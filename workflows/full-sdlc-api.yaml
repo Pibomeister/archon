@@ -585,7 +585,9 @@ nodes:
       SCOPE — the files you may touch are exactly the intersection of:
         (a) files changed or untracked since the base sha in bootstrap-head.txt
             (in the worktree: git status --porcelain, and
-             git diff --name-only "$(cat <that directory>/bootstrap-head.txt)"..HEAD),
+             git diff --name-only "$(cat <that directory>/bootstrap-head.txt)"
+             — anchored at the base sha, NOT at HEAD: the implementation is not
+             committed yet, so a ..HEAD range would always come back empty),
         (b) the paths listed in files-allowlist.json in the artifacts directory.
       Nothing else. The implementation is UNCOMMITTED here, so the working tree
       — untracked files included — is the subject, not a HEAD-anchored diff.
@@ -886,11 +888,23 @@ nodes:
               # UNTRACKED at checkpoint time as a deletion (git diff <tree> only walks
               # tracked paths), so the tree-to-tree diff above is the accurate one.
               git diff "$CK" || true
-              echo "RESTORE the pre-review bytes with EITHER of:"
+              # The saved HEAD is the one the checkpoint recorded, not the current one:
+              # if the reviewer committed, $NOWHEAD is already the wrong target.
+              SAVEDHEAD=$(sed -n 's/^head=//p' "$ARTIFACTS_DIR/deslop-tree.txt")
+              echo "RESTORE the pre-review state — run these three, in this order:"
+              echo "  git -C $WT reset --soft $SAVEDHEAD"
+              echo "  git -C $WT read-tree $CK && git -C $WT checkout-index -af"
+              echo "  git -C $WT clean -fd"
+              echo "  (1) undoes any commit the reviewer made; (2) restores every"
+              echo "  checkpointed file's bytes, untracked ones included; (3) removes files"
+              echo "  the reviewer ADDED. clean -fd leaves ignored paths (node_modules) alone."
+              echo "  The index is left holding the checkpoint tree; deslop-recheck re-takes"
+              echo "  the whole checkpoint on resume, so that is the new baseline, not drift."
+              echo "Content-only alternative — restores bytes but does NOT undo a commit or"
+              echo "remove reviewer-added files:"
               echo "  tar -xf $RD/checkpoint.tar -C $WT"
               echo "  git -C $WT archive $CK | tar -x -C $WT"
-              echo "Neither removes files the reviewer ADDED (they are listed above as"
-              echo "new files); delete those by hand. Then: archon workflow resume."
+              echo "Then: archon workflow resume."
               exit 1
             fi
             # Fail-closed validation + gate-DERIVED verdict. The reviewer's declared
@@ -922,6 +936,9 @@ nodes:
                 malformed(f"unparseable json: {exc}")
             if not isinstance(doc, dict):
                 malformed("top level is not an object")
+            extra = sorted(set(doc) - {"verdict", "coverage", "findings"})
+            if extra:
+                malformed(f"extra top-level keys={extra}")
             verdict = doc.get("verdict")
             if verdict not in ("CLEAN", "DIRTY"):
                 malformed(f"verdict={verdict!r}")
