@@ -36,24 +36,31 @@ HEAD="$(resolve_bin head)" || { echo "PACKAGE=FAIL cannot resolve a head binary 
 # Payload manifest: everything a teammate's .archon/ tree needs, nothing else.
 # register-probe ships (it IS the documented one-time folder registration);
 # wrap-* and lg-probe are dev scaffolding pinned to this machine's fixtures.
+# backfill.yaml is deliberately held back until its own clean trial passes —
+# do not add it here without that evidence.
 MANIFEST=(
   config.yaml
   RUNBOOK.md
   workflows/babysit.yaml
+  workflows/bugfix.yaml
+  workflows/bugfix-smoke-deployed.yaml
   workflows/cleanup.yaml
   workflows/full-sdlc-api.yaml
   workflows/full-sdlc-web.yaml
   workflows/register-probe.yaml
   setup/allowlist.json
+  setup/bind-repo.py
   setup/check-fixer-result.py
   setup/check-scope.py
   setup/detach.py
   setup/gist-README.md
   setup/install.sh
+  setup/negcontrol.sh
   setup/package.sh
   setup/params-env.sh
   setup/parse-review-envelope.py
   setup/resolve-params.sh
+  setup/run-repro.sh
   setup/selective-genapi-patch.py
   setup/stage-skills.sh
   setup/strip-premise-answers.py

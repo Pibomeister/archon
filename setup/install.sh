@@ -214,11 +214,11 @@ rm -f "$REG_LOG"
 
 echo "=== 6. Validate workflows ==="
 # archon validates its own bundled workflows too, and those can error on this
-# machine (e.g. a bundled MCP config we don't ship) — gate on OUR five only.
+# machine (e.g. a bundled MCP config we don't ship) — gate on OUR workflows only.
 VAL_LOG="$(mktemp)"
 ( cd "$ROOT" && archon validate workflows </dev/null >"$VAL_LOG" 2>&1 ) || true
 VAL_FAIL=0
-for w in babysit cleanup full-sdlc-api full-sdlc-web register-probe; do
+for w in babysit bugfix bugfix-smoke-deployed cleanup full-sdlc-api full-sdlc-web register-probe; do
   if "$GREP" -Eq "^[[:space:]]+$w[[:space:]]+ok[[:space:]]*$" "$VAL_LOG"; then
     pass "workflow validates: $w"
   else

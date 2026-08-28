@@ -171,6 +171,7 @@ What its seven steps do, so you can read a failure:
 | `FAIL archon on PATH is not v0.8.0` | another archon shadows it | put `~/.local/bin` ahead of the other install |
 | `FAIL BASE_BRANCH did not resolve to [main]` | `.archon/config.yaml` edited | restore `worktree.baseBranch: main` |
 | `FAIL workflow not ok: <w>` | YAML/schema problem | read the validator output it prints |
+| `Error: Workflow '<name>' not found` (at run time) | installed payload predates the lane | `ls <root>/.archon/workflows/` + `cat <root>/.archon/VERSION`; if the yaml is absent, pull the gist and rerun `install.sh`. If the gist lacks `archon__workflows__<name>.yaml`, the maintainer adds it to the `package.sh` MANIFEST (`grep <name> setup/package.sh`) and `--publish`. Never auto-retry |
 | `.env missing` | expected | get it from a teammate out of band |
 
 `install.sh` runs without `set -e` on purpose (it accumulates FAILs rather than

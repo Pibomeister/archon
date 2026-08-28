@@ -165,6 +165,7 @@ archon workflow resume <run-id>
 - **A branch-DELETION push still fires husky pre-push** (full jest, multi-minute, historically flaky in hook git env). Delete pushes go `--no-verify`.
 - **api boot prints an inspector-port 9229 collision warning** when your own api dev server runs (`start:api` hardcodes `--debug`). It is noise, not a boot failure.
 - **`gh pr ready` re-triggers the AI-review bots**, so babysit always terminates with a freshly-pending CodeRabbit status. It resolves green minutes later. Merge-ready = CI green + ready flag; the post-flip bot re-run is expected residue.
+- **`Error: Workflow '<name>' not found`.** The installed payload predates the lane. Run `ls <root>/.archon/workflows/` and `cat <root>/.archon/VERSION`. If the yaml is absent, pull the gist and rerun `install.sh`. If the gist itself lacks `archon__workflows__<name>.yaml`, the maintainer must add it to the `package.sh` MANIFEST and `--publish`. Never auto-retry the run.
 - Nodes start at the (non-git) folder root with no git context — which is why every repo path in the workflows is absolute and rendered per machine at install time. Don't "fix" one to a relative path.
 
 ### 6a. Linux notes

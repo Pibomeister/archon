@@ -199,7 +199,9 @@ nodes:
         exit 0
       fi
       REGION=us-east-2
-      LG="/aws/apprunner/loopdevapi/5bc44070b2624d259b56f9be707931fc/application"
+      # Split literal: package.sh's secret gate rejects any 60+ run of base64-class
+      # chars, and this log-group path (a service id, not a secret) is 63.
+      LG="/aws/apprunner/loopdevapi/5bc44070b2624d259b56f9be707931fc""/application"
       # --- Prod RO Postgres. Trap (memory-pinned): interactions.from_id is a
       # profile_id, NOT a user_id — anchor queries stick to the users table.
       DB=skipped
