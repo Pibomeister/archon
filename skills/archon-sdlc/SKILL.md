@@ -68,9 +68,11 @@ Every part of that line is load-bearing (RUNBOOK §1):
   gate, which is twenty minutes or more on the api lane and longer than an
   agent tool call will wait; if the launching process is killed the run dies
   with it. `--detach` returns at once, prints the child's log path, and the run
-  shows up in `archon workflow runs` like any other. Poll
-  `archon workflow status` for the pause, then read the packet and hand back
-  per §3. Starting a run is allowed and always was; only approve, reject, and
+  shows up in `archon workflow runs` like any other. The pause is not pushed
+  to you: watch the child log for the literal `Workflow paused — waiting for
+  approval.` line (recipe in §3 "How to hand a pause back"), then read the
+  packet and hand back per §3 in the same turn — never leave a paused run
+  unannounced. Starting a run is allowed and always was; only approve, reject, and
   abandon are off limits (§0), and the derived allowlist reflects exactly that
   split — `archon workflow run|resume|get|runs|status` are permitted verbs.
 
@@ -137,6 +139,31 @@ What to do here:
    thousand wrong code lines; do not rubber-stamp, and do not release the gate.
 
 ### How to hand a pause back
+
+**The pause is never delivered to you — you have to watch for it, and the moment
+you see it you hand it back, in that same turn.** A detached run prints the
+literal line `Workflow paused — waiting for approval.` (plain text, not a JSON
+event) into its child log under `~/.archon/logs/`, and `archon workflow status
+<id>` flips to `Status: paused`. Nothing else announces it: the browser opening
+`plan-review.html` is not a hand-back, and a monitor that greps for a
+`workflow_paused` JSON event will sit silent through the whole pause (this
+happened; the human found the packet on their own and had to ask). Watch for it
+explicitly:
+
+```bash
+LOG=~/.archon/logs/detached-run-cli-<...>.log   # printed by --detach
+until grep -q 'Workflow paused' "$LOG" \
+   || ! DISABLE_OMC=1 archon workflow status <run-id> 2>/dev/null | grep -q 'Status: running'; do
+  sleep 60
+done
+```
+
+When it fires, post the hand-back below immediately — the packet reading and
+all three commands with the run id filled in. Ending a turn on a paused run
+without those commands in front of the human is the failure mode; the human
+cannot act on a packet they have not been told is waiting on them. If the
+human works from an agent session, say that `!` in front of the command runs it
+there (`! DISABLE_OMC=1 archon workflow approve <run-id> ...`).
 
 Your report is the whole interface for someone who has not read this runbook, so
 lead with the state and not the mechanics. The run finished this stage and is
