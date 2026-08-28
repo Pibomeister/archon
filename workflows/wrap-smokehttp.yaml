@@ -1,0 +1,19 @@
+name: wrap-smokehttp
+description: W5 HTTP smoke bash node (curl on a workflow-dedicated port; production curls the api/web on their dedicated workflow ports). Kills by PID, never pkill.
+provider: claude
+nodes:
+  - id: smoke
+    timeout: 300000
+    bash: |
+      set -uo pipefail
+      cd /private/tmp/claude-501/-Users-eduardopicazo-Documents-Workspace-Goodword/88bb31f2-0094-41b2-bd3f-8409f1264538/scratchpad/m1-fixture/repo
+      python3 -m http.server 4199 >/dev/null 2>&1 &
+      SRV=$!
+      trap 'kill "$SRV" 2>/dev/null || true' EXIT
+      for i in 1 2 3 4 5; do
+        sleep 1
+        CODE=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4199/ || echo 000)
+        test "$CODE" = "200" && break
+      done
+      test "$CODE" = "200" || { echo "SMOKE_HTTP=FAIL code=$CODE"; exit 1; }
+      echo "SMOKE_HTTP=200"

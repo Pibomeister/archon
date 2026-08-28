@@ -1,0 +1,24 @@
+name: lg-probe
+description: Zero-spend probe - can a bash body node's promise exit a loop_group early? (3 max iterations, promise emitted on iteration 1; early exit = 1 recorded iteration)
+provider: claude
+nodes:
+  - id: loop
+    loop_group:
+      max_iterations: 3
+      until: LG_CONVERGED
+      nodes:
+        - id: work
+          timeout: 120000
+          bash: |
+            set -uo pipefail
+            C="$ARTIFACTS_DIR/iter-count.txt"
+            N=$(cat "$C" 2>/dev/null || echo 0); N=$((N+1)); echo "$N" > "$C"
+            echo "ITERATION=$N"
+        - id: gate
+          depends_on: [work]
+          timeout: 120000
+          bash: |
+            set -uo pipefail
+            N=$(cat "$ARTIFACTS_DIR/iter-count.txt")
+            echo "GATE_SEES_ITERATION=$N"
+            echo "<promise>LG_CONVERGED</promise>"

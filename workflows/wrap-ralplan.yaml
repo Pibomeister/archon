@@ -1,0 +1,49 @@
+name: wrap-ralplan
+description: W1 plan-author node (ce-plan Tier-3 replacement; no CE skill). Smoke targets the m1 fixture spec.
+provider: claude
+nodes:
+  - id: plan
+    model: sonnet
+    maxBudgetUsd: 3
+    timeout: 1200000
+    prompt: |
+      You are a planning node in an unattended workflow. There is no user to ask;
+      never ask questions — make conservative assumptions and record them in the plan.
+
+      Author an implementation plan for the spec at this absolute path:
+        /private/tmp/claude-501/-Users-eduardopicazo-Documents-Workspace-Goodword/88bb31f2-0094-41b2-bd3f-8409f1264538/scratchpad/m1-fixture/docs/spec.md
+
+      The target repository (absolute path, you are NOT cwd'd there):
+        /private/tmp/claude-501/-Users-eduardopicazo-Documents-Workspace-Goodword/88bb31f2-0094-41b2-bd3f-8409f1264538/scratchpad/m1-fixture/repo
+
+      Read the spec and the repository first. Then write the plan as markdown to
+      the file plan.md inside the directory named by the ARTIFACTS_DIR environment
+      variable (resolve it by running: echo "$ARTIFACTS_DIR").
+
+      The plan must contain exactly one implementation unit, structured with these
+      exact markdown headings so downstream nodes can consume it verbatim:
+        ## Goal
+        ## Files
+        ## Approach
+        ## Test scenarios
+        ## Verification
+      Under Verification list the exact commands that must exit 0.
+
+      Do not modify the repository. Do not create commits or branches.
+      End your reply with the single line:
+      PLAN_WRITTEN=<absolute path of plan.md>
+
+  - id: gate
+    depends_on: [plan]
+    timeout: 120000
+    bash: |
+      set -uo pipefail
+      P="$ARTIFACTS_DIR/plan.md"
+      test -s "$P" || { echo "GATE=FAIL plan.md missing or empty"; exit 1; }
+      for h in "## Goal" "## Files" "## Approach" "## Test scenarios" "## Verification"; do
+        grep -q "^$h" "$P" || { echo "GATE=FAIL missing heading: $h"; exit 1; }
+      done
+      cd /private/tmp/claude-501/-Users-eduardopicazo-Documents-Workspace-Goodword/88bb31f2-0094-41b2-bd3f-8409f1264538/scratchpad/m1-fixture/repo
+      test -z "$(git status --porcelain)" || { echo "GATE=FAIL planner mutated the repo"; exit 1; }
+      echo "PLAN_PATH=$P"
+      echo "W1_GATE=PASS"

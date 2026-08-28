@@ -1,0 +1,42 @@
+name: wrap-babysit
+description: W10 thread-reply lane (ce-resolve-pr-feedback Tier-3 replacement per effects-table 8c) — mechanical classification only; bias hard to needs-human; AI-review bots always needs-human. Smoke classifies fixture threads; live GraphQL reply/resolve verbs deferred to M3.1.
+provider: claude
+nodes:
+  - id: classify
+    timeout: 300000
+    bash: |
+      set -euo pipefail
+      REPO=/private/tmp/claude-501/-Users-eduardopicazo-Documents-Workspace-Goodword/88bb31f2-0094-41b2-bd3f-8409f1264538/scratchpad/m1-fixture/repo
+      THREADS=/private/tmp/claude-501/-Users-eduardopicazo-Documents-Workspace-Goodword/88bb31f2-0094-41b2-bd3f-8409f1264538/scratchpad/m1-fixture/data/threads.json
+      AUTO=0; HUMAN=0
+      : > "$ARTIFACTS_DIR/needs-human.txt"
+      COUNT=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))))" "$THREADS")
+      i=0
+      while [ "$i" -lt "$COUNT" ]; do
+        TID=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))[int(sys.argv[2])]['id'])" "$THREADS" "$i")
+        TPATH=$(python3 -c "import json,sys;v=json.load(open(sys.argv[1]))[int(sys.argv[2])]['path'];print(v or '')" "$THREADS" "$i")
+        CREATED=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))[int(sys.argv[2])]['comments']['nodes'][0]['createdAt'])" "$THREADS" "$i")
+        AUTHOR=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))[int(sys.argv[2])]['comments']['nodes'][0]['author']['login'])" "$THREADS" "$i")
+        DISPO=needs-human
+        # Mechanical rule: auto-closable iff the cited path changed in a commit after
+        # the comment. No path, human author asking a question, any doubt -> needs-human.
+        if [ -n "$TPATH" ]; then
+          case "$AUTHOR" in
+            *human*) DISPO=needs-human ;;
+            *)
+              TOUCHED=$(git -C "$REPO" log --since="$CREATED" --format=%H -- "$TPATH" | head -1)
+              test -n "$TOUCHED" && DISPO=auto-closable
+              ;;
+          esac
+        fi
+        if [ "$DISPO" = auto-closable ]; then AUTO=$((AUTO+1)); else
+          HUMAN=$((HUMAN+1)); echo "$TID $TPATH $AUTHOR" >> "$ARTIFACTS_DIR/needs-human.txt"
+        fi
+        echo "THREAD=$TID dispo=$DISPO"
+        i=$((i+1))
+      done
+      echo "AUTO_CLOSABLE=$AUTO NEEDS_HUMAN=$HUMAN"
+      # Smoke assertion: fixture is built so exactly one of each classification exists.
+      test "$AUTO" = 1 && test "$HUMAN" = 1 || { echo "W10_GATE=FAIL unexpected classification"; exit 1; }
+      echo "GH_VERBS_DEFERRED=M3.1"
+      echo "W10_GATE=PASS"

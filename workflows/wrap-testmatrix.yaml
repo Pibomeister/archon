@@ -1,0 +1,13 @@
+name: wrap-testmatrix
+description: W4 test-matrix bash node. Explicit timeout is mandatory (bash default 120s kills real suites). Production command sets live in .archon/templates/; integration tests are serial-only, one node, never parallel.
+provider: claude
+nodes:
+  - id: tests
+    timeout: 600000
+    retry:
+      max_attempts: 1
+    bash: |
+      set -uo pipefail
+      cd /private/tmp/claude-501/-Users-eduardopicazo-Documents-Workspace-Goodword/88bb31f2-0094-41b2-bd3f-8409f1264538/scratchpad/m1-fixture/repo
+      ./run-tests.sh || { echo "TESTMATRIX=FAIL"; exit 1; }
+      echo "TESTMATRIX=PASS"

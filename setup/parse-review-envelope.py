@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Parse a ce-code-review return under EITHER skill contract.
+
+Old contract (CE 3.2.0 headless): markdown envelope containing 'Review complete',
+optionally 'Code review degraded (headless mode)', and a 'Verdict: <enum>' line.
+New contract (CE >= ~3.19 mode:agent, mode:headless aliased): ONE raw JSON object
+with fields status (complete|failed|degraded|skipped) and verdict (same enum).
+
+Usage: parse-review-envelope.py <envelope-file>
+Prints shell-eval-able lines:
+  G1=PASS|FAIL   terminal signal present (review actually completed)
+  G2=PASS|FAIL   not degraded
+  VERDICT=<enum or empty>
+  VSRC=json|envelope|none
+"""
+
+import json
+import re
+import sys
+
+ENUM = ("Ready to merge", "Ready with fixes", "Not ready")
+
+
+def find_json(text):
+    """First parseable JSON object carrying status or verdict."""
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict) and ("status" in obj or "verdict" in obj):
+            return obj
+    except ValueError:
+        pass
+    dec = json.JSONDecoder()
+    for m in re.finditer(r"\{", text):
+        try:
+            obj, _ = dec.raw_decode(text, m.start())
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and ("status" in obj or "verdict" in obj):
+            return obj
+    return None
+
+
+def main():
+    text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+    obj = find_json(text)
+    if obj is not None:
+        status = str(obj.get("status", "")).lower()
+        g1 = "PASS" if status in ("complete", "degraded") or (not status and obj.get("verdict")) else "FAIL"
+        g2 = "FAIL" if status == "degraded" else "PASS"
+        v = obj.get("verdict") if obj.get("verdict") in ENUM else ""
+        print(f"G1={g1}")
+        print(f"G2={g2}")
+        print(f"VERDICT={v}")
+        print("VSRC=json")
+        return
+    g1 = "PASS" if "Review complete" in text else "FAIL"
+    g2 = "FAIL" if "Code review degraded (headless mode)" in text else "PASS"
+    m = re.search(r"Verdict: (Ready to merge|Ready with fixes|Not ready)", text)
+    v = m.group(1) if m else ""
+    print(f"G1={g1}")
+    print(f"G2={g2}")
+    print(f"VERDICT={v}")
+    print("VSRC=envelope" if (m or g1 == "PASS") else "VSRC=none")
+
+
+if __name__ == "__main__":
+    main()

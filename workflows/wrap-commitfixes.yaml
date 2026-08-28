@@ -1,0 +1,20 @@
+name: wrap-commitfixes
+description: W7 commit-review-fixes bash node (lfg step-4 semantics excluding push). Loop invariant makes every dirty path a review product, including review-CREATED files (M0.6c); telemetry dirs excluded by pathspec, never by trust.
+provider: claude
+nodes:
+  - id: commit
+    timeout: 300000
+    bash: |
+      set -euo pipefail
+      REPO=/private/tmp/claude-501/-Users-eduardopicazo-Documents-Workspace-Goodword/88bb31f2-0094-41b2-bd3f-8409f1264538/scratchpad/m1-fixture/repo
+      cd "$REPO"
+      git add -A -- ':(exclude).archon'
+      if git diff --cached --quiet; then
+        echo "COMMITTED=NO NOCHANGES=TRUE"
+      else
+        git diff --cached --name-only
+        git commit -m "fix(review): apply autofix feedback"
+        echo "COMMITTED=YES sha=$(git rev-parse HEAD)"
+      fi
+      test -z "$(git status --porcelain)" || { echo "W7_GATE=FAIL tree not clean after commit"; exit 1; }
+      echo "W7_GATE=PASS"

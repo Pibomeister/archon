@@ -1,0 +1,13 @@
+name: register-probe
+description: One-time folder-project registration + node-env sanity (gist setup step; free)
+provider: claude
+nodes:
+  - id: probe
+    timeout: 120000
+    bash: |
+      set -uo pipefail
+      echo "cwd=$(pwd)"
+      echo "ARTIFACTS_DIR=${ARTIFACTS_DIR:-<UNSET>}"
+      echo "BASE_BRANCH=[${BASE_BRANCH:-<UNSET>}]"
+      test -d "${ARTIFACTS_DIR:-/nonexistent}" || { echo "REGISTER_PROBE=FAIL artifacts dir missing"; exit 1; }
+      echo "REGISTER_PROBE_OK"

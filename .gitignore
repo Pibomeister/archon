@@ -1,0 +1,5 @@
+dist/
+.omc/
+.superpowers/
+.gist-id
+workflows/.bak/

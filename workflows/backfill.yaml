@@ -1,0 +1,901 @@
+name: backfill
+description: Safe prod-data execution graph for backfills & data migrations (intake -> census -> raw-row sample audit -> dry-run reconciliation -> arm with baked bounds + kill-switch negative control -> human gate (packet) -> snapshot -> apply with live bound monitor -> reconcile + outside-set negative control -> report). EXECUTION ONLY - the instrument (CLI command or SQL) must already be MERGED; this lane never invents commands, it only arms and executes what the spec names. Run message = ABSOLUTE path to a backfill spec .md; empty fails preflight. Write credentials are fetched at runtime ONLY by the post-gate snapshot/apply nodes; everything else runs on dev/database/ro-credentials. Invoke with DISABLE_OMC=1.
+provider: claude
+nodes:
+  - id: preflight
+    timeout: 300000
+    bash: |
+      set -euo pipefail
+      ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+      # Billing guard: runs MUST bill the Claude subscription (OAuth /login), never the API.
+      for v in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_PROFILE; do
+        test -z "$(printenv "$v")" || { echo "PREFLIGHT=FAIL $v is set - would bill API, not subscription"; exit 1; }
+      done
+      grep -q 'apiKeyHelper' "$HOME/.claude/settings.json" 2>/dev/null && { echo "PREFLIGHT=FAIL apiKeyHelper configured - would override subscription"; exit 1; }
+      # aws is HARD here, unlike the bugfix lane's soft degrade: census and
+      # apply both need prod DB credentials; a backfill run without them is
+      # a run that cannot do its one job.
+      aws sts get-caller-identity >/dev/null 2>&1 || { echo "PREFLIGHT=FAIL aws session expired - run: aws login"; exit 1; }
+      command -v psql >/dev/null || { echo "PREFLIGHT=FAIL psql missing"; exit 1; }
+      command -v python3 >/dev/null || { echo "PREFLIGHT=FAIL python3 missing"; exit 1; }
+      command -v bun >/dev/null || { echo "PREFLIGHT=FAIL bun missing (cli instruments run from an api worktree)"; exit 1; }
+      test -d "$ROOT/api/.git" || { echo "PREFLIGHT=FAIL api repo missing"; exit 1; }
+      test -f "$ROOT/.archon/setup/census-runner.py" || { echo "PREFLIGHT=FAIL census-runner.py missing"; exit 1; }
+      test -f "$ROOT/.archon/setup/armed-exec.sh" || { echo "PREFLIGHT=FAIL armed-exec.sh missing"; exit 1; }
+      test -f "$ROOT/.archon/setup/backfill-limits.json" || { echo "PREFLIGHT=FAIL backfill-limits.json missing"; exit 1; }
+      # Run identity: message = absolute backfill-spec path (empty = hard fail).
+      bash "$ROOT/.archon/setup/resolve-params.sh" "$ROOT" "${ARGUMENTS-}" "$ARTIFACTS_DIR"
+      eval "$(bash "$ROOT/.archon/setup/params-env.sh" "$ARTIFACTS_DIR/params.json")"
+      cp "$SPEC" "$ARTIFACTS_DIR/backfill-spec.md"
+      # Per-run copy of the absolute bounds: widening for ONE run is a human
+      # edit of THIS copy before census runs - the edit is the approval.
+      cp "$ROOT/.archon/setup/backfill-limits.json" "$ARTIFACTS_DIR/backfill-limits.json"
+      test -d "$ROOT/goodword-kb/wiki" || { echo "PREFLIGHT=FAIL knowledge base missing"; exit 1; }
+      git -C "$ROOT/goodword-kb" status --porcelain | sort > "$ARTIFACTS_DIR/kb-pre-porcelain.txt"
+      echo "PREFLIGHT=PASS"
+
+  - id: intake
+    depends_on: [preflight]
+    model: sonnet
+    maxBudgetUsd: 2
+    timeout: 900000
+    prompt: |
+      You are the backfill-intake node in an unattended pipeline. Ask no
+      questions. Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
+      Read backfill-spec.md there. Your job is NORMALIZATION, not authorship:
+      every SQL statement and every command in your output must be copied
+      VERBATIM from the spec. You never invent, complete, or "fix" a query or
+      a command. A required field the spec does not provide is written as
+      null - the gate stops the run and names it; that is the correct outcome
+      for an incomplete spec, never something to paper over.
+
+      Write ONE file, backfill-plan.json, to that directory:
+
+      {"instrument": {
+         "kind": "cli" | "sql",
+         "repo": "api",                              // cli only
+         "merged_sha": "<full 40-char commit sha>",  // cli only
+         "source_files": ["<repo-relative path>"],   // cli only, at least one
+         "apply_command": "<verbatim; must contain {MAX_ROWS}; may contain {CHUNK_SIZE} and {STATEMENT_TIMEOUT_MS}>",  // cli only
+         "dry_run_command": "<verbatim read-only form>",                      // cli only
+         "would_touch_regex": "<regex, one capture group>" or null,           // default WOULD_TOUCH=([0-9]+)
+         "progress_regex": "<regex, one capture group, captures INCREMENTS>" or null,  // default TOUCHED=([0-9]+)
+         "env_map": {"<ENV_VAR>": "host|port|username|password|dbname"} or null,
+         "apply_sql": "<verbatim single statement containing {CHUNK_SIZE}>",  // sql only
+         "dry_run_sql": "<verbatim single SELECT/WITH returning one count>"   // sql only
+       },
+       "claim": {"population": "<prose>",
+                 "expected_count": <int> or null,
+                 "expected_range": [lo, hi] or null,   // exactly one of count/range
+                 "est_fraction_of_table": <float>},
+       "target": {"tables": ["<table>"], "key_columns": ["<col>"]},
+       "census": {"count_sql": "<single-value count of the population>",
+                  "distribution_sql": "<the distribution, not the sum>",
+                  "largest_sql": "<the LARGEST/worst case - extremes expose what totals conceal>"},
+       "sample": {"rows_sql": "<15 RAW matched rows, LIMIT 15>",
+                  "clusters_sql": "<the 3 largest per-entity clusters>"},
+       "bounds_proposal": {"max_rows": <int>, "max_fraction": <float>, "per_entity_cap": <int> or null},
+       "verification": {
+         "reconcile_queries": [{"id": "<slug>", "question": "<what this settles>",
+                                "sql": "<single-value SELECT/WITH>",
+                                "expect": {"op": "eq|le|ge", "value": <int>}}],
+         "negative_control_query": "<single-value count of rows OUTSIDE the target set - must be unchanged after apply>",
+         "post_signal": "<prose: what should go quiet or appear after>"},
+       "undo": {"snapshot": [{"table": "<table>", "id_col": "<col>",
+                              "value_cols": ["<col>"], "where_sql": "<predicate selecting the target rows>",
+                              "mode": "update" | "insert-missing"}]},
+       "premortem": "<one sentence: if this destroys data, the cause will have been ___>"}
+
+      All census/sample/verification SQL is read-only (SELECT/WITH). apply_sql
+      is the ONLY write statement and must drain its own population (each
+      chunk's touched rows leave the target set) - if the spec's statement
+      does not obviously do that, copy it anyway; the dry-run and stall gates
+      exist for exactly that doubt. Convert nothing, summarize nothing:
+      claim.population is the spec's own words.
+      End with the single line: INTAKE_DONE
+
+  - id: intake-gate
+    depends_on: [intake]
+    timeout: 300000
+    bash: |
+      set -euo pipefail
+      ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+      P="$ARTIFACTS_DIR/backfill-plan.json"
+      test -s "$P" || { echo "INTAKE_GATE=FAIL no backfill-plan.json"; exit 1; }
+      python3 - "$P" <<'PY'
+      import json, re, sys
+      p = json.load(open(sys.argv[1], encoding="utf-8"))
+      RO = re.compile(r"(?is)^\s*(select|with)\b")
+      WKW = re.compile(r"(?i)\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|copy|vacuum)\b")
+      IDENT = re.compile(r"^[a-z_][a-z0-9_]*$")
+      def need(cond, msg):
+          assert cond, msg
+      def ro(sql, label):
+          need(isinstance(sql, str) and sql.strip(), f"SPEC_INCOMPLETE field={label}")
+          s = sql.strip().rstrip(";")
+          need(RO.match(s), f"{label}: must start with SELECT/WITH")
+          need(not WKW.search(s), f"{label}: write/DDL keyword rejected")
+          need(";" not in s, f"{label}: single statement only")
+      ins = p["instrument"]
+      kind = ins.get("kind")
+      need(kind in ("cli", "sql"), "instrument.kind out of enum")
+      if kind == "cli":
+          need(ins.get("repo") == "api", "instrument.repo must be api (backfills are DB work; the instrument lives in the api repo)")
+          need(re.fullmatch(r"[0-9a-f]{40}", str(ins.get("merged_sha") or "")), "SPEC_INCOMPLETE field=instrument.merged_sha (full 40-char sha required)")
+          sf = ins.get("source_files")
+          need(isinstance(sf, list) and sf, "SPEC_INCOMPLETE field=instrument.source_files")
+          ac = ins.get("apply_command")
+          need(isinstance(ac, str) and ac.strip(), "SPEC_INCOMPLETE field=instrument.apply_command")
+          need("{MAX_ROWS}" in ac, "apply_command must contain the {MAX_ROWS} placeholder - a cli instrument the lane cannot bound internally is not armable")
+          need(isinstance(ins.get("dry_run_command"), str) and ins["dry_run_command"].strip(), "SPEC_INCOMPLETE field=instrument.dry_run_command")
+          for rk in ("would_touch_regex", "progress_regex"):
+              rv = ins.get(rk)
+              if rv is not None:
+                  re.compile(rv)
+                  need(re.compile(rv).groups == 1, f"{rk} must have exactly one capture group")
+          em = ins.get("env_map")
+          if em is not None:
+              need(isinstance(em, dict) and em, "env_map must be a non-empty object or null")
+              for k, v in em.items():
+                  need(re.fullmatch(r"[A-Z][A-Z0-9_]*", k), f"env_map key {k!r} not an ENV_VAR name")
+                  need(v in ("host", "port", "username", "password", "dbname"), f"env_map value {v!r} out of enum")
+      else:
+          asql = ins.get("apply_sql")
+          need(isinstance(asql, str) and asql.strip(), "SPEC_INCOMPLETE field=instrument.apply_sql")
+          need("{CHUNK_SIZE}" in asql, "apply_sql must contain the {CHUNK_SIZE} placeholder (chunked execution is the design)")
+          need(";" not in asql.strip().rstrip(";"), "apply_sql: single statement only")
+          need(not RO.match(asql.strip()), "apply_sql is the write statement - a SELECT here means the spec swapped its forms")
+          ro(ins.get("dry_run_sql"), "instrument.dry_run_sql")
+      c = p["claim"]
+      need(isinstance(c.get("population"), str) and c["population"].strip(), "SPEC_INCOMPLETE field=claim.population")
+      has_count = c.get("expected_count") is not None
+      has_range = c.get("expected_range") is not None
+      need(has_count != has_range, "claim needs exactly one of expected_count / expected_range")
+      if has_range:
+          lo, hi = c["expected_range"]
+          need(int(lo) <= int(hi), "expected_range lo > hi")
+      t = p["target"]
+      need(isinstance(t.get("tables"), list) and t["tables"], "SPEC_INCOMPLETE field=target.tables")
+      for tb in t["tables"]:
+          need(IDENT.match(tb), f"target table {tb!r} not a simple identifier")
+      need(isinstance(t.get("key_columns"), list) and t["key_columns"], "SPEC_INCOMPLETE field=target.key_columns")
+      for label in ("count_sql", "distribution_sql", "largest_sql"):
+          ro(p["census"].get(label), f"census.{label}")
+      ro(p["sample"].get("rows_sql"), "sample.rows_sql")
+      need("limit" in p["sample"]["rows_sql"].lower(), "sample.rows_sql must carry a LIMIT (raw rows, never a dump)")
+      ro(p["sample"].get("clusters_sql"), "sample.clusters_sql")
+      b = p["bounds_proposal"]
+      need(isinstance(b.get("max_rows"), int) and b["max_rows"] > 0, "SPEC_INCOMPLETE field=bounds_proposal.max_rows")
+      need(isinstance(b.get("max_fraction"), (int, float)) and 0 < b["max_fraction"] <= 1, "bounds_proposal.max_fraction out of (0,1]")
+      v = p["verification"]
+      rq = v.get("reconcile_queries")
+      need(isinstance(rq, list) and rq, "SPEC_INCOMPLETE field=verification.reconcile_queries")
+      for q in rq:
+          need(q.get("id") and q.get("question"), "reconcile query missing id/question")
+          ro(q.get("sql"), f"reconcile {q.get('id')}")
+          e = q.get("expect") or {}
+          need(e.get("op") in ("eq", "le", "ge") and isinstance(e.get("value"), int), f"reconcile {q.get('id')}: expect must be {{op: eq|le|ge, value: int}}")
+      ro(v.get("negative_control_query"), "verification.negative_control_query")
+      need(isinstance(v.get("post_signal"), str) and v["post_signal"].strip(), "SPEC_INCOMPLETE field=verification.post_signal")
+      snap = p["undo"].get("snapshot")
+      need(isinstance(snap, list) and snap, "SPEC_INCOMPLETE field=undo.snapshot")
+      for s in snap:
+          need(IDENT.match(s.get("table", "")), f"undo table {s.get('table')!r} not a simple identifier")
+          need(IDENT.match(s.get("id_col", "")), f"undo id_col {s.get('id_col')!r} not a simple identifier")
+          vc = s.get("value_cols")
+          need(isinstance(vc, list) and vc and all(IDENT.match(x) for x in vc), "undo value_cols must be simple identifiers")
+          w = s.get("where_sql")
+          need(isinstance(w, str) and w.strip(), "SPEC_INCOMPLETE field=undo.snapshot.where_sql")
+          need(";" not in w, "where_sql: no statement separators")
+          need(not re.search(r"(?i)\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|copy|vacuum)\b", w), "where_sql: write/DDL keyword rejected")
+          need(s.get("mode", "update") in ("update", "insert-missing"), "undo mode out of enum")
+      pm = p.get("premortem")
+      need(isinstance(pm, str) and len(pm.strip()) >= 20, "SPEC_INCOMPLETE field=premortem (one real sentence, not a token)")
+      print(f"INTAKE_GATE=SHAPE_OK kind={kind} tables={','.join(t['tables'])} reconcile_queries={len(rq)}")
+      PY
+      # Instrument existence - the merged-instrument contract, deterministic:
+      KIND=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1], encoding='utf-8'))['instrument']['kind'])" "$P")
+      if [ "$KIND" = cli ]; then
+        git -C "$ROOT/api" fetch origin main --quiet
+        SHA=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1], encoding='utf-8'))['instrument']['merged_sha'])" "$P")
+        git -C "$ROOT/api" merge-base --is-ancestor "$SHA" origin/main || { echo "INSTRUMENT=FAIL merged_sha $SHA is not an ancestor of origin/main - the instrument is NOT merged; this lane executes merged instruments only"; exit 1; }
+        for F in $(python3 -c "import json,sys;[print(f) for f in json.load(open(sys.argv[1], encoding='utf-8'))['instrument']['source_files']]" "$P"); do
+          git -C "$ROOT/api" cat-file -e "origin/main:$F" 2>/dev/null || { echo "INSTRUMENT=FAIL source file $F absent at origin/main"; exit 1; }
+        done
+      fi
+      echo "INTAKE_GATE=PASS kind=$KIND"
+
+  - id: census
+    depends_on: [intake-gate]
+    timeout: 900000
+    bash: |
+      set -euo pipefail
+      ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+      AD="$ARTIFACTS_DIR"
+      # Census runs on RO credentials only - same recipe as the bugfix lane's
+      # probe nodes. Never extrapolate from the reported instance; measure the
+      # population, the distribution, and the LARGEST case.
+      aws sts get-caller-identity >/dev/null 2>&1 || { echo "CENSUS=FAIL sso expired - run: aws login, then: archon workflow resume <run-id>"; exit 1; }
+      SEC=$(aws secretsmanager get-secret-value --secret-id dev/database/ro-credentials --region us-east-2 --query SecretString --output text 2>/dev/null || true)
+      test -n "$SEC" || { echo "CENSUS=FAIL no RO credentials"; exit 1; }
+      export SEC
+      eval "$(python3 <<'PY'
+      import json, os, shlex
+      d = json.loads(os.environ["SEC"])
+      print(f"export PGHOST={shlex.quote(str(d.get('RODBHOST') or d.get('host','')))}")
+      print(f"export PGPORT={shlex.quote(str(d.get('RODBPORT') or d.get('port',5432)))}")
+      print(f"export PGUSER={shlex.quote(str(d.get('RODBUSERNAME') or d.get('username') or d.get('user','')))}")
+      print(f"export PGPASSWORD={shlex.quote(str(d.get('RODBPASSWORD') or d.get('password','')))}")
+      print(f"export PGDATABASE={shlex.quote(str(d.get('RODBNAME') or d.get('dbname') or d.get('database','postgres')))}")
+      print(f"export PGSSLMODE=require")
+      PY
+      )"
+      unset SEC
+      python3 "$ROOT/.archon/setup/census-runner.py" census "$AD/backfill-plan.json" "$AD"
+      # Exit codes 4 (CLAIM_DIVERGED) and 5 (EXTRAORDINARY_CLAIM) carry their
+      # own typed lines from the runner; set -e propagates them as node stops.
+
+  - id: sample
+    depends_on: [census]
+    timeout: 600000
+    bash: |
+      set -euo pipefail
+      ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+      AD="$ARTIFACTS_DIR"
+      aws sts get-caller-identity >/dev/null 2>&1 || { echo "SAMPLE=FAIL sso expired - run: aws login, then resume"; exit 1; }
+      SEC=$(aws secretsmanager get-secret-value --secret-id dev/database/ro-credentials --region us-east-2 --query SecretString --output text 2>/dev/null || true)
+      test -n "$SEC" || { echo "SAMPLE=FAIL no RO credentials"; exit 1; }
+      export SEC
+      eval "$(python3 <<'PY'
+      import json, os, shlex
+      d = json.loads(os.environ["SEC"])
+      print(f"export PGHOST={shlex.quote(str(d.get('RODBHOST') or d.get('host','')))}")
+      print(f"export PGPORT={shlex.quote(str(d.get('RODBPORT') or d.get('port',5432)))}")
+      print(f"export PGUSER={shlex.quote(str(d.get('RODBUSERNAME') or d.get('username') or d.get('user','')))}")
+      print(f"export PGPASSWORD={shlex.quote(str(d.get('RODBPASSWORD') or d.get('password','')))}")
+      print(f"export PGDATABASE={shlex.quote(str(d.get('RODBNAME') or d.get('dbname') or d.get('database','postgres')))}")
+      print(f"export PGSSLMODE=require")
+      PY
+      )"
+      unset SEC
+      python3 "$ROOT/.archon/setup/census-runner.py" sample "$AD/backfill-plan.json" "$AD"
+
+  - id: sample-audit
+    depends_on: [sample]
+    model: sonnet
+    maxBudgetUsd: 2
+    timeout: 900000
+    prompt: |
+      You are the sample-audit node: the human check that a count cannot do.
+      A total is identical whether it came from thousands of genuine matches
+      or a few hundred mass collisions on one incidental key - only the raw
+      rows expose the difference. Ask no questions.
+
+      Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
+      Read there: backfill-plan.json (the claim - what the population is
+      supposed to be) and sample-rows.txt (15 raw matched rows plus the 3
+      largest per-entity clusters, verbatim psql output).
+
+      Read the ACTUAL rows, not their count. Ask of them:
+      - Does each row look like what claim.population describes, or like
+        distinct records sharing one incidental key?
+      - Do the largest clusters look like genuine members of the population,
+        or like one entity's rows mass-matched by a loose predicate?
+      - Is anything in the rows (emails, names, timestamps, sources) at odds
+        with the claim's story?
+      The canonical failure this node exists for: a "duplicates" claim of
+      785k that was really 26k, visible in the first cluster read - large
+      groups of distinct records sharing one incidental key.
+
+      Write sample-audit.json to that directory:
+        {"verdict": "consistent" | "suspect",
+         "note": "<2-4 sentences: what the rows actually show, citing
+                  concrete values from them>"}
+      "suspect" stops the run - use it whenever the rows do not clearly match
+      the claim. Doubt is a verdict, not a reason to soften.
+      End with the single line: SAMPLE_AUDIT_DONE
+
+  - id: sample-gate
+    depends_on: [sample-audit]
+    timeout: 120000
+    bash: |
+      set -euo pipefail
+      python3 - "$ARTIFACTS_DIR/sample-audit.json" <<'PY'
+      import json, sys
+      a = json.load(open(sys.argv[1], encoding="utf-8"))
+      v = a.get("verdict")
+      assert v in ("consistent", "suspect"), f"verdict out of enum: {v}"
+      assert a.get("note") and len(a["note"]) >= 30, "note missing or too thin to audit"
+      if v == "suspect":
+          print(f"SAMPLE_SUSPECT note={a['note']}")
+          print("SAMPLE_SUSPECT (the raw rows do not match the claim - read sample-rows.txt yourself; if the audit is wrong, a human edits sample-audit.json verdict to consistent - the edit is the approval - then resumes; otherwise fix the spec)")
+          sys.exit(1)
+      print("SAMPLE_GATE=PASS verdict=consistent")
+      PY
+
+  - id: dry-run
+    depends_on: [sample-gate]
+    timeout: 1800000
+    bash: |
+      set -euo pipefail
+      ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+      AD="$ARTIFACTS_DIR"
+      eval "$(bash "$ROOT/.archon/setup/params-env.sh" "$AD/params.json")"
+      KIND=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1], encoding='utf-8'))['instrument']['kind'])" "$AD/backfill-plan.json")
+      aws sts get-caller-identity >/dev/null 2>&1 || { echo "DRYRUN=FAIL sso expired - run: aws login, then resume"; exit 1; }
+      SEC=$(aws secretsmanager get-secret-value --secret-id dev/database/ro-credentials --region us-east-2 --query SecretString --output text 2>/dev/null || true)
+      test -n "$SEC" || { echo "DRYRUN=FAIL no RO credentials"; exit 1; }
+      export SEC
+      eval "$(python3 <<'PY'
+      import json, os, shlex
+      d = json.loads(os.environ["SEC"])
+      print(f"export PGHOST={shlex.quote(str(d.get('RODBHOST') or d.get('host','')))}")
+      print(f"export PGPORT={shlex.quote(str(d.get('RODBPORT') or d.get('port',5432)))}")
+      print(f"export PGUSER={shlex.quote(str(d.get('RODBUSERNAME') or d.get('username') or d.get('user','')))}")
+      print(f"export PGPASSWORD={shlex.quote(str(d.get('RODBPASSWORD') or d.get('password','')))}")
+      print(f"export PGDATABASE={shlex.quote(str(d.get('RODBNAME') or d.get('dbname') or d.get('database','postgres')))}")
+      print(f"export PGSSLMODE=require")
+      PY
+      )"
+      unset SEC
+      if [ "$KIND" = sql ]; then
+        python3 "$ROOT/.archon/setup/census-runner.py" dryrun "$AD/backfill-plan.json" "$AD"
+      else
+        # Instrument worktree: detached at origin/main (the instrument is
+        # merged - intake-gate proved merged_sha is an ancestor). The main
+        # api checkout is never touched.
+        WT_I="$ROOT/api/.worktrees/backfill-$SLUG"
+        if [ ! -d "$WT_I" ]; then
+          git -C "$ROOT/api" worktree add --detach "$WT_I" origin/main
+        fi
+        ( cd "$WT_I" && bun install --frozen-lockfile > "$AD/instrument-install.log" 2>&1 ) || { tail -5 "$AD/instrument-install.log"; echo "DRYRUN=FAIL bun install"; exit 1; }
+        cp "$ROOT/api/.env" "$WT_I/.env" 2>/dev/null || true
+        # env_map: the spec's declared mapping from PG* creds to the env vars
+        # the instrument reads. Exported AFTER .env is copied - exported env
+        # beats dotenv, so the DB target is the RO prod credentials.
+        eval "$(python3 - "$AD/backfill-plan.json" <<'PY'
+      import json, os, shlex, sys
+      em = json.load(open(sys.argv[1], encoding="utf-8"))["instrument"].get("env_map") or {}
+      f2v = {"host": "PGHOST", "port": "PGPORT", "username": "PGUSER", "password": "PGPASSWORD", "dbname": "PGDATABASE"}
+      for k, v in em.items():
+          print(f"export {k}={shlex.quote(os.environ.get(f2v[v], ''))}")
+      PY
+      )"
+        CMD=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1], encoding='utf-8'))['instrument']['dry_run_command'])" "$AD/backfill-plan.json")
+        ( cd "$WT_I" && bash -c "$CMD" ) > "$AD/dryrun.log" 2>&1 || { tail -15 "$AD/dryrun.log"; echo "DRYRUN=FAIL dry_run_command exited non-zero"; exit 1; }
+        python3 - "$AD/backfill-plan.json" "$AD" <<'PY'
+      import json, re, sys
+      plan = json.load(open(sys.argv[1], encoding="utf-8"))
+      rx = re.compile(plan["instrument"].get("would_touch_regex") or r"WOULD_TOUCH=([0-9]+)")
+      log = open(sys.argv[2] + "/dryrun.log", encoding="utf-8", errors="replace").read()
+      ms = rx.findall(log)
+      if not ms:
+          print("DRYRUN=FAIL no would-touch line in dry-run output (the instrument's dry-run must state its count; check would_touch_regex against dryrun.log)")
+          sys.exit(1)
+      n = int(ms[-1])
+      open(sys.argv[2] + "/dryrun-count.txt", "w", encoding="utf-8").write(str(n) + "\n")
+      print(f"DRYRUN=OK would_touch={n}")
+      PY
+      fi
+      python3 "$ROOT/.archon/setup/census-runner.py" dryrun-check "$AD/backfill-plan.json" "$AD"
+
+  - id: arm
+    depends_on: [dry-run]
+    timeout: 300000
+    bash: |
+      set -euo pipefail
+      ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+      AD="$ARTIFACTS_DIR"
+      eval "$(bash "$ROOT/.archon/setup/params-env.sh" "$AD/params.json")"
+      export SLUG AD ROOT
+      # Final bounds = min(spec proposal, census*1.1, absolute ceiling) - the
+      # absolute ceiling holds regardless of expected volume, because an
+      # inherited number disarms every gate built around it.
+      python3 <<'PY'
+      import json, math, os
+      ad = os.environ["AD"]
+      plan = json.load(open(f"{ad}/backfill-plan.json", encoding="utf-8"))
+      census = json.load(open(f"{ad}/census.json", encoding="utf-8"))
+      limits = json.load(open(f"{ad}/backfill-limits.json", encoding="utf-8"))
+      prop = plan["bounds_proposal"]
+      cands = {
+          "spec_proposal": int(prop["max_rows"]),
+          "census_x1.1": math.ceil(census["measured"] * 1.1),
+          "absolute_ceiling": int(limits["absolute_max_rows"]),
+      }
+      frac = min(float(prop["max_fraction"]), float(limits["absolute_max_fraction"]))
+      tmin = min(census["tables"].values())
+      cands["fraction_cap"] = math.floor(frac * tmin)
+      max_rows = min(cands.values())
+      chunk = min(int(limits["default_chunk_size"]), max_rows) or 1
+      bounds = {
+          "max_rows": max_rows,
+          "binding_bound": min(cands, key=cands.get),
+          "candidates": cands,
+          "chunk_size": chunk,
+          "statement_timeout_ms": int(limits["statement_timeout_ms"]),
+          "stall_seconds": int(limits["stall_seconds"]),
+          "per_entity_cap": prop.get("per_entity_cap"),
+          "cwd": f"{os.environ['ROOT']}/api/.worktrees/backfill-{os.environ['SLUG']}" if plan["instrument"]["kind"] == "cli" else None,
+      }
+      json.dump(bounds, open(f"{ad}/bounds.json", "w", encoding="utf-8"), indent=2)
+      # Bake the bounds INTO the armed command - the command itself carries
+      # its cap; the executor's monitor is the outer belt.
+      ins = plan["instrument"]
+      raw = ins["apply_command"] if ins["kind"] == "cli" else ins["apply_sql"]
+      armed = (raw.replace("{MAX_ROWS}", str(max_rows))
+                  .replace("{CHUNK_SIZE}", str(chunk))
+                  .replace("{STATEMENT_TIMEOUT_MS}", str(bounds["statement_timeout_ms"])))
+      open(f"{ad}/armed-command.txt", "w", encoding="utf-8").write(armed)
+      print(f"ARM bounds max_rows={max_rows} (binding: {bounds['binding_bound']}) chunk={chunk}")
+      PY
+      if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$AD/armed-command.txt" | cut -d' ' -f1 > "$AD/armed-command.sha256"
+      else
+        shasum -a 256 "$AD/armed-command.txt" | cut -d' ' -f1 > "$AD/armed-command.sha256"
+      fi
+      cp "$AD/armed-command.txt" "$AD/armed-command.pre.txt"
+      # Kill-switch NEGATIVE CONTROL: prove the refusal path fires BEFORE the
+      # first real apply. Engage -> expect the typed refusal + exit 3 -> disengage.
+      touch "$AD/KILL_SWITCH"
+      set +e
+      bash "$ROOT/.archon/setup/armed-exec.sh" "$AD" apply > "$AD/killswitch-negcontrol.txt" 2>&1
+      RC=$?
+      set -e
+      rm -f "$AD/KILL_SWITCH"
+      test "$RC" = 3 || { cat "$AD/killswitch-negcontrol.txt"; echo "KILLSWITCH_NEGCONTROL=FAIL expected exit 3, got $RC - the refusal path is broken; never proceed to a real apply on an unproven kill switch"; exit 1; }
+      grep -q 'KILL_SWITCH=ENGAGED' "$AD/killswitch-negcontrol.txt" || { echo "KILLSWITCH_NEGCONTROL=FAIL typed refusal line missing"; exit 1; }
+      echo "KILLSWITCH_NEGCONTROL=PASS (engaged -> typed refusal -> disengaged)"
+      # Snapshot plan for the packet: the exact statements snapshot will run
+      # (<TS> resolves at snapshot time) and the restore commands.
+      export SLUG_T=$(printf '%s' "$SLUG" | tr -c 'a-z0-9' '_' | sed 's/_*$//')
+      python3 <<'PY'
+      import json, os
+      ad = os.environ["AD"]; slug_t = os.environ["SLUG_T"]
+      plan = json.load(open(f"{ad}/backfill-plan.json", encoding="utf-8"))
+      lines = []
+      for i, s in enumerate(plan["undo"]["snapshot"], 1):
+          undo = f"backfill_undo_{slug_t}_{i}_<TS>"
+          cols = ", ".join([s["id_col"]] + s["value_cols"])
+          lines.append(f'-- snapshot {i} ({s["table"]})')
+          lines.append(f'CREATE TABLE {undo} AS SELECT {cols} FROM {s["table"]} WHERE {s["where_sql"]};')
+          setl = ", ".join(f"{c} = u.{c}" for c in s["value_cols"])
+          if s.get("mode", "update") == "update":
+              lines.append(f'-- restore {i}')
+              lines.append(f'UPDATE {s["table"]} t SET {setl} FROM {undo} u WHERE t.{s["id_col"]} = u.{s["id_col"]};')
+          else:
+              lines.append(f'-- restore {i} (re-insert missing rows)')
+              lines.append(f'INSERT INTO {s["table"]} ({cols}) SELECT {cols} FROM {undo} u WHERE NOT EXISTS (SELECT 1 FROM {s["table"]} t WHERE t.{s["id_col"]} = u.{s["id_col"]});')
+      open(f"{ad}/snapshot-plan.txt", "w", encoding="utf-8").write("\n".join(lines) + "\n")
+      PY
+      echo "ARM=OK sha256=$(cat "$AD/armed-command.sha256")"
+
+  - id: packet
+    depends_on: [arm]
+    model: sonnet
+    maxBudgetUsd: 3
+    timeout: 900000
+    prompt: |
+      You are the backfill-packet node. This packet is the run's ONLY human
+      gate: approving it starts snapshot -> apply -> reconcile against
+      PRODUCTION DATA, unattended. The reviewer must be able to absorb the
+      measured population, the raw rows, the exact command, and the recovery
+      story in two minutes. Ask no questions.
+
+      Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
+      Read there: backfill-plan.json, census.json, census.txt,
+      sample-rows.txt, sample-audit.json, dryrun-count.txt, bounds.json,
+      armed-command.txt, armed-command.sha256, killswitch-negcontrol.txt,
+      snapshot-plan.txt, backfill-limits.json.
+      Write a single self-contained backfill-review.html to that directory.
+      Do NOT modify armed-command.txt, bounds.json, or any other artifact.
+      No external resources in the HTML.
+
+      Sections, in order, each wrapped in an HTML comment marker so a gate
+      can verify them:
+      <!-- GIST --> Bro register: what this backfill changes, how many rows
+      the pipeline MEASURED (not what anyone claimed), and how we get the
+      data back if it goes wrong. Five sentences maximum; every number and
+      path exactly as written in the artifacts.
+      <!-- CLAIM --> Claim vs census, side by side: claim.population in the
+      spec's words, the claimed count, the measured count from census.json,
+      the divergence, the max fraction of any target table, and the
+      negative-control baseline (rows outside the set, captured now, asserted
+      unchanged after). Include the distribution and largest-case output from
+      census.txt verbatim in a scrollable block.
+      <!-- ROWS --> The 15 raw rows and the 3 largest clusters VERBATIM from
+      sample-rows.txt, plus sample-audit.json's verdict and note. The human
+      is approving what the rows show, not what the count implies.
+      <!-- DRYRUN --> The instrument's would-touch count vs the census count
+      and the divergence percentage - the instrument and the census agree
+      about the population, or this packet would not exist.
+      <!-- BOUNDS --> Every bound candidate from bounds.json (spec proposal,
+      census*1.1, absolute ceiling, fraction cap), which one is BINDING, the
+      chunk size, statement timeout, stall seconds, and per_entity_cap. Say
+      plainly: these are baked into the command and enforced again by the
+      executor; touched rows beyond max_rows engage the kill switch mid-run.
+      <!-- COMMAND --> The byte-exact armed command from armed-command.txt in
+      its own code chip, and the sha256 hash from armed-command.sha256
+      VERBATIM beside it. Say: the apply node re-hashes the file and refuses
+      on any drift from this hash - what you approve is what runs, byte for
+      byte.
+      <!-- UNDO --> snapshot-plan.txt verbatim: the snapshot tables that will
+      be created BEFORE the first write, and the restore commands. State that
+      write credentials are fetched only after approval, and the snapshot
+      count must reconcile with the census before the apply starts.
+      <!-- PREMORTEM --> The premortem sentence from backfill-plan.json,
+      verbatim and prominent, then one sentence on what in this packet
+      addresses it.
+      <!-- CONTROLS --> What ran and what will run: the kill-switch negative
+      control result from killswitch-negcontrol.txt (quote the typed refusal
+      line - the refusal path is PROVEN, not assumed), and what the
+      post-apply reconcile will assert: each reconcile query's question and
+      expectation, and the negative-control query returning exactly the
+      baseline.
+      <!-- DECIDE --> The decision box: approving fetches write credentials,
+      snapshots the undo set, executes the armed command chunked with a live
+      bound monitor, then reconciles. AWS SSO expires in ~15 minutes - run
+      `aws login` immediately before approving.
+      Then, in the same box, the standard decision block that every gate
+      packet carries. Resolve this run's id by running: basename "$ARTIFACTS_DIR"
+      and use that literal id in every command below. Never print the
+      placeholder <run-id>. Lead with one sentence saying the run is paused
+      because it finished this stage and is now waiting on a person, which is
+      how the stage is supposed to end and not a failure. Then the three
+      commands, each in its own code chip with a short label saying when to
+      pick it:
+        DISABLE_OMC=1 archon workflow approve <id> </dev/null >/tmp/archon-approve.log 2>&1 &
+        DISABLE_OMC=1 archon workflow reject <id> "why you are stopping it"
+        DISABLE_OMC=1 archon workflow abandon <id>
+      Say that approve runs the rest of the workflow inside the terminal it is
+      typed in and holds that terminal until the run ends, which is why it is
+      backgrounded, and that a failed resume still leaves the approval
+      recorded so archon workflow resume <id> picks it up. Say that reject
+      ends the run and records the reason typed after it, that abandon ends
+      the run without recording one, and that NEITHER sends the work back for
+      a rewrite: this lane declares no on_reject handler, so a different plan
+      means a fresh run from a corrected spec. Files already written stay on
+      disk either way. Close with one line: these three verbs do not appear in
+      archon --help, but they are real.
+
+      Simple inline CSS, one accent color, readable in BOTH light and dark
+      (custom properties on :root, overridden under
+      @media (prefers-color-scheme: dark)). Identity by label, never color
+      alone. Writing rules: plain sentences with varied length; no em dashes;
+      no vocabulary like "crucial", "leverage", "robust", "seamless",
+      "comprehensive"; no emoji; every number gets a consequence or
+      comparison in the same sentence.
+      End with the single line: PACKET_DONE
+
+  - id: render-gate
+    depends_on: [packet]
+    timeout: 120000
+    bash: |
+      set -euo pipefail
+      AD="$ARTIFACTS_DIR"
+      H="$AD/backfill-review.html"
+      test -s "$H" || { echo "RENDER_GATE=FAIL no backfill-review.html"; exit 1; }
+      for m in GIST CLAIM ROWS DRYRUN BOUNDS COMMAND UNDO PREMORTEM CONTROLS DECIDE; do
+        grep -q "<!-- $m -->" "$H" || { echo "RENDER_GATE=FAIL missing section $m"; exit 1; }
+      done
+      RID="$(basename "$ARTIFACTS_DIR")"
+      grep -qF "$RID" "$H" || { echo "RENDER_GATE=FAIL DECIDE box does not carry this run's id verbatim"; exit 1; }
+      for v in approve reject abandon; do
+        grep -qF "archon workflow $v" "$H" || { echo "RENDER_GATE=FAIL DECIDE box missing the $v command"; exit 1; }
+      done
+      cmp -s "$AD/armed-command.txt" "$AD/armed-command.pre.txt" || { echo "RENDER_GATE=FAIL renderer modified armed-command.txt"; exit 1; }
+      grep -qF "$(cat "$AD/armed-command.sha256")" "$H" || { echo "RENDER_GATE=FAIL packet does not carry the armed-command sha256 verbatim"; exit 1; }
+      OPENER="$(command -v xdg-open 2>/dev/null || command -v open 2>/dev/null || true)"
+      OPENED=no
+      if [ -n "$OPENER" ] && "$OPENER" "$H" >/dev/null 2>&1; then OPENED=yes; fi
+      if [ "$OPENED" = yes ]; then
+        echo "RENDER_GATE=PASS packet=file://$H (opened in browser)"
+      else
+        echo "RENDER_GATE=PASS packet=file://$H (no browser opener - open that path yourself)"
+      fi
+
+  - id: apply-approval
+    depends_on: [render-gate]
+    approval:
+      message: "Backfill packet ready (the run's ONLY gate): open <this run's ARTIFACTS_DIR>/backfill-review.html. Read the RAW ROWS and the armed command byte-for-byte - approving executes it against PRODUCTION after snapshotting the undo set. The sha256 in the packet pins the command; any drift after approval is a hard stop. IMPORTANT: run `aws login` immediately before approving (SSO expires in ~15 min; the post-gate nodes fetch write credentials at runtime). The run is paused, which is how this stage is meant to end, not a failure; nothing degrades while it waits. The packet's DECIDE box has the three commands with this run's id filled in: approve continues (background it, it holds the terminal), reject ends the run and records your reason, abandon ends it without one; either way nothing is written to production and neither sends the work back for a rewrite (this lane has no on_reject handler). None of the three appear in archon --help; they are real."
+
+  - id: snapshot
+    depends_on: [apply-approval]
+    timeout: 1800000
+    bash: |
+      set -euo pipefail
+      ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+      AD="$ARTIFACTS_DIR"
+      eval "$(bash "$ROOT/.archon/setup/params-env.sh" "$AD/params.json")"
+      # FIRST node allowed to hold write credentials - fetched at runtime,
+      # never earlier, never written to any artifact or env file.
+      aws sts get-caller-identity >/dev/null 2>&1 || { echo "WRITE_CREDS=FAIL sso expired - run: aws login, then: archon workflow resume <run-id>"; exit 1; }
+      SEC=$(aws secretsmanager get-secret-value --secret-id dev/database/credentials --region us-east-2 --query SecretString --output text 2>/dev/null || true)
+      test -n "$SEC" || { echo "WRITE_CREDS=FAIL cannot read dev/database/credentials"; exit 1; }
+      export SEC
+      eval "$(python3 <<'PY'
+      import json, os, shlex, sys
+      d = json.loads(os.environ["SEC"])
+      host = d.get("DBHOST") or d.get("host") or ""
+      if not host:
+          print("echo 'WRITE_CREDS=FAIL DBHOST missing in dev/database/credentials - add the host key to the secret, then resume'; exit 1")
+          sys.exit(0)
+      print(f"export PGHOST={shlex.quote(str(host))}")
+      print(f"export PGPORT={shlex.quote(str(d.get('DBPORT') or d.get('port', 5432)))}")
+      print(f"export PGUSER={shlex.quote(str(d.get('DBUSERNAME') or d.get('username') or d.get('user','')))}")
+      print(f"export PGPASSWORD={shlex.quote(str(d.get('DBPASSWORD') or d.get('password','')))}")
+      print(f"export PGDATABASE={shlex.quote(str(d.get('DBNAME') or d.get('dbname') or d.get('database','postgres')))}")
+      print(f"export PGSSLMODE=require")
+      PY
+      )"
+      unset SEC
+      TS=$(date +%Y%m%d%H%M%S)
+      export SLUG_T=$(printf '%s' "$SLUG" | tr -c 'a-z0-9' '_' | sed 's/_*$//')
+      export AD TS
+      # Build the concrete statements from the plan (identifiers were
+      # validated at intake-gate; <TS> resolves here).
+      python3 <<'PY'
+      import json, os
+      ad, ts, slug_t = os.environ["AD"], os.environ["TS"], os.environ["SLUG_T"]
+      plan = json.load(open(f"{ad}/backfill-plan.json", encoding="utf-8"))
+      creates, counts, restores, tables = [], [], [], []
+      for i, s in enumerate(plan["undo"]["snapshot"], 1):
+          undo = f"backfill_undo_{slug_t}_{i}_{ts}"
+          tables.append(undo)
+          cols = ", ".join([s["id_col"]] + s["value_cols"])
+          creates.append(f'CREATE TABLE {undo} AS SELECT {cols} FROM {s["table"]} WHERE {s["where_sql"]}')
+          counts.append(f'SELECT count(*) FROM {undo}')
+          if s.get("mode", "update") == "update":
+              setl = ", ".join(f"{c} = u.{c}" for c in s["value_cols"])
+              restores.append(f'UPDATE {s["table"]} t SET {setl} FROM {undo} u WHERE t.{s["id_col"]} = u.{s["id_col"]};')
+          else:
+              restores.append(f'INSERT INTO {s["table"]} ({cols}) SELECT {cols} FROM {undo} u WHERE NOT EXISTS (SELECT 1 FROM {s["table"]} t WHERE t.{s["id_col"]} = u.{s["id_col"]});')
+      open(f"{ad}/snapshot-creates.sql", "w", encoding="utf-8").write("\n".join(c + ";" for c in creates) + "\n")
+      open(f"{ad}/snapshot-counts.sql", "w", encoding="utf-8").write("\n".join(c + ";" for c in counts) + "\n")
+      open(f"{ad}/snapshot-tables.txt", "w", encoding="utf-8").write("\n".join(tables) + "\n")
+      open(f"{ad}/restore-command.txt", "w", encoding="utf-8").write(
+          "-- Restore this backfill from its snapshot (run with write credentials):\n" + "\n".join(restores) + "\n")
+      PY
+      export PGOPTIONS="-c statement_timeout=600000"
+      psql -X -q -v ON_ERROR_STOP=1 -f "$AD/snapshot-creates.sql" || { echo "SNAPSHOT=FAIL create statements failed"; exit 1; }
+      TOTAL=0
+      while IFS= read -r Q; do
+        test -n "$Q" || continue
+        N=$(psql -X -At -v ON_ERROR_STOP=1 -c "${Q%;}")
+        TOTAL=$((TOTAL + N))
+      done < "$AD/snapshot-counts.sql"
+      echo "$TOTAL" > "$AD/snapshot-count.txt"
+      export TOTAL
+      python3 <<'PY'
+      import json, os, sys
+      ad = os.environ["AD"]
+      total = int(os.environ["TOTAL"])
+      census = json.load(open(f"{ad}/census.json", encoding="utf-8"))
+      limits = json.load(open(f"{ad}/backfill-limits.json", encoding="utf-8"))
+      tol = limits["snapshot_tolerance_pct"]
+      m = census["measured"]
+      d = abs(total - m) / m * 100.0 if m else (0.0 if total == 0 else 100.0)
+      if d > tol:
+          print(f"SNAPSHOT_DIVERGED snapshot={total} census={m} divergence={d:.1f}% tolerance={tol}% "
+                f"(the undo set does not cover the measured population - the snapshot tables named in "
+                f"snapshot-tables.txt exist and are yours to drop or keep; fix undo.where_sql or the census, then resume)")
+          sys.exit(1)
+      print(f"SNAPSHOT=OK rows={total} census={m} divergence={d:.1f}% tables=$(see snapshot-tables.txt)")
+      PY
+      echo "SNAPSHOT_TABLES:"; cat "$AD/snapshot-tables.txt"
+
+  - id: apply
+    depends_on: [snapshot]
+    timeout: 3600000
+    bash: |
+      set -euo pipefail
+      ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+      AD="$ARTIFACTS_DIR"
+      # Re-pin the approved command: hash must match the arm-time sha AND
+      # appear verbatim in the packet the human approved.
+      if command -v sha256sum >/dev/null 2>&1; then
+        HAVE=$(sha256sum "$AD/armed-command.txt" | cut -d' ' -f1)
+      else
+        HAVE=$(shasum -a 256 "$AD/armed-command.txt" | cut -d' ' -f1)
+      fi
+      WANT=$(cat "$AD/armed-command.sha256")
+      test "$HAVE" = "$WANT" || { echo "ARMED_DRIFT armed-command.txt hash $HAVE != approved $WANT (the command changed after approval - hard stop; re-run arm and re-approve)"; exit 1; }
+      grep -qF "$WANT" "$AD/backfill-review.html" || { echo "ARMED_DRIFT approved packet does not carry hash $WANT - the packet and the command diverged; hard stop"; exit 1; }
+      test -f "$AD/KILL_SWITCH" && { echo "KILL_SWITCH=ENGAGED refusing to apply (remove $AD/KILL_SWITCH only as a deliberate human act)"; exit 1; }
+      test -s "$AD/restore-command.txt" || { echo "APPLY=FAIL no restore-command.txt - never apply without the snapshot's restore story"; exit 1; }
+      aws sts get-caller-identity >/dev/null 2>&1 || { echo "WRITE_CREDS=FAIL sso expired - run: aws login, then: archon workflow resume <run-id>"; exit 1; }
+      SEC=$(aws secretsmanager get-secret-value --secret-id dev/database/credentials --region us-east-2 --query SecretString --output text 2>/dev/null || true)
+      test -n "$SEC" || { echo "WRITE_CREDS=FAIL cannot read dev/database/credentials"; exit 1; }
+      export SEC
+      eval "$(python3 <<'PY'
+      import json, os, shlex, sys
+      d = json.loads(os.environ["SEC"])
+      host = d.get("DBHOST") or d.get("host") or ""
+      if not host:
+          print("echo 'WRITE_CREDS=FAIL DBHOST missing in dev/database/credentials'; exit 1")
+          sys.exit(0)
+      print(f"export PGHOST={shlex.quote(str(host))}")
+      print(f"export PGPORT={shlex.quote(str(d.get('DBPORT') or d.get('port', 5432)))}")
+      print(f"export PGUSER={shlex.quote(str(d.get('DBUSERNAME') or d.get('username') or d.get('user','')))}")
+      print(f"export PGPASSWORD={shlex.quote(str(d.get('DBPASSWORD') or d.get('password','')))}")
+      print(f"export PGDATABASE={shlex.quote(str(d.get('DBNAME') or d.get('dbname') or d.get('database','postgres')))}")
+      print(f"export PGSSLMODE=require")
+      PY
+      )"
+      unset SEC
+      # env_map for cli instruments - write credentials this time.
+      eval "$(python3 - "$AD/backfill-plan.json" <<'PY'
+      import json, os, shlex, sys
+      em = json.load(open(sys.argv[1], encoding="utf-8"))["instrument"].get("env_map") or {}
+      f2v = {"host": "PGHOST", "port": "PGPORT", "username": "PGUSER", "password": "PGPASSWORD", "dbname": "PGDATABASE"}
+      for k, v in em.items():
+          print(f"export {k}={shlex.quote(os.environ.get(f2v[v], ''))}")
+      PY
+      )"
+      bash "$ROOT/.archon/setup/armed-exec.sh" "$AD" apply
+      # armed-exec exit codes carry their own typed lines:
+      # 3 KILL_SWITCH, 8 BOUND_BREACH, 9 APPLY_STALLED, 10 exec failure.
+      # On any of them, recovery is the snapshot:
+      #   psql (write creds) -f restore-command.txt equivalents - see the file.
+      echo "APPLY_NODE=OK touched=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1], encoding='utf-8'))['touched'])" "$AD/apply-result.json")"
+
+  - id: reconcile
+    depends_on: [apply]
+    timeout: 900000
+    bash: |
+      set -euo pipefail
+      ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+      AD="$ARTIFACTS_DIR"
+      # Back to READ-ONLY credentials: reconciliation must not be able to
+      # write, by construction.
+      aws sts get-caller-identity >/dev/null 2>&1 || { echo "RECONCILE=FAIL sso expired - run: aws login, then resume (the apply is DONE; reconcile is the outstanding proof)"; exit 1; }
+      SEC=$(aws secretsmanager get-secret-value --secret-id dev/database/ro-credentials --region us-east-2 --query SecretString --output text 2>/dev/null || true)
+      test -n "$SEC" || { echo "RECONCILE=FAIL no RO credentials"; exit 1; }
+      export SEC
+      eval "$(python3 <<'PY'
+      import json, os, shlex
+      d = json.loads(os.environ["SEC"])
+      print(f"export PGHOST={shlex.quote(str(d.get('RODBHOST') or d.get('host','')))}")
+      print(f"export PGPORT={shlex.quote(str(d.get('RODBPORT') or d.get('port',5432)))}")
+      print(f"export PGUSER={shlex.quote(str(d.get('RODBUSERNAME') or d.get('username') or d.get('user','')))}")
+      print(f"export PGPASSWORD={shlex.quote(str(d.get('RODBPASSWORD') or d.get('password','')))}")
+      print(f"export PGDATABASE={shlex.quote(str(d.get('RODBNAME') or d.get('dbname') or d.get('database','postgres')))}")
+      print(f"export PGSSLMODE=require")
+      PY
+      )"
+      unset SEC
+      TOUCHED=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1], encoding='utf-8'))['touched'])" "$AD/apply-result.json")
+      set +e
+      python3 "$ROOT/.archon/setup/census-runner.py" reconcile "$AD/backfill-plan.json" "$AD" "$TOUCHED"
+      RC=$?
+      set -e
+      if [ "$RC" != 0 ]; then
+        echo "RECOVERY: the snapshot restore is in $AD/restore-command.txt -"
+        cat "$AD/restore-command.txt"
+        exit 1
+      fi
+      echo "RECONCILE_NODE=OK touched=$TOUCHED"
+
+  - id: run-report
+    depends_on: [reconcile]
+    model: sonnet
+    maxBudgetUsd: 2
+    timeout: 600000
+    prompt: |
+      You are the final-report node: the last thing a human sees from this
+      run, so show, do not tell. Ask no questions.
+      Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
+      Read there: backfill-plan.json, census.json, sample-audit.json,
+      dryrun-count.txt, bounds.json, armed-command.txt, apply-result.json,
+      apply.log (tail is enough), reconcile.txt, snapshot-tables.txt,
+      snapshot-count.txt, restore-command.txt.
+      Write a single self-contained run-report.html to that directory with
+      these marker-wrapped sections:
+      <!-- GIST --> Bro register: what changed in prod, how many rows, and
+      how we know nothing outside the set moved. Four sentences max; every
+      number verbatim from the artifacts.
+      <!-- NUMBERS --> The reconciliation story as labeled chips in order:
+      CLAIMED (from the spec), MEASURED (census), WOULD-TOUCH (dry run),
+      TOUCHED (apply), and the negative control (baseline vs after,
+      unchanged). One short sentence beside each chip saying why that step
+      proves something. Then each reconcile query's question, value, and
+      verdict from reconcile.txt.
+      <!-- UNDO --> The snapshot tables from snapshot-tables.txt with their
+      row count, the FULL restore command from restore-command.txt verbatim
+      in a code chip, and the TTL note: the snapshot tables stay for 14 days;
+      dropping them after that is a human act listed in the RUNBOOK - nothing
+      automated deletes them.
+      <!-- NEXT --> What the human does now: watch the post_signal named in
+      backfill-plan.json, run kb:compound to curate the capture, and drop the
+      snapshot tables after 14 quiet days. Concrete commands or names only.
+      Show-me rules: smallest view that makes each point; real names, paths,
+      and numbers only; no invented data; light and dark via :root custom
+      properties plus a prefers-color-scheme override. Plain sentences, no em
+      dashes, no AI-tell vocabulary. End with the single line: RUN_REPORT_DONE
+
+  - id: kb-capture
+    depends_on: [run-report]
+    model: sonnet
+    maxBudgetUsd: 2
+    timeout: 600000
+    prompt: |
+      You are the knowledge-capture node: compound what this backfill taught
+      us so the next one starts smarter. Ask no questions.
+      Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
+      Read there: backfill-plan.json, census.json, sample-audit.json,
+      bounds.json, apply-result.json, reconcile.txt, snapshot-tables.txt,
+      restore-command.txt.
+
+      Write EXACTLY ONE new markdown file into
+      /Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb/wiki/change-history/
+      named <YYYY-MM-DD>-archon-backfill-<slug>.md (get the date with the
+      date command; the slug is the "slug" field of params.json in the
+      artifacts directory).
+      That one new file is your ENTIRE write surface: never edit or delete
+      any existing knowledge-base file. Curation belongs to a human-attended
+      kb:compound session, not to you.
+
+      Frontmatter: title, date, source (archon backfill, run id = the
+      artifacts directory basename), status: captured.
+      Body sections, exactly these headings:
+        ## Population claim vs measured
+        ## What the sample showed
+        ## Bounds and what fired
+        ## Reconciliation
+        ## Promotion candidates
+      Population claim vs measured: the spec's claim, the census number, and
+      the divergence - the honest gap between what was believed and what was
+      true. What the sample showed: the audit verdict and what the raw rows
+      actually looked like. Bounds and what fired: the binding bound, whether
+      the kill switch, bound monitor, or stall detector fired, and the final
+      touched count. Reconciliation: each check's outcome including the
+      negative control, plus the snapshot table names and that they expire as
+      a human act after 14 days. Promotion candidates: bullets in the form
+      "glossary: <term>", "pattern: <name>", "footgun: <one line>" for the
+      curator - anything this run exposed about the tables, the instrument,
+      or the population definition.
+      Everything from run artifacts; nothing invented; facts verbatim.
+      End with the single line: KB_CAPTURE_DONE
+
+  - id: kb-capture-gate
+    depends_on: [kb-capture]
+    timeout: 120000
+    bash: |
+      set -euo pipefail
+      KB=/Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb
+      git -C "$KB" status --porcelain | sort > "$ARTIFACTS_DIR/kb-post-capture.txt"
+      NEW=$(comm -13 "$ARTIFACTS_DIR/kb-pre-porcelain.txt" "$ARTIFACTS_DIR/kb-post-capture.txt" || true)
+      COUNT=$(printf '%s\n' "$NEW" | grep -c "^?? wiki/change-history/" || true)
+      TOTAL=$(printf '%s\n' "$NEW" | grep -c . || true)
+      test "$COUNT" = "1" || { echo "KB_CAPTURE_GATE=FAIL expected exactly one new capture file, delta: [$NEW]"; exit 1; }
+      test "$TOTAL" = "$COUNT" || { echo "KB_CAPTURE_GATE=FAIL KB changes outside change-history: [$NEW]"; exit 1; }
+      F="$KB/$(printf '%s\n' "$NEW" | sed -n 's/^?? //p')"
+      grep -q "status: captured" "$F" || { echo "KB_CAPTURE_GATE=FAIL missing frontmatter"; exit 1; }
+      grep -qi "Population claim vs measured" "$F" || { echo "KB_CAPTURE_GATE=FAIL missing claim-vs-measured section"; exit 1; }
+      grep -qi "Promotion candidates" "$F" || { echo "KB_CAPTURE_GATE=FAIL missing promotion candidates"; exit 1; }
+      echo "KB_CAPTURE_GATE=PASS file=$F"
+
+  - id: report
+    depends_on: [kb-capture-gate]
+    trigger_rule: all_done
+    always_run: true
+    timeout: 120000
+    bash: |
+      set -uo pipefail
+      AD="$ARTIFACTS_DIR"
+      echo "=== BACKFILL REPORT ==="
+      echo "ARTIFACTS_DIR=$AD"
+      cat "$AD/census.json" 2>/dev/null || echo "no census.json (run stopped before census)"
+      cat "$AD/apply-result.json" 2>/dev/null || echo "APPLY=NOT_RUN"
+      tail -5 "$AD/reconcile.txt" 2>/dev/null || true
+      if [ -s "$AD/snapshot-tables.txt" ]; then
+        echo "SNAPSHOT_TABLES (drop after 14 quiet days - human act):"
+        cat "$AD/snapshot-tables.txt"
+        echo "RESTORE=$AD/restore-command.txt"
+      fi
+      if [ -s "$AD/run-report.html" ]; then
+        echo "REPORT=file://$AD/run-report.html"
+        OPENER="$(command -v xdg-open 2>/dev/null || command -v open 2>/dev/null || true)"
+        [ -n "$OPENER" ] && "$OPENER" "$AD/run-report.html" >/dev/null 2>&1 || true
+      fi
+      echo "REPORT_DONE"

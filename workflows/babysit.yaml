@@ -1,0 +1,86 @@
+name: babysit
+description: M2.9 back half - babysit both toy-feature PRs to MERGE-READY. Per repo - watch CI to conclusion, run the mechanical thread lane (proven-addressed threads only; everything else needs-human), flip draft to ready. Loop is transient-retry only; CI red is a hard CI_RED failure.
+provider: claude
+nodes:
+  - id: babysit-api
+    loop_group:
+      max_iterations: 3
+      until: API_MERGE_READY
+      nodes:
+        - id: api-watch
+          timeout: 2400000
+          bash: |
+            set -uo pipefail
+            REPO=/Users/eduardopicazo/Documents/Workspace/Goodword/api
+            BR=archon/health-archon
+            cd "$REPO"
+            PR=$(gh pr list --head "$BR" --state open --json number --jq '.[0].number' 2>/dev/null)
+            if [ -z "$PR" ]; then
+              echo "NO_OPEN_PR head=$BR (nothing to babysit - reported, not hidden)"
+              echo "<promise>API_MERGE_READY</promise>"
+              exit 0
+            fi
+            echo "WATCHING PR #$PR"
+            if ! gh pr checks "$PR" --watch --interval 30 > "$ARTIFACTS_DIR/api-checks.txt" 2>&1; then
+              tail -5 "$ARTIFACTS_DIR/api-checks.txt"
+              echo "CI_RED pr=$PR - engineer required"
+              exit 1
+            fi
+            tail -3 "$ARTIFACTS_DIR/api-checks.txt"
+
+            # Mechanical thread lane (effects-table 8c): auto-close ONLY threads whose
+            # cited path changed in a commit pushed after the comment. Bias needs-human;
+            # AI-review bots always needs-human. Replies are public and irreversible.
+            python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/thread-lane.py \
+              "$REPO" "$PR" "$ARTIFACTS_DIR/api-needs-human.txt" || { echo "THREAD_LANE=FAIL"; exit 1; }
+
+            gh pr ready "$PR" && echo "MARKED_READY pr=$PR"
+            echo "<promise>API_MERGE_READY</promise>"
+
+  - id: babysit-web
+    loop_group:
+      max_iterations: 3
+      until: WEB_MERGE_READY
+      nodes:
+        - id: web-watch
+          timeout: 2400000
+          bash: |
+            set -uo pipefail
+            REPO=/Users/eduardopicazo/Documents/Workspace/Goodword/web-app
+            BR=archon/health-archon-web
+            cd "$REPO"
+            PR=$(gh pr list --head "$BR" --state open --json number --jq '.[0].number' 2>/dev/null)
+            if [ -z "$PR" ]; then
+              echo "NO_OPEN_PR head=$BR (nothing to babysit - reported, not hidden)"
+              echo "<promise>WEB_MERGE_READY</promise>"
+              exit 0
+            fi
+            echo "WATCHING PR #$PR"
+            # KNOWN: web pr.yaml is gated on base main/prod - a stacked/misbased PR gets
+            # ZERO CI runs and a lone CodeRabbit pass looks green but is not a build.
+            N=$(gh pr checks "$PR" 2>/dev/null | wc -l | tr -d ' ')
+            if [ "$N" = "0" ]; then echo "NO_CI_RUNS pr=$PR - check base branch (pr.yaml gate)"; exit 1; fi
+            if ! gh pr checks "$PR" --watch --interval 30 > "$ARTIFACTS_DIR/web-checks.txt" 2>&1; then
+              tail -5 "$ARTIFACTS_DIR/web-checks.txt"
+              echo "CI_RED pr=$PR - engineer required"
+              exit 1
+            fi
+            tail -3 "$ARTIFACTS_DIR/web-checks.txt"
+            python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/thread-lane.py \
+              "$REPO" "$PR" "$ARTIFACTS_DIR/web-needs-human.txt" || { echo "THREAD_LANE=FAIL"; exit 1; }
+            gh pr ready "$PR" && echo "MARKED_READY pr=$PR"
+            echo "<promise>WEB_MERGE_READY</promise>"
+
+  - id: report
+    depends_on: [babysit-api, babysit-web]
+    trigger_rule: all_done
+    always_run: true
+    timeout: 120000
+    bash: |
+      set -uo pipefail
+      echo "=== BABYSIT REPORT ==="
+      for f in api-needs-human.txt web-needs-human.txt; do
+        echo "--- $f"
+        cat "$ARTIFACTS_DIR/$f" 2>/dev/null || echo "(none / lane did not run)"
+      done
+      echo "REPORT_DONE"

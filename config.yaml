@@ -1,0 +1,5 @@
+# M1.1 — Archon project config for the Goodword parent-dir anchor (folder project).
+# REQUIRED: without worktree.baseBranch, any node referencing $BASE_BRANCH fails
+# PRE-EXECUTION with dag_node_pre_execution_failed (D0 Condition 2, negative-controlled).
+worktree:
+  baseBranch: main

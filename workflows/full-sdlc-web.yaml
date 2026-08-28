@@ -1,0 +1,874 @@
+name: full-sdlc-web
+description: Web lane of the toy feature - presupposes the api lane ran with the DEFAULT (toy) spec, so its worktree is api/.worktrees/toy-feature-spec with GET /health-archon. Still toy-pinned; parameterize before first real two-lane ticket. Selective gen:api patch (full regen banned per M0.9), implement label, review loop, SSR curl smoke, agent-browser UAT, draft PR. Invoke with DISABLE_OMC=1.
+provider: claude
+nodes:
+  - id: preflight
+    timeout: 300000
+    bash: |
+      set -euo pipefail
+      SK=/Users/eduardopicazo/Documents/Workspace/Goodword/.claude/skills
+      test -f "$SK/ce-code-review/SKILL.md" || { echo "PREFLIGHT=FAIL staged ce-code-review missing"; exit 1; }
+      # Dual contract: CE 3.2.0 carries the markers in SKILL.md; newer CE moved
+      # mode:headless (now an alias for mode:agent) into references/modes-and-output.md
+      # and the verdict field into references/finish-review.md. Either satisfies.
+      { grep -q 'mode:headless' "$SK/ce-code-review/SKILL.md" && grep -q '"verdict"' "$SK/ce-code-review/SKILL.md"; }         || { grep -q 'mode:headless' "$SK/ce-code-review/references/modes-and-output.md" 2>/dev/null && grep -q '"verdict"' "$SK/ce-code-review/references/finish-review.md" 2>/dev/null; }         || { echo "PREFLIGHT=FAIL ce-code-review carries neither review contract (headless envelope nor agent JSON)"; exit 1; }
+      command -v pnpm >/dev/null || { echo "PREFLIGHT=FAIL pnpm missing"; exit 1; }
+      command -v mise >/dev/null || { echo "PREFLIGHT=FAIL mise missing"; exit 1; }
+      mise x node@20 -- node -v | grep -q '^v20' || { echo "PREFLIGHT=FAIL node20 via mise unavailable"; exit 1; }
+      command -v gh >/dev/null && gh auth status >/dev/null 2>&1 || { echo "PREFLIGHT=FAIL gh unauthenticated"; exit 1; }
+      command -v agent-browser >/dev/null || { echo "PREFLIGHT=FAIL agent-browser missing"; exit 1; }
+      aws sts get-caller-identity >/dev/null 2>&1 || { echo "PREFLIGHT=FAIL aws session expired - run: aws login"; exit 1; }
+      for v in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_PROFILE; do
+        test -z "$(printenv "$v")" || { echo "PREFLIGHT=FAIL $v is set - would bill API, not subscription"; exit 1; }
+      done
+      grep -q 'apiKeyHelper' "$HOME/.claude/settings.json" 2>/dev/null && { echo "PREFLIGHT=FAIL apiKeyHelper configured"; exit 1; }
+      # port_pids: PIDs holding a TCP port. lsof is preinstalled on macOS and
+      # frequently absent on Linux, so try lsof -> ss -> fuser. rc 1 means NO
+      # backend exists at all; it never means "the port is free".
+      port_pids() { # $1 = port
+        local out=""
+        if command -v lsof >/dev/null 2>&1; then
+          out="$(lsof -ti ":$1" 2>/dev/null || true)"
+        elif command -v ss >/dev/null 2>&1; then
+          out="$(ss -ltnp "sport = :$1" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u || true)"
+        elif command -v fuser >/dev/null 2>&1; then
+          out="$(fuser -n tcp "$1" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' || true)"
+        else
+          return 1
+        fi
+        [ -n "$out" ] && printf '%s\n' "$out"
+        return 0
+      }
+      port_pids 4123 >/dev/null || { echo "PREFLIGHT=FAIL no port-inspection tool (need lsof, ss, or fuser)"; exit 1; }
+      test -z "$(port_pids 4123)" || { echo "PREFLIGHT=FAIL port 4123 busy"; exit 1; }
+      test -z "$(port_pids 3123)" || { echo "PREFLIGHT=FAIL port 3123 busy"; exit 1; }
+      test -d /Users/eduardopicazo/Documents/Workspace/Goodword/web-app/.git || { echo "PREFLIGHT=FAIL web repo missing"; exit 1; }
+      APIWT=/Users/eduardopicazo/Documents/Workspace/Goodword/api/.worktrees/toy-feature-spec
+      grep -q 'health-archon' "$APIWT/apps/api/src/app/app.controller.ts" 2>/dev/null || { echo "PREFLIGHT=FAIL api lane output missing (no health-archon in api worktree)"; exit 1; }
+      test -d /Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb/wiki || { echo "PREFLIGHT=FAIL knowledge base missing"; exit 1; }
+      git -C /Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb status --porcelain | sort > "$ARTIFACTS_DIR/kb-pre-porcelain.txt"
+      echo "PREFLIGHT=PASS"
+
+  - id: bootstrap
+    depends_on: [preflight]
+    timeout: 1200000
+    bash: |
+      set -euo pipefail
+      WEB=/Users/eduardopicazo/Documents/Workspace/Goodword/web-app
+      WT=$WEB/.worktrees/archon-toy
+      BR=archon/health-archon-web
+      git -C "$WEB" fetch origin main
+      if [ -d "$WT" ]; then
+        test "$(git -C "$WT" branch --show-current)" = "$BR" || { echo "BOOTSTRAP=FAIL existing worktree on wrong branch"; exit 1; }
+        echo "BOOTSTRAP=ADOPTED"
+      else
+        git -C "$WEB" worktree add "$WT" -b "$BR" origin/main
+        echo "BOOTSTRAP=CREATED"
+      fi
+      cp "$WEB/.env" "$WT/.env"
+      # origin/main pnpm-lock drifts from package.json (known project fact) — frozen refuses.
+      # Unfrozen install; the lockfile is excluded from every commit node in this lane.
+      cd "$WT" && mise x node@20 -- pnpm install --no-frozen-lockfile > "$ARTIFACTS_DIR/pnpm-install.log" 2>&1 || { tail -5 "$ARTIFACTS_DIR/pnpm-install.log"; echo "BOOTSTRAP=FAIL pnpm install"; exit 1; }
+      git -C "$WT" rev-parse HEAD > "$ARTIFACTS_DIR/bootstrap-head.txt"
+      printf '{"web_worktree":"%s","branch":"%s"}\n' "$WT" "$BR" > "$ARTIFACTS_DIR/worktrees.json"
+      echo "WORKTREE=$WT BRANCH=$BR HEAD=$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")"
+
+  # Contract parity with the api lane: the web lane has no plan stage yet
+  # (toy-pinned), so ralplan-written artifacts (premises.json, files-allowlist.json,
+  # reader-audit.json) do not exist and these nodes short-circuit EXPLICITLY.
+  # They gain teeth the day the lane is parameterized — see RUNBOOK.
+  - id: premise-strip
+    depends_on: [bootstrap]
+    timeout: 120000
+    bash: |
+      set -euo pipefail
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/strip-premise-answers.py \
+        "$ARTIFACTS_DIR/premises.json" "$ARTIFACTS_DIR/premises-questions.json"
+      echo "PREMISE_STRIP=OK"
+
+  - id: premise-verify
+    depends_on: [premise-strip]
+    model: sonnet
+    maxBudgetUsd: 3
+    timeout: 1200000
+    prompt: |
+      You are the premise-verification node: a blind re-derivation check. The
+      planner answered the spec's premise questions; your value is an answer
+      derived from CODE with no exposure to the planner's reasoning, so the two
+      can be compared. Ask no questions.
+
+      Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
+      Read ONLY premises-questions.json there. The repository checkout to read
+      (you are NOT cwd'd there):
+        /Users/eduardopicazo/Documents/Workspace/Goodword/web-app/.worktrees/archon-toy
+      You are FORBIDDEN from opening premises.json or any plan file until
+      step 2 below.
+
+      If premises-questions.json is an empty array, write an empty array []
+      to premise-verify.json in that directory and end with the single line:
+      PREMISE_VERIFY_DONE
+
+      Step 1: answer each question independently by reading the worktree code.
+      Every answer cites file:line evidence from files you actually opened.
+      Write premise-verify.json to that directory FIRST, before step 2:
+        [{"id": <n>, "answer": "<your independent answer>",
+          "evidence": ["<repo-relative file>:<lines>", ...]}]
+
+      Step 2: only after that file is written, read premises.json in that
+      directory and compare per id. Rewrite premise-verify.json adding to each
+      entry:
+        "verdict": "agree" | "conflict" | "cannot_determine"
+        "note": "<one line on why>"
+      "conflict" means the code contradicts the planner's answer.
+      "cannot_determine" means the code alone cannot settle the question.
+      End with the single line: PREMISE_VERIFY_DONE
+
+  - id: premise-gate
+    depends_on: [premise-verify]
+    timeout: 120000
+    bash: |
+      set -euo pipefail
+      Q="$ARTIFACTS_DIR/premises-questions.json"
+      V="$ARTIFACTS_DIR/premise-verify.json"
+      NQ=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))))" "$Q")
+      if [ "$NQ" = 0 ]; then echo "PREMISE_GATE=PASS (no premises declared)"; exit 0; fi
+      test -s "$V" || { echo "PREMISE_GATE=FAIL no premise-verify.json"; exit 1; }
+      python3 - "$Q" "$V" <<'PY'
+      import json, sys
+      qs = {q["id"] for q in json.load(open(sys.argv[1]))}
+      byid = {v.get("id"): v for v in json.load(open(sys.argv[2]))}
+      missing = qs - set(byid)
+      assert not missing, f"ids not covered: {sorted(missing)}"
+      allowed = {"agree", "conflict", "cannot_determine"}
+      bad = sorted(i for i in qs if byid[i].get("verdict") not in allowed)
+      assert not bad, f"verdict missing or out of enum for ids: {bad}"
+      conflicts = sorted(i for i in qs if byid[i].get("verdict") == "conflict")
+      if conflicts:
+          for i in conflicts:
+              print(f"PREMISE_CONFLICT id={i}")
+          sys.exit(1)
+      PY
+      echo "PREMISE_GATE=PASS"
+
+  - id: gen-api-sync
+    depends_on: [bootstrap]
+    timeout: 1200000
+    bash: |
+      set -uo pipefail
+      set -x
+      echo "AD=[${ARTIFACTS_DIR:-UNSET}] cwd=[$(pwd)]"
+      APIWT=/Users/eduardopicazo/Documents/Workspace/Goodword/api/.worktrees/toy-feature-spec
+      WT=/Users/eduardopicazo/Documents/Workspace/Goodword/web-app/.worktrees/archon-toy
+      cd "$APIWT"
+      # port_pids: lsof -> ss -> fuser (lsof is often absent on Linux).
+      port_pids() { # $1 = port
+        local out=""
+        if command -v lsof >/dev/null 2>&1; then
+          out="$(lsof -ti ":$1" 2>/dev/null || true)"
+        elif command -v ss >/dev/null 2>&1; then
+          out="$(ss -ltnp "sport = :$1" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u || true)"
+        elif command -v fuser >/dev/null 2>&1; then
+          out="$(fuser -n tcp "$1" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' || true)"
+        else
+          return 1
+        fi
+        [ -n "$out" ] && printf '%s\n' "$out"
+        return 0
+      }
+      PORT=4123 bun start > "$ARTIFACTS_DIR/api-boot.log" 2>&1 &
+      SRV=$!
+      # bun start spawns children that outlive the parent: sweep the PORT on exit.
+      trap 'kill "$SRV" 2>/dev/null; sleep 1; P=$(port_pids 4123); test -n "$P" && kill $P 2>/dev/null; true' EXIT
+      CODE=000
+      for i in $(seq 1 120); do
+        sleep 3
+        CODE=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:4123/api-docs-json || echo 000)
+        test "$CODE" = "200" && break
+      done
+      test "$CODE" = "200" || { echo "GENAPI=FAIL api-docs-json code=$CODE"; exit 1; }
+      curl -s http://localhost:4123/api-docs-json | grep -q 'health-archon' || { echo "GENAPI=FAIL endpoint absent from swagger"; exit 1; }
+      cd "$WT"
+      FRESH=$ARTIFACTS_DIR/api-client.fresh.d.ts
+      mise x node@20 -- npx openapi-typescript http://localhost:4123/api-docs-json -o "$FRESH" || { echo "GENAPI=FAIL openapi-typescript"; exit 1; }
+      mise x node@20 -- bunx @biomejs/biome check --write "$FRESH" >/dev/null 2>&1 || true
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/selective-genapi-patch.py \
+        "$WT/app/services/api-client.d.ts" "$FRESH" health-archon HealthArchon || { echo "GENAPI=FAIL selective patch"; exit 1; }
+      git -C "$WT" diff --stat -- app/services/api-client.d.ts
+      git -C "$WT" diff --name-only | grep -vE '^app/services/api-client\.d\.ts$|^pnpm-lock\.yaml$' && { echo "GENAPI=FAIL patch touched other files"; exit 1; }
+      mise x node@20 -- pnpm typecheck || { echo "GENAPI=FAIL typecheck after selective patch (adjacent drift?)"; exit 1; }
+      git -C "$WT" diff -- app/services/api-client.d.ts > "$ARTIFACTS_DIR/genapi.patch"
+      echo "GENAPI=PASS"
+
+  - id: implement
+    depends_on: [gen-api-sync, premise-gate]
+    model: sonnet
+    maxBudgetUsd: 8
+    timeout: 1800000
+    prompt: |
+      Implement the web prong of the toy feature described in the spec at:
+        /Users/eduardopicazo/Documents/Workspace/Goodword/.omc/research/toy-feature-spec.md
+      (API prong and gen:api sync are already done; the generated types in
+      app/services/api-client.d.ts already contain /health-archon.)
+
+      The working tree is at this absolute path (you are NOT cwd'd there; cd for every command):
+        /Users/eduardopicazo/Documents/Workspace/Goodword/web-app/.worktrees/archon-toy
+
+      Unit: in the existing app/routes/health.tsx, fetch GET /health-archon from the api
+      and render the returned status as a literal text label. The read MUST be typed
+      against the generated client (e.g. paths['/health-archon']['get']) — a hardcoded
+      string defeats the fixture. Add or extend a vitest spec for the route if one exists
+      nearby; otherwise a minimal one.
+
+      Scope: change only app/routes/health.tsx and its test file. Do not touch
+      api-client.d.ts (already patched). Do not edit pnpm-lock.yaml.
+      Do not create commits or branches — a later node commits.
+      If the work already exists and passes verification, say so and stop.
+
+      <repo-conventions repo="web-app">
+      pnpm ONLY (bun install breaks overrides). Run everything through Node 20:
+        mise x node@20 -- pnpm typecheck
+        mise x node@20 -- pnpm lint
+        mise x node@20 -- pnpm test --run
+      TypeScript strict; no `any`. No co-author lines anywhere.
+      </repo-conventions>
+
+      Done when those three commands exit 0 in the working tree. Report the exact
+      commands and exit statuses. Unattended pipeline invocation; ask no questions.
+
+  - id: gate-tests
+    depends_on: [implement]
+    timeout: 1200000
+    bash: |
+      set -euo pipefail
+      cd /Users/eduardopicazo/Documents/Workspace/Goodword/web-app/.worktrees/archon-toy
+      rm -rf .omc
+      mise x node@20 -- pnpm typecheck || { echo "GATE_TESTS=FAIL typecheck"; exit 1; }
+      mise x node@20 -- pnpm lint || { echo "GATE_TESTS=FAIL lint"; exit 1; }
+      mise x node@20 -- pnpm test --run || { echo "GATE_TESTS=FAIL vitest"; exit 1; }
+      test -n "$(git status --porcelain)" || { echo "GATE_TESTS=FAIL no changes produced"; exit 1; }
+      # Scope guard: active only once a plan stage writes files-allowlist.json
+      # (toy lane has none) — the skip is explicit, never silent.
+      if [ -s "$ARTIFACTS_DIR/files-allowlist.json" ]; then
+        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py \
+          "$ARTIFACTS_DIR/files-allowlist.json" "$(pwd)" "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" \
+          --exclude pnpm-lock.yaml || { echo "GATE_TESTS=FAIL scope breach"; exit 1; }
+      else
+        echo "SCOPE_GUARD=SKIP no files-allowlist.json (toy lane; no plan stage)"
+      fi
+      echo "GATE_TESTS=PASS"
+
+  - id: reader-audit
+    depends_on: [gate-tests]
+    model: sonnet
+    maxBudgetUsd: 3
+    timeout: 1200000
+    prompt: |
+      You are the reader-audit node: when a diff changes what a DB column's
+      value MEANS, every reader of that column is a suspect, and the change is
+      only safe when every reader has been looked at. Ask no questions.
+
+      Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
+      Read reader-audit.json there. If that file is ABSENT or its "columns"
+      array is empty, write exactly {"columns": []} to reader-audit-result.json
+      in that directory and end with the single line: READER_AUDIT_DONE
+
+      The repository checkout (you are NOT cwd'd there):
+        /Users/eduardopicazo/Documents/Workspace/Goodword/web-app/.worktrees/archon-toy
+
+      For each declared column: enumerate EVERY reader of it in the repository
+      — grep data-access code, query hooks, and rendering paths for the column
+      name and its enum value tokens; follow the call sites; do not stop at
+      the first hits. Classify each reader:
+        "unaffected" — its behavior is unchanged by the new semantics
+        "affected"   — it must change and this plan does not change it
+        "residual"   — semantics shift but the behavior is acceptable; worth
+                       recording in the PR body
+      Write reader-audit-result.json to that directory:
+        {"columns": [{"table": "<table>", "column": "<column>",
+          "readers": [{"file": "<repo-relative>:<line>",
+                       "class": "unaffected|affected|residual",
+                       "why": "<one line>"}]}]}
+      End with the single line: READER_AUDIT_DONE
+
+  - id: reader-audit-gate
+    depends_on: [reader-audit]
+    timeout: 120000
+    bash: |
+      set -euo pipefail
+      D="$ARTIFACTS_DIR/reader-audit.json"
+      R="$ARTIFACTS_DIR/reader-audit-result.json"
+      # Toy lane: no plan stage declares columns; absence short-circuits explicitly.
+      NC=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))['columns']))" "$D" 2>/dev/null || echo 0)
+      if [ "$NC" = 0 ]; then echo "READER_AUDIT_GATE=PASS (no columns declared)"; exit 0; fi
+      test -s "$R" || { echo "READER_AUDIT_FAIL no reader-audit-result.json"; exit 1; }
+      python3 - "$D" "$R" <<'PY'
+      import json, sys
+      decl = {(c["table"], c["column"]) for c in json.load(open(sys.argv[1]))["columns"]}
+      res = json.load(open(sys.argv[2]))["columns"]
+      got = {(c["table"], c["column"]) for c in res}
+      missing = decl - got
+      assert not missing, f"declared columns not covered: {sorted(missing)}"
+      affected = [(c["table"], c["column"], r.get("file", "?"))
+                  for c in res for r in c.get("readers", [])
+                  if r.get("class") == "affected"]
+      if affected:
+          for t, col, f in affected:
+              print(f"READER_AUDIT_FAIL affected reader {t}.{col} at {f}")
+          sys.exit(1)
+      PY
+      echo "READER_AUDIT_GATE=PASS"
+
+  - id: commit-impl
+    depends_on: [gate-tests]
+    timeout: 300000
+    bash: |
+      set -euo pipefail
+      cd /Users/eduardopicazo/Documents/Workspace/Goodword/web-app/.worktrees/archon-toy
+      git add -A
+      git restore --staged pnpm-lock.yaml 2>/dev/null || true
+      if git diff --cached --quiet; then
+        # Idempotent re-run: a prior run may have already committed the work.
+        grep -q 'health-archon' app/routes/health.tsx && { echo "COMMIT_IMPL=ALREADY sha=$(git rev-parse HEAD)"; exit 0; }
+        echo "COMMIT_IMPL=FAIL nothing staged and no prior work"; exit 1
+      fi
+      git diff --cached --name-only
+      git commit -m "feat(web): render health-archon status label"
+      echo "COMMIT_IMPL=OK sha=$(git rev-parse HEAD)"
+
+  - id: review-loop
+    depends_on: [commit-impl]
+    loop_group:
+      max_iterations: 4
+      until: REVIEW_CONVERGED
+      nodes:
+        - id: round-pre
+          timeout: 120000
+          bash: |
+            set -euo pipefail
+            C="$ARTIFACTS_DIR/round.txt"
+            N=$(cat "$C" 2>/dev/null || echo 0); N=$((N+1)); echo "$N" > "$C"
+            RD="$ARTIFACTS_DIR/round-$N"; mkdir -p "$RD"
+            cd /Users/eduardopicazo/Documents/Workspace/Goodword/web-app/.worktrees/archon-toy
+            git rev-parse HEAD > "$RD/pre-head.txt"
+            ls -1d /tmp/compound-engineering/ce-code-review/*/ 2>/dev/null | sort > "$RD/prerun-dirs.txt" || true
+            touch "$RD/prerun-dirs.txt"
+            echo "ROUND=$N head=$(cat "$RD/pre-head.txt")"
+
+        - id: review
+          depends_on: [round-pre]
+          model: sonnet
+          maxBudgetUsd: 15
+          timeout: 1800000
+          skills: [ce-code-review]
+          prompt: |
+            The repository checkout to review is at this absolute path (you are NOT cwd'd
+            there — cd into it for every git command):
+              /Users/eduardopicazo/Documents/Workspace/Goodword/web-app/.worktrees/archon-toy
+            It is already on the branch to be reviewed.
+            Resolve the artifacts directory by running: echo "$ARTIFACTS_DIR"
+
+            Persona selection happens in this session, so three instructions
+            BEFORE you invoke the skill:
+            - Measure the diff first: in the worktree, run
+              git diff --stat "$(cat <that directory>/bootstrap-head.txt)"..HEAD
+              Under roughly 150 changed lines, cap the conditional personas at
+              3 beyond the always-on set, and record the decision (diff size,
+              cap applied or not, personas chosen) in the envelope's Coverage
+              section so the choice is observable.
+            - Task one reviewer lens with exactly this: "extract the
+              assumptions this diff encodes — in-diff comments are the primary
+              source — and verify each against out-of-diff code; report
+              mismatches as findings." Feed its findings through the skill's
+              normal merge pipeline like any other reviewer's.
+            - If waivers.md exists in the artifacts directory, read it first.
+              A finding that materially matches a waived entry goes under a
+              "Previously waived" heading in the envelope — NOT as a new
+              actionable finding — unless the reviewer states specific new
+              evidence that was absent when the waiver was recorded.
+
+            Invoke the ce-code-review skill with arguments exactly:
+              mode:headless base:origin/main
+            Do not expand scope beyond the diff against that base.
+            The staged ce-code-review may be either contract generation: CE 3.2.0's
+            markdown headless envelope, or the newer agent-JSON contract (there
+            mode:headless aliases mode:agent and the skill returns ONE raw JSON
+            object with status and verdict fields). Invoke with the same
+            arguments either way and relay the skill's full return VERBATIM
+            (envelope or raw JSON) as part of your output. External/cross-model
+            review is PROHIBITED in this unattended pipeline: never send the
+            diff to any external peer, regardless of what the skill's own
+            references permit.
+
+        - id: review-gate
+          depends_on: [review]
+          timeout: 300000
+          bash: |
+            set -uo pipefail
+            N=$(cat "$ARTIFACTS_DIR/round.txt"); RD="$ARTIFACTS_DIR/round-$N"
+            OUT=$review.output
+            if [ "${#OUT}" -lt 100 ] && [ -s "$RD/review-envelope.txt" ]; then
+              OUT=$(cat "$RD/review-envelope.txt")
+            fi
+            printf '%s\n' "$OUT" > "$RD/review-envelope.txt"
+            # Dual-contract parse: CE 3.2.0's markdown headless envelope OR the
+            # newer skills' single raw JSON object (status/verdict fields).
+            eval "$(python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/parse-review-envelope.py "$RD/review-envelope.txt" | sed 's/^/ENV_/')"
+            G1="$ENV_G1"; G2="$ENV_G2"
+            echo "GATE_1_review_complete_present=$G1 (contract=$ENV_VSRC)"
+            echo "GATE_2_degraded_absent=$G2"
+            # Run-scoped, not /tmp: a same-named file owned by another user on a
+            # shared host makes the redirect fail, `|| true` swallows it, and comm
+            # then diffs against a foreign list — silently picking the wrong
+            # ce-code-review run directory to read the verdict from.
+            ls -1d /tmp/compound-engineering/ce-code-review/*/ 2>/dev/null | sort > "$RD/post-dirs.txt" || true
+            NEW=$(comm -13 "$RD/prerun-dirs.txt" "$RD/post-dirs.txt")
+            PREHEAD=$(cat "$RD/pre-head.txt")
+            VERDICT=""; RUNDIR=""
+            for d in $NEW; do
+              M="$d/metadata.json"; test -f "$M" || continue
+              SHA=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('head_sha',''))" "$M" 2>/dev/null)
+              if [ "${#SHA}" -ge 7 ]; then
+                case "$PREHEAD" in
+                  "$SHA"*)
+                    RUNDIR="$d"
+                    VERDICT=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('verdict',''))" "$M" 2>/dev/null)
+                    ;;
+                esac
+              fi
+            done
+            VSRC=metadata
+            if [ -z "$VERDICT" ]; then
+              # Fallback: metadata.json omission is a known model-side contract slip; the
+              # envelope is the skill's PRIMARY handoff. Strict-match its Verdict line.
+              test -n "$ENV_VERDICT" && { VERDICT="$ENV_VERDICT"; VSRC="$ENV_VSRC"; }
+            fi
+            G3=FAIL
+            case "$VERDICT" in "Ready to merge"|"Ready with fixes"|"Not ready") G3=PASS ;; esac
+            echo "GATE_3_verdict_in_enum=$G3 verdict=[$VERDICT] source=$VSRC rundir=[$RUNDIR]"
+            DEGRADED=true; test "$G2" = PASS && DEGRADED=false
+            python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/write-review-summary.py \
+              "$RD/review-summary.json" "$VERDICT" "$DEGRADED"
+            test "$G1" = PASS && test "$G2" = PASS && test "$G3" = PASS || { echo "REVIEW_GATE=FAIL round=$N"; exit 1; }
+            echo "REVIEW_GATE=PASS round=$N"
+
+        - id: commit-fixes
+          depends_on: [review-gate]
+          timeout: 300000
+          bash: |
+            set -euo pipefail
+            cd /Users/eduardopicazo/Documents/Workspace/Goodword/web-app/.worktrees/archon-toy
+            git add -A
+            git restore --staged pnpm-lock.yaml 2>/dev/null || true
+            if git diff --cached --quiet; then echo "COMMITTED=NO"; else
+              git commit -m "fix(review): apply autofix feedback"; echo "COMMITTED=YES sha=$(git rev-parse HEAD)"
+            fi
+            echo "COMMIT_FIXES=OK"
+
+        - id: fixer
+          depends_on: [commit-fixes]
+          model: sonnet
+          maxBudgetUsd: 5
+          timeout: 1200000
+          prompt: |
+            You are the fixer node in an unattended review-fix pipeline. Ask no questions.
+            Resolve the artifacts directory by running: echo "$ARTIFACTS_DIR"
+            Read the current round number from round.txt there, then read the review
+            envelope at round-<N>/review-envelope.txt.
+            The envelope is either CE 3.2.0's markdown headless envelope or the
+            newer contract's single JSON object; in JSON, actionable findings
+            live in "actionable_findings" (fields: severity Pn, owner,
+            autofix_class gated_auto|manual, file, line, title,
+            suggested_fix) — treat them exactly like the envelope's findings.
+
+            The repository under review (you are NOT cwd'd there):
+              /Users/eduardopicazo/Documents/Workspace/Goodword/web-app/.worktrees/archon-toy
+
+            Rules:
+            - No unresolved P0-P2 gated_auto/manual findings: write the JSON result with
+              empty arrays (advisory may list P3 waivers) and stop. Do not invent work.
+            - Fix unresolved P0-P2 gated_auto/manual findings by editing repository files.
+            - P3/advisory: do NOT fix; record each as a waiver with one line of rationale.
+            - "failed" means BLOCKED — it halts the whole pipeline for a human. Reserve it
+              for a P0-P2 that must be fixed in this diff and that you attempted but could
+              not complete (build breaks, code not found, findings contradict each other).
+            - Declining is not failing. A finding tagged pre_existing, or whose defect
+              predates this diff, or whose fix would expand beyond the diff's stated
+              scope, goes in "advisory" with action starting "Waived:" plus one line of
+              rationale. Advisory entries surface in the PR body's residuals section —
+              recorded, not lost.
+            - If waivers.md exists in the artifacts directory, a finding that
+              materially matches one of its entries is "advisory" by default —
+              record it as a waiver again rather than re-fixing or failing on
+              it, unless the review states specific new evidence.
+            - "incomplete" is for transient incompletions: session budget ran out, an
+              edit failed on stale anchors, or a fix/test was attempted but not landed.
+              One entry per item, one line of reason. These are retried automatically —
+              the next review round re-surfaces them and the loop will not converge
+              while any exist. Never silently drop a finding from the result file.
+            - No commits, no branches. Never touch pnpm-lock.yaml.
+            Write JSON to round-<N>/fixer-result.json:
+              {"applied": [...], "failed": [...], "advisory": [...], "incomplete": [...]}
+            Writing the JSON result file is MANDATORY and comes BEFORE your final line —
+            ending without it aborts the pipeline. Write it even when all arrays are
+            empty. Then end with the single line: FIXER_DONE
+
+        - id: commit-fixer
+          depends_on: [fixer]
+          timeout: 300000
+          bash: |
+            set -euo pipefail
+            cd /Users/eduardopicazo/Documents/Workspace/Goodword/web-app/.worktrees/archon-toy
+            git add -A
+            git restore --staged pnpm-lock.yaml 2>/dev/null || true
+            if git diff --cached --quiet; then echo "COMMITTED=NO"; else
+              git commit -m "fix(review): apply fixer feedback"; echo "COMMITTED=YES sha=$(git rev-parse HEAD)"
+            fi
+            echo "COMMIT_FIXER=OK"
+
+        - id: converge
+          depends_on: [commit-fixer]
+          timeout: 300000
+          bash: |
+            set -uo pipefail
+            N=$(cat "$ARTIFACTS_DIR/round.txt"); RD="$ARTIFACTS_DIR/round-$N"
+            exec > >(tee "$RD/converge.txt") 2>&1
+            cd /Users/eduardopicazo/Documents/Workspace/Goodword/web-app/.worktrees/archon-toy
+            V=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['verdict'])" "$RD/review-summary.json" 2>/dev/null || echo UNKNOWN)
+            FIXOK=NO
+            python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-fixer-result.py "$RD/fixer-result.json" >/dev/null 2>&1 && FIXOK=YES
+            CLEAN=NO; test -z "$(git status --porcelain | grep -vE '^\?\? \.env$|^ M pnpm-lock\.yaml$')" && CLEAN=YES
+            MOVED=YES; test "$(git rev-parse HEAD)" = "$(cat "$RD/pre-head.txt")" && MOVED=NO
+            INC=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1])).get('incomplete',[])))" "$RD/fixer-result.json" 2>/dev/null || echo 0)
+            echo "ROUND=$N verdict=[$V] fixer_ok=$FIXOK clean=$CLEAN head_moved=$MOVED incomplete=$INC"
+            # Scope guard: active only once a plan stage writes files-allowlist.json
+            # (toy lane has none) — the skip is explicit, never silent.
+            if [ -s "$ARTIFACTS_DIR/files-allowlist.json" ]; then
+              python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py \
+                "$ARTIFACTS_DIR/files-allowlist.json" "$(pwd)" \
+                "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" --round "$N" --exclude pnpm-lock.yaml || exit 1
+            else
+              echo "SCOPE_GUARD=SKIP no files-allowlist.json (toy lane; no plan stage)"
+            fi
+            if [ "$FIXOK" = NO ]; then echo "FIXER_BLOCKED round=$N"; exit 1; fi
+            # Waiver ledger: record this round's advisory declines so later rounds
+            # do not re-litigate them without new evidence.
+            python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/update-waivers.py \
+              "$RD/fixer-result.json" "$ARTIFACTS_DIR/waivers.md"
+            # Durable round cap: counted against round.txt (survives resumes), not
+            # loop iterations. accept-residuals.txt is a HUMAN act, never an agent's.
+            CAP=$(cat "$ARTIFACTS_DIR/round-cap.txt" 2>/dev/null || echo 4)
+            ACCEPT=NO; test -f "$ARTIFACTS_DIR/accept-residuals.txt" && ACCEPT=YES
+            case "$V" in
+              "Ready to merge"|"Ready with fixes")
+                if [ "$MOVED" = NO ] && [ "$CLEAN" = YES ] && [ "$INC" = 0 ]; then
+                  echo "CONVERGED round=$N"
+                  echo "<promise>REVIEW_CONVERGED</promise>"
+                elif [ "$N" -ge "$CAP" ]; then
+                  if [ "$ACCEPT" = YES ]; then
+                    echo "CONVERGED round=$N (human accepted residuals)"
+                    echo "<promise>REVIEW_CONVERGED</promise>"
+                  else
+                    echo "ROUND_CAP_REACHED round=$N"; exit 1
+                  fi
+                else
+                  echo "ROUND_PROGRESSED round=$N"
+                fi
+                ;;
+              "Not ready")
+                if [ "$MOVED" = NO ]; then echo "NO_PROGRESS round=$N"; exit 1; fi
+                if [ "$N" -ge "$CAP" ]; then
+                  if [ "$ACCEPT" = YES ]; then
+                    echo "CONVERGED round=$N (human accepted residuals)"
+                    echo "<promise>REVIEW_CONVERGED</promise>"
+                  else
+                    echo "ROUND_CAP_REACHED round=$N"; exit 1
+                  fi
+                else
+                  echo "ROUND_PROGRESSED round=$N"
+                fi
+                ;;
+              *) echo "CONVERGE=FAIL unknown verdict [$V]"; exit 1 ;;
+            esac
+
+  - id: smoke
+    depends_on: [review-loop, reader-audit-gate]
+    timeout: 1200000
+    bash: |
+      set -uo pipefail
+      APIWT=/Users/eduardopicazo/Documents/Workspace/Goodword/api/.worktrees/toy-feature-spec
+      WT=/Users/eduardopicazo/Documents/Workspace/Goodword/web-app/.worktrees/archon-toy
+      # Detached boots: archon reaps the node's process group at exit, so plain
+      # background children die before the UAT node. detach.py double-forks+setsid.
+      # mise shell shims do not apply inside detach.py's bare exec: pin node explicitly.
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/detach.py \
+        "$ARTIFACTS_DIR/smoke-api.log" "$APIWT" env PORT=4123 mise x node@22 -- bun start | tee "$ARTIFACTS_DIR/api.detach" | cat
+      sed -n 's/^DETACHED_PID=//p' "$ARTIFACTS_DIR/api.detach" > "$ARTIFACTS_DIR/api.pid"
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/detach.py \
+        "$ARTIFACTS_DIR/smoke-web.log" "$WT" env VITE_PUBLIC_API_URL=http://localhost:4123 mise x node@20 -- pnpm dev --port 3123 | tee "$ARTIFACTS_DIR/web.detach" | cat
+      sed -n 's/^DETACHED_PID=//p' "$ARTIFACTS_DIR/web.detach" > "$ARTIFACTS_DIR/web.pid"
+      # Host spelling: `localhost` FIRST and always — macOS Vite binds ::1 only, so
+      # a 127.0.0.1 probe "proves" the server is down when it isn't (RUNBOOK §6).
+      # 127.0.0.1 is a purely additive second try for hosts where localhost does
+      # not resolve; it can never shadow the localhost result.
+      probe_host() { # $1 port, $2 path -> prints the host that answered 200; rc 1 if neither did
+        local h
+        for h in localhost 127.0.0.1; do
+          if [ "$(curl -s -o /dev/null -w '%{http_code}' "http://$h:$1$2" 2>/dev/null)" = 200 ]; then
+            printf '%s' "$h"; return 0
+          fi
+        done
+        return 1
+      }
+      APIOK=NO; WEBOK=NO; WEBHOST=localhost
+      for i in $(seq 1 120); do
+        sleep 3
+        test "$APIOK" = NO && probe_host 4123 /health-archon >/dev/null && APIOK=YES
+        if [ "$WEBOK" = NO ]; then H=$(probe_host 3123 /health) && { WEBOK=YES; WEBHOST="$H"; }; fi
+        test "$APIOK" = YES && test "$WEBOK" = YES && break
+      done
+      test "$APIOK" = YES || { echo "SMOKE=FAIL api not up"; exit 1; }
+      if [ "$WEBOK" != YES ]; then
+        echo "SMOKE=FAIL web /health not 200 on localhost or 127.0.0.1 (see smoke-web.log)"
+        # Name the cause instead of leaving a six-minute silent timeout behind.
+        echo "HOST_RESOLUTION: $(getent hosts localhost 2>/dev/null || echo 'getent unavailable or localhost unresolved')"
+        exit 1
+      fi
+      BODY=$(curl -s "http://$WEBHOST:3123/health")
+      printf '%s' "$BODY" > "$ARTIFACTS_DIR/health-ssr.html"
+      printf '%s' "$BODY" | grep -qi 'ok' || { echo "SMOKE=FAIL label not in SSR output"; exit 1; }
+      echo "SMOKE=PASS (servers left running for UAT; PIDs in artifacts)"
+
+  - id: uat
+    depends_on: [smoke]
+    model: sonnet
+    maxBudgetUsd: 5
+    timeout: 1200000
+    prompt: |
+      You are the acceptance-testing node, standing in for a human tester. Ask no
+      questions. The app under test is already running:
+        web: http://localhost:3123    api: http://localhost:4123
+      Do NOT start, stop, or restart any server.
+
+      Use the agent-browser CLI (already installed; run `agent-browser --help` if you
+      need the command surface) to act as a user:
+        1. Open http://localhost:3123/health
+        2. Wait for the page to render.
+        3. Verify the page shows the health-archon status label with the value "ok".
+        4. Save a screenshot as uat-health.png inside the directory named by the
+           ARTIFACTS_DIR environment variable (resolve via: echo "$ARTIFACTS_DIR").
+
+      Acceptance criteria (each becomes an entry in the result):
+        - page-loads: /health renders without an error page
+        - label-ok: the status text "ok" is visible on the page
+        - screenshot: uat-health.png exists and is non-empty
+
+      Write JSON to uat-result.json in that artifacts directory:
+        {"passed": [...], "failed": [...], "evidence": ["<screenshot path>"]}
+      each entry {"criterion": "<id>", "detail": "<what you observed>"}.
+      A criterion you could not verify goes in "failed" — never in "passed".
+      End with the single line: UAT_DONE
+
+  - id: servers-down
+    depends_on: [uat]
+    trigger_rule: all_done
+    always_run: true
+    timeout: 120000
+    bash: |
+      set -uo pipefail
+      for p in api.pid web.pid; do
+        PID=$(cat "$ARTIFACTS_DIR/$p" 2>/dev/null) && test -n "$PID" && kill "$PID" 2>/dev/null && echo "KILLED $p=$PID" || echo "NOKILL $p"
+      done
+      # Parents spawn children that hold the ports: sweep both ports too.
+      # port_pids: lsof -> ss -> fuser (lsof is often absent on Linux).
+      port_pids() { # $1 = port
+        local out=""
+        if command -v lsof >/dev/null 2>&1; then
+          out="$(lsof -ti ":$1" 2>/dev/null || true)"
+        elif command -v ss >/dev/null 2>&1; then
+          out="$(ss -ltnp "sport = :$1" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u || true)"
+        elif command -v fuser >/dev/null 2>&1; then
+          out="$(fuser -n tcp "$1" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' || true)"
+        else
+          return 1
+        fi
+        [ -n "$out" ] && printf '%s\n' "$out"
+        return 0
+      }
+      port_pids 4123 >/dev/null || echo "WARN no port-inspection tool (lsof/ss/fuser) — cannot sweep ports"
+      sleep 1
+      for port in 4123 3123; do
+        P=$(port_pids "$port")
+        test -n "$P" && kill $P 2>/dev/null && echo "SWEPT_PORT $port"
+      done
+      echo "SERVERS_DOWN"
+
+  - id: uat-gate
+    depends_on: [servers-down]
+    timeout: 120000
+    bash: |
+      set -euo pipefail
+      R="$ARTIFACTS_DIR/uat-result.json"
+      test -s "$R" || { echo "UAT_GATE=FAIL no uat-result.json"; exit 1; }
+      python3 -c "import json,sys;d=json.load(open(sys.argv[1]));sys.exit('failed: '+str(d['failed'])) if d['failed'] else print('UAT_PASSED='+str(len(d['passed'])))" "$R"
+      test -s "$ARTIFACTS_DIR/uat-health.png" || { echo "UAT_GATE=FAIL no screenshot"; exit 1; }
+      echo "UAT_GATE=PASS"
+
+  - id: prbody
+    depends_on: [uat-gate]
+    model: sonnet
+    maxBudgetUsd: 2
+    timeout: 600000
+    prompt: |
+      You are the PR-body composition node. Ask no questions.
+      Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
+      Read round.txt for the final round N, then round-<N>/review-summary.json and
+      round-<N>/fixer-result.json, plus uat-result.json and genapi.patch there.
+      Also read, when present: reader-audit-result.json and accept-residuals.txt.
+      Write a pull-request body in markdown to pr-body.md in that directory with
+      exactly these sections:
+        ## Summary
+        ## Known Residuals
+        ## Post-Deploy Monitoring & Validation
+      Summary covers: the label in app/routes/health.tsx typed against the generated
+      client, and that api-client.d.ts was patched SELECTIVELY (only the /health-archon
+      hunk; accumulated drift rejected by tooling). Note the api PR dependency: this PR
+      is truthful only after the api PR deploys.
+      Known Residuals lists fixer advisory waivers verbatim; if none, "None."
+      When reader-audit-result.json exists and declares columns, Known Residuals
+      also lists every reader classified "residual" verbatim (file, class, why).
+      When accept-residuals.txt exists, Known Residuals OPENS with a line quoting
+      it: Residuals human-accepted: <its contents> — and then lists the final
+      round's "advisory" AND "incomplete" entries verbatim.
+      Mention verification evidence: typecheck, lint, vitest, SSR curl smoke, and
+      agent-browser acceptance run (screenshot in run artifacts).
+      If no runtime impact beyond the label, the monitoring section must say exactly:
+      "No additional operational monitoring required."
+      No co-author or attribution lines. End with the single line: PRBODY_WRITTEN
+
+  - id: ship
+    depends_on: [prbody]
+    timeout: 900000
+    bash: |
+      set -euo pipefail
+      WT=/Users/eduardopicazo/Documents/Workspace/Goodword/web-app/.worktrees/archon-toy
+      BR=archon/health-archon-web
+      test "$(git -C "$WT" rev-parse --abbrev-ref HEAD)" = "$BR"
+      test -s "$ARTIFACTS_DIR/pr-body.md"
+      grep -q '^## Known Residuals' "$ARTIFACTS_DIR/pr-body.md"
+      grep -q '^## Post-Deploy Monitoring & Validation' "$ARTIFACTS_DIR/pr-body.md"
+      APIPR=$(cd /Users/eduardopicazo/Documents/Workspace/Goodword/api && gh pr list --head archon/health-archon --state all --json url --jq '.[0].url' 2>/dev/null || true)
+      test -n "$APIPR" && printf '\n\nDepends on api PR: %s\n' "$APIPR" >> "$ARTIFACTS_DIR/pr-body.md"
+      git -C "$WT" push -u origin "$BR"
+      cd "$WT"
+      gh pr create --draft --base main --head "$BR" \
+        --title "feat(web): render health-archon status label [archon]" \
+        --body-file "$ARTIFACTS_DIR/pr-body.md" > "$ARTIFACTS_DIR/pr-url.txt"
+      echo "PR_URL=$(cat "$ARTIFACTS_DIR/pr-url.txt")"
+      echo "SHIP=OK"
+
+  - id: run-report
+    depends_on: [ship]
+    model: sonnet
+    maxBudgetUsd: 2
+    timeout: 600000
+    prompt: |
+      You are the final-report node: the last thing a human sees from this run,
+      so show, do not tell. Ask no questions.
+      Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
+      Read there: pr-url.txt, worktrees.json, genapi.patch, uat-result.json,
+      round.txt, and each round-<N>/review-summary.json and
+      round-<N>/fixer-result.json.
+      Write a single self-contained run-report.html to that directory with these
+      marker-wrapped sections:
+      <!-- GIST --> Open in the bro register: what just happened, told like you
+      would tell a smart friend over a beer. Simpler, not necessarily shorter;
+      the bar is impossible to misunderstand. Casual connectives are fine
+      ("basically", "so here's the deal"), memes are not. Every path, command,
+      number, and URL stays exactly as it is. Flat prose, four sentences max.
+      <!-- SHIPPED --> What shipped: the PR link as the headline, its dependency
+      on the api PR, and a two-sentence plain-language summary.
+      <!-- EVIDENCE --> Proof, not claims: embed the acceptance screenshot with
+      <img src="uat-health.png"> (same directory, relative path) captioned with
+      the three passed criteria from uat-result.json; beside it, a labeled chip
+      for the SSR smoke and one for the selective contract patch (accepted vs
+      rejected hunk counts from the patch context if visible, else describe it).
+      <!-- ROUNDS --> The review story: one row per round with its verdict and
+      what the fixer applied, as a compact pill timeline. Name what grew across
+      rounds (files added, tests added) so the rounds read as work, not churn.
+      <!-- RESIDUALS --> Waivers and advisory findings in plain words; "None" if empty.
+      <!-- NEXT --> What the human does now: review both PRs in dependency order,
+      merge api first, then web. Concrete links, no vagueness.
+      Show-me rules: pick the smallest view that makes each point; place each
+      visual beside one short supporting sentence; real names, paths, and numbers
+      only; no invented data; light and dark via :root custom properties plus a
+      prefers-color-scheme override. Plain sentences, no em dashes, no AI-tell
+      vocabulary. End with the single line: RUN_REPORT_DONE
+
+  - id: kb-capture
+    depends_on: [run-report]
+    model: sonnet
+    maxBudgetUsd: 2
+    timeout: 600000
+    prompt: |
+      You are the knowledge-capture node: compound what this run learned so the
+      next feature build starts smarter. Ask no questions.
+      Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
+      Read there: pr-url.txt, genapi.patch, uat-result.json, round.txt, and each
+      round-<N>/review-summary.json and round-<N>/fixer-result.json.
+
+      Write EXACTLY ONE new markdown file into
+      /Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb/wiki/change-history/
+      named <YYYY-MM-DD>-archon-web-<feature-slug>.md (get the date with the
+      date command; derive the slug from the PR title or branch).
+      That one new file is your ENTIRE write surface: never edit or delete any
+      existing knowledge-base file. Curation into concepts, patterns, glossary,
+      or ADRs belongs to a human-attended kb:compound session, not to you.
+
+      Frontmatter: title, date, source (archon full-sdlc-web, run id = the
+      artifacts directory basename), pr (the URL), status: captured.
+      Body sections: What shipped (two sentences plus the PR link and its api PR
+      dependency). Decisions made and why. Gotchas discovered (from review
+      rounds, fixer results, the contract patch, and the UAT run: recurring
+      findings, environment traps). Process notes (what the pipeline itself
+      taught us this run). Promotion candidates (bullets in the form
+      "glossary: <term>", "ADR: <decision>", "pattern: <name>" for the curator).
+      Everything from run artifacts; nothing invented; facts verbatim.
+      End with the single line: KB_CAPTURE_DONE
+
+  - id: kb-capture-gate
+    depends_on: [kb-capture]
+    timeout: 120000
+    bash: |
+      set -euo pipefail
+      KB=/Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb
+      git -C "$KB" status --porcelain | sort > "$ARTIFACTS_DIR/kb-post-capture.txt"
+      NEW=$(comm -13 "$ARTIFACTS_DIR/kb-pre-porcelain.txt" "$ARTIFACTS_DIR/kb-post-capture.txt" || true)
+      COUNT=$(printf '%s\n' "$NEW" | grep -c "^?? wiki/change-history/" || true)
+      TOTAL=$(printf '%s\n' "$NEW" | grep -c . || true)
+      test "$COUNT" = "1" || { echo "KB_CAPTURE_GATE=FAIL expected exactly one new capture file, delta: [$NEW]"; exit 1; }
+      test "$TOTAL" = "$COUNT" || { echo "KB_CAPTURE_GATE=FAIL KB changes outside change-history: [$NEW]"; exit 1; }
+      F="$KB/$(printf '%s\n' "$NEW" | sed -n 's/^?? //p')"
+      grep -q "status: captured" "$F" || { echo "KB_CAPTURE_GATE=FAIL missing frontmatter"; exit 1; }
+      grep -qi "Promotion candidates" "$F" || { echo "KB_CAPTURE_GATE=FAIL missing promotion candidates"; exit 1; }
+      echo "KB_CAPTURE_GATE=PASS file=$F"
+
+  - id: report
+    depends_on: [kb-capture-gate]
+    trigger_rule: all_done
+    always_run: true
+    timeout: 120000
+    bash: |
+      set -uo pipefail
+      echo "=== FULL-SDLC-WEB REPORT ==="
+      echo "ARTIFACTS_DIR=$ARTIFACTS_DIR"
+      cat "$ARTIFACTS_DIR/worktrees.json" 2>/dev/null || echo "no worktrees.json"
+      cat "$ARTIFACTS_DIR/pr-url.txt" 2>/dev/null || echo "PR=NOT_CREATED"
+      cat "$ARTIFACTS_DIR/uat-result.json" 2>/dev/null || echo "no uat result"
+      # show-me: open the evidence report for the human when it exists. Print the
+      # path either way — xdg-open/open may be absent (or be openvt(1) on Linux).
+      if [ -s "$ARTIFACTS_DIR/run-report.html" ]; then
+        echo "REPORT=file://$ARTIFACTS_DIR/run-report.html"
+        OPENER="$(command -v xdg-open 2>/dev/null || command -v open 2>/dev/null || true)"
+        [ -n "$OPENER" ] && "$OPENER" "$ARTIFACTS_DIR/run-report.html" >/dev/null 2>&1 || true
+      fi
+      echo "REPORT_DONE"

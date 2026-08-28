@@ -1,0 +1,31 @@
+name: wrap-gitnexus-probe
+description: Dev-only probe for the bugfix lane - proves whether a headless archon node session can reach the gitnexus stdio MCP tools. One cheap AI node attempts mcp__gitnexus__query and emits a typed signal. If UNREACHABLE, the bugfix graph's evidence-gitnexus node degrades to GITNEXUS=UNAVAILABLE and the graph still works. No repo writes. Invoke with DISABLE_OMC=1.
+provider: claude
+nodes:
+  - id: probe
+    model: sonnet
+    maxBudgetUsd: 1
+    timeout: 600000
+    prompt: |
+      You are a tooling probe in an unattended workflow. Ask no questions.
+      Modify nothing anywhere.
+      Determine whether the gitnexus MCP tools are available in YOUR session:
+      tools named mcp__gitnexus__query, mcp__gitnexus__context, and similar.
+      If available: call mcp__gitnexus__query with the query "search" against
+      the indexed repo, and report only the first result's symbol name and
+      file path (one line, as proof the call round-tripped).
+      Then end with the single line: GITNEXUS_PROBE=REACHABLE
+      If the tools are absent from your session, or the call errors, say what
+      you observed in one line, then end with the single line:
+      GITNEXUS_PROBE=UNREACHABLE
+
+  - id: probe-gate
+    depends_on: [probe]
+    timeout: 60000
+    bash: |
+      set -uo pipefail
+      OUT=$probe.output
+      printf '%s\n' "$OUT" | tail -5
+      printf '%s' "$OUT" | grep -q 'GITNEXUS_PROBE=REACHABLE' && { echo "PROBE_GATE=REACHABLE"; exit 0; }
+      printf '%s' "$OUT" | grep -q 'GITNEXUS_PROBE=UNREACHABLE' && { echo "PROBE_GATE=UNREACHABLE (evidence-gitnexus degrades to GITNEXUS=UNAVAILABLE; the bugfix graph still works)"; exit 0; }
+      echo "PROBE_GATE=FAIL no typed signal"; exit 1

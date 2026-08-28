@@ -1,0 +1,67 @@
+name: cleanup
+description: M2.10 - deliberate teardown of toy-feature workflow state. Convention-driven (well-known worktrees/branches); only touches branches named archon/*; refuses dirty trees; deletes remote branches only when their PR is already closed. Closing PRs stays an operator action (rollback is documented, never automatic).
+provider: claude
+nodes:
+  - id: cleanup
+    timeout: 600000
+    bash: |
+      set -uo pipefail
+      # 1. Stray workflow servers on the dedicated ports - kill by PID, never pkill.
+      # port_pids: lsof -> ss -> fuser. lsof is preinstalled on macOS and often
+      # absent on Linux; rc 1 means NO backend at all, never "the port is free".
+      port_pids() { # $1 = port
+        local out=""
+        if command -v lsof >/dev/null 2>&1; then
+          out="$(lsof -ti ":$1" 2>/dev/null || true)"
+        elif command -v ss >/dev/null 2>&1; then
+          out="$(ss -ltnp "sport = :$1" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u || true)"
+        elif command -v fuser >/dev/null 2>&1; then
+          out="$(fuser -n tcp "$1" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' || true)"
+        else
+          return 1
+        fi
+        [ -n "$out" ] && printf '%s\n' "$out"
+        return 0
+      }
+      port_pids 4123 >/dev/null || { echo "CLEANUP=PARTIAL no port-inspection tool (need lsof, ss, or fuser) — cannot prove ports are free"; exit 1; }
+      for port in 4123 3123; do
+        PID=$(port_pids "$port")
+        test -n "$PID" && kill $PID 2>/dev/null && echo "KILLED_PORT $port pid=$PID" || echo "PORT_FREE $port"
+      done
+
+      teardown() {
+        REPO="$1"; WT="$2"; BR="$3"
+        case "$BR" in archon/*) ;; *) echo "REFUSE: branch $BR is not archon/*"; return 1 ;; esac
+        if [ -d "$WT" ]; then
+          DIRTY=$(git -C "$WT" status --porcelain | grep -vE '^\?\? \.env$|^\?\? \.omc/|^ M pnpm-lock\.yaml$')
+          if [ -n "$DIRTY" ]; then
+            echo "REFUSE_DIRTY $WT:"; echo "$DIRTY" | head -5
+            return 1
+          fi
+          git -C "$REPO" worktree remove --force "$WT" && echo "WORKTREE_REMOVED $WT"
+        else
+          echo "WORKTREE_ABSENT $WT"
+        fi
+        git -C "$REPO" branch -D "$BR" 2>/dev/null && echo "LOCAL_BRANCH_DELETED $BR" || echo "LOCAL_BRANCH_ABSENT $BR"
+        # Remote branch: delete ONLY when no open PR uses it (closed/merged PR or none).
+        OPEN=$(cd "$REPO" && gh pr list --head "$BR" --state open --json number --jq 'length' 2>/dev/null || echo err)
+        if [ "$OPEN" = "0" ]; then
+          if git -C "$REPO" ls-remote --exit-code origin "refs/heads/$BR" >/dev/null 2>&1; then
+            git -C "$REPO" push --no-verify origin --delete "$BR" && echo "REMOTE_BRANCH_DELETED $BR"
+          else
+            echo "REMOTE_BRANCH_ABSENT $BR"
+          fi
+        else
+          echo "REMOTE_KEPT $BR (open PR count=$OPEN or gh error - operator decides)"
+        fi
+      }
+
+      FAIL=0
+      teardown /Users/eduardopicazo/Documents/Workspace/Goodword/api \
+               /Users/eduardopicazo/Documents/Workspace/Goodword/api/.worktrees/archon-toy \
+               archon/health-archon || FAIL=1
+      teardown /Users/eduardopicazo/Documents/Workspace/Goodword/web-app \
+               /Users/eduardopicazo/Documents/Workspace/Goodword/web-app/.worktrees/archon-toy \
+               archon/health-archon-web || FAIL=1
+      test "$FAIL" = 0 || { echo "CLEANUP=PARTIAL (refusals above are deliberate)"; exit 1; }
+      echo "CLEANUP=COMPLETE"

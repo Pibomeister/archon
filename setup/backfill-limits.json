@@ -1,0 +1,11 @@
+{
+  "_comment": "Absolute bounds for the backfill lane. These hold REGARDLESS of what any spec claims - an inherited number disarms every gate built around it, so these are the bounds that do not inherit. Widening any value is a HUMAN act: edit the per-run copy in the run's artifacts dir (backfill-limits.json there) before the census node runs, or edit this file for a durable change. preflight copies this file into the artifacts dir; every gate reads the per-run copy.",
+  "absolute_max_rows": 100000,
+  "absolute_max_fraction": 0.10,
+  "claim_divergence_pct": 25,
+  "dryrun_divergence_pct": 5,
+  "snapshot_tolerance_pct": 5,
+  "statement_timeout_ms": 30000,
+  "default_chunk_size": 5000,
+  "stall_seconds": 300
+}

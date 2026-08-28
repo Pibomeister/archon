@@ -1,0 +1,229 @@
+name: bugfix-smoke-deployed
+description: Post-merge deployed smoke for a bugfix run. Run message = ABSOLUTE path to that run's artifacts directory (the one holding smoke-matrix.json). Re-runs the matrix's auto rows that need no controlled fixture data against staging (staging-app.goodword.com), re-renders the matrix with staging results, pauses for a human to record DEPLOYED_SMOKE, then posts the matrix summary as a comment on the run's PR. Run it manually after merge + staging deploy. Invoke with DISABLE_OMC=1.
+provider: claude
+nodes:
+  - id: preflight
+    timeout: 300000
+    bash: |
+      set -euo pipefail
+      SRC="${ARGUMENTS-}"
+      test -n "$SRC" || { echo "PREFLIGHT=FAIL run message must be the bugfix run's artifacts dir"; exit 1; }
+      test -d "$SRC" || { echo "PREFLIGHT=FAIL not a directory: $SRC"; exit 1; }
+      test -s "$SRC/smoke-matrix.json" || { echo "PREFLIGHT=FAIL no smoke-matrix.json in $SRC (the bugfix run never reached its matrix)"; exit 1; }
+      test -s "$SRC/pr-url.txt" || { echo "PREFLIGHT=FAIL no pr-url.txt in $SRC (no PR to comment on)"; exit 1; }
+      command -v pnpm >/dev/null || { echo "PREFLIGHT=FAIL pnpm missing"; exit 1; }
+      command -v mise >/dev/null || { echo "PREFLIGHT=FAIL mise missing"; exit 1; }
+      mise x node@20 -- node -v | grep -q '^v20' || { echo "PREFLIGHT=FAIL node20 via mise unavailable"; exit 1; }
+      command -v gh >/dev/null || { echo "PREFLIGHT=FAIL gh missing"; exit 1; }
+      gh auth status >/dev/null 2>&1 || { echo "PREFLIGHT=FAIL gh unauthenticated"; exit 1; }
+      for v in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_PROFILE; do
+        test -z "$(printenv "$v")" || { echo "PREFLIGHT=FAIL $v is set - would bill API, not subscription"; exit 1; }
+      done
+      printf '%s\n' "$SRC" > "$ARTIFACTS_DIR/source-run.txt"
+      cp "$SRC/smoke-matrix.json" "$ARTIFACTS_DIR/smoke-matrix-deployed.json"
+      cp "$SRC/pr-url.txt" "$ARTIFACTS_DIR/pr-url.txt"
+      test -s "$SRC/smoke-matrix.spec.ts" && cp "$SRC/smoke-matrix.spec.ts" "$ARTIFACTS_DIR/smoke-matrix.spec.ts"
+      CODE=$(curl -s -o /dev/null -w '%{http_code}' https://staging-app.goodword.com/ || echo 000)
+      test "$CODE" = "200" || { echo "PREFLIGHT=FAIL staging web unreachable code=$CODE"; exit 1; }
+      echo "PREFLIGHT=PASS source=$SRC pr=$(cat "$ARTIFACTS_DIR/pr-url.txt")"
+
+  - id: staging-auto
+    depends_on: [preflight]
+    timeout: 1800000
+    bash: |
+      set -uo pipefail
+      ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+      AD="$ARTIFACTS_DIR"
+      M="$AD/smoke-matrix-deployed.json"
+      # Eligible rows: auto AND needs_seed_data=false — staging holds real
+      # data, so fixture-bound assertions would be vacuous or wrong there.
+      python3 - "$M" > "$AD/eligible-titles.txt" <<'PY'
+      import json, sys
+      m = json.load(open(sys.argv[1], encoding="utf-8"))
+      for r in m["rows"]:
+          if r["kind"] == "auto" and not r.get("needs_seed_data") and r.get("spec_title"):
+              print(r["spec_title"])
+      PY
+      N=$(grep -c . "$AD/eligible-titles.txt" || true)
+      if [ "$N" = 0 ] || [ ! -s "$AD/smoke-matrix.spec.ts" ]; then
+        python3 - "$M" <<'PY'
+      import json, sys
+      m = json.load(open(sys.argv[1], encoding="utf-8"))
+      for r in m["rows"]:
+          r["deployed_result"] = "skipped"
+      json.dump(m, open(sys.argv[1], "w", encoding="utf-8"), indent=2)
+      PY
+        echo "STAGING_AUTO=SKIP no eligible rows or no spec (judgment-only matrix; the human walks staging by hand)"
+        exit 0
+      fi
+      # Disposable worktree off origin/main: the main web-app checkout is
+      # routinely stale, and the spec must run with current helper code.
+      WEB_WT="$ROOT/web-app/.worktrees/bugfix-smoke-deployed"
+      git -C "$ROOT/web-app" fetch origin main --quiet
+      if [ ! -d "$WEB_WT" ]; then
+        git -C "$ROOT/web-app" worktree add --detach "$WEB_WT" origin/main > "$AD/worktree.log" 2>&1 || { tail -5 "$AD/worktree.log"; echo "STAGING_AUTO=FAIL worktree"; exit 1; }
+      fi
+      cp "$ROOT/web-app/.env" "$WEB_WT/.env"
+      cd "$WEB_WT"
+      mise x node@20 -- pnpm install --no-frozen-lockfile > "$AD/web-install.log" 2>&1 || { tail -5 "$AD/web-install.log"; echo "STAGING_AUTO=FAIL pnpm install"; exit 1; }
+      mkdir -p tests/smoke-matrix
+      cp "$AD/smoke-matrix.spec.ts" tests/smoke-matrix/matrix.spec.ts
+      GREP=$(python3 -c "
+      import re, sys
+      titles = [l.strip() for l in open(sys.argv[1], encoding='utf-8') if l.strip()]
+      print('|'.join(re.escape(t) for t in titles))" "$AD/eligible-titles.txt")
+      export PLAYWRIGHT_BASE_URL="https://staging-app.goodword.com"
+      export TEST_API_URL="https://staging-api.goodword.cloud"
+      export VITE_PUBLIC_API_URL="https://staging-api.goodword.cloud"
+      # Staging whitelists the @goodword.com domain for OTP; the spec reads
+      # its login user from SMOKE_MATRIX_USER.
+      export SMOKE_MATRIX_USER="tester+deployedsmoke@goodword.com"
+      export WHITELISTED_OTP="${WHITELISTED_OTP:-123456}"
+      export WHITELISTED_PHONE="${WHITELISTED_PHONE:-15184884416}"
+      RC=0
+      mise x node@20 -- pnpm exec playwright test tests/smoke-matrix --project=chromium --grep "$GREP" --reporter=json \
+        > "$AD/staging-report.json" 2> "$AD/staging-err.txt" || RC=$?
+      python3 - "$AD" <<'PY'
+      import json, os, sys
+      ad = sys.argv[1]
+      m = json.load(open(os.path.join(ad, "smoke-matrix-deployed.json"), encoding="utf-8"))
+      eligible = {l.strip() for l in open(os.path.join(ad, "eligible-titles.txt"), encoding="utf-8") if l.strip()}
+      outcomes = {}
+      try:
+          rep = json.load(open(os.path.join(ad, "staging-report.json"), encoding="utf-8"))
+          def walk(suite):
+              for spec in suite.get("specs", []):
+                  outcomes[spec.get("title", "")] = bool(spec.get("ok"))
+              for sub in suite.get("suites", []):
+                  walk(sub)
+          for s in rep.get("suites", []):
+              walk(s)
+      except Exception:
+          pass
+      for r in m["rows"]:
+          t = r.get("spec_title")
+          if r["kind"] == "auto" and t in eligible:
+              r["deployed_result"] = ("pass" if outcomes[t] else "fail") if t in outcomes else "not-run"
+          else:
+              r["deployed_result"] = "skipped"
+      json.dump(m, open(os.path.join(ad, "smoke-matrix-deployed.json"), "w", encoding="utf-8"), indent=2)
+      counts = {}
+      for r in m["rows"]:
+          counts[r["deployed_result"]] = counts.get(r["deployed_result"], 0) + 1
+      print("STAGING_AUTO rows:", counts)
+      PY
+      rm -rf tests/smoke-matrix
+      cd "$ROOT" && git -C "$ROOT/web-app" worktree remove --force "$WEB_WT" 2>/dev/null
+      cp "$AD/smoke-matrix-deployed.json" "$AD/smoke-matrix-deployed.pre.json"
+      echo "STAGING_AUTO=DONE rc=$RC (per-row deployed_result written; failures surface at the gate, not judged here)"
+      exit 0
+
+  - id: staging-render
+    depends_on: [staging-auto]
+    model: sonnet
+    maxBudgetUsd: 2
+    timeout: 900000
+    prompt: |
+      You are the deployed-matrix presentation node. Ask no questions.
+      Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
+      Read there: smoke-matrix-deployed.json, pr-url.txt, source-run.txt.
+      Write ONLY smoke-matrix-deployed.html to that directory; modify no
+      other artifact. No external resources in the HTML.
+      Sections, each wrapped in an HTML comment marker:
+      <!-- GIST --> Two sentences: this is the post-merge re-run of the fix's
+      smoke matrix against https://staging-app.goodword.com; what passed.
+      <!-- AUTO --> Rows with deployed_result pass/fail/not-run as a table
+      (id, steps, expected, result chip). A fail or not-run row gets one
+      sentence telling the human to check it by hand on staging.
+      <!-- SKIPPED --> Rows with deployed_result skipped, each with why in
+      one line (judgment row, or needs controlled fixture data staging lacks)
+      and its click path so the human CAN walk it on staging if they choose.
+      <!-- DECIDE --> Approving records DEPLOYED_SMOKE and posts the matrix
+      summary as a PR comment on the PR named in pr-url.txt.
+      Then, in the same box, the standard decision block that every gate
+      packet carries. Resolve this run's id by running: basename "$ARTIFACTS_DIR"
+      and use that literal id in every command below. Never print the
+      placeholder <run-id>. Lead with one sentence saying the run is paused
+      because it finished this stage and is now waiting on a person, which is
+      how the stage is supposed to end and not a failure. Then the three
+      commands, each in its own code chip with a short label saying when to
+      pick it:
+        DISABLE_OMC=1 archon workflow approve <id> </dev/null >/tmp/archon-approve.log 2>&1 &
+        DISABLE_OMC=1 archon workflow reject <id> "why you are stopping it"
+        DISABLE_OMC=1 archon workflow abandon <id>
+      Say that approve runs the rest of the workflow inside the terminal it is
+      typed in and holds that terminal until the run ends, which is why it is
+      backgrounded, and that a failed resume still leaves the approval
+      recorded so archon workflow resume <id> picks it up. Say that reject
+      ends the run and records the reason typed after it, that abandon ends
+      the run without recording one, and that NEITHER sends the work back for
+      a rewrite: this lane declares no on_reject handler, so a different plan
+      means a fresh run from a corrected spec. Files already written stay on
+      disk either way. Close with one line: these three verbs do not appear in
+      archon --help, but they are real.
+      Simple inline CSS, one accent color, readable in BOTH light and dark
+      (custom properties on :root, overridden under
+      @media (prefers-color-scheme: dark)). Identity by label, never color
+      alone. Plain sentences; no em dashes; no AI-tell vocabulary; no emoji.
+      End with the single line: STAGING_RENDER_DONE
+
+  - id: staging-render-gate
+    depends_on: [staging-render]
+    timeout: 120000
+    bash: |
+      set -euo pipefail
+      H="$ARTIFACTS_DIR/smoke-matrix-deployed.html"
+      test -s "$H" || { echo "STAGING_RENDER_GATE=FAIL no smoke-matrix-deployed.html"; exit 1; }
+      for m in GIST AUTO SKIPPED DECIDE; do
+        grep -q "<!-- $m -->" "$H" || { echo "STAGING_RENDER_GATE=FAIL missing section $m"; exit 1; }
+      done
+      RID="$(basename "$ARTIFACTS_DIR")"
+      grep -qF "$RID" "$H" || { echo "STAGING_RENDER_GATE=FAIL DECIDE box does not carry this run's id verbatim"; exit 1; }
+      for v in approve reject abandon; do
+        grep -qF "archon workflow $v" "$H" || { echo "STAGING_RENDER_GATE=FAIL DECIDE box missing the $v command"; exit 1; }
+      done
+      cmp -s "$ARTIFACTS_DIR/smoke-matrix-deployed.json" "$ARTIFACTS_DIR/smoke-matrix-deployed.pre.json" 2>/dev/null || {
+        test -f "$ARTIFACTS_DIR/smoke-matrix-deployed.pre.json" && { echo "STAGING_RENDER_GATE=FAIL renderer modified smoke-matrix-deployed.json"; exit 1; }
+      }
+      OPENER="$(command -v xdg-open 2>/dev/null || command -v open 2>/dev/null || true)"
+      [ -n "$OPENER" ] && "$OPENER" "$H" >/dev/null 2>&1 || true
+      echo "STAGING_RENDER_GATE=PASS packet=file://$H"
+
+  - id: deployed-approval
+    depends_on: [staging-render-gate]
+    approval:
+      message: "Deployed smoke matrix ready: open <this run's ARTIFACTS_DIR>/smoke-matrix-deployed.html. Auto rows re-ran against https://staging-app.goodword.com; skipped rows list their click paths if you want to walk them there. Approving records DEPLOYED_SMOKE and posts the summary as a PR comment. The run is paused, which is how this stage is meant to end, not a failure; nothing degrades while it waits. The packet's DECIDE box has the three commands with this run's id filled in: approve continues (background it, it holds the terminal), reject ends the run and records your reason, abandon ends it without one. Neither sends the work back for a rewrite - this lane has no on_reject handler, so a different plan means a fresh run from a corrected spec. None of the three appear in archon --help; they are real."
+
+  - id: pr-comment
+    depends_on: [deployed-approval]
+    timeout: 300000
+    bash: |
+      set -euo pipefail
+      AD="$ARTIFACTS_DIR"
+      PR=$(cat "$AD/pr-url.txt")
+      python3 - "$AD/smoke-matrix-deployed.json" > "$AD/deployed-smoke-result.txt" <<'PY'
+      import json, sys
+      m = json.load(open(sys.argv[1], encoding="utf-8"))
+      ran = [r for r in m["rows"] if r.get("deployed_result") in ("pass", "fail", "not-run")]
+      npass = sum(1 for r in ran if r["deployed_result"] == "pass")
+      status = "PASS" if ran and npass == len(ran) else ("PARTIAL" if ran else "MANUAL")
+      print(f"DEPLOYED_SMOKE={status} auto={npass}/{len(ran)} against staging-app.goodword.com (human-approved)")
+      PY
+      {
+        echo "## Deployed smoke (staging)"
+        echo
+        cat "$AD/deployed-smoke-result.txt"
+        echo
+        python3 - "$AD/smoke-matrix-deployed.json" <<'PY'
+      import json, sys
+      m = json.load(open(sys.argv[1], encoding="utf-8"))
+      print("| row | kind | deployed result | expected |")
+      print("|---|---|---|---|")
+      for r in m["rows"]:
+          exp = r["expected"].replace("|", "\\|")
+          print(f"| {r['id']} | {r['kind']} | {r.get('deployed_result','-')} | {exp} |")
+      PY
+      } > "$AD/pr-comment.md"
+      gh pr comment "$PR" --body-file "$AD/pr-comment.md"
+      cat "$AD/deployed-smoke-result.txt"
+      echo "PR_COMMENT=POSTED $PR"
