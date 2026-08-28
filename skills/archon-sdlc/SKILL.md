@@ -234,10 +234,12 @@ reviewer. Stops here:
   flagged issue in the worktree yourself, then resume.
 - `DESLOP_ROUND_CAP round=N` - the DIRTY-verdict counter hit 2. Same
   resume-after-hand-fix pattern, or accept and ship with the residual noted.
-- `DESLOP_REVIEW=FAIL coverage incomplete|malformed finding|verdict inconsistent`
-  - a schema failure on the reviewer's own `deslop-review.json`. Resume re-runs
-  the reviewer fresh; recurring on the same shape means the reviewer prompt
-  drifted - escalate.
+- `DESLOP_REVIEW=FAIL coverage incomplete round=N <reason>` /
+  `DESLOP_REVIEW=FAIL malformed finding round=N <reason>` /
+  `DESLOP_REVIEW=FAIL verdict inconsistent round=N declared DIRTY with 0
+  blocking findings` - a schema failure on the reviewer's own
+  `deslop-review.json`. Resume re-runs the reviewer fresh; recurring on the
+  same shape means the reviewer prompt drifted - escalate.
 - **`DESLOP_REVIEW=FAIL reviewer modified tree` - never plain-resume this one.**
   The reviewer session is told to write only `deslop-review.json`; if a single
   byte of the worktree differs from the pre-review checkpoint, the gate refuses
@@ -403,8 +405,8 @@ tee, quota). Differences that decide supervision calls:
 - **The deslop group sits between the fix loop and negative control**
   (RUNBOOK §3b/§12; VERSION 2026.08.28-2, design-only). Same stops as §4
   above (`DESLOP_GATE=FAIL <guard>`, `DESLOP=DIRTY`, `DESLOP_ROUND_CAP`,
-  `DESLOP_REVIEW=FAIL ...`, and never-plain-resume on `reviewer modified
-  tree`), plus one bugfix-only reviewer value: **`beyond_five_guards`** — this
+  the three `DESLOP_REVIEW=FAIL` schema variants, and never-plain-resume on
+  `reviewer modified tree`), plus one bugfix-only reviewer value: **`beyond_five_guards`** — this
   lane is causal-minimal, so the writer may fix only the five guards and must
   report anything else under `reported_not_fixed`; the reviewer diffs the
   writer's actual edits against that declaration and files
