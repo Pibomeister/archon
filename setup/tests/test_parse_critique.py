@@ -40,7 +40,7 @@ class ParseCritiqueTest(unittest.TestCase):
     def test_valid_accept_no_findings(self):
         r = run({"verdict": "ACCEPT", "findings": []}, round_no="1")
         self.assertEqual(r.returncode, 0)
-        self.assertEqual(r.stdout.strip(), "CRITIQUE round=1 verdict=ACCEPT scope=0 regression=0 gap=0")
+        self.assertEqual(r.stdout.strip(), "CRITIQUE round=1 verdict=ACCEPT scope=0 regression=0 gap=0 verifiability=0")
         self.assertEqual(r.stderr, "")
 
     def test_counts_only_blocking_confidence_by_kind(self):
@@ -51,11 +51,11 @@ class ParseCritiqueTest(unittest.TestCase):
             finding(kind="regression", confidence=75),
             finding(kind="gap", confidence=100),
             finding(kind="gap", confidence=100),
-            finding(kind="verifiability", confidence=100),  # not a counted kind
+            finding(kind="verifiability", confidence=100),
         ]
         r = run({"verdict": "REVISE", "findings": findings}, round_no="2")
         self.assertEqual(r.returncode, 0)
-        self.assertEqual(r.stdout.strip(), "CRITIQUE round=2 verdict=REVISE scope=2 regression=1 gap=2")
+        self.assertEqual(r.stdout.strip(), "CRITIQUE round=2 verdict=REVISE scope=2 regression=1 gap=2 verifiability=1")
 
     def test_malformed_json_fails(self):
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as fh:
@@ -121,7 +121,7 @@ class ParseCritiqueTest(unittest.TestCase):
     def test_reject_verdict_still_counts_blocking_findings(self):
         r = run({"verdict": "REJECT", "findings": [finding(kind="scope", confidence=100)]}, round_no="3")
         self.assertEqual(r.returncode, 0)
-        self.assertEqual(r.stdout.strip(), "CRITIQUE round=3 verdict=REJECT scope=1 regression=0 gap=0")
+        self.assertEqual(r.stdout.strip(), "CRITIQUE round=3 verdict=REJECT scope=1 regression=0 gap=0 verifiability=0")
 
 
 if __name__ == "__main__":

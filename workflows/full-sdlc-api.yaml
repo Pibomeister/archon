@@ -243,6 +243,17 @@ nodes:
             C="$ARTIFACTS_DIR/plan-round.txt"
             N=$(cat "$C" 2>/dev/null || echo 0)
             CAP=$(cat "$ARTIFACTS_DIR/plan-round-cap.txt" 2>/dev/null || echo 3)
+            # Both files are hand-editable, so both are untrusted input. `[ x -ge y ]`
+            # with a non-integer operand returns 2, and `if` reads that as "not taken",
+            # which would silently switch the cap off — the exact fail-open this guard
+            # exists to prevent. A junk cap falls back to the default; a junk counter
+            # stops the run instead, because resetting a counter to 0 on garbage is
+            # itself a way to run forever.
+            case "$CAP" in ''|*[!0-9]*) CAP=3 ;; esac
+            case "$N" in
+              '') N=0 ;;
+              *[!0-9]*) echo "PLAN_ROUND_PRE=FAIL plan-round.txt is not an integer: [$N]"; exit 1 ;;
+            esac
             if [ "$N" -ge "$CAP" ]; then echo "PLAN_ROUND_CAP round=$N cap=$CAP"; exit 1; fi
             test -s "$ARTIFACTS_DIR/plan.md" || { echo "PLAN_ROUND_PRE=FAIL no plan.md round=$((N+1))"; exit 1; }
             # Durable round counter: survives resumes, unlike the loop's own iteration
@@ -251,8 +262,18 @@ nodes:
             N=$((N+1)); echo "$N" > "$C"
             RD="$ARTIFACTS_DIR/plan-round-$N"; mkdir -p "$RD"
             # Round-scoped pre-image: plan-converge diffs plan.md against THIS file to
-            # tell a revision that changed nothing from one that actually moved.
+            # tell a revision that changed nothing from one that actually moved, and to
+            # check mechanically that a REJECT round really was the no-op its prompt
+            # asks for. Every contract plan-revise may rewrite is snapshotted, not just
+            # the plan: a reviser that leaves plan.md alone but rewrites the allowlist
+            # has still mutated the plan the human is about to judge.
             cp "$ARTIFACTS_DIR/plan.md" "$RD/plan.pre.md"
+            # An `if` and not `test … && cp`: premises.json and smoke-probe.json are
+            # both optional, so on the last iteration a bare AND-list would leave the
+            # loop with status 1 and set -e would kill the node.
+            for f in verify.json files-allowlist.json reader-audit.json premises.json smoke-probe.json; do
+              if [ -f "$ARTIFACTS_DIR/$f" ]; then cp "$ARTIFACTS_DIR/$f" "$RD/pre-$f"; fi
+            done
             echo "PLAN_ROUND=$N cap=$CAP"
 
         - id: impact-probe
@@ -479,7 +500,8 @@ nodes:
             finding at confidence 100, and it can only see what you copy here.
 
             Do not touch the worktree or any repository file. Plans only.
-            End with the single line: PLAN_REVISED round=N
+            End with the single line: PLAN_REVISED round=N, with N substituted for the
+            actual round number.
 
         - id: plan-converge
           depends_on: [plan-revise]
@@ -487,6 +509,9 @@ nodes:
           bash: |
             set -euo pipefail
             N=$(cat "$ARTIFACTS_DIR/plan-round.txt" 2>/dev/null) || { echo "PLAN_CONVERGE=FAIL no plan-round.txt"; exit 1; }
+            # Same coercion as plan-round-pre: a non-integer operand makes `[ -ge ]`
+            # return 2, which `if` reads as "not taken", switching the cap off silently.
+            case "$N" in ''|*[!0-9]*) echo "PLAN_CONVERGE=FAIL plan-round.txt is not an integer: [$N]"; exit 1 ;; esac
             RD="$ARTIFACTS_DIR/plan-round-$N"
             eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
             V=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1],encoding='utf-8'))['verdict'])" "$RD/critique.json" 2>/dev/null || echo UNKNOWN)
@@ -497,11 +522,39 @@ nodes:
             test -s "$RD/revision.json" || { echo "PLAN_CONVERGE=FAIL no revision.json round=$N"; exit 1; }
             # 1. REJECT is a typed human stop. A one-unit plan has no automatic
             # transformation into a differently shaped one, so nothing here can fix it.
+            # plan-revise is told to be a no-op on REJECT, but a prompt is a request,
+            # not a guarantee, and the whole point of REJECT is that the human reads
+            # the critic's objection against the plan the critic actually saw. So the
+            # no-op is checked mechanically and reported either way, rather than
+            # assumed: an unnoticed mutation here would silently defeat the stop.
             if [ "$V" = REJECT ]; then
-              echo "PLAN_REJECTED round=$N"
+              PM=NO
+              cmp -s "$ARTIFACTS_DIR/plan.md" "$RD/plan.pre.md" || PM=YES
+              AM=""
+              for f in verify.json files-allowlist.json reader-audit.json premises.json smoke-probe.json; do
+                CUR="$ARTIFACTS_DIR/$f"; PRE="$RD/pre-$f"
+                if [ -f "$CUR" ] && [ -f "$PRE" ]; then
+                  cmp -s "$CUR" "$PRE" || AM="$AM,$f"
+                elif [ -f "$CUR" ] || [ -f "$PRE" ]; then
+                  # Appeared or disappeared: a contract file's existence is part of it.
+                  AM="$AM,$f"
+                fi
+              done
+              AM="${AM#,}"; test -n "$AM" || AM=none
+              echo "PLAN_REJECTED round=$N plan_mutated=$PM artifacts_mutated=$AM"
               exit 1
             fi
-            # 2. ACCEPT converges, but only against the same shape contract
+            # 2. The critic states its own verdict, so a critic that contradicts itself
+            # would converge the loop on a plan carrying an unaddressed P0. Re-derive
+            # the blocking count from the findings and refuse the mismatch; the group
+            # fails, and the resume re-runs the critic, which is the fix.
+            BLOCKING=$(python3 -c "import json,sys; f=json.load(open(sys.argv[1],encoding='utf-8')).get('findings') or []; print(sum(1 for x in f if isinstance(x,dict) and x.get('severity') in ('P0','P1') and int(str(x.get('confidence')))>=75))" "$RD/critique.json") \
+              || { echo "PLAN_CONVERGE=FAIL critique.json findings unreadable round=$N"; exit 1; }
+            if [ "$V" = ACCEPT ] && [ "$BLOCKING" != 0 ]; then
+              echo "CRITIC_GATE=FAIL verdict inconsistent round=$N declared ACCEPT with $BLOCKING blocking findings"
+              exit 1
+            fi
+            # 3. ACCEPT converges, but only against the same shape contract
             # plan-snapshot enforced: the revisions of earlier rounds must not have
             # left plan.md or its contract files broken.
             if [ "$V" = ACCEPT ]; then
@@ -517,22 +570,50 @@ nodes:
               echo "<promise>PLAN_CONVERGED</promise>"
               exit 0
             fi
-            # 3. A scope finding the critic is certain about, declined anyway, is a
+            # 4. A scope finding the critic is certain about, declined anyway, is a
             # disagreement between two sessions about what the spec asked for. That is
             # exactly the question a human is here to settle, so it stops the run.
-            DISPUTE=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1],encoding='utf-8')).get('declined') or []; print(sum(1 for x in d if isinstance(x,dict) and x.get('kind')=='scope' and x.get('confidence')==100))" "$RD/revision.json") \
-              || { echo "PLAN_CONVERGE=FAIL revision.json unparseable round=$N"; exit 1; }
+            # revision.json is unvalidated model output and this stop is the only thing
+            # reading it, so every shape error fails closed. Counting 0 on a missing or
+            # mistyped field would turn the stop off exactly when it is most needed,
+            # and confidence is coerced from its string form because a model that
+            # writes "100" means 100.
+            DISPUTE=$(python3 - "$RD/revision.json" <<'PY'
+            import json, sys
+            try:
+                doc = json.load(open(sys.argv[1], encoding="utf-8"))
+            except (OSError, ValueError) as e:
+                sys.exit(f"unreadable: {e}")
+            if not isinstance(doc, dict):
+                sys.exit("top level is not an object")
+            for key in ("applied", "declined"):
+                if not isinstance(doc.get(key), list):
+                    sys.exit(f"{key} is missing or not a list")
+            n = 0
+            for i, x in enumerate(doc["declined"]):
+                if not isinstance(x, dict):
+                    sys.exit(f"declined[{i}] is not an object")
+                try:
+                    conf = int(str(x.get("confidence")))
+                except (TypeError, ValueError):
+                    sys.exit(f"declined[{i}] confidence uncoercible: {x.get('confidence')!r}")
+                if x.get("kind") == "scope" and conf == 100:
+                    n += 1
+            print(n)
+            PY
+            ) || { echo "PLAN_CONVERGE=FAIL revision.json malformed round=$N"; exit 1; }
             if [ "$DISPUTE" != 0 ]; then echo "PLAN_SCOPE_DISPUTE round=$N declined_scope_100=$DISPUTE"; exit 1; fi
-            # 4. REVISE plus an untouched plan means another round would be identical.
+            # 5. REVISE plus an untouched plan means another round would be identical.
             if cmp -s "$ARTIFACTS_DIR/plan.md" "$RD/plan.pre.md"; then
               echo "PLAN_NO_PROGRESS round=$N"
               exit 1
             fi
-            # 5. Post-round cap, kept even though plan-round-pre checks it too:
+            # 6. Post-round cap, kept even though plan-round-pre checks it too:
             # max_iterations equals the cap, so without this the third progressing
             # round ends in Archon's native iteration-exhaustion error and the typed
             # token would only appear on the next resume.
             CAP=$(cat "$ARTIFACTS_DIR/plan-round-cap.txt" 2>/dev/null || echo 3)
+            case "$CAP" in ''|*[!0-9]*) CAP=3 ;; esac
             if [ "$N" -ge "$CAP" ]; then echo "PLAN_ROUND_CAP round=$N cap=$CAP"; exit 1; fi
             echo "PLAN_ROUND_PROGRESSED round=$N"
 

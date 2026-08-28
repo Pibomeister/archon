@@ -4,7 +4,7 @@ converge-loop's typed summary line. A finding below confidence 50 is dropped
 before counting; the printed per-kind counts are of findings at or above 75
 (the "blocking" tier that sizes plan-revise's/rca-revise's obligation).
 Usage: parse-critique.py <critique.json> --round N
-Prints: CRITIQUE round=N verdict=<ACCEPT|REVISE|REJECT> scope=<n> regression=<n> gap=<n>
+Prints: CRITIQUE round=N verdict=<ACCEPT|REVISE|REJECT> scope=<n> regression=<n> gap=<n> verifiability=<n>
 On malformed input: CRITIC_GATE=FAIL <reason>, exit 1. Nothing else on success."""
 import json
 import sys
@@ -73,14 +73,15 @@ def main():
             kept.append(f)
 
     blocking = [f for f in kept if f["confidence"] >= 75]
-    counts = {"scope": 0, "regression": 0, "gap": 0}
+    counts = {"scope": 0, "regression": 0, "gap": 0, "verifiability": 0}
     for f in blocking:
         if f["kind"] in counts:
             counts[f["kind"]] += 1
 
     print(
         f"CRITIQUE round={round_no} verdict={verdict} "
-        f"scope={counts['scope']} regression={counts['regression']} gap={counts['gap']}"
+        f"scope={counts['scope']} regression={counts['regression']} gap={counts['gap']} "
+        f"verifiability={counts['verifiability']}"
     )
 
 
