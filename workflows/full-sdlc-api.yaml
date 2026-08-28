@@ -208,51 +208,347 @@ nodes:
     timeout: 120000
     bash: |
       set -euo pipefail
-      test -s "$ARTIFACTS_DIR/plan.md" || { echo "SNAPSHOT=FAIL no plan.md"; exit 1; }
-      for h in "## Goal" "## Files" "## Approach" "## Test scenarios" "## Verification"; do
-        grep -q "^$h" "$ARTIFACTS_DIR/plan.md" || { echo "SNAPSHOT=FAIL missing $h"; exit 1; }
-      done
-      # The gate contract: at least one test pattern, machine-readable.
-      python3 -c "import json,sys; p=json.load(open(sys.argv[1]))['test_patterns']; assert isinstance(p,list) and p and all(isinstance(x,str) and x.strip() for x in p)" "$ARTIFACTS_DIR/verify.json" || { echo "SNAPSHOT=FAIL verify.json missing or empty"; exit 1; }
-      # Scope contract: a non-empty allowlist of repo-relative paths.
-      python3 -c "import json,sys; a=json.load(open(sys.argv[1])); assert isinstance(a,list) and a and all(isinstance(x,str) and x.strip() for x in a)" "$ARTIFACTS_DIR/files-allowlist.json" || { echo "SNAPSHOT=FAIL files-allowlist.json missing or empty"; exit 1; }
-      # Reader-audit declaration must at least parse (empty columns is a valid declaration).
-      python3 -c "import json,sys; c=json.load(open(sys.argv[1]))['columns']; assert isinstance(c,list)" "$ARTIFACTS_DIR/reader-audit.json" || { echo "SNAPSHOT=FAIL reader-audit.json missing or malformed"; exit 1; }
-      # Premise obligation: a spec that asks questions gets cited answers, not arguments.
+      # Shape, contract and premise-citation checks live in setup/plan-shape.sh so
+      # plan-converge can re-run exactly the same checks on an ACCEPT round. A
+      # second inline copy of the cited() helper would be two contracts drifting
+      # apart, and the drift would show up as a plan that passes here and fails
+      # after the critic loop, or worse, the reverse.
       eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
-      if grep -q '^## Premises to verify' "$SPEC"; then
-        python3 - "$ARTIFACTS_DIR/premises.json" "$WT" <<'PY' || { echo "SNAPSHOT=FAIL premises.json missing, empty, or uncited"; exit 1; }
-      import json, os, subprocess, sys
-      prem = json.load(open(sys.argv[1]))
-      assert isinstance(prem, list) and prem, "empty premises list though spec declares premises"
-      def cited(q, path):
-          if subprocess.run(["grep", "-qF", q, path]).returncode == 0:
-              return True
-          # Verbatim modulo formatting: Prettier wraps statements across lines,
-          # so a quote that is one line in the plan may be split in the source.
-          # Collapse whitespace runs on both sides before the substring check.
-          try:
-              content = open(path, encoding="utf-8", errors="replace").read()
-          except Exception:
-              return False
-          return bool(content) and " ".join(q.split()) in " ".join(content.split())
-      for p in prem:
-          ev = p.get("evidence") or []
-          assert ev, f"premise {p.get('id')} has no evidence"
-          ok = False
-          for e in ev:
-              f = os.path.join(sys.argv[2], e["file"])
-              if os.path.isfile(f) and cited(e["quote"], f):
-                  ok = True
-                  break
-          assert ok, f"premise {p.get('id')}: no evidence quote found verbatim in the worktree"
-      PY
+      SHAPE=0
+      OUT=$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/plan-shape.sh \
+        "$ARTIFACTS_DIR" "$WT" "$SPEC" 2>&1) || SHAPE=$?
+      if [ "$SHAPE" != 0 ]; then
+        # This node keeps its own typed token: SNAPSHOT=FAIL <reason> is what the
+        # runbook and every existing grep over run logs look for.
+        printf '%s\n' "$OUT" | sed 's/^PLAN_SHAPE=FAIL/SNAPSHOT=FAIL/'
+        exit 1
       fi
       cp "$ARTIFACTS_DIR/plan.md" "$ARTIFACTS_DIR/plan.pre.md"
       echo "SNAPSHOT=OK"
 
-  - id: premise-strip
+  - id: plan-loop
     depends_on: [plan-snapshot]
+    loop_group:
+      max_iterations: 3
+      until: PLAN_CONVERGED
+      nodes:
+        - id: plan-round-pre
+          timeout: 120000
+          bash: |
+            set -euo pipefail
+            # The cap is checked BEFORE a round is spent. A body node's non-zero exit
+            # fails the whole group, and `archon workflow resume` re-enters the group
+            # with a fresh iteration, so a cap enforced only in plan-converge could be
+            # walked past forever by resuming after every critic-gate failure.
+            C="$ARTIFACTS_DIR/plan-round.txt"
+            N=$(cat "$C" 2>/dev/null || echo 0)
+            CAP=$(cat "$ARTIFACTS_DIR/plan-round-cap.txt" 2>/dev/null || echo 3)
+            if [ "$N" -ge "$CAP" ]; then echo "PLAN_ROUND_CAP round=$N cap=$CAP"; exit 1; fi
+            test -s "$ARTIFACTS_DIR/plan.md" || { echo "PLAN_ROUND_PRE=FAIL no plan.md round=$((N+1))"; exit 1; }
+            # Durable round counter: survives resumes, unlike the loop's own iteration
+            # index. Artifacts are round-scoped so a hand fix plus a resume cannot read
+            # the previous round's critique as this round's.
+            N=$((N+1)); echo "$N" > "$C"
+            RD="$ARTIFACTS_DIR/plan-round-$N"; mkdir -p "$RD"
+            # Round-scoped pre-image: plan-converge diffs plan.md against THIS file to
+            # tell a revision that changed nothing from one that actually moved.
+            cp "$ARTIFACTS_DIR/plan.md" "$RD/plan.pre.md"
+            echo "PLAN_ROUND=$N cap=$CAP"
+
+        - id: impact-probe
+          depends_on: [plan-round-pre]
+          model: sonnet
+          maxBudgetUsd: 2
+          timeout: 600000
+          prompt: |
+            You are the code-graph impact node for one round of the planning critic
+            loop. You run every round, so what you write reflects the plan as it
+            stands right now, not as it stood when the loop started. Ask no
+            questions.
+
+            Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
+            The round number is the contents of plan-round.txt in that directory;
+            call it N. Your output file is plan-round-N/impact.json there, with N
+            substituted for the actual number.
+            The repository checkout is the "worktree" field of params.json in that
+            same directory (you are NOT cwd'd there — cd into it for every command).
+
+            Read plan.md in the artifacts directory and collect every existing
+            symbol (function, class, method) that its ## Approach steps and ## Files
+            entries propose to MODIFY. Symbols the plan creates from scratch have no
+            callers yet and do not belong in the list.
+
+            Self-gating rules, in order — no external gate skips you, so you skip
+            yourself explicitly and visibly:
+            1. If the plan modifies no existing symbol, write impact.json with
+               "status": "SKIPPED" and an empty "symbols" array.
+            2. If the gitnexus MCP tools (mcp__gitnexus__impact and friends) are not
+               available in your session, write impact.json with
+               "status": "UNAVAILABLE" and an empty "symbols" array.
+            3. Otherwise call mcp__gitnexus__impact with
+               {target: "<symbol>", direction: "upstream"} for each symbol, against
+               the indexed repo "mono" (it covers api/ only), and record what comes
+               back with "status": "GATHERED".
+
+            impact.json is ALWAYS valid JSON and carries NO token prepended to it —
+            the typed status line is this node's stdout only, never part of the file:
+              {"status": "GATHERED|UNAVAILABLE|SKIPPED",
+               "symbols": [{"name": "<symbol>",
+                            "file": "<repo-relative path>",
+                            "d1_callers": ["<caller symbol or path:line>", ...],
+                            "risk": "LOW|MEDIUM|HIGH|CRITICAL"}]}
+            Every d1_caller comes from tool output. Never invent one: a symbol the
+            graph does not know gets an empty d1_callers list and risk "LOW", and the
+            critic reads that as unprobed rather than as safe.
+
+            Your FIRST output line is exactly one of:
+              IMPACT=GATHERED symbols=<count>
+              IMPACT=UNAVAILABLE <one-line reason>
+              IMPACT=SKIPPED <one-line reason>
+            Do not modify the repository or any file other than impact.json.
+            End with the single line: IMPACT_DONE
+
+        - id: plan-critic
+          depends_on: [impact-probe]
+          model: opus
+          maxBudgetUsd: 4
+          timeout: 900000
+          prompt: |
+            You are the plan CRITIC. Your only value is that you did not write this
+            plan and have nothing to defend in it. Ask no questions. You are a critic
+            ONLY: you write exactly one file and change nothing else.
+
+            Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
+            The round number is the contents of plan-round.txt there; call it N.
+            Your output file is plan-round-N/critique.json in that directory, with N
+            substituted for the actual number.
+            The repository checkout is the "worktree" field of params.json in that
+            same directory (you are NOT cwd'd there — cd into it for every command).
+            The feature spec is the "spec" field of that same params.json.
+
+            READ: the spec, plan.md, files-allowlist.json, reader-audit.json,
+            verify.json, kb-context.md, plan-round-N/impact.json, and the repository
+            files the plan names.
+
+            DO NOT READ any earlier round's critique.json or revision.json. You are
+            deliberately blind to prior rounds: a critic that reads its own earlier
+            findings starts defending them instead of re-deriving them from the plan
+            actually in front of it.
+
+            Do not modify the repository, plan.md, or any contract file.
+
+            Rubric, in priority order.
+
+            1. SCOPE CREEP (primary). For each ## Files entry and each ## Approach
+               step, trace it to a spec requirement (quote the spec line), or to a
+               code-derived necessity of an already-traced item (name the traced item
+               and say why the code requires this: module registration, DTO, test
+               file, caller). Raise kind "scope" only when NEITHER trace exists;
+               evidence is the plan item plus the nearest spec line it fails to
+               match. Categories: scope-exceeds-goals, indirect scope,
+               framework-ahead-of-need, config or extensibility with no consumer,
+               "while we're here" refactors and renames, edits outside the unit.
+               The mirror of this check: a spec requirement with no plan item is
+               kind "gap".
+            2. REGRESSION POTENTIAL. For each impact.json symbol that has d1
+               callers, every d1 caller must be named in ## Files or ## Test
+               scenarios, or the plan must carry an explicit "unaffected because…"
+               line for it; otherwise kind "regression". A shared writer or reader of
+               a persisted column whose interpretation the plan changes and which
+               reader-audit.json does not list is kind "regression". A HIGH or
+               CRITICAL risk symbol with no mitigation (a flag, additive-only
+               changes, a caller test) is kind "regression".
+               If impact.json's "status" is UNAVAILABLE or SKIPPED, the caller half
+               of this rule does not apply for this run — say so in your summary and
+               still apply the reader-audit half.
+            3. VERIFIABILITY. Test scenarios that cannot fail (they assert what the
+               code does rather than what it must do, or they assert on a mock they
+               themselves configured) are kind "verifiability". So is a verify.json
+               pattern that selects zero spec files: check the patterns against the
+               worktree before claiming this.
+            4. PRE-MORTEM. Write three concrete scenarios in which this plan is
+               executed exactly as written and the result is still wrong. Each names
+               the step that fails and what breaks. Findings that fall out of these
+               go in under whichever kind fits.
+
+            Write plan-round-N/critique.json:
+              {"verdict": "ACCEPT|REVISE|REJECT",
+               "summary": "<two or three sentences>",
+               "findings": [
+                 {"kind": "scope|regression|gap|verifiability",
+                  "severity": "P0|P1|P2",
+                  "confidence": 50|75|100,
+                  "section": "<the plan heading or file the finding is about>",
+                  "evidence": [{"source": "spec|plan|impact|repo",
+                                "quote": "<verbatim quote>"}],
+                  "recommendation": "<what to change, in one or two sentences>"}]}
+            Confidence is exactly 50, 75 or 100. Use 100 only when the evidence
+            settles it and no reading of the spec rescues the plan item; 75 when you
+            are confident but a trace you could not find might exist; 50 for a doubt
+            worth recording that must not block.
+
+            Verdict rules, applied mechanically to your own findings:
+              REVISE — any P0 or P1 finding at confidence 75 or above.
+              REJECT — a P0 scope finding at confidence 100 whose fix needs a
+                       different unit shape rather than an edit to this one.
+              ACCEPT — neither of the above.
+
+            Writing the file is MANDATORY and comes BEFORE your final line; ending
+            without it aborts the pipeline. Write it even when findings is empty.
+            End with the single line: CRITIC_DONE
+
+        - id: plan-critic-gate
+          depends_on: [plan-critic]
+          timeout: 120000
+          bash: |
+            set -euo pipefail
+            N=$(cat "$ARTIFACTS_DIR/plan-round.txt" 2>/dev/null) || { echo "CRITIC_GATE=FAIL no plan-round.txt"; exit 1; }
+            RD="$ARTIFACTS_DIR/plan-round-$N"
+            test -s "$RD/critique.json" || { echo "CRITIC_GATE=FAIL no critique.json round=$N"; exit 1; }
+            # parse-critique.py prints its own CRITIC_GATE=FAIL <reason> and exits 1
+            # on a malformed envelope, and prints the CRITIQUE summary line on success.
+            # A schema failure stops the group; the resume re-enters with a fresh
+            # iteration and re-runs the critic, which is what makes this safe to fail.
+            python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/parse-critique.py \
+              "$RD/critique.json" --round "$N"
+
+        - id: plan-revise
+          depends_on: [plan-critic-gate]
+          model: sonnet
+          maxBudgetUsd: 3
+          timeout: 900000
+          prompt: |
+            You are the plan REVISER. A critic in a separate session challenged the
+            plan; your job is to answer it in the plan itself. Ask no questions.
+
+            Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
+            The round number is the contents of plan-round.txt there; call it N.
+            The repository checkout is the "worktree" field of params.json in that
+            same directory (you are NOT cwd'd there — cd into it for every command).
+            The feature spec is the "spec" field of that same params.json.
+
+            FIRST, before reading anything else, read the "verdict" field of
+            plan-round-N/critique.json.
+
+            If the verdict is REJECT, you are a NO-OP. Write
+            plan-round-N/revision.json containing exactly
+              {"applied": [], "declined": [], "skipped": "REJECT"}
+            change no other file at all, and end. A REJECT means the critic thinks
+            the unit has the wrong shape, and the human at the plan gate has to see
+            that objection against the un-mutated plan rather than against your
+            attempt to patch around it.
+
+            If the verdict is ACCEPT, make no changes. Write
+            plan-round-N/revision.json containing exactly
+              {"applied": [], "declined": []}
+            and end.
+
+            Otherwise the verdict is REVISE. Read the spec, plan.md,
+            files-allowlist.json, verify.json, reader-audit.json, premises.json,
+            plan-round-N/impact.json and the repository files involved. Then, for
+            every finding at confidence 75 or 100, either apply it or decline it.
+
+            Declining is allowed and sometimes correct, but it costs a citation: a
+            verbatim spec quote, or a code-derived-necessity citation naming the
+            traced plan item and the repository line that forces the item to exist.
+            A scope finding resolves in exactly two ways — remove the item from the
+            plan, or supply the trace the critic could not find. "It is useful" is
+            not a trace.
+
+            When you change the plan, keep every contract consistent with it in the
+            same pass: files-allowlist.json lists every path the revised plan
+            touches and nothing more, verify.json's patterns still select every spec
+            the revised unit touches and match the ## Verification commands exactly,
+            reader-audit.json lists any column whose interpretation or presentation
+            the revision changes, and any premise answer you alter keeps at least one
+            citation whose quote appears VERBATIM in the file it names (verify that
+            by reading the file). Findings at confidence 50 are advisory; act on them
+            only if doing so costs nothing.
+
+            Write plan-round-N/revision.json:
+              {"applied": [{"kind": "<finding kind>", "severity": "<P0|P1|P2>",
+                            "confidence": <50|75|100>, "section": "<finding section>",
+                            "what_changed": "<one or two sentences>"}],
+               "declined": [{"kind": "<finding kind>", "severity": "<P0|P1|P2>",
+                             "confidence": <50|75|100>, "section": "<finding section>",
+                             "justification": "<why the finding does not hold>",
+                             "citation": {"source": "spec|repo",
+                                          "quote": "<verbatim quote>"}}]}
+            Copy kind, severity, confidence and section from the finding you are
+            answering, unchanged: a downstream gate stops the run on a declined scope
+            finding at confidence 100, and it can only see what you copy here.
+
+            Do not touch the worktree or any repository file. Plans only.
+            End with the single line: PLAN_REVISED round=N
+
+        - id: plan-converge
+          depends_on: [plan-revise]
+          timeout: 300000
+          bash: |
+            set -euo pipefail
+            N=$(cat "$ARTIFACTS_DIR/plan-round.txt" 2>/dev/null) || { echo "PLAN_CONVERGE=FAIL no plan-round.txt"; exit 1; }
+            RD="$ARTIFACTS_DIR/plan-round-$N"
+            eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+            V=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1],encoding='utf-8'))['verdict'])" "$RD/critique.json" 2>/dev/null || echo UNKNOWN)
+            case "$V" in
+              ACCEPT|REVISE|REJECT) ;;
+              *) echo "PLAN_CONVERGE=FAIL unknown verdict [$V] round=$N"; exit 1 ;;
+            esac
+            test -s "$RD/revision.json" || { echo "PLAN_CONVERGE=FAIL no revision.json round=$N"; exit 1; }
+            # 1. REJECT is a typed human stop. A one-unit plan has no automatic
+            # transformation into a differently shaped one, so nothing here can fix it.
+            if [ "$V" = REJECT ]; then
+              echo "PLAN_REJECTED round=$N"
+              exit 1
+            fi
+            # 2. ACCEPT converges, but only against the same shape contract
+            # plan-snapshot enforced: the revisions of earlier rounds must not have
+            # left plan.md or its contract files broken.
+            if [ "$V" = ACCEPT ]; then
+              SHAPE=0
+              OUT=$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/plan-shape.sh \
+                "$ARTIFACTS_DIR" "$WT" "$SPEC" 2>&1) || SHAPE=$?
+              if [ "$SHAPE" != 0 ]; then
+                printf '%s\n' "$OUT"
+                echo "PLAN_CONVERGE=FAIL shape round=$N"
+                exit 1
+              fi
+              echo "PLAN_CONVERGED round=$N"
+              echo "<promise>PLAN_CONVERGED</promise>"
+              exit 0
+            fi
+            # 3. A scope finding the critic is certain about, declined anyway, is a
+            # disagreement between two sessions about what the spec asked for. That is
+            # exactly the question a human is here to settle, so it stops the run.
+            DISPUTE=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1],encoding='utf-8')).get('declined') or []; print(sum(1 for x in d if isinstance(x,dict) and x.get('kind')=='scope' and x.get('confidence')==100))" "$RD/revision.json") \
+              || { echo "PLAN_CONVERGE=FAIL revision.json unparseable round=$N"; exit 1; }
+            if [ "$DISPUTE" != 0 ]; then echo "PLAN_SCOPE_DISPUTE round=$N declined_scope_100=$DISPUTE"; exit 1; fi
+            # 4. REVISE plus an untouched plan means another round would be identical.
+            if cmp -s "$ARTIFACTS_DIR/plan.md" "$RD/plan.pre.md"; then
+              echo "PLAN_NO_PROGRESS round=$N"
+              exit 1
+            fi
+            # 5. Post-round cap, kept even though plan-round-pre checks it too:
+            # max_iterations equals the cap, so without this the third progressing
+            # round ends in Archon's native iteration-exhaustion error and the typed
+            # token would only appear on the next resume.
+            CAP=$(cat "$ARTIFACTS_DIR/plan-round-cap.txt" 2>/dev/null || echo 3)
+            if [ "$N" -ge "$CAP" ]; then echo "PLAN_ROUND_CAP round=$N cap=$CAP"; exit 1; fi
+            echo "PLAN_ROUND_PROGRESSED round=$N"
+
+  - id: plan-post-snapshot
+    depends_on: [plan-loop]
+    timeout: 120000
+    bash: |
+      set -euo pipefail
+      test -s "$ARTIFACTS_DIR/plan.md" || { echo "PLAN_POST_SNAPSHOT=FAIL no plan.md"; exit 1; }
+      # The critic loop's output is the pre-image for doc-review, so docreview.diff
+      # attributes only ce-doc-review's edits and not the critic rounds' revisions.
+      cp "$ARTIFACTS_DIR/plan.md" "$ARTIFACTS_DIR/plan.post-critic.md"
+      echo "PLAN_POST_SNAPSHOT=OK rounds=$(cat "$ARTIFACTS_DIR/plan-round.txt" 2>/dev/null || echo 0)"
+
+  - id: premise-strip
+    depends_on: [plan-post-snapshot]
     timeout: 120000
     bash: |
       set -euo pipefail
@@ -324,7 +620,7 @@ nodes:
       echo "PREMISE_GATE=PASS"
 
   - id: docreview
-    depends_on: [plan-snapshot]
+    depends_on: [plan-post-snapshot]
     model: sonnet
     maxBudgetUsd: 8
     timeout: 1800000
@@ -345,7 +641,10 @@ nodes:
       printf '%s\n' "$OUT" > "$ARTIFACTS_DIR/docreview-envelope.txt"
       printf '%s' "$OUT" | grep -q 'Review complete' || { echo "DOCREVIEW_GATE=FAIL no terminal signal"; exit 1; }
       printf '%s' "$OUT" | grep -q 'Review failed: headless mode requires a document path' && { echo "DOCREVIEW_GATE=FAIL refusal"; exit 1; }
-      diff -u "$ARTIFACTS_DIR/plan.pre.md" "$ARTIFACTS_DIR/plan.md" > "$ARTIFACTS_DIR/docreview.diff" && echo "DOC_CHANGED=NO" || echo "DOC_CHANGED=YES"
+      # Diff against the post-critic snapshot, not plan.pre.md: the critic loop
+      # already rewrote the plan, and attributing its revisions to doc-review would
+      # put edits in the REVIEW section that ce-doc-review never made.
+      diff -u "$ARTIFACTS_DIR/plan.post-critic.md" "$ARTIFACTS_DIR/plan.md" > "$ARTIFACTS_DIR/docreview.diff" && echo "DOC_CHANGED=NO" || echo "DOC_CHANGED=YES"
       cp "$ARTIFACTS_DIR/plan.md" "$ARTIFACTS_DIR/plan.post-docreview.md"
       echo "DOCREVIEW_GATE=PASS"
 
@@ -362,8 +661,9 @@ nodes:
       Ask no questions.
 
       Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
-      Read plan.md, docreview.diff, docreview-envelope.txt, and (when present
-      and non-empty) premise-verify.json there.
+      Read plan.md, docreview.diff, docreview-envelope.txt, plan-round.txt with
+      the plan-round-N/ directories it implies, and (when present and non-empty)
+      premise-verify.json there.
       Write a single self-contained plan-review.html to that directory.
       Do NOT modify plan.md or any other file. No external resources in the HTML.
 
@@ -398,6 +698,23 @@ nodes:
       human sees where the blind re-derivation agreed with the planner and
       where it could not settle the question. Skip the block entirely when
       there are no premises.
+      <!-- CRITIC --> What the plan critic found, before doc-review ever saw the
+      plan. Read plan-round.txt for the number of rounds the critic loop ran,
+      then for each round R from 1 to that number read plan-round-R/critique.json,
+      plan-round-R/revision.json and plan-round-R/impact.json. Open with one
+      table, a row per round: the round number, the critic's verdict, and the
+      count of findings still open at P0 or P1 broken out by kind (scope,
+      regression, gap, verifiability). Then quote the FINAL round's declined
+      findings in full: for each one, the critic's evidence quote and the
+      reviser's justification quote, both verbatim, so the human is judging the
+      actual disagreement rather than a summary of it. If nothing was declined,
+      one sentence saying so. Close with an impact table built from the final
+      round's impact.json: each symbol, its d1 callers, and where the plan covers
+      each caller (a ## Files entry, a test scenario, or an explicit "unaffected
+      because" line). If that file's "status" is UNAVAILABLE or SKIPPED, say that
+      in one sentence and skip the table, because a reader must never mistake an
+      unprobed plan for a plan with no callers. If plan-round.txt does not exist,
+      one sentence saying the critic loop did not run.
       <!-- DECIDE --> The decision box: approving starts unattended
       implementation, and rejecting ends the run.
       Then, in the same box, the standard decision block that every gate
@@ -437,7 +754,7 @@ nodes:
       set -euo pipefail
       H="$ARTIFACTS_DIR/plan-review.html"
       test -s "$H" || { echo "RENDER_GATE=FAIL no plan-review.html"; exit 1; }
-      for m in GIST KB MAP PLAN REVIEW DECIDE; do
+      for m in GIST KB MAP PLAN REVIEW CRITIC DECIDE; do
         grep -q "<!-- $m -->" "$H" || { echo "RENDER_GATE=FAIL missing section $m"; exit 1; }
       done
       RID="$(basename "$ARTIFACTS_DIR")"
@@ -492,7 +809,7 @@ nodes:
           4. Re-render plan-review.html yourself: same sections, same order,
              each still wrapped in its HTML comment marker
              (<!-- GIST --> <!-- KB --> <!-- MAP --> <!-- PLAN --> <!-- REVIEW -->
-             <!-- DECIDE -->). Carry the DECIDE box over unchanged, including
+             <!-- CRITIC --> <!-- DECIDE -->). Carry the DECIDE box over unchanged, including
              this run's id and all three commands. The render gate does not
              run again, so a marker you drop is a marker nobody restores.
           5. Open REVIEW with a "Revision" block: the rejection reason
@@ -500,6 +817,14 @@ nodes:
              the blind premise-verify node does not re-run on a revision, so
              any premise answer you touched carries your citation but not an
              independent re-derivation.
+          6. Append one line to the CRITIC section, keeping the rest of it
+             unchanged: "Revision N — human-directed; not re-critiqued", where N
+             is one more than the number of lines already starting with
+             "Revision" in that section. The plan critic does not re-run on a
+             human rejection: a human-requested revision is a trusted exception,
+             the same way premise answers are not re-derived blind after a
+             revision. Do not restate the critic's earlier findings as though
+             they were re-checked against your new text, because they were not.
 
           Do not touch the worktree or any repository file. Plans only.
           End your reply with the single line: PLAN_REVISED
