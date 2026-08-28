@@ -434,7 +434,16 @@ tee, quota). Differences that decide supervision calls:
   designed human stops — same handling as `PLAN_REJECTED`/`PLAN_NO_PROGRESS`/
   `PLAN_SCOPE_DISPUTE` in §5; `RCA_PLAN_NO_PROGRESS` carries
   `other_mutated=<list|none>`, which says whether the revision landed on the
-  contract files instead of `fix-plan.json`), and
+  contract files instead of `fix-plan.json`),
+  `RCA_CONVERGE=FAIL missing durable anchor imm-<file>` (the pre-loop copy
+  `rca-gate` took of one of the six immutable diagnosis artifacts is gone, so
+  nothing can check the diagnosis was not rewritten — **never restore it from
+  `rca-round-<N>/imm-<file>`**, that per-round copy is re-taken every round and
+  may already hold a mutation; re-derive from the run's `rca-gate` outputs or
+  abandon and re-run the RCA),
+  `GREEN_GATE=FAIL VERIFY_CONTRACT attempt=N` (`verify.json` unreadable or its
+  `test_patterns` empty — a contract error no fix attempt can repair; a human
+  fixes the file, then resume), and
   any `NEGCONTROL=FAIL` (the fix was proven non-causal or the failure mode
   changed under revert; the failure line names the recovery command).
 - **Resume is right** for the same transient class as §5, plus
