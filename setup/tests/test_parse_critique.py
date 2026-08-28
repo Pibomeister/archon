@@ -38,7 +38,7 @@ def run(critique, round_no="1"):
 
 class ParseCritiqueTest(unittest.TestCase):
     def test_valid_accept_no_findings(self):
-        r = run({"verdict": "ACCEPT", "findings": []}, round_no=1)
+        r = run({"verdict": "ACCEPT", "findings": []}, round_no="1")
         self.assertEqual(r.returncode, 0)
         self.assertEqual(r.stdout.strip(), "CRITIQUE round=1 verdict=ACCEPT scope=0 regression=0 gap=0")
         self.assertEqual(r.stderr, "")
@@ -53,7 +53,7 @@ class ParseCritiqueTest(unittest.TestCase):
             finding(kind="gap", confidence=100),
             finding(kind="verifiability", confidence=100),  # not a counted kind
         ]
-        r = run({"verdict": "REVISE", "findings": findings}, round_no=2)
+        r = run({"verdict": "REVISE", "findings": findings}, round_no="2")
         self.assertEqual(r.returncode, 0)
         self.assertEqual(r.stdout.strip(), "CRITIQUE round=2 verdict=REVISE scope=2 regression=1 gap=2")
 
@@ -119,7 +119,7 @@ class ParseCritiqueTest(unittest.TestCase):
         self.assertIn("CRITIC_GATE=FAIL", r.stdout + r.stderr)
 
     def test_reject_verdict_still_counts_blocking_findings(self):
-        r = run({"verdict": "REJECT", "findings": [finding(kind="scope", confidence=100)]}, round_no=3)
+        r = run({"verdict": "REJECT", "findings": [finding(kind="scope", confidence=100)]}, round_no="3")
         self.assertEqual(r.returncode, 0)
         self.assertEqual(r.stdout.strip(), "CRITIQUE round=3 verdict=REJECT scope=1 regression=0 gap=0")
 

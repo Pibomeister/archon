@@ -8,6 +8,7 @@ Prints: CRITIQUE round=N verdict=<ACCEPT|REVISE|REJECT> scope=<n> regression=<n>
 On malformed input: CRITIC_GATE=FAIL <reason>, exit 1. Nothing else on success."""
 import json
 import sys
+from typing import NoReturn
 
 VERDICTS = {"ACCEPT", "REVISE", "REJECT"}
 SEVERITIES = {"P0", "P1", "P2"}
@@ -15,7 +16,7 @@ CONFIDENCES = {50, 75, 100}
 SOURCES = {"spec", "plan", "impact", "repo"}
 
 
-def fail(reason):
+def fail(reason) -> NoReturn:
     sys.exit(f"CRITIC_GATE=FAIL {reason}")
 
 

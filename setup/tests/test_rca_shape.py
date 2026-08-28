@@ -5,7 +5,6 @@ file, so the fixture stays the single source of truth for "valid"."""
 import json
 import shutil
 import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -109,6 +108,45 @@ class RcaShapeTest(unittest.TestCase):
         r = run(self.tmp)
         self.assertEqual(r.returncode, 1)
         self.assertIn("fix-plan.files not subset of files-allowlist", r.stdout)
+
+    def test_writes_repo_txt_on_pass(self):
+        # rca-gate (bugfix.yaml:721) writes repo.txt after validation and 9
+        # downstream nodes `cat` it; rca-shape.sh must be a true drop-in.
+        minimal_artifacts(self.tmp)
+        self.assertFalse((self.tmp / "repo.txt").exists())
+        r = run(self.tmp)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual((self.tmp / "repo.txt").read_text(encoding="utf-8"), "api\n")
+
+    def test_repo_txt_write_is_idempotent(self):
+        minimal_artifacts(self.tmp)
+        (self.tmp / "repo.txt").write_text("stale\n", encoding="utf-8")
+        r = run(self.tmp)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual((self.tmp / "repo.txt").read_text(encoding="utf-8"), "api\n")
+
+    def test_integration_kind_reemits_rca_note(self):
+        minimal_artifacts(self.tmp)
+        d = json.loads((self.tmp / "failing-test.json").read_text())
+        d["kind"] = "integration"
+        d["integration_note"] = "owns ports 54322/8001"
+        write(self.tmp, "failing-test.json", d)
+        r = run(self.tmp)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(
+            "RCA_NOTE=integration mutex: the repro will own ports 54322/8001 machine-globally",
+            r.stdout,
+        )
+        self.assertIn("RCA_SHAPE=OK repo=api kind=integration", r.stdout)
+
+    def test_integration_kind_without_note_fails(self):
+        minimal_artifacts(self.tmp)
+        d = json.loads((self.tmp / "failing-test.json").read_text())
+        d["kind"] = "integration"
+        write(self.tmp, "failing-test.json", d)
+        r = run(self.tmp)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("kind=integration requires integration_note", r.stdout)
 
     def test_allowlist_files_wrapper_shape_normalized(self):
         minimal_artifacts(self.tmp)

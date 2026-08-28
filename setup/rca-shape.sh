@@ -9,6 +9,10 @@
 # files-allowlist normalization + test_file membership — plus two checks not
 # in the original gate: fix-plan.files subset-of-allowlist, and the
 # failing-test/repo cross-check restated explicitly (it was implicit there).
+# On success this is a true drop-in for the mutable-artifact half of
+# rca-gate: it (re)writes repo.txt = "<repo>\n" idempotently (9 downstream
+# nodes `cat` it) and re-emits the RCA_NOTE=integration mutex line for
+# kind=integration.
 # Usage: rca-shape.sh <artifacts-dir>
 set -euo pipefail
 AD="${1:?usage: rca-shape.sh <artifacts-dir>}"
@@ -54,8 +58,10 @@ if len(sig) < 10:
     fail("signature too generic: under 10 chars")
 if sig.strip() in {"Error", "error", "failed", "FAIL", "undefined"}:
     fail("signature too generic")
-if ft["kind"] == "integration" and not ft.get("integration_note"):
-    fail("kind=integration requires integration_note")
+if ft["kind"] == "integration":
+    if not ft.get("integration_note"):
+        fail("kind=integration requires integration_note")
+    print("RCA_NOTE=integration mutex: the repro will own ports 54322/8001 machine-globally")
 
 try:
     fp = load("fix-plan.json")
@@ -137,5 +143,6 @@ if fp_files:
     if missing:
         fail(f"fix-plan.files not subset of files-allowlist: {missing}")
 
+open(os.path.join(ad, "repo.txt"), "w", encoding="utf-8").write(repo + "\n")
 print(f"RCA_SHAPE=OK repo={repo} kind={ft['kind']}")
 PY
