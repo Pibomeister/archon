@@ -98,7 +98,7 @@ echo "--- reverse check (workflow -> setup script coverage) ---"
 REVERSE_FAIL=0
 for f in "${MANIFEST[@]}"; do
   case "$f" in workflows/*.yaml) ;; *) continue ;; esac
-  REFS="$("$GREP" -ohE 'setup/[A-Za-z0-9_.-]+' "$ARCHON/$f" | sort -u)" && grc=0 || grc=$?
+  REFS="$("$GREP" -ohE 'setup/[A-Za-z0-9_./-]+' "$ARCHON/$f" | sort -u)" && grc=0 || grc=$?
   if [ "$grc" -ge 2 ]; then
     echo "PACKAGE=FAIL grep errored scanning $f for setup/ references (fail-closed)"
     REVERSE_FAIL=1
