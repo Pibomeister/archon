@@ -1,0 +1,8 @@
+{
+  "approach": "fix the off-by-one",
+  "fix_site": "src/foo.ts:42",
+  "alternatives": [
+    {"label": "widen the check", "why_not": "hides the bug"}
+  ],
+  "files": ["src/foo.ts", "src/foo.spec.ts"]
+}

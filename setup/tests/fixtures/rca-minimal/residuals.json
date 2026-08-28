@@ -1,0 +1,5 @@
+{
+  "residuals": [
+    {"symptom": "off-by-one on last page", "disposition": "fixed-by-this-chain", "citation": "src/foo.ts:42"}
+  ]
+}
