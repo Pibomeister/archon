@@ -1,6 +1,6 @@
 ---
 name: archon-sdlc
-description: Use when driving or supervising a Goodword Archon SDLC, bugfix, or backfill run - starting full-sdlc-api on a feature spec, bugfix on a bug report, or backfill on a backfill spec, reading the plan-gate, RCA-gate, or backfill-packet, interpreting loop exits (CONVERGED, NO_PROGRESS, FIXER_BLOCKED, SCOPE_BREACH, ROUND_CAP_REACHED, CHAIN_CONFLICT, FIX_STALLED, ARCHITECTURE_SUSPECT, NEGCONTROL=FAIL, CLAIM_DIVERGED, SAMPLE_SUSPECT, BOUND_BREACH, RECONCILE_FAIL), deciding resume vs escalate, or running babysit/cleanup afterwards. Triggers on "archon run", "start the SDLC lane", "archon bugfix", "archon backfill", "the run is stuck", "resume the run", or any mention of a paused/failed archon workflow.
+description: Use when driving or supervising a Goodword Archon SDLC, bugfix, or backfill run - starting full-sdlc-api on a feature spec, bugfix on a bug report, or backfill on a backfill spec, reading the plan-gate, RCA-gate, or backfill-packet, interpreting loop exits (CONVERGED, NO_PROGRESS, FIXER_BLOCKED, SCOPE_BREACH, ROUND_CAP_REACHED, CHAIN_CONFLICT, FIX_STALLED, ARCHITECTURE_SUSPECT, NEGCONTROL=FAIL, CLAIM_DIVERGED, SAMPLE_SUSPECT, BOUND_BREACH, RECONCILE_FAIL, PLAN_REJECTED, PLAN_NO_PROGRESS, PLAN_SCOPE_DISPUTE, PLAN_ROUND_CAP, RCA_PLAN_REJECTED, RCA_PLAN_SCOPE_DISPUTE, RCA_PLAN_SHAPE=FAIL, CRITIC_GATE=FAIL, IMPACT=UNAVAILABLE, DESLOP=DIRTY, DESLOP_REVIEW=FAIL, DESLOP_ROUND_CAP), deciding resume vs escalate, or running babysit/cleanup afterwards. Triggers on "archon run", "start the SDLC lane", "archon bugfix", "archon backfill", "the run is stuck", "resume the run", or any mention of a paused/failed archon workflow.
 ---
 
 <WORKFLOW-NODE-STOP>
@@ -109,10 +109,10 @@ The run pauses (`status: paused`) after doc-review and prints
 when an opener is available; the path is printed either way, so read the file
 directly if it did not open.
 
-Six sections (RUNBOOK §2a): **GIST** plain-language summary, **KB** what prior art
+Seven sections (RUNBOOK §2a): **GIST** plain-language summary, **KB** what prior art
 the plan honors, **MAP** files and units, **PLAN** verbatim, **REVIEW** doc-review's
-applied edits plus unapplied findings and a "Premise check" block, **DECIDE** the
-commands.
+applied edits plus unapplied findings and a "Premise check" block, **CRITIC** the
+planning-critic loop's findings (below), **DECIDE** the commands.
 
 What to do here:
 
@@ -121,9 +121,19 @@ What to do here:
    Those are the plan's soft spots - the blind verifier could not confirm the
    claim from code. (`conflict` never reaches this packet; it stops the run at
    `premise-gate` with `PREMISE_CONFLICT id=N`.)
-3. Check the MAP against the spec: files the plan will touch that the spec never
+3. Read the CRITIC table (RUNBOOK §2a/§3a; added VERSION 2026.08.28-2). It's a
+   per-round table of the plan-loop critic's verdict and open P0/P1 finding count
+   by kind (scope, regression, gap, verifiability), followed by every finding the
+   plan-loop reviser DECLINED in the final round, quoted verbatim alongside its
+   justification. **Every declined finding is a soft spot exactly like a
+   `cannot_determine` premise** - the critic raised something and a separate
+   session decided not to act on it. Call each one out by name; do not read a
+   declined finding as resolved just because it did not stop the loop. If the
+   impact table is missing, the packet says why (`IMPACT=UNAVAILABLE` or
+   `IMPACT=SKIPPED`) - that means unprobed, never "no callers".
+4. Check the MAP against the spec: files the plan will touch that the spec never
    mentioned, and spec requirements with no file behind them.
-4. Report all of that to the human and **stop**. One wrong plan line becomes a
+5. Report all of that to the human and **stop**. One wrong plan line becomes a
    thousand wrong code lines; do not rubber-stamp, and do not release the gate.
 
 ### How to hand a pause back
@@ -211,6 +221,36 @@ Budget expectation, measured on the first real ticket: **about two fix rounds
 after implement.** The loop converges on toy diffs and *diverges* on real ones -
 more rounds past that is a signal to look, not to wait.
 
+**Before `review-loop`, `gate-tests` feeds `deslop` and `deslop-verify`** (RUNBOOK
+§3b; VERSION 2026.08.28-2, design-only - not yet observed live). Every path into
+`review-loop` depends on `deslop-verify`, so no un-deslopped code reaches a
+reviewer. Stops here:
+
+- `DESLOP_GATE=FAIL <guard>` (typecheck/lint/unit/scope/slop) - the writer's own
+  cleanup broke something. Hand-fix the worktree, resume; resume re-enters the
+  loop fresh and re-checkpoints.
+- `DESLOP=DIRTY round=N blocking=N` - the independent reviewer session filed a
+  finding at confidence >=75. There is no automatic writer retry: hand-fix the
+  flagged issue in the worktree yourself, then resume.
+- `DESLOP_ROUND_CAP round=N` - the DIRTY-verdict counter hit 2. Same
+  resume-after-hand-fix pattern, or accept and ship with the residual noted.
+- `DESLOP_REVIEW=FAIL coverage incomplete|malformed finding|verdict inconsistent`
+  - a schema failure on the reviewer's own `deslop-review.json`. Resume re-runs
+  the reviewer fresh; recurring on the same shape means the reviewer prompt
+  drifted - escalate.
+- **`DESLOP_REVIEW=FAIL reviewer modified tree` - never plain-resume this one.**
+  The reviewer session is told to write only `deslop-review.json`; if a single
+  byte of the worktree differs from the pre-review checkpoint, the gate refuses
+  to trust anything the reviewer wrote and does not even validate its JSON. The
+  failure output prints the exact restore commands (`git reset --soft`, then
+  `git read-tree <checkpoint> && git checkout-index -af`, then `git clean -fd`).
+  **Run those by hand first, THEN resume** - `deslop-recheck` re-takes the
+  checkpoint on every iteration, so resuming without restoring first silently
+  adopts the reviewer's edits as the new baseline and blesses them as if the
+  writer had made them. On a `web-app` bugfix this restore also reverts the
+  bootstrap's deliberate lockfile drift; re-run the unfrozen install after
+  restoring (RUNBOOK §12).
+
 ## 5. When to resume, and when to stop
 
 Resume (`archon workflow resume <run-id>`) is right for the transient class:
@@ -229,6 +269,16 @@ resume (RUNBOOK §3).
 - `PREMISE_CONFLICT id=N`, `READER_AUDIT_FAIL`, `SCOPE_BREACH`,
   `ROUND_CAP_REACHED` - each is a designed human stop with its own recipe in
   RUNBOOK §3. Read the artifact, explain what the fix would be, hand back.
+- `PLAN_REJECTED`, `PLAN_NO_PROGRESS`, `PLAN_SCOPE_DISPUTE`, `PLAN_CONVERGE=FAIL`
+  (RUNBOOK §3a) - the plan-loop critic and reviser disagree, or the loop stalled.
+  Read `plan-round-N/critique.json` and `revision.json`, explain the disagreement,
+  hand back. `PLAN_ROUND_CAP` alone is resumable after raising the cap or
+  accepting the loop's last state by hand.
+- `DESLOP_REVIEW=FAIL reviewer modified tree` (RUNBOOK §3b) - **never plain-resume**;
+  run the printed restore triple first (§4 above), then resume.
+- `DESLOP=DIRTY`, `beyond_five_guards` findings (bugfix lane, RUNBOOK §12) - hand-fix
+  the flagged issue in the worktree before resuming; there is no automatic writer
+  retry.
 
 More iterations on any of these only burn quota. When you escalate, say which
 discriminator fired, which artifact file holds the evidence, and what the RUNBOOK
@@ -305,18 +355,31 @@ DISABLE_OMC=1 archon workflow run bugfix "/abs/path/to/bug-report.md" </dev/null
 Everything in §0-§1 applies unchanged (guardrails, `DISABLE_OMC=1`, `</dev/null`,
 tee, quota). Differences that decide supervision calls:
 
+- **Before gate 1, `chain-gate` feeds `rca-plan-loop`** (RUNBOOK §12's RCA
+  planning-critic table; VERSION 2026.08.28-2, design-only - not yet observed
+  live), the same critic/reviser/converge shape as `plan-loop` in §3-§4 but
+  with the diagnosis frozen for the whole loop: `rca.md`, `causal-chain.json`,
+  `hypotheses.json`, `residuals.json`, `probe.json`, `repo.json` are read-only
+  to the critic and reviser, and `RCA_PLAN=FAIL immutable artifact modified`
+  is a hard engineer stop if any of them moved. `rca-plan-shape` re-validates
+  the four mutable planning files once the loop exits, before
+  `experiment-design` ever runs.
 - **Two human gates.** Gate 1 is the RCA packet: `rca-review.html` shows the
   evidence chips, the cited 5-whys chain with the blind verifier's per-link
   verdicts, the live-experiment verdict (a `cannot_determine` dispute triggers
   a real run of the code that settles it — the EXPERIMENT section says
   skipped / degraded / observed), the residuals table (every reported symptom
   gets a disposition; separate-bug rows become split tickets, never silent
-  scope-outs), the fix plan, and the failing-test contract with its predicted
-  failure signature verbatim. Approving starts UNATTENDED
-  red-test -> fix -> negative-control -> review. Your job at the pause:
-  summarize, call out every `cannot_determine` link verdict and every
-  degraded experiment by name, check the fix site against the chain, hand
-  back per §3. Never approve it yourself.
+  scope-outs), a **CRITIC section** (VERSION 2026.08.28-2, design-only,
+  positioned between RESIDUALS and FIX — same per-round table and declined-
+  findings treatment as §3 above; findings the reviser declined because they'd
+  require editing the frozen diagnosis are marked distinctly, since only you
+  at this gate can settle those), the fix plan, and the failing-test contract
+  with its predicted failure signature verbatim. Approving starts UNATTENDED
+  red-test -> fix -> deslop -> negative-control -> review. Your job at the
+  pause: summarize, call out every `cannot_determine` link verdict, every
+  degraded experiment, and every CRITIC-declined finding by name, check the
+  fix site against the chain, hand back per §3. Never approve it yourself.
 - Gate 2 is the **in-app smoke matrix**: after the exit gate the lane boots
   the REAL stack (api on 4124 from the fix worktree — or the main checkout
   when the fix is web — web on 3124, e2e DB with the search-eval fixture),
@@ -330,9 +393,25 @@ tee, quota). Differences that decide supervision calls:
 - **The home repo is a finding of the RCA.** `params.json`'s worktree is
   provisional until `bind-repo` rewrites it after approval. `CROSS_REPO_BUG` is
   a typed v1 stop with the RCA preserved: the human splits the report per repo.
-- **The repro test is frozen after RED.** `GREEN_GATE=FAIL repro test modified`
-  and `REVIEW_SCOPE=FAIL repro test modified in review` are hard stops, same
-  class as SCOPE_BREACH: restoring the test is a human act.
+- **The repro test is frozen after RED — through the deslop group too.**
+  `GREEN_GATE=FAIL repro test modified`, `REVIEW_SCOPE=FAIL repro test modified
+  in review`, and (VERSION 2026.08.28-2, design-only) `DESLOP=FAIL repro test
+  modified` — checked in `deslop-recheck` and again before AND after
+  `deslop-commit` stages anything — are all hard stops, same class as
+  SCOPE_BREACH: restoring the test (`git checkout <red-sha> -- <test_file>`)
+  is a human act.
+- **The deslop group sits between the fix loop and negative control**
+  (RUNBOOK §3b/§12; VERSION 2026.08.28-2, design-only). Same stops as §4
+  above (`DESLOP_GATE=FAIL <guard>`, `DESLOP=DIRTY`, `DESLOP_ROUND_CAP`,
+  `DESLOP_REVIEW=FAIL ...`, and never-plain-resume on `reviewer modified
+  tree`), plus one bugfix-only reviewer value: **`beyond_five_guards`** — this
+  lane is causal-minimal, so the writer may fix only the five guards and must
+  report anything else under `reported_not_fixed`; the reviewer diffs the
+  writer's actual edits against that declaration and files
+  `beyond_five_guards` for anything undeclared. It blocks like any other
+  finding — hand-fix (usually: revert the out-of-scope edit), then resume.
+  `DESLOP_GATE=FAIL repro harness error rc=97` is a harness bug, not a
+  regression — fix the environment, not the diff.
 - **Escalate, do not resume**, on: `CHAIN_CONFLICT` (blind verifier contradicts
   the RCA — never "fix" the verifier), `EXPERIMENT_CONFLICT` (the LIVE RUN
   contradicts the RCA — same rule: never "fix" the experiment),
@@ -340,7 +419,10 @@ tee, quota). Differences that decide supervision calls:
   outcomes; a human reads `experiment-results.txt`), `RED_GATE=FAIL test
   passed`, `FIX_STALLED`, `ARCHITECTURE_SUSPECT attempts=3`, `EVAL_DIVERGED`
   (a search-touching fix shifted the offline eval lanes; the human decides
-  re-record with `--subset` + additive pin merge vs revisiting the fix), and
+  re-record with `--subset` + additive pin merge vs revisiting the fix),
+  `RCA_PLAN_REJECTED` / `RCA_PLAN_SCOPE_DISPUTE` / `RCA_PLAN=FAIL immutable
+  artifact modified` (the RCA planning-critic loop's designed human stops —
+  same handling as `PLAN_REJECTED`/`PLAN_SCOPE_DISPUTE` in §5), and
   any `NEGCONTROL=FAIL` (the fix was proven non-causal or the failure mode
   changed under revert; the failure line names the recovery command).
 - **Resume is right** for the same transient class as §5, plus

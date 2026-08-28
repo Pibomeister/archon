@@ -52,13 +52,17 @@ MANIFEST=(
   setup/bind-repo.py
   setup/check-fixer-result.py
   setup/check-scope.py
+  setup/check-slop.py
   setup/detach.py
   setup/gist-README.md
   setup/install.sh
   setup/negcontrol.sh
   setup/package.sh
   setup/params-env.sh
+  setup/parse-critique.py
   setup/parse-review-envelope.py
+  setup/plan-shape.sh
+  setup/rca-shape.sh
   setup/resolve-params.sh
   setup/run-repro.sh
   setup/selective-genapi-patch.py
@@ -83,6 +87,37 @@ for f in "${MANIFEST[@]}"; do
   test -f "$ARCHON/$f" || { echo "PACKAGE=FAIL manifest file missing: .archon/$f"; exit 1; }
 done
 test -f "$FIXTURE" || { echo "PACKAGE=FAIL toy fixture missing: $FIXTURE"; exit 1; }
+
+# --- Reverse check: every setup/ script a manifest workflow references must ---
+# itself be in MANIFEST, or a teammate's install ships a workflow that calls a
+# script that never arrived. Only manifest workflow YAMLs are scanned.
+# grep's exit code drives the fail path directly (rc>=2 fails closed) rather
+# than living inside an `if` condition, for the same reason the secret gate
+# above resolves its own grep binary: `if grep ...` is invisible to `set -e`.
+echo "--- reverse check (workflow -> setup script coverage) ---"
+REVERSE_FAIL=0
+for f in "${MANIFEST[@]}"; do
+  case "$f" in workflows/*.yaml) ;; *) continue ;; esac
+  REFS="$("$GREP" -ohE 'setup/[A-Za-z0-9_.-]+' "$ARCHON/$f" | sort -u)" && grc=0 || grc=$?
+  if [ "$grc" -ge 2 ]; then
+    echo "PACKAGE=FAIL grep errored scanning $f for setup/ references (fail-closed)"
+    REVERSE_FAIL=1
+    continue
+  fi
+  while IFS= read -r ref; do
+    test -n "$ref" || continue
+    IN_MANIFEST=no
+    for m in "${MANIFEST[@]}"; do
+      [ "$m" = "$ref" ] && { IN_MANIFEST=yes; break; }
+    done
+    if [ "$IN_MANIFEST" = no ]; then
+      echo "PACKAGE=FAIL workflow references unpackaged script $ref (from $f)"
+      REVERSE_FAIL=1
+    fi
+  done <<< "$REFS"
+done
+[ "$REVERSE_FAIL" = 0 ] || { echo "PACKAGE=FAIL reverse check — see unpackaged-script lines above"; exit 1; }
+echo "REVERSE_CHECK=OK"
 
 # --- VERSION: date-serial, bumped when repackaging on the same day -------------
 TODAY="$(date +%Y.%m.%d)"
