@@ -91,14 +91,20 @@ test -f "$FIXTURE" || { echo "PACKAGE=FAIL toy fixture missing: $FIXTURE"; exit 
 # --- Reverse check: every setup/ script a manifest workflow references must ---
 # itself be in MANIFEST, or a teammate's install ships a workflow that calls a
 # script that never arrived. Only manifest workflow YAMLs are scanned.
+# Two reference spellings exist and BOTH must be caught: the literal
+# "$ROOT/.archon/setup/foo.sh", and the indirect "$SETUP/foo.sh" that bugfix.yaml
+# uses after `SETUP="$ROOT/.archon/setup"`. Matching only the literal spelling
+# would let every $SETUP-called script ship unpackaged; the sed normalises the
+# indirect form back to the manifest's own `setup/...` key before comparison.
 # grep's exit code drives the fail path directly (rc>=2 fails closed) rather
 # than living inside an `if` condition, for the same reason the secret gate
 # above resolves its own grep binary: `if grep ...` is invisible to `set -e`.
+# `set -o pipefail` (top of file) is what carries grep's rc through the pipe.
 echo "--- reverse check (workflow -> setup script coverage) ---"
 REVERSE_FAIL=0
 for f in "${MANIFEST[@]}"; do
   case "$f" in workflows/*.yaml) ;; *) continue ;; esac
-  REFS="$("$GREP" -ohE 'setup/[A-Za-z0-9_./-]+' "$ARCHON/$f" | sort -u)" && grc=0 || grc=$?
+  REFS="$("$GREP" -ohE '(setup|\$\{?SETUP\}?)/[A-Za-z0-9_./-]+' "$ARCHON/$f" | sed -E 's#^\$\{?SETUP\}?/#setup/#' | sort -u)" && grc=0 || grc=$?
   if [ "$grc" -ge 2 ]; then
     echo "PACKAGE=FAIL grep errored scanning $f for setup/ references (fail-closed)"
     REVERSE_FAIL=1

@@ -1,6 +1,6 @@
 ---
 name: archon-sdlc
-description: Use when driving or supervising a Goodword Archon SDLC, bugfix, or backfill run - starting full-sdlc-api on a feature spec, bugfix on a bug report, or backfill on a backfill spec, reading the plan-gate, RCA-gate, or backfill-packet, interpreting loop exits (CONVERGED, NO_PROGRESS, FIXER_BLOCKED, SCOPE_BREACH, ROUND_CAP_REACHED, CHAIN_CONFLICT, FIX_STALLED, ARCHITECTURE_SUSPECT, NEGCONTROL=FAIL, CLAIM_DIVERGED, SAMPLE_SUSPECT, BOUND_BREACH, RECONCILE_FAIL, PLAN_REJECTED, PLAN_NO_PROGRESS, PLAN_SCOPE_DISPUTE, PLAN_ROUND_CAP, RCA_PLAN_REJECTED, RCA_PLAN_SCOPE_DISPUTE, RCA_PLAN_SHAPE=FAIL, CRITIC_GATE=FAIL, IMPACT=UNAVAILABLE, DESLOP=DIRTY, DESLOP_REVIEW=FAIL, DESLOP_ROUND_CAP), deciding resume vs escalate, or running babysit/cleanup afterwards. Triggers on "archon run", "start the SDLC lane", "archon bugfix", "archon backfill", "the run is stuck", "resume the run", or any mention of a paused/failed archon workflow.
+description: Use when driving or supervising a Goodword Archon SDLC, bugfix, or backfill run - starting full-sdlc-api on a feature spec, bugfix on a bug report, or backfill on a backfill spec, reading the plan-gate, RCA-gate, or backfill-packet, interpreting loop exits (CONVERGED, NO_PROGRESS, FIXER_BLOCKED, SCOPE_BREACH, ROUND_CAP_REACHED, CHAIN_CONFLICT, FIX_STALLED, ARCHITECTURE_SUSPECT, NEGCONTROL=FAIL, CLAIM_DIVERGED, SAMPLE_SUSPECT, BOUND_BREACH, RECONCILE_FAIL, PLAN_REJECTED, PLAN_NO_PROGRESS, PLAN_SCOPE_DISPUTE, PLAN_ROUND_CAP, RCA_PLAN_REJECTED, RCA_PLAN_SCOPE_DISPUTE, RCA_PLAN_SHAPE=FAIL, CRITIC_GATE=FAIL, IMPACT=UNAVAILABLE, IMPACT=SKIPPED, DESLOP=DIRTY, DESLOP_GATE=FAIL, DESLOP_REVIEW=FAIL, DESLOP_ROUND_CAP), deciding resume vs escalate, or running babysit/cleanup afterwards. Triggers on "archon run", "start the SDLC lane", "archon bugfix", "archon backfill", "the run is stuck", "resume the run", or any mention of a paused/failed archon workflow.
 ---
 
 <WORKFLOW-NODE-STOP>
@@ -276,6 +276,13 @@ resume (RUNBOOK §3).
   Read `plan-round-N/critique.json` and `revision.json`, explain the disagreement,
   hand back. `PLAN_ROUND_CAP` alone is resumable after raising the cap or
   accepting the loop's last state by hand.
+- `PLAN_ROUND_PRE=FAIL` (RUNBOOK §3a) / `RCA_ROUND_PRE=FAIL` (RUNBOOK §12) - the
+  round counter (`plan-round.txt` / `rca-round.txt`) is not an integer, or a
+  planning artifact the round needs is missing. Both mean a hand-edited or
+  truncated artifacts dir, not a model failure, and a plain resume re-runs the
+  same broken pre-check. Inspect the artifacts dir, fix the file by hand, then
+  resume. A junk round **cap** does not stop a run (it falls back to 3); only a
+  junk **counter** does.
 - `DESLOP_REVIEW=FAIL reviewer modified tree` (RUNBOOK §3b) - **never plain-resume**;
   run the printed restore triple first (§4 above), then resume.
 - `DESLOP=DIRTY`, `beyond_five_guards` findings (bugfix lane, RUNBOOK §12) - hand-fix
@@ -422,14 +429,20 @@ tee, quota). Differences that decide supervision calls:
   passed`, `FIX_STALLED`, `ARCHITECTURE_SUSPECT attempts=3`, `EVAL_DIVERGED`
   (a search-touching fix shifted the offline eval lanes; the human decides
   re-record with `--subset` + additive pin merge vs revisiting the fix),
-  `RCA_PLAN_REJECTED` / `RCA_PLAN_SCOPE_DISPUTE` / `RCA_PLAN=FAIL immutable
-  artifact modified` (the RCA planning-critic loop's designed human stops —
-  same handling as `PLAN_REJECTED`/`PLAN_SCOPE_DISPUTE` in §5), and
+  `RCA_PLAN_REJECTED` / `RCA_PLAN_SCOPE_DISPUTE` / `RCA_PLAN_NO_PROGRESS` /
+  `RCA_PLAN=FAIL immutable artifact modified` (the RCA planning-critic loop's
+  designed human stops — same handling as `PLAN_REJECTED`/`PLAN_NO_PROGRESS`/
+  `PLAN_SCOPE_DISPUTE` in §5; `RCA_PLAN_NO_PROGRESS` carries
+  `other_mutated=<list|none>`, which says whether the revision landed on the
+  contract files instead of `fix-plan.json`), and
   any `NEGCONTROL=FAIL` (the fix was proven non-causal or the failure mode
   changed under revert; the failure line names the recovery command).
 - **Resume is right** for the same transient class as §5, plus
   `RED_GATE=FAIL error-not-failure` once, and `SMOKE_STACK=FAIL` once (boot
   flakes; recurring means the stack recipe broke — engineer).
+  `RCA_PLAN_ROUND_CAP` is resumable the same way `PLAN_ROUND_CAP` is: raise the
+  cap (`echo N > <artifacts>/rca-round-cap.txt`) or accept the loop's last state
+  by hand first, since a bare resume re-enters the loop and hits the same cap.
 - `EXPERIMENT=DEGRADED` and `EXPERIMENT_GATE=PASS degraded` are typed and
   non-fatal: the run continues and the packet shows the dispute unsettled —
   call it out at gate 1 like a `cannot_determine`.

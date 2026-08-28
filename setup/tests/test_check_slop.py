@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Tests for check-slop.py against a real temp git repo fixture: exercises all
 four guards, the legacy-excess REPORT-not-FAIL distinction, a clean fixture,
-and the working-tree-vs-base..HEAD anchoring negative control."""
+the working-tree-vs-base..HEAD anchoring negative control, and the C-quoted
+porcelain paths that used to drop a file with a space in its name."""
 import shutil
 import subprocess
 import sys
@@ -166,6 +167,81 @@ class CheckSlopTest(unittest.TestCase):
         r = run(repo, base, "--exclude", "src/example.ts", "--exclude", "src/example.spec.ts")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertTrue(r.stdout.strip().startswith("SLOP=OK files=0"))
+
+    # --- porcelain path quoting -------------------------------------------
+
+    def test_untracked_path_with_space_is_scanned(self):
+        # git status --porcelain (without -z) C-quotes any path it considers
+        # unusual: `?? "src/new file.ts"`. Keeping the quotes makes the .ts suffix
+        # test fail, so the file is dropped from the scan and its slop ships. The
+        # file below carries an unambiguous narrating comment, so a scanned file
+        # MUST produce SLOP=FAIL naming it.
+        repo = self.tmp / "spacey"
+        init_repo(repo)
+        (repo / "src").mkdir()
+        (repo / "src" / "base.ts").write_text("export const x = 1;\n", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "base")
+        base = git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        (repo / "src" / "new file.ts").write_text(
+            "let counter = 0;\n// increment counter\ncounter++;\n", encoding="utf-8"
+        )
+        # Negative control on the fixture itself: prove git really does quote it,
+        # so this test fails for the reason it claims if git ever stops.
+        porcelain = git(repo, "status", "--porcelain").stdout
+        self.assertIn('"src/new file.ts"', porcelain, porcelain)
+
+        r = run(repo, base)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("src/new file.ts", r.stdout)
+        self.assertIn("SLOP=FAIL narrating_comment", r.stdout)
+
+    def test_committed_path_with_space_is_scanned(self):
+        # Same class on the other input: the diff --name-only lane. Committing the
+        # file takes it out of porcelain entirely, so only the diff lane can find it.
+        repo = self.tmp / "spacey-committed"
+        init_repo(repo)
+        (repo / "src").mkdir()
+        (repo / "src" / "base.ts").write_text("export const x = 1;\n", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "base")
+        base = git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        (repo / "src" / "new file.ts").write_text(
+            "let counter = 0;\n// increment counter\ncounter++;\n", encoding="utf-8"
+        )
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "spacey")
+        self.assertEqual(git(repo, "status", "--porcelain").stdout.strip(), "")
+
+        r = run(repo, base)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("src/new file.ts", r.stdout)
+
+    def test_renamed_path_with_space_uses_new_name(self):
+        # With -z a rename is two records: the NEW path, then the ORIGINAL. Both
+        # carry a space here, so this covers the quoting fix and the record-pairing
+        # at once: the new path must be scanned (it holds the narrating comment) and
+        # the original — which no longer exists — must not be reported.
+        repo = self.tmp / "renamed"
+        init_repo(repo)
+        (repo / "src").mkdir()
+        (repo / "src" / "old name.ts").write_text(
+            "let counter = 0;\n// increment counter\ncounter++;\n", encoding="utf-8"
+        )
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "base")
+        base = git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        git(repo, "mv", "src/old name.ts", "src/new name.ts")
+        porcelain = git(repo, "status", "--porcelain").stdout
+        self.assertIn("R", porcelain, porcelain)
+
+        r = run(repo, base)
+        self.assertIn("src/new name.ts", r.stdout, r.stdout + r.stderr)
+        self.assertNotIn("src/old name.ts", r.stdout)
+        self.assertIn("SLOP=FAIL narrating_comment", r.stdout)
 
     def test_max_complexity_override(self):
         repo, base = self._dirty_repo()

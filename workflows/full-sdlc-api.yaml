@@ -604,8 +604,26 @@ nodes:
             ) || { echo "PLAN_CONVERGE=FAIL revision.json malformed round=$N"; exit 1; }
             if [ "$DISPUTE" != 0 ]; then echo "PLAN_SCOPE_DISPUTE round=$N declined_scope_100=$DISPUTE"; exit 1; fi
             # 5. REVISE plus an untouched plan means another round would be identical.
+            # plan.md is the plan here the way fix-plan.json is in the bugfix lane, so
+            # an untouched plan.md still stops the loop — but the five snapshotted
+            # contract files are reported the same way the bugfix lane reports them.
+            # A reviser that answered a verifiability finding by rewriting verify.json
+            # alone, or narrowed scope by editing files-allowlist.json alone, DID make
+            # progress; without this list the operator reads a bare PLAN_NO_PROGRESS
+            # and re-runs the same round instead of accepting the narrowed contract.
             if cmp -s "$ARTIFACTS_DIR/plan.md" "$RD/plan.pre.md"; then
-              echo "PLAN_NO_PROGRESS round=$N"
+              OTHER=""
+              for f in verify.json files-allowlist.json reader-audit.json premises.json smoke-probe.json; do
+                CUR="$ARTIFACTS_DIR/$f"; PRE="$RD/pre-$f"
+                if [ -f "$CUR" ] && [ -f "$PRE" ]; then
+                  cmp -s "$CUR" "$PRE" || OTHER="$OTHER,$f"
+                elif [ -f "$CUR" ] || [ -f "$PRE" ]; then
+                  # Appeared or disappeared: a contract file's existence is part of it.
+                  OTHER="$OTHER,$f"
+                fi
+              done
+              OTHER="${OTHER#,}"; test -n "$OTHER" || OTHER=none
+              echo "PLAN_NO_PROGRESS round=$N other_mutated=$OTHER"
               exit 1
             fi
             # 6. Post-round cap, kept even though plan-round-pre checks it too:
@@ -960,10 +978,21 @@ nodes:
       rm -rf .omc   # runtime-state leakage guard: any .omc here is session contamination, never work product
       bun run typecheck || { echo "GATE_TESTS=FAIL typecheck"; exit 1; }
       bun run lint || { echo "GATE_TESTS=FAIL lint"; exit 1; }
+      # Materialize the patterns first (same reason as deslop-recheck): piping the
+      # extractor straight into the loop puts it in a subshell whose exit code the
+      # loop never sees, so a verify.json that fails to parse — or that carries an
+      # empty test_patterns — feeds the loop nothing and this gate prints PASS
+      # having run zero tests. `test -s` is the difference between "all patterns
+      # passed" and "there were no patterns".
+      python3 -c "import json,sys; [print(p) for p in json.load(open(sys.argv[1]))['test_patterns']]" \
+        "$ARTIFACTS_DIR/verify.json" > "$ARTIFACTS_DIR/gate-tests-patterns.txt" \
+        || { echo "GATE_TESTS=FAIL verify.json unreadable"; exit 1; }
+      test -s "$ARTIFACTS_DIR/gate-tests-patterns.txt" \
+        || { echo "GATE_TESTS=FAIL verify.json yielded no patterns"; exit 1; }
       while IFS= read -r PAT; do
         test -n "$PAT" || continue
         bun run test -- "$PAT" || { echo "GATE_TESTS=FAIL unit pattern=$PAT"; exit 1; }
-      done < <(python3 -c "import json,sys; [print(p) for p in json.load(open(sys.argv[1]))['test_patterns']]" "$ARTIFACTS_DIR/verify.json")
+      done < "$ARTIFACTS_DIR/gate-tests-patterns.txt"
       test -n "$(git status --porcelain)" || { echo "GATE_TESTS=FAIL no changes produced"; exit 1; }
       test -s "$ARTIFACTS_DIR/commit-msg.txt" || { echo "GATE_TESTS=FAIL no commit-msg.txt from implement"; exit 1; }
       # Scope guard: catch implement-node creep before the first review round.
@@ -1400,7 +1429,14 @@ nodes:
               2)
                 # Durable DIRTY counter: rounds also advance on a mechanical recheck
                 # failure, which never reaches a verdict, so the cap counts verdicts.
-                D=$(cat "$ARTIFACTS_DIR/deslop-dirty.txt" 2>/dev/null || echo 0); D=$((D+1))
+                # deslop-dirty.txt is hand-editable, so it is untrusted input.
+                # $((D+1)) on a non-integer aborts the arithmetic (and under set -e
+                # the node), and `[ x -ge 2 ]` on junk returns 2 which `if` reads as
+                # "not taken" — the cap would silently switch off. Coerce to 0 so a
+                # corrupt counter costs one extra round, never the cap itself.
+                D=$(cat "$ARTIFACTS_DIR/deslop-dirty.txt" 2>/dev/null || echo 0)
+                case "$D" in ''|*[!0-9]*) D=0 ;; esac
+                D=$((D+1))
                 echo "$D" > "$ARTIFACTS_DIR/deslop-dirty.txt"
                 if [ "$D" -ge 2 ]; then echo "DESLOP_ROUND_CAP round=$N dirty_rounds=$D"; fi
                 exit 1
@@ -1770,10 +1806,18 @@ nodes:
         test -s "$ARTIFACTS_DIR/reader-audit-result.json" || { echo "EXIT_GATE=FAIL READER_AUDIT_FAIL missing reader-audit-result.json"; exit 1; }
         python3 -c "import json,sys; cols=json.load(open(sys.argv[1]))['columns']; aff=[r for c in cols for r in c.get('readers',[]) if r.get('class')=='affected']; sys.exit('affected readers: %s' % aff) if aff else None" "$ARTIFACTS_DIR/reader-audit-result.json" || { echo "EXIT_GATE=FAIL READER_AUDIT_FAIL affected reader"; exit 1; }
       fi
+      # Materialize-then-`test -s`, same as gate-tests and deslop-recheck: a process
+      # substitution hides the extractor's exit code, so a broken or empty
+      # verify.json would run the loop zero times and this gate would print
+      # EXIT_GATE=PASS having verified nothing.
+      python3 -c "import json,sys; [print(p) for p in json.load(open(sys.argv[1]))['test_patterns']]" \
+        "$ARTIFACTS_DIR/verify.json" > "$ARTIFACTS_DIR/exit-patterns.txt" \
+        || { echo "EXIT_GATE=FAIL verify.json unreadable"; exit 1; }
+      test -s "$ARTIFACTS_DIR/exit-patterns.txt" || { echo "EXIT_GATE=FAIL verify.json yielded no patterns"; exit 1; }
       while IFS= read -r PAT; do
         test -n "$PAT" || continue
         bun run test -- "$PAT" >/dev/null || { echo "EXIT_GATE=FAIL post-fix unit tests pattern=$PAT"; exit 1; }
-      done < <(python3 -c "import json,sys; [print(p) for p in json.load(open(sys.argv[1]))['test_patterns']]" "$ARTIFACTS_DIR/verify.json")
+      done < "$ARTIFACTS_DIR/exit-patterns.txt"
       echo "EXIT_GATE=PASS"
 
   - id: smoke

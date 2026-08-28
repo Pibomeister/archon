@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Tests for parse-critique.py: schema validation, confidence-gated counting,
-and the exact CRITIQUE summary line."""
+"""Tests for parse-critique.py: schema validation, severity-and-confidence-gated
+counting (the same BLOCKING predicate plan-converge/rca-converge re-derive), and
+the exact CRITIQUE summary line."""
 import json
 import subprocess
 import sys
@@ -56,6 +57,29 @@ class ParseCritiqueTest(unittest.TestCase):
         r = run({"verdict": "REVISE", "findings": findings}, round_no="2")
         self.assertEqual(r.returncode, 0)
         self.assertEqual(r.stdout.strip(), "CRITIQUE round=2 verdict=REVISE scope=2 regression=1 gap=2 verifiability=1")
+
+    def test_p2_findings_are_not_blocking_at_any_confidence(self):
+        # plan-converge and rca-converge re-derive BLOCKING as severity in
+        # (P0, P1) AND confidence >= 75. A P2 at confidence 100 is advisory to
+        # them, so it must be advisory here too, or a run log would carry two
+        # different blocking counts for the same critique.
+        findings = [
+            finding(kind="scope", severity="P2", confidence=100),
+            finding(kind="gap", severity="P2", confidence=75),
+        ]
+        r = run({"verdict": "ACCEPT", "findings": findings}, round_no="4")
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout.strip(), "CRITIQUE round=4 verdict=ACCEPT scope=0 regression=0 gap=0 verifiability=0")
+
+    def test_p0_and_p1_at_75_are_blocking(self):
+        findings = [
+            finding(kind="scope", severity="P0", confidence=75),
+            finding(kind="regression", severity="P1", confidence=100),
+            finding(kind="regression", severity="P2", confidence=100),  # advisory
+        ]
+        r = run({"verdict": "REVISE", "findings": findings}, round_no="5")
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout.strip(), "CRITIQUE round=5 verdict=REVISE scope=1 regression=1 gap=0 verifiability=0")
 
     def test_malformed_json_fails(self):
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as fh:

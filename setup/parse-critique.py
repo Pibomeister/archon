@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Validate a critic finding envelope (plan-critic / rca-critic) and print the
 converge-loop's typed summary line. A finding below confidence 50 is dropped
-before counting; the printed per-kind counts are of findings at or above 75
-(the "blocking" tier that sizes plan-revise's/rca-revise's obligation).
+before counting; the printed per-kind counts are of BLOCKING findings only —
+severity P0 or P1 AND confidence at or above 75. That is the same predicate
+plan-converge and rca-converge re-derive from critique.json to catch a critic
+that declares ACCEPT with blocking findings outstanding; counting a P2 here
+would report a blocking finding the gates do not see, and the two numbers in
+one run log would disagree about the same file.
 Usage: parse-critique.py <critique.json> --round N
 Prints: CRITIQUE round=N verdict=<ACCEPT|REVISE|REJECT> scope=<n> regression=<n> gap=<n> verifiability=<n>
 On malformed input: CRITIC_GATE=FAIL <reason>, exit 1. Nothing else on success."""
@@ -72,7 +76,9 @@ def main():
         if confidence >= 50:
             kept.append(f)
 
-    blocking = [f for f in kept if f["confidence"] >= 75]
+    # Keep this predicate byte-identical in meaning to plan-converge's and
+    # rca-converge's BLOCKING re-derivation: severity in (P0, P1) and >= 75.
+    blocking = [f for f in kept if f["severity"] in ("P0", "P1") and f["confidence"] >= 75]
     counts = {"scope": 0, "regression": 0, "gap": 0, "verifiability": 0}
     for f in blocking:
         if f["kind"] in counts:

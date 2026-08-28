@@ -713,6 +713,18 @@ nodes:
       echo "RCA_GATE=PASS repo=$REPO links=$LINKS kind=$KIND"
       cp "$ARTIFACTS_DIR/rca.md" "$ARTIFACTS_DIR/rca.pre.md"
       cp "$ARTIFACTS_DIR/causal-chain.json" "$ARTIFACTS_DIR/causal-chain.pre.json"
+      # Durable immutable-set anchors, written ONCE here and never rewritten by the
+      # planning loop. rca-round-pre also copies these six into the round dir, but
+      # those copies are re-taken every round: a reviser that mutates repo.json,
+      # a round that then fails, and a resume would have the next round-pre snapshot
+      # the MUTATED file as that round's baseline, and the cmp would pass — the
+      # failed round launders the mutation. These copies predate the loop entirely,
+      # so no resume can move them. Every one of the six is already proven to exist
+      # by the checks above (rca.md/causal-chain.json/hypotheses.json inline,
+      # repo.json/probe.json/residuals.json in rca-shape.sh), so a plain cp is safe.
+      for f in rca.md causal-chain.json hypotheses.json residuals.json probe.json repo.json; do
+        cp "$ARTIFACTS_DIR/$f" "$ARTIFACTS_DIR/imm-$f"
+      done
 
   - id: probe-run
     depends_on: [rca-gate]
@@ -880,8 +892,17 @@ nodes:
             # probe.json was already executed against production, and repo.json drives
             # bind-repo after the gate. A reviser that edits the chain to fit its fix
             # has removed the check rather than passed it.
+            # These per-round copies are DIAGNOSTICS ONLY — "what did round N start
+            # from" when reading a failed run. They are re-taken every round, so they
+            # cannot be the cmp target: a mutation, a failed round and a resume would
+            # have the next round re-snapshot the mutated file as its own baseline.
+            # rca-converge cmps against $ARTIFACTS_DIR/imm-<f>, written once by
+            # rca-gate before the loop. Also verify the durable anchor is present,
+            # so a hand-deleted anchor stops the round instead of the run reaching
+            # rca-converge with nothing to compare against.
             for f in rca.md causal-chain.json hypotheses.json residuals.json probe.json repo.json; do
               test -f "$ARTIFACTS_DIR/$f" || { echo "RCA_ROUND_PRE=FAIL missing diagnosis artifact $f round=$N"; exit 1; }
+              test -f "$ARTIFACTS_DIR/imm-$f" || { echo "RCA_ROUND_PRE=FAIL missing durable anchor imm-$f round=$N"; exit 1; }
               cp "$ARTIFACTS_DIR/$f" "$RD/imm-$f"
             done
             echo "RCA_PLAN_ROUND=$N cap=$CAP"
@@ -1197,13 +1218,15 @@ nodes:
             esac
             test -s "$RD/revision.json" || { echo "RCA_CONVERGE=FAIL no revision.json round=$N"; exit 1; }
             # 1. The diagnosis is immutable for the whole loop, so this runs before
-            # any verdict is acted on and on every verdict alike. Two anchors where
-            # two exist: the round's own copy catches a reviser that edited the file
-            # this round, and rca.pre.md / causal-chain.pre.json — written by rca-gate
-            # before the loop ever ran — catch drift that a resumed run would
-            # otherwise re-snapshot as the new baseline.
+            # any verdict is acted on and on every verdict alike. The cmp target is
+            # the DURABLE $AD/imm-<f> copy rca-gate wrote once before the loop, not
+            # rca-round-pre's $RD/imm-<f>: the round copies are re-taken every round,
+            # so a mutation + a failed round + a resume would let the next round-pre
+            # re-snapshot the mutated file as its own baseline and the check would
+            # pass. rca-gate's copies predate the loop, so no resume can move them.
             for f in rca.md causal-chain.json hypotheses.json residuals.json probe.json repo.json; do
-              cmp -s "$AD/$f" "$RD/imm-$f" || { echo "RCA_PLAN=FAIL immutable artifact modified $f round=$N"; exit 1; }
+              test -f "$AD/imm-$f" || { echo "RCA_CONVERGE=FAIL missing durable anchor imm-$f round=$N"; exit 1; }
+              cmp -s "$AD/$f" "$AD/imm-$f" || { echo "RCA_PLAN=FAIL immutable artifact modified $f round=$N"; exit 1; }
             done
             cmp -s "$AD/rca.md" "$AD/rca.pre.md" || { echo "RCA_PLAN=FAIL immutable artifact modified rca.md round=$N"; exit 1; }
             cmp -s "$AD/causal-chain.json" "$AD/causal-chain.pre.json" || { echo "RCA_PLAN=FAIL immutable artifact modified causal-chain.json round=$N"; exit 1; }
@@ -1937,7 +1960,16 @@ nodes:
               fi
             fi
             if [ "$GREEN" = true ]; then
-              python3 -c "import json,sys; [print(p) for p in json.load(open(sys.argv[1], encoding='utf-8'))['test_patterns']]" "$ARTIFACTS_DIR/verify.json" > "$ADN/patterns.txt"
+              # Materialize, then require a non-empty file. This node runs without
+              # set -e, so an unreadable verify.json would leave patterns.txt empty,
+              # the loop would iterate zero times, and GREEN would stay true having
+              # run no suites at all — a green verdict for the wrong reason.
+              python3 -c "import json,sys; [print(p) for p in json.load(open(sys.argv[1], encoding='utf-8'))['test_patterns']]" "$ARTIFACTS_DIR/verify.json" > "$ADN/patterns.txt" \
+                || { GREEN=false; REASON="verify.json unreadable"; }
+              test "$GREEN" = false || test -s "$ADN/patterns.txt" \
+                || { GREEN=false; REASON="verify.json yielded no patterns"; }
+            fi
+            if [ "$GREEN" = true ]; then
               while IFS= read -r PAT; do
                 test -n "$PAT" || continue
                 if [ "$REPO" = web-app ]; then
@@ -1975,6 +2007,10 @@ nodes:
             case "$REASON" in
               "repro test modified"*) echo "GREEN_GATE=FAIL repro test modified (hard stop: the fix node edited the repro; restore it and re-run, or re-open the RCA)"; exit 1 ;;
               "scope breach"*) echo "GREEN_GATE=FAIL SCOPE_BREACH attempt=$N (human edits files-allowlist.json — the edit is the approval — or reverts the file, then resume)"; exit 1 ;;
+              # A broken verify.json is a contract error, not a fix error: another
+              # fix attempt cannot repair it, so stop here instead of burning the
+              # three-attempt circuit breaker on an unfixable input.
+              "verify.json "*) echo "GREEN_GATE=FAIL VERIFY_CONTRACT attempt=$N reason=[$REASON] (fix verify.json test_patterns by hand, then resume)"; exit 1 ;;
             esac
             if [ "$GREEN" = true ]; then
               eval "$(bash "$ROOT/.archon/setup/params-env.sh" "$ARTIFACTS_DIR/params.json")"
@@ -2533,7 +2569,14 @@ nodes:
               2)
                 # Durable DIRTY counter: rounds also advance on a mechanical recheck
                 # failure, which never reaches a verdict, so the cap counts verdicts.
-                D=$(cat "$ARTIFACTS_DIR/deslop-dirty.txt" 2>/dev/null || echo 0); D=$((D+1))
+                # deslop-dirty.txt is hand-editable, so it is untrusted input.
+                # $((D+1)) on a non-integer aborts the arithmetic (and under set -e
+                # the node), and `[ x -ge 2 ]` on junk returns 2 which `if` reads as
+                # "not taken" — the cap would silently switch off. Coerce to 0 so a
+                # corrupt counter costs one extra round, never the cap itself.
+                D=$(cat "$ARTIFACTS_DIR/deslop-dirty.txt" 2>/dev/null || echo 0)
+                case "$D" in ''|*[!0-9]*) D=0 ;; esac
+                D=$((D+1))
                 echo "$D" > "$ARTIFACTS_DIR/deslop-dirty.txt"
                 if [ "$D" -ge 2 ]; then echo "DESLOP_ROUND_CAP round=$N dirty_rounds=$D"; fi
                 exit 1
@@ -2875,8 +2918,12 @@ nodes:
         || { echo "EXIT_GATE=FAIL scope breach"; exit 1; }
       TESTF=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1], encoding='utf-8'))['test_file'])" "$ARTIFACTS_DIR/failing-test.json")
       test -z "$(git diff "$RED" -- "$TESTF")" || { echo "EXIT_GATE=FAIL REVIEW_SCOPE repro test drifted"; exit 1; }
-      # Suites stay green.
-      python3 -c "import json,sys; [print(p) for p in json.load(open(sys.argv[1], encoding='utf-8'))['test_patterns']]" "$ARTIFACTS_DIR/verify.json" > "$ARTIFACTS_DIR/exit-patterns.txt"
+      # Suites stay green. Same materialize-then-`test -s` shape as deslop-recheck:
+      # an empty pattern file makes the loop below iterate zero times, and this gate
+      # would print EXIT_GATE=PASS having run no suite at all.
+      python3 -c "import json,sys; [print(p) for p in json.load(open(sys.argv[1], encoding='utf-8'))['test_patterns']]" "$ARTIFACTS_DIR/verify.json" > "$ARTIFACTS_DIR/exit-patterns.txt" \
+        || { echo "EXIT_GATE=FAIL verify.json unreadable"; exit 1; }
+      test -s "$ARTIFACTS_DIR/exit-patterns.txt" || { echo "EXIT_GATE=FAIL verify.json yielded no patterns"; exit 1; }
       while IFS= read -r PAT; do
         test -n "$PAT" || continue
         if [ "$REPO" = web-app ]; then

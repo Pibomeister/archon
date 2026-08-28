@@ -75,17 +75,29 @@ def git_show(worktree, rev, path):
 
 
 def changed_ts_files(worktree, base, excludes):
+    # -z on BOTH commands, not just one. Without it git applies C-style quoting to
+    # any path it considers unusual — "a/has space.ts" comes back with the quotes
+    # attached, so the .ts suffix test below fails and the file is silently dropped
+    # from the slop scan. A gate that skips a file is worse than one that errors.
+    # -z also removes the " -> " rename ambiguity: with -z, porcelain emits a
+    # rename as two records, the NEW path first and the ORIGINAL second, so the
+    # original is consumed and discarded rather than parsed out of one line.
     changed = set()
-    for line in git(worktree, "diff", "--name-only", base).splitlines():
-        if line.strip():
-            changed.add(line.strip())
-    for line in git(worktree, "status", "--porcelain").splitlines():
-        if not line.strip():
+    for path in git(worktree, "diff", "--name-only", "-z", base).split("\0"):
+        if path:
+            changed.add(path)
+    records = [r for r in git(worktree, "status", "--porcelain", "-z").split("\0") if r]
+    i = 0
+    while i < len(records):
+        rec = records[i]
+        i += 1
+        if len(rec) < 4:
             continue
-        path = line[3:]
-        if " -> " in path:
-            path = path.split(" -> ", 1)[1]
-        changed.add(path.strip())
+        status, path = rec[:2], rec[3:]
+        if "R" in status or "C" in status:
+            i += 1  # the following record is the ORIGINAL path; the new path is rec
+        if path:
+            changed.add(path)
     return sorted(p for p in changed if p not in excludes and (p.endswith(".ts") or p.endswith(".tsx")))
 
 
