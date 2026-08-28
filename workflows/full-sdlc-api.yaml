@@ -566,8 +566,428 @@ nodes:
         || { echo "GATE_TESTS=FAIL scope breach"; exit 1; }
       echo "GATE_TESTS=PASS"
 
-  - id: reader-audit
+  - id: deslop
     depends_on: [gate-tests]
+    model: sonnet
+    maxBudgetUsd: 4
+    timeout: 1200000
+    prompt: |
+      You are the deslop WRITER node in an unattended pipeline: you clean the
+      AI slop out of the implementation BEFORE any commit reaches the code
+      review loop. Ask no questions.
+
+      Resolve the artifacts directory by running: echo "$ARTIFACTS_DIR"
+
+      The repository checkout is the "worktree" field of params.json in that
+      same directory (you are NOT cwd'd there — cd into it for every git
+      command). It is already on the branch to be cleaned.
+
+      SCOPE — the files you may touch are exactly the intersection of:
+        (a) files changed or untracked since the base sha in bootstrap-head.txt
+            (in the worktree: git status --porcelain, and
+             git diff --name-only "$(cat <that directory>/bootstrap-head.txt)"..HEAD),
+        (b) the paths listed in files-allowlist.json in the artifacts directory.
+      Nothing else. The implementation is UNCOMMITTED here, so the working tree
+      — untracked files included — is the subject, not a HEAD-anchored diff.
+
+      POSTURE (from ai-slop-cleaner):
+      - Preserve behavior. This is a cleanup pass, not a redesign.
+      - Plan before you edit: read the whole changed surface first, list the
+        smells you intend to remove, then edit.
+      - One smell-pass at a time. Do not interleave unrelated cleanups.
+      - Re-run targeted verification after each pass (see VERIFICATION).
+      - Never expand scope. A smell outside the scope above is REPORTED, not fixed.
+
+      TAXONOMY (from ai-slop-cleaner): duplication; dead code; needless
+      abstraction; boundary violations.
+
+      Plus these FIVE GUARDS, which are the point of this node:
+
+      1. CYCLOMATIC COMPLEXITY — a *new* function above 10, or a changed
+         function whose complexity the diff *raised* above 10: flatten it
+         (early returns, table dispatch). A pre-existing function already above
+         10 that the diff did not worsen: leave it, report it.
+      2. TAUTOLOGICAL TESTS — a test that asserts a value against itself, or
+         whose only matchers are toBeDefined / toBeTruthy / not.toThrow, or that
+         asserts on a mock's return value, or that has no assertion at all. Fix
+         it by asserting the observable value; if no observable value exists,
+         DELETE the test and say so.
+      3. YAGNI — parameters, options, branches, exports, types and config with
+         no caller in the diff or anywhere in the repo: delete them.
+      4. OPEN/CLOSED — where the change special-cases an existing dispatch
+         (a switch, an if-chain, a registry) and an extension point already
+         exists, use the extension point. Do NOT *introduce* an extension point
+         for a single consumer.
+      5. NARRATING COMMENTS — comments that restate the code, narrate the change,
+         or preserve task history; banner comments; JSDoc that repeats the
+         signature; any added TODO. Delete them. KEEP comments that explain
+         *why*, or record an invariant or a constraint.
+
+      GATING RULES (verbatim from ce-simplify-code, and they override the guards
+      wherever they conflict):
+      - Never simplify away a safety check.
+      - LOC removed is not the metric.
+
+      MUST NOT:
+      - Change public API shapes (exported signatures, DTOs, route contracts,
+        response bodies). If a guard would require that, report it instead.
+      - Touch any file outside the scope intersection above.
+      - Touch commit-msg.txt.
+      - Create commits, branches or worktrees. A later node commits.
+
+      VERIFICATION — after your passes, in the worktree, these must exit 0:
+        bun run typecheck     (tsgo — NOT build:fast)
+        bun run lint          (biome)
+        bun run test -- "<pattern>"  for each pattern in test_patterns in
+                              verify.json in the artifacts directory.
+      NEVER run bare `bun test`: `test` is a bun builtin, so the bare form runs
+      bun's own runner instead of jest and silently breaks the suite's mocks.
+      Do not run integration tests in this node.
+
+      Write deslop-result.json to the artifacts directory, with exactly this shape:
+        {"changed_files": ["<repo-relative>", ...],
+         "passes": [{"guard": "complexity|tautological_tests|yagni|open_closed|comments",
+                     "file": "<repo-relative>", "line": <int>,
+                     "action": "deleted|rewrote|kept", "reason": "<one line>"}],
+         "reported_not_fixed": [{"guard": "<one of the five>",
+                                 "file": "<repo-relative>", "line": <int>,
+                                 "reason": "<why it was not fixed>"}],
+         "verification": {"typecheck": <int exit code>, "lint": <int exit code>,
+                          "tests": <int exit code>}}
+      Writing this file is MANDATORY and comes BEFORE your final line — ending
+      without it aborts the pipeline. Write it even when every array is empty.
+      Then end with the single line: DESLOP_DONE
+
+  - id: deslop-verify
+    depends_on: [deslop]
+    loop_group:
+      max_iterations: 2
+      until: DESLOP_CLEAN
+      nodes:
+        - id: deslop-recheck
+          timeout: 1200000
+          bash: |
+            set -euo pipefail
+            eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+            cd "$WT"
+            # The writer ran a full agent session against this worktree; any .omc
+            # it left is runtime-state leakage, never work product (same guard as
+            # gate-tests). It must go BEFORE the checkpoint or it is snapshotted.
+            rm -rf .omc
+            # Durable round counter: survives resumes, unlike the loop's own
+            # iteration index. Artifacts are round-scoped so a hand fix + resume
+            # cannot read the previous round's verification as its own.
+            C="$ARTIFACTS_DIR/deslop-round.txt"
+            N=$(cat "$C" 2>/dev/null || echo 0); N=$((N+1)); echo "$N" > "$C"
+            RD="$ARTIFACTS_DIR/deslop-round-$N"; mkdir -p "$RD"
+            BASE=$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")
+            # Every check runs even after one fails: recheck.json is the reviewer's
+            # authoritative verification record and must carry all five exit codes.
+            TC=0; bun run typecheck > "$RD/typecheck.txt" 2>&1 || TC=$?
+            LT=0; bun run lint > "$RD/lint.txt" 2>&1 || LT=$?
+            # Materialize the patterns first. Piping the extractor straight into the
+            # loop would let a verify.json parse failure feed the loop nothing, and a
+            # gate that silently runs zero tests reports PASS for the wrong reason.
+            python3 -c "import json,sys; [print(p) for p in json.load(open(sys.argv[1]))['test_patterns']]" \
+              "$ARTIFACTS_DIR/verify.json" > "$RD/patterns.txt" \
+              || { echo "DESLOP_GATE=FAIL verify.json unreadable round=$N"; exit 1; }
+            test -s "$RD/patterns.txt" || { echo "DESLOP_GATE=FAIL verify.json has no test_patterns round=$N"; exit 1; }
+            UT=0
+            while IFS= read -r PAT; do
+              test -n "$PAT" || continue
+              bun run test -- "$PAT" >> "$RD/test.txt" 2>&1 || UT=$?
+            done < "$RD/patterns.txt"
+            SC=0
+            python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py \
+              "$ARTIFACTS_DIR/files-allowlist.json" "$WT" "$BASE" > "$RD/scope.txt" 2>&1 || SC=$?
+            # Delta-only: check-slop compares the base tree to the WORKING tree
+            # (untracked included), never base..HEAD — the implementation is not
+            # committed until commit-impl, so a HEAD-anchored diff would be empty.
+            SL=0
+            python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-slop.py \
+              "$WT" "$BASE" --max-complexity 10 > "$RD/slop.txt" 2>&1 || SL=$?
+            python3 - "$RD/recheck.json" "$TC" "$LT" "$UT" "$SC" "$SL" <<'PY'
+            import json, sys
+            path, tc, lt, ut, sc, sl = sys.argv[1:7]
+            json.dump({"typecheck": int(tc), "lint": int(lt), "tests": int(ut),
+                       "scope": int(sc), "slop": int(sl)}, open(path, "w"), indent=2)
+            PY
+            cat "$RD/slop.txt" || true
+            test "$TC" = 0 || { echo "DESLOP_GATE=FAIL typecheck round=$N"; tail -40 "$RD/typecheck.txt"; exit 1; }
+            test "$LT" = 0 || { echo "DESLOP_GATE=FAIL lint round=$N"; tail -40 "$RD/lint.txt"; exit 1; }
+            test "$UT" = 0 || { echo "DESLOP_GATE=FAIL unit round=$N"; tail -40 "$RD/test.txt"; exit 1; }
+            test "$SC" = 0 || { echo "DESLOP_GATE=FAIL scope round=$N"; cat "$RD/scope.txt"; exit 1; }
+            test "$SL" = 0 || { echo "DESLOP_GATE=FAIL slop round=$N"; exit 1; }
+            # The writer's own "verification" block is historical (a hand fix on
+            # resume would leave it stale), so this is a shape check only —
+            # recheck.json above is what the reviewer is told to trust.
+            RJ="$ARTIFACTS_DIR/deslop-result.json"
+            test -s "$RJ" || { echo "DESLOP_GATE=FAIL no deslop-result.json round=$N"; exit 1; }
+            python3 -c "import json,sys; d=json.load(open(sys.argv[1], encoding='utf-8')); assert isinstance(d, dict); assert isinstance(d.get('changed_files'), list); assert isinstance(d.get('passes'), list)" \
+              "$RJ" || { echo "DESLOP_GATE=FAIL deslop-result.json unparseable round=$N"; exit 1; }
+            # Restorable checkpoint, not just a fingerprint. A throwaway index
+            # turns the whole worktree — untracked implementation files included —
+            # into a real tree object in this repo's object DB, so a reviewer that
+            # edits or deletes files is not only DETECTED but UNDOABLE. HEAD sha
+            # and the live index tree go in too: a reviewer that commits or stages
+            # without changing content leaves `git status --porcelain` identical,
+            # so porcelain alone is not enough.
+            rm -f "$RD/index"
+            GIT_INDEX_FILE="$RD/index" git add -A || { echo "DESLOP_GATE=FAIL checkpoint add round=$N"; exit 1; }
+            CKTREE=$(GIT_INDEX_FILE="$RD/index" git write-tree) \
+              || { echo "DESLOP_GATE=FAIL checkpoint write-tree round=$N"; exit 1; }
+            test -n "$CKTREE" || { echo "DESLOP_GATE=FAIL checkpoint empty tree sha round=$N"; exit 1; }
+            echo "$CKTREE" > "$RD/checkpoint-tree.txt"
+            # Belt: the bytes survive even a worktree wipe that takes the object DB.
+            git archive "$CKTREE" > "$RD/checkpoint.tar" \
+              || { echo "DESLOP_GATE=FAIL checkpoint archive round=$N"; exit 1; }
+            CKHEAD=$(git rev-parse HEAD) || { echo "DESLOP_GATE=FAIL checkpoint rev-parse round=$N"; exit 1; }
+            CKINDEX=$(git write-tree) || { echo "DESLOP_GATE=FAIL checkpoint live-index tree round=$N"; exit 1; }
+            {
+              echo "head=$CKHEAD"
+              echo "index=$CKINDEX"
+              echo "checkpoint=$CKTREE"
+            } > "$ARTIFACTS_DIR/deslop-tree.txt"
+            FILES=$(sed -n 's/^SLOP=OK files=\([0-9]*\)$/\1/p' "$RD/slop.txt" | tail -1)
+            test -n "$FILES" || FILES=0
+            echo "DESLOP_GATE=PASS files=$FILES round=$N checkpoint=$CKTREE"
+
+        - id: deslop-review
+          depends_on: [deslop-recheck]
+          model: sonnet
+          maxBudgetUsd: 2
+          timeout: 600000
+          prompt: |
+            You are the deslop REVIEWER node. You are a reviewer ONLY: the writer
+            that cleaned this code was a different session, and you must not become
+            its author. Ask no questions.
+
+            YOU MUST NOT EDIT ANYTHING. Do not modify, create or delete any file in
+            the repository. Do not stage anything, do not commit, do not run any
+            command that writes to the worktree. The next node fingerprints the
+            worktree (HEAD sha, index tree, and a full-tree checkpoint taken before
+            you started) and fails the run if a single byte moved. The ONLY file you
+            write is deslop-review.json in the artifacts directory.
+
+            Resolve the artifacts directory by running: echo "$ARTIFACTS_DIR"
+
+            The repository checkout is the "worktree" field of params.json in that
+            same directory (you are NOT cwd'd there — cd into it for every git
+            command).
+
+            READ, in this order:
+            - the current round number in deslop-round.txt in the artifacts directory
+              (call it N), then deslop-round-N/recheck.json there. That file is the
+              AUTHORITATIVE verification record: {"typecheck","lint","tests","scope",
+              "slop"} exit codes, all zero.
+            - deslop-result.json in the artifacts directory — the writer's own log of
+              what it changed. Its "verification" block is HISTORICAL and may be stale
+              (a human may have hand-fixed and resumed); recheck.json overrides it.
+            - the change itself, in the worktree:
+                git diff "$(cat <that directory>/bootstrap-head.txt)"
+                git status --porcelain
+              and read the untracked files directly — the implementation is NOT
+              committed yet, so the working tree is the subject.
+            - files-allowlist.json in the artifacts directory: the in-scope paths.
+
+            Judge the change against exactly these five guards:
+            1. complexity — a new function above cyclomatic complexity 10, or a
+               changed function whose complexity this change raised above 10. A
+               pre-existing function already above 10 that this change did not
+               worsen is NOT a finding.
+            2. tautological_tests — a test asserting a value against itself, whose
+               only matchers are toBeDefined / toBeTruthy / not.toThrow, that asserts
+               on a mock's return value, or that has no assertion.
+            3. yagni — parameters, options, branches, exports, types or config added
+               by this change with no caller in the diff or in the repo.
+            4. open_closed — the change special-cases an existing dispatch (switch,
+               if-chain, registry) where an extension point already exists; or it
+               introduces an extension point for a single consumer. This guard is
+               NOT mechanically checkable — it is yours to own.
+            5. comments — added comments that restate the code, narrate the change,
+               or preserve task history; banners; JSDoc repeating the signature;
+               added TODOs. A comment explaining *why*, or recording an invariant or
+               a constraint, is correct and is NOT a finding.
+
+            Two rules override all five: never call for simplifying away a safety
+            check, and LOC removed is not the metric.
+
+            Confidence is a contract, not a mood. 100 = you read the code and the
+            defect is present as described. 75 = present, with one assumption you
+            could not check. 50 = suspicion worth recording that you could not
+            confirm. 75 and 100 BLOCK the pipeline for a human; 50 does not. There
+            is no other allowed value.
+
+            Write deslop-review.json to the artifacts directory with EXACTLY this
+            schema — every key required, no extra top-level keys:
+              {"verdict": "CLEAN|DIRTY",
+               "coverage": {
+                 "complexity":         {"status": "assessed|not_applicable", "evidence": "<non-empty>"},
+                 "tautological_tests": {"status": "assessed|not_applicable", "evidence": "<non-empty>"},
+                 "yagni":              {"status": "assessed|not_applicable", "evidence": "<non-empty>"},
+                 "open_closed":        {"status": "assessed|not_applicable", "evidence": "<non-empty>"},
+                 "comments":           {"status": "assessed|not_applicable", "evidence": "<non-empty>"}
+               },
+               "findings": [
+                 {"guard": "complexity|tautological_tests|yagni|open_closed|comments",
+                  "file": "<repo-relative>", "line": <int>,
+                  "confidence": 50|75|100, "evidence": "<non-empty>"}
+               ]}
+            "evidence" under coverage says what you looked at for that guard and why
+            you concluded what you concluded; "not_applicable" needs evidence too
+            (for example: no test files in the change). "findings" is [] when clean.
+            Declare "verdict": "DIRTY" if and only if you filed at least one finding
+            at confidence 75 or 100 — the next node re-derives the verdict from the
+            findings and FAILS the run if your declaration disagrees with them.
+
+            Writing deslop-review.json is MANDATORY and comes BEFORE your final line —
+            ending without it aborts the pipeline. Then end with the single line:
+            DESLOP_REVIEW_DONE
+
+        - id: deslop-review-gate
+          depends_on: [deslop-review]
+          timeout: 300000
+          bash: |
+            set -euo pipefail
+            eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+            cd "$WT"
+            N=$(cat "$ARTIFACTS_DIR/deslop-round.txt" 2>/dev/null || echo "")
+            test -n "$N" || { echo "DESLOP_REVIEW=FAIL no deslop-round.txt (deslop-recheck did not run)"; exit 1; }
+            RD="$ARTIFACTS_DIR/deslop-round-$N"
+            test -s "$RD/checkpoint-tree.txt" || { echo "DESLOP_REVIEW=FAIL no checkpoint for round=$N"; exit 1; }
+            R="$ARTIFACTS_DIR/deslop-review.json"
+            test -s "$R" || { echo "DESLOP_REVIEW=FAIL no deslop-review.json round=$N"; exit 1; }
+            # The reviewer session may leave .omc in the worktree exactly as the
+            # writer does. That is runtime-state leakage, not an edit — clearing it
+            # here keeps it from reading as tampering below.
+            rm -rf .omc
+            # Tamper check comes FIRST: a reviewer that edited the code is not a
+            # reviewer, and nothing it wrote can be trusted. Recompute the same three
+            # facts the checkpoint recorded and compare byte-for-byte.
+            CK=$(cat "$RD/checkpoint-tree.txt")
+            rm -f "$RD/index-verify"
+            GIT_INDEX_FILE="$RD/index-verify" git add -A || { echo "DESLOP_REVIEW=FAIL recompute add round=$N"; exit 1; }
+            NOWCK=$(GIT_INDEX_FILE="$RD/index-verify" git write-tree) \
+              || { echo "DESLOP_REVIEW=FAIL recompute write-tree round=$N"; exit 1; }
+            NOWHEAD=$(git rev-parse HEAD) || { echo "DESLOP_REVIEW=FAIL recompute rev-parse round=$N"; exit 1; }
+            NOWINDEX=$(git write-tree) || { echo "DESLOP_REVIEW=FAIL recompute live-index tree round=$N"; exit 1; }
+            {
+              echo "head=$NOWHEAD"
+              echo "index=$NOWINDEX"
+              echo "checkpoint=$NOWCK"
+            } > "$RD/deslop-tree-now.txt"
+            if ! cmp -s "$ARTIFACTS_DIR/deslop-tree.txt" "$RD/deslop-tree-now.txt"; then
+              echo "DESLOP_REVIEW=FAIL reviewer modified tree round=$N"
+              diff "$ARTIFACTS_DIR/deslop-tree.txt" "$RD/deslop-tree-now.txt" || true
+              echo "--- what the reviewer changed (checkpoint tree -> now) ---"
+              git diff --stat "$CK" "$NOWCK" || true
+              git diff "$CK" "$NOWCK" || true
+              # Literal tree-vs-worktree diff as well. It reports every file that was
+              # UNTRACKED at checkpoint time as a deletion (git diff <tree> only walks
+              # tracked paths), so the tree-to-tree diff above is the accurate one.
+              git diff "$CK" || true
+              echo "RESTORE the pre-review bytes with EITHER of:"
+              echo "  tar -xf $RD/checkpoint.tar -C $WT"
+              echo "  git -C $WT archive $CK | tar -x -C $WT"
+              echo "Neither removes files the reviewer ADDED (they are listed above as"
+              echo "new files); delete those by hand. Then: archon workflow resume."
+              exit 1
+            fi
+            # Fail-closed validation + gate-DERIVED verdict. The reviewer's declared
+            # verdict is never trusted on its own: blocking = findings at confidence
+            # >= 75, and a declaration that disagrees with the findings is a failure,
+            # not a tie-break.
+            set +e
+            python3 - "$R" "$N" <<'PY'
+            import json, sys
+
+            GUARDS = ["complexity", "tautological_tests", "yagni", "open_closed", "comments"]
+            STATUSES = ("assessed", "not_applicable")
+            path, rnd = sys.argv[1], sys.argv[2]
+
+
+            def malformed(msg):
+                print(f"DESLOP_REVIEW=FAIL malformed finding round={rnd} {msg}")
+                sys.exit(3)
+
+
+            def incomplete(msg):
+                print(f"DESLOP_REVIEW=FAIL coverage incomplete round={rnd} {msg}")
+                sys.exit(4)
+
+
+            try:
+                doc = json.load(open(path, encoding="utf-8"))
+            except Exception as exc:
+                malformed(f"unparseable json: {exc}")
+            if not isinstance(doc, dict):
+                malformed("top level is not an object")
+            verdict = doc.get("verdict")
+            if verdict not in ("CLEAN", "DIRTY"):
+                malformed(f"verdict={verdict!r}")
+            coverage = doc.get("coverage")
+            if not isinstance(coverage, dict):
+                incomplete("coverage is not an object")
+            for guard in GUARDS:
+                entry = coverage.get(guard)
+                if not isinstance(entry, dict):
+                    incomplete(f"missing={guard}")
+                if entry.get("status") not in STATUSES:
+                    incomplete(f"guard={guard} status={entry.get('status')!r}")
+                ev = entry.get("evidence")
+                if not isinstance(ev, str) or not ev.strip():
+                    incomplete(f"guard={guard} empty evidence")
+            findings = doc.get("findings")
+            if not isinstance(findings, list):
+                malformed("findings is not an array")
+            blocking = 0
+            for i, f in enumerate(findings):
+                if not isinstance(f, dict):
+                    malformed(f"index={i} finding is not an object")
+                if f.get("guard") not in GUARDS:
+                    malformed(f"index={i} guard={f.get('guard')!r}")
+                for key in ("file", "evidence"):
+                    val = f.get(key)
+                    if not isinstance(val, str) or not val.strip():
+                        malformed(f"index={i} {key}={val!r}")
+                line = f.get("line")
+                if isinstance(line, bool) or not isinstance(line, int):
+                    malformed(f"index={i} line={line!r}")
+                conf = f.get("confidence")
+                if isinstance(conf, bool) or conf not in (50, 75, 100):
+                    malformed(f"index={i} confidence={conf!r}")
+                if conf >= 75:
+                    blocking += 1
+                    print(f"DESLOP_FINDING guard={f['guard']} file={f['file']}:{line} confidence={conf}")
+            print(f"DESLOP_REVIEW_PARSE round={rnd} declared={verdict} findings={len(findings)} blocking={blocking}")
+            if blocking > 0:
+                print(f"DESLOP=DIRTY round={rnd} blocking={blocking}")
+                sys.exit(2)
+            if verdict == "DIRTY":
+                print(f"DESLOP_REVIEW=FAIL verdict inconsistent round={rnd} declared DIRTY with 0 blocking findings")
+                sys.exit(5)
+            print(f"DESLOP=CLEAN round={rnd}")
+            print("<promise>DESLOP_CLEAN</promise>")
+            sys.exit(0)
+            PY
+            RC=$?
+            set -e
+            case "$RC" in
+              0) exit 0 ;;
+              2)
+                # Durable DIRTY counter: rounds also advance on a mechanical recheck
+                # failure, which never reaches a verdict, so the cap counts verdicts.
+                D=$(cat "$ARTIFACTS_DIR/deslop-dirty.txt" 2>/dev/null || echo 0); D=$((D+1))
+                echo "$D" > "$ARTIFACTS_DIR/deslop-dirty.txt"
+                if [ "$D" -ge 2 ]; then echo "DESLOP_ROUND_CAP round=$N dirty_rounds=$D"; fi
+                exit 1
+                ;;
+              3|4|5) exit 1 ;;
+              *) echo "DESLOP_REVIEW=FAIL validator error rc=$RC round=$N"; exit 1 ;;
+            esac
+
+  - id: reader-audit
+    depends_on: [deslop-verify]
     model: sonnet
     maxBudgetUsd: 3
     timeout: 1200000
@@ -627,7 +1047,7 @@ nodes:
       echo "READER_AUDIT_GATE=PASS"
 
   - id: commit-impl
-    depends_on: [gate-tests]
+    depends_on: [deslop-verify]
     timeout: 300000
     bash: |
       set -euo pipefail
