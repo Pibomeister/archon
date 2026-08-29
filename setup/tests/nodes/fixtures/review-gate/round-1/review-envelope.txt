@@ -1,0 +1,338 @@
+Now dispatching the reviewer team in parallel. Team: 4 always-on structured personas (correctness, testing, maintainability, project-standards) + 2 always-on CE agents (agent-native, learnings-researcher) + 3 conditional personas (security — new public endpoint; api-contract — new route/DTO/type export; kieran-typescript — TypeScript API code) + 1 custom assumption-extraction lens mandated for this run. Diff is 15 lines (12 committed + 4/-1 uncommitted amendment already folded into the base-diff), under the 150-line threshold, so conditional personas are capped at 3 — the natural selection already lands at exactly 3, no trimming needed.This spec file is unrelated to the new DTO (it tests `McpEventBatchDto`), so no regression there — confirmed.
+
+The change is minimal and correct: a static, unguarded `GET /health-archon` returning a hardcoded `{ status: 'ok' }`, matching the pattern of adjacent unguarded static endpoints (`personas`, `sync/success`, `sync/failed`) in the same controller. No service/module/DI changes. Route path is unique, no `@UseGuards` collision, DTO has one required `@ApiProperty()` string field consistent with Swagger conventions elsewhere in the file. I traced execution: request → no guard → literal object return → Nest serializes via DTO type for Swagger only (no `class-transformer` `@Exclude`/`@Expose` needed since it's a plain literal, not passed through a validation pipe). No null/undefined paths, no state, no boundary conditions, nothing async. I found no correctness defect worth reporting at the 50+ confidence floor.Artifact written successfully to `/tmp/compound-engineering/ce-code-review/20260828-200741-cd945e21/correctness.json`.
+
+```json
+{
+  "reviewer": "correctness",
+  "findings": [],
+  "residual_risks": [
+    "The endpoint is intentionally unauthenticated per stated intent (toy fixture for OpenAPI client regen), matching existing unguarded static routes (personas, sync/success, sync/failed) in the same controller -- no anomaly, just noting the public surface grows by one route."
+  ],
+  "testing_gaps": [
+    "No unit test added for the new getHealthArchon() handler or GetHealthArchonResponseDto; correctness risk is negligible given the static literal return, but there is zero test coverage asserting the route registers and returns {status: 'ok'}."
+  ]
+}
+```
+
+Relevant files inspected:
+- `/Users/eduardopicazo/Documents/Workspace/Goodword/api/.worktrees/toy-feature-spec/apps/api/src/app/app.controller.ts`
+- `/Users/eduardopicazo/Documents/Workspace/Goodword/api/.worktrees/toy-feature-spec/apps/api/src/app/app.controller.dto.ts`
+- `/Users/eduardopicazo/Documents/Workspace/Goodword/api/.worktrees/toy-feature-spec/apps/api/src/app/__tests__/app.controller.dto.spec.ts` (confirmed no interaction with the diff)
+
+No correctness defects found at confidence >= 50. The change is a minimal, static, unguarded endpoint consistent with sibling routes in the same controller; no null/undefined paths, no state mutation, no async ordering, no boundary logic to trace.Artifact written to `/tmp/compound-engineering/ce-code-review/20260828-200741-cd945e21/maintainability.json`.
+
+```json
+{
+  "reviewer": "maintainability",
+  "findings": [
+    {
+      "title": "New endpoint named 'health-archon' mixes generic health-check semantics with an internal codename, and nothing marks it as a temporary fixture",
+      "severity": "P3",
+      "file": "apps/api/src/app/app.controller.ts",
+      "line": 380,
+      "confidence": 50,
+      "autofix_class": "advisory",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "suggested_fix": "Either name it clearly as a fixture (e.g. 'archon-fixture' route, avoiding the 'health' prefix which implies infra semantics), or add a one-line comment/TODO noting it exists solely for Archon M0.T client-gen and can be removed once the real feature lands."
+    }
+  ],
+  "residual_risks": [
+    "If this fixture endpoint is intended to be removed once the Archon M0.T client-gen validation is done, there is no tracked-issue reference (TODO/ENG-XXX) tying it to a cleanup task, so it may be forgotten and remain permanent API surface."
+  ],
+  "testing_gaps": []
+}
+```
+
+Relevant files reviewed:
+- `/Users/eduardopicazo/Documents/Workspace/Goodword/api/.worktrees/toy-feature-spec/apps/api/src/app/app.controller.ts`
+- `/Users/eduardopicazo/Documents/Workspace/Goodword/api/.worktrees/toy-feature-spec/apps/api/src/app/app.controller.dto.ts`
+
+No structural coupling, premature abstraction, or placement issues found beyond the naming/permanence concern above — the DTO placement adjacent to `GetInfoResponseDto` follows the file's existing declaration-order convention and is not misleading, and the change is otherwise as minimal as the stated intent (no service/module/guard changes).Artifact written to `/tmp/compound-engineering/ce-code-review/20260828-200741-cd945e21/testing.json`.
+
+Analysis summary: verified `apps/api/src/app/__tests__/app.controller.dto.spec.ts` only imports and validates `McpEventBatchDto` (no exhaustive class enumeration), so the plan's claim that adding `GetHealthArchonResponseDto` poses no regression risk to that spec holds up — confirmed safe. No `app.controller.spec.ts` exists. Confirmed the sibling `GetInfoResponseDto`/`getInfo()` pattern the plan cites is indeed untested, supporting the plan's "mirrors existing untested pattern" argument. Given this repo's explicit test-value gate (`.claude/rules/testing.md`: reject tests for hardcoded values, pass-through handlers), no unit test is warranted for the new branch-free `getHealthArchon()` handler — no findings raised for that.
+
+One gap surfaced: the plan's stated verification (`bun run test -- "app.controller.dto"`) never executes or type-checks `apps/api/src/app/app.controller.ts`, where the actual new code lives (the new import, `@Get('health-archon')` decorator, `@ApiOkResponse` wiring). Since ts-jest runs with `isolatedModules: true`, that command wouldn't catch a typo or type mismatch in the controller file itself. Routed to `testing_gaps` (advisory) rather than a blocking finding, since the change is trivial and the repo's own manual-QA doc (`docs/manual-qa.md`) is the intended catch for API response changes — recommend adding `bun run typecheck` plus a manual hit of `GET /health-archon` before merge.
+
+```json
+{
+  "reviewer": "testing",
+  "findings": [],
+  "residual_risks": [
+    "No automated test executes GET /health-archon end-to-end (no app.controller.spec.ts exists for this file); correctness of the route registration and response shape relies entirely on manual QA against a running server, consistent with the repo's stated policy of not unit-testing hardcoded, branch-free handlers."
+  ],
+  "testing_gaps": [
+    "The plan's stated verification command (`bun run test -- \"app.controller.dto\"`) only runs app.controller.dto.spec.ts, which imports McpEventBatchDto from app.controller.dto.ts -- it never imports or executes app.controller.ts, where the actual new code (the @Get('health-archon') handler, the new import, and the @ApiOkResponse wiring) lives. Since ts-jest runs with isolatedModules, that verification step would not even type-check app.controller.ts. Recommend adding `bun run typecheck` and a manual curl of GET /health-archon before merge."
+  ]
+}
+```Artifact written successfully to `/tmp/compound-engineering/ce-code-review/20260828-200741-cd945e21/security.json`.
+
+Verification performed: read `.claude/rules/api-patterns.md` (apps/api/**) directly — it states health checks and self-authenticated webhooks are the named exception to the guard-presence check, confirming the plan's paraphrase is accurate, not embellished. Checked `apps/api/src/app/app.controller.ts` guard usage: sibling `getInfo()` (line 341/347-348) *is* guarded with `CompositeAuthGuard` (it returns deployment/git metadata, a more sensitive payload), but `sync/success`/`sync/failed` (lines 389, 397) are pre-existing unguarded GETs, and `apps/api/src/main.ts:264` already registers an unauthenticated `/health` route for App Runner — so an unauthenticated health-style route is an established codebase pattern, not a deviation this diff invents. The new `getHealthArchon()` (line 380-386) takes no input, has no side effects, and returns only the static literal `{status:'ok'}` — no git sha, env, uptime, or other data — so there is no information-disclosure surface beyond a fixed string.
+
+No exploitable vulnerability or rule violation found; findings array is empty.
+
+```json
+{
+  "reviewer": "security",
+  "findings": [],
+  "residual_risks": [
+    "The endpoint is a toy/fixture artifact for an Archon M0.T spec exercise; if merged as-is it leaves a permanent unauthenticated route in AppController with no operational value beyond the pre-existing /health App Runner check -- route-hygiene concern, not a vulnerability."
+  ],
+  "testing_gaps": [
+    "No test asserts GET /health-archon returns 200 with {status:'ok'} without an Authorization header, which would pin the intentional public-access decision as a regression guard."
+  ]
+}
+```Artifact written to `/tmp/compound-engineering/ce-code-review/20260828-200741-cd945e21/project-standards.json`.
+
+Reviewed against `/Users/eduardopicazo/Documents/Workspace/Goodword/api/.worktrees/toy-feature-spec/CLAUDE.md` and `.claude/rules/{api-patterns,type-safety,code-style,testing}.md`. The diff (new `GetHealthArchonResponseDto` + `GET /health-archon`) complies with the applicable rules: explicit response DTO used (no generic `Object` schema), single controller DTO file kept consolidated, `@ApiProperty()` present, no `any`/`require()`/hardcoded secrets/untracked TODOs, unauthenticated route falls within the api-patterns.md health-check guard exception, and testing.md explicitly states a new endpoint does not require a test by itself. No quotable violation found.
+
+```json
+{
+  "reviewer": "project-standards",
+  "findings": [],
+  "residual_risks": [
+    "CLAUDE.md 'API Client Sync' states: 'After updating any API endpoint or DTO, remind the user to run `bun run gen:api` ... to sync the generated client types.' This diff adds both a new endpoint and a new DTO; whether that reminder was given in the surrounding session/PR is not visible from the diff alone and should be confirmed before merge.",
+    "The new `GET /health-archon` route has no guard, matching the api-patterns.md sanctioned exception for 'health checks' — but confirm it is not inadvertently covered by a global auth interceptor/guard added elsewhere, so it stays public only as intended."
+  ],
+  "testing_gaps": []
+}
+```
+
+Relevant files read:
+- /Users/eduardopicazo/Documents/Workspace/Goodword/api/.worktrees/toy-feature-spec/CLAUDE.md
+- /Users/eduardopicazo/Documents/Workspace/Goodword/api/.worktrees/toy-feature-spec/.claude/rules/api-patterns.md
+- /Users/eduardopicazo/Documents/Workspace/Goodword/api/.worktrees/toy-feature-spec/.claude/rules/type-safety.md
+- /Users/eduardopicazo/Documents/Workspace/Goodword/api/.worktrees/toy-feature-spec/.claude/rules/code-style.md
+- /Users/eduardopicazo/Documents/Workspace/Goodword/api/.worktrees/toy-feature-spec/.claude/rules/testing.md
+- /Users/eduardopicazo/Documents/Workspace/Goodword/api/.worktrees/toy-feature-spec/apps/api/src/app/app.controller.dto.ts (diff)
+- /Users/eduardopicazo/Documents/Workspace/Goodword/api/.worktrees/toy-feature-spec/apps/api/src/app/app.controller.ts (diff)No dynamic/param routes to collide with. Route is fine, no shadowing risk.
+
+Now writing findings. Main finding: `status: string` untyped field deviates from established convention of enum/literal typing for fixed-value status fields (evidenced by `ChannelConsentStatus`, `SubscriptionStatus`, `OnboardingStatus` all using `enum:` in `@ApiProperty`). This weakens the generated TS client type from a literal `'ok'` to plain `string`, which is exactly the downstream-consumer risk the task calls out. Confidence 50 (stylistic/advisory per rubric — a plain `string` doesn't break the client, just weakens the generated type). Route naming, `@ApiOkResponse` shape, and versioning are all fine — no findings there.No `@ApiTags`/global guard usage in this controller at all (siblings like `getInfo` opt in to `CompositeAuthGuard` explicitly per-route, and there's no controller-level `@ApiTags`), so the new route's lack of a tag/guard is consistent with existing style, not a regression.
+
+Agent-accessibility review of `GET /health-archon`:
+
+- No gaps found. It's a simple unauthenticated GET returning a typed DTO (`GetHealthArchonResponseDto`), documented with `@ApiOkResponse` + `type`, matching the pattern of the adjacent `getInfo` handler (same file, same DTO-export convention in `app.controller.dto.ts`). Any OpenAPI-client generator (e.g. `web-app`'s `pnpm gen:api`) will pick it up and produce a typed method automatically — no manual/agent-specific plumbing needed since this repo doesn't use hand-maintained tool registries for its Swagger-derived clients.
+- Minor, non-blocking observations (not gaps, since the endpoint is intentionally a toy/no-op):
+  - No `@ApiOperation({ summary })`, unlike a few other routes in this file (e.g. the MCP batch endpoint) that add a summary for extra Swagger discoverability — optional polish only.
+  - `status: string` is untyped/unconstrained (could be `'ok'` literal or enum) — since this is a fixture endpoint meant to prove out a real contract, a loose `string` is fine and arguably matches the "smallest possible change" intent.Artifact written to `/tmp/compound-engineering/ce-code-review/20260828-200741-cd945e21/api-contract.json`.
+
+Route naming (`GET /health-archon`), no dynamic-route shadowing risk (checked all sibling `@Get()` paths in `apps/api/src/app/app.controller.ts`), `@ApiOkResponse` shape/description consistency with sibling endpoints (`/info`, `/personas`, `/intents`), and versioning (net-new route/export, no name collisions) all checked clean — no findings there.
+
+```json
+{
+  "reviewer": "api-contract",
+  "findings": [
+    {
+      "title": "status field typed as plain string instead of literal/enum, weakening generated client type",
+      "severity": "P3",
+      "file": "apps/api/src/app/app.controller.dto.ts",
+      "line": 540,
+      "confidence": 50,
+      "autofix_class": "manual",
+      "owner": "review-fixer",
+      "requires_verification": false,
+      "pre_existing": false,
+      "suggested_fix": "Either declare a string-literal type (status: 'ok') or a small enum and pass it via @ApiProperty({ enum: ... }) to match the convention used by ChannelConsentStatus/SubscriptionStatus/OnboardingStatus elsewhere in this file."
+    }
+  ],
+  "residual_risks": [
+    "If GetHealthArchonResponseDto.status is later reused for a real (non-toy) health check with multiple possible values, the untyped string will already be baked into any generated client types that consumers pin to; fixing it later is a breaking type change for those consumers."
+  ],
+  "testing_gaps": [
+    "No unit or e2e test asserts the GET /health-archon response shape (status: 'ok'), so a future accidental change to the returned field name or value would not be caught by CI."
+  ]
+}
+```Reviewers are reporting back; waiting on the remaining three (kieran-typescript, learnings-researcher, assumption-audit) before merging findings.Artifact written to `/tmp/compound-engineering/ce-code-review/20260828-200741-cd945e21/kieran-typescript.json`.
+
+```json
+{
+  "reviewer": "kieran-typescript",
+  "findings": [
+    {
+      "title": "GetHealthArchonResponseDto.status typed as bare string, not the literal it always returns",
+      "severity": "P2",
+      "file": "apps/api/src/app/app.controller.dto.ts",
+      "line": 542,
+      "confidence": 75,
+      "autofix_class": "safe_auto",
+      "owner": "review-fixer",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Narrow the field to a literal type and reflect it in Swagger, e.g. `@ApiProperty({ enum: ['ok'] }) status: 'ok';` (plain `@ApiProperty()` won't infer the literal for Swagger since TS emits `String` design metadata for literal string types)."
+    }
+  ],
+  "residual_risks": [
+    "If this DTO's shape is treated as a template for future toy/fixture endpoints, the loose `string` status field may get copy-pasted forward, compounding the imprecision across multiple contract-fixture endpoints."
+  ],
+  "testing_gaps": [
+    "No test file changed alongside this endpoint; there is no assertion (unit or e2e) that GET /health-archon is reachable without auth and returns the exact shape { status: 'ok' }, which is the property this fixture exists to guarantee for the web-lane codegen consumer."
+  ]
+}
+```
+
+Notes: checked `@Controller()` and confirmed no class-level guard, and that `getHealthArchon` correctly omits `@UseGuards(CompositeAuthGuard)` (unlike the neighboring `getInfo`), so the "unauthenticated" intent is satisfied — not flagged. Import ordering and DTO placement are alphabetically/structurally consistent with the rest of the file and would be caught by Biome if wrong anyway, so not flagged. Return type matches the declared DTO exactly.Same two files in the main `api/` repo — confirms the worktree isn't missing anything from a stale checkout.
+
+## Institutional Learnings Search Result
+
+**Searched**: `docs/solutions/` in both the worktree (`/Users/eduardopicazo/Documents/Workspace/Goodword/api/.worktrees/toy-feature-spec/docs/solutions/`) and the main `api/` repo. Only two documented-learnings files exist in the entire directory:
+
+- `docs/solutions/chat-langgraph/interrupt-resume-subject-binding.md` — `module: chat/langgraph`, `problem_type: logic_error`. Covers LangGraph interrupt/resume subject-binding bugs in smart-group flows. Not related.
+- `docs/solutions/infrastructure/lambda-eventinvokeconfig-dlq-iam-race.md` — `module: integration-service`, `problem_type: deploy-failure`. Covers a SAM/IAM first-deploy race for Lambda EventInvokeConfig + DLQ grants. Not related.
+
+Neither file's `module`, `tags`, or content touches NestJS controllers, Swagger/OpenAPI DTOs, health-check endpoints, guard/auth decisions, or `gen:api` client-sync issues.
+
+**No relevant past solutions found** for this PR's changes (`apps/app.controller.ts`, `apps/app.controller.dto.ts` — adding an unauthenticated `GET /health-archon` toy endpoint with a `GetHealthArchonResponseDto`).
+
+One relevant non-`docs/solutions` note worth carrying forward from `api/CLAUDE.md` itself (not a "learning" file, but a standing project convention that bears directly on this diff): "For Nest Swagger decorators, always use explicit request/response DTO classes. Do not use generic `Object` response schemas" — the PR's use of a concrete `GetHealthArchonResponseDto` aligns with this. Also relevant: the CLAUDE.md API Client Sync section explicitly instructs reminding the user to run `bun run gen:api` after any endpoint/DTO change, which matches this PR's stated intent (unblocking a web-lane's client regen) — worth confirming that step is called out in the PR description/handoff rather than assumed.
+
+No prior incident exists in the KB about omitting a guard on a new endpoint, so there's no documented precedent either validating or warning against the unauthenticated design choice for `/health-archon` — that judgment call isn't informed by past institutional learnings and should be evaluated on its own merits (e.g., whether it leaks any information, matches conventions for existing health-check-style endpoints elsewhere in `AppController`, if any).
+
+Given the sparse `docs/solutions/` corpus here, this PR's outcome (if it surfaces anything about toy/fixture-endpoint conventions, DTO-only Swagger contracts for cross-repo client generation, or gen:api sync gotchas) looks like a good candidate for a `kb:capture` or `/ce-compound` entry once it lands.Still waiting on 3 of 10 reviewer subagents (kieran-typescript, learnings-researcher, assumption-audit). No action needed from me until they report back — I'll resume merging as soon as they land.Kieran-TypeScript done — still waiting on learnings-researcher and assumption-audit.Learnings-researcher done — only assumption-audit still pending.Now writing the full artifact and compiling the compact response.Full artifact written to `/tmp/compound-engineering/ce-code-review/20260828-200741-cd945e21/assumption-audit.json`.
+
+```json
+{
+  "reviewer": "assumption-audit",
+  "findings": [
+    {
+      "title": "\"Health checks are the rule's named exception\" overstates api-patterns.md's actual guidance",
+      "severity": "P3",
+      "file": "apps/api/src/app/app.controller.ts",
+      "line": 380,
+      "confidence": 100,
+      "autofix_class": "advisory",
+      "owner": "human",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Reword the plan/spec's justification to reflect the rule's actual 'verify intentionality' wording (not a blanket exemption), or leave an inline comment on the handler explaining the deliberate no-guard decision."
+    },
+    {
+      "title": "Swagger description labels a no-op literal echo a 'health-check endpoint'",
+      "severity": "P3",
+      "file": "apps/api/src/app/app.controller.ts",
+      "line": 382,
+      "confidence": 75,
+      "autofix_class": "advisory",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "suggested_fix": "Reword @ApiOkResponse description to avoid implying real liveness/health semantics if this route could ever be scraped by monitoring tooling."
+    },
+    {
+      "title": "Plan overstates test blast-radius: 3 other spec files exercise app.controller.dto.ts, not just app.controller.dto.spec.ts",
+      "severity": "P3",
+      "file": "apps/api/src/app/app.controller.dto.ts",
+      "line": 540,
+      "confidence": 100,
+      "autofix_class": "gated_auto",
+      "owner": "review-fixer",
+      "requires_verification": false,
+      "pre_existing": false,
+      "suggested_fix": "Broaden verification to `bun run test -- \"app.controller.dto|resolved-entities.util|reminder-v2.dto|notes.api.service\"` or run the full apps/api suite."
+    }
+  ],
+  "residual_risks": [
+    "Change is purely additive so practical regression risk from the test-coverage gap is low, but the plan's stated verification recipe would not have caught a regression had one existed.",
+    "Verified as accurate MATCHES (no findings emitted): GetInfoResponseDto has no class-validator decorators; api-patterns.md's one-DTO-file-per-controller rule text matches verbatim; @Controller() has no path prefix and @Get('info')→/info is a real sibling; the M0.T 'Design constraint' citation is a real, locatable section in .omc/research/toy-feature-spec.md; no omitted app.controller.spec.ts exists (controller has no dedicated spec file at all, pre-existing convention)."
+  ],
+  "testing_gaps": [
+    "AppController has no dedicated spec file; getHealthArchon has zero direct unit-test coverage (pre-existing pattern, not introduced by this diff).",
+    "Plan's verification command doesn't exercise resolved-entities.util.spec.ts, reminder-v2.dto.spec.ts, or notes.api.service.spec.ts, all of which import from the edited file."
+  ]
+}
+```
+
+Key finding for the reviewer: all three known claims plus one additional check-item (M0.T citation) verified as genuine matches. The three mismatches found are all in the P3 (advisory/low-severity) range — the plan's "named exception" framing subtly converts a "verify intentionality" rule into a false blanket exemption, the public Swagger description could mislead health-monitoring tooling, and the verification section's "only test file affected" claim is factually incomplete (3 other specs import the same file, none covered by the given jest filter). No P0/P1/P2 issues; nothing below confidence 50 was suppressed since all three had solid evidence.All 10 reviewers have reported. Before merging, I need to load the full artifacts (for `why_it_matters`) and run Stage 5b's independent validation pass on the survivors.{
+  "validated": true,
+  "reason": "The new GetHealthArchonResponseDto.status is typed as bare `string` with plain @ApiProperty() while the handler always returns 'ok', and sibling status fields in the same file (ChannelConsentStatus, SubscriptionStatus, OnboardingStatus) do use imported enum types, so this is both a real divergence from file convention and an accurate widening of the OpenAPI schema (TS emits String design-metadata for string literals, so Swagger reflects type:'string' with no enum/const), with no compile-time or runtime narrowing elsewhere to compensate."
+}{
+  "validated": true,
+  "reason": "api-patterns.md line 20-22 says to 'Verify the endpoint is intentionally public (health checks, webhooks with their own auth)' with 'Blocking if auth is missing unintentionally' — a judgment-call verification, not a carve-out — while plan.md lines 43-44 literally quotes 'health checks are the rule's named exception,' misrepresenting that instruction for this exact unguarded endpoint, so the mischaracterization is real, diff-specific, and not mitigated just because the current toy endpoint itself is harmless."
+}2 of 4 validators done (both confirmed). Waiting on Swagger-description and test-blast-radius validators.{
+  "validated": false,
+  "reason": "A real, well-known `/health` endpoint already exists in apps/api/src/main.ts (explicitly wired for App Runner health checks), so any actual monitoring/infra config already targets that path directly rather than discovering probes by scraping Swagger descriptions, and the new route's own path ('health-archon') plus explicit 'Toy'/'Archon fixture' qualifiers in the description make accidental reuse of this specific toy endpoint as a liveness probe implausible."
+}Still waiting on 2 of 4 Stage 5b validators (Swagger-description and test-blast-radius findings) before I can merge and synthesize the final headless envelope. No action needed yet — will proceed as soon as they report back.Swagger-description finding rejected by the validator (real `/health` endpoint already exists; toy route is implausible to be mistaken for it). Still waiting on the test-blast-radius validator.CI runs `bun run test` (full unit suite, line 406) unconditionally in the `test-unit` job — so the plan's narrow local filter command doesn't gate the actual merge; the full suite runs regardless of what's in the plan doc.
+
+All findings confirmed:
+- 4 files (reminder-v2.dto.ts, resolved-entities.util.ts, imports.controller.dto.ts, notes.controller.dto.ts) import `ResolvedEntityDto` from app.controller.dto.ts
+- notes.api.service.ts transitively imports notes.controller.dto.ts, confirming notes.api.service.spec.ts's transitive dependency
+- Corresponding spec files exist: reminder-v2.dto.spec.ts, resolved-entities.util.spec.ts, notes.api.service.spec.ts
+- Jest pattern matching is filename-based per CLAUDE.md ("Pattern matches filename"), so `"app.controller.dto"` would not match any of these three spec files
+- CI (`test-unit` job in pr.yaml) runs `bun run test` with no filter, so the full suite runs regardless of the plan's narrower manual-verification suggestion{
+  "validated": false,
+  "reason": "The dependency and filter-exclusion claims are technically accurate, but CI's test-unit job runs the full unqualified `bun run test` suite on every PR regardless of the plan's narrower local-verification suggestion, so the plan's overstated blast-radius claim carries no actual regression risk — this is a moot documentation nitpick, not a real gap, and severity should be downgraded/dismissed rather than validated as-is."
+}All reviewers and validators have completed. Findings merged, cross-reviewer corroboration applied, and the Stage 5b validator pass dropped 2 of 4 survivors as false/moot. Relaying the ce-code-review skill's full headless output verbatim below.
+
+---
+
+**Persona-selection decision (recorded per this run's outer instructions):** Diff measured via `git diff --stat <bootstrap-head>..HEAD` = 12 insertions across 2 files (2 files changed, 12 insertions(+)); the fuller diff against `origin/main` (used for the actual review scope) came to 15 lines across the same 2 files. Both are well under the 150-line threshold, so conditional personas beyond the always-on set were capped at 3. The skill's own diff-driven selection (Stage 3) independently landed on exactly 3 — `security` (new unauthenticated public endpoint), `api-contract` (new route + DTO + exported type), `kieran-typescript` (TypeScript API code) — so no trimming was required. `waivers.md` does not exist in the artifacts run directory, so no "Previously waived" section applies. A 10th, non-catalog reviewer lens ("assumption-audit") was dispatched per the outer run's mandate, tasked verbatim with extracting the diff/plan's encoded assumptions and verifying each against out-of-diff code; its findings were merged through the normal Stage 5/5b pipeline like any other reviewer's.
+
+---
+
+```
+Code review complete (headless mode).
+
+Scope: standalone branch review, archon/toy-feature-spec vs origin/main (merge-base bc5ca113e670b7e0b1f29f5c8eb40d7d0f7fdbda), 2 files / 15 lines changed
+Intent: Add a static, unauthenticated GET /health-archon toy endpoint to AppController, documented in Swagger via a new GetHealthArchonResponseDto, so a separate web-lane can regenerate its OpenAPI client against a real contract (Archon M0.T "toy feature fixture" spec). Deliberately the smallest possible change -- no service, module, repository, or guard changes.
+Reviewers: correctness (always), testing (always), maintainability (always), project-standards (always), ce-agent-native-reviewer (always), ce-learnings-researcher (always), security (new unauthenticated public endpoint), api-contract (new route + DTO + exported type), kieran-typescript (TypeScript API/DTO code), assumption-audit (custom lens: diff/plan assumption extraction and verification)
+Verdict: Ready with fixes
+Artifact: /tmp/compound-engineering/ce-code-review/20260828-200741-cd945e21/
+
+Applied 0 safe_auto fixes.
+
+Manual findings (actionable, needs handoff):
+
+[P2][manual -> downstream-resolver][needs-verification] File: apps/api/src/app/app.controller.dto.ts:540 -- GetHealthArchonResponseDto.status typed as bare string, not the literal it always returns (kieran-typescript, api-contract; confidence 100)
+  Why: The handler only ever returns { status: 'ok' } but the DTO widens the field to `string`, so the generated OpenAPI client (and any TS consumer) types it as an arbitrary string instead of the literal 'ok'. This undercuts the endpoint's stated purpose of giving the web lane a precise, real contract to regenerate against. Sibling status-like fields in this same file (ChannelConsentStatus, SubscriptionStatus, OnboardingStatus) use enum/literal types, so this also diverges from the file's own convention.
+  Suggested fix: Narrow the field to a literal type and reflect it in Swagger, e.g. `@ApiProperty({ enum: ['ok'] }) status: 'ok';`
+  Evidence: apps/api/src/app/app.controller.dto.ts:541-542 adds `status: string;` with no literal/enum constraint
+  Evidence: apps/api/src/app/app.controller.ts:379 `getHealthArchon(): GetHealthArchonResponseDto { return { status: 'ok' }; }` -- the only value ever produced
+  Evidence: Two independent reviewers (kieran-typescript P2/safe_auto, api-contract P3/manual) flagged the same field; merged to the more conservative `manual` routing and promoted to confidence 100 via cross-reviewer corroboration.
+
+Advisory findings (report-only):
+
+[P3][advisory -> human][needs-verification] File: apps/api/src/app/app.controller.ts:380 -- "Health checks are the rule's named exception" overstates api-patterns.md's actual guidance (assumption-audit, confidence 100)
+  Why: The plan (and the source spec it quotes) tells a reviewer that api-patterns.md contains a "named exception" for health checks, reading as an automatic pass. The rule actually instructs reviewers to "verify the endpoint is intentionally public (health checks, webhooks with their own auth)... blocking if auth is missing unintentionally" -- a judgment call, not a blanket carve-out. A future reviewer relying on the plan's framing could wave through other unguarded endpoints under a false belief of automatic exemption.
+  Suggested fix: Reword the plan/spec's justification to reflect the rule's actual "verify intentionality" text, or add a brief inline comment on the handler noting the deliberate no-guard decision.
+  Evidence: Plan (plan.md:43-44): "No @UseGuards(...) — intentional per the spec ('health checks are the rule's named exception' in .claude/rules/api-patterns.md's guard-presence check)."
+  Evidence: Actual rule (.claude/rules/api-patterns.md:20-22): "Verify the endpoint is intentionally public (health checks, webhooks with their own auth). Blocking if auth is missing unintentionally: add the appropriate authentication guard."
+
+Residual risks:
+- No automated e2e test exercises GET /health-archon; correctness of route registration and response shape relies entirely on manual QA (testing, security).
+- The new unauthenticated route provides no operational value beyond the pre-existing /health App Runner check in main.ts -- a route-hygiene concern, not a vulnerability (security).
+- No tracked-issue reference (TODO/ENG-XXX) ties this fixture endpoint to a future cleanup task, so it may be forgotten and remain permanent API surface (maintainability).
+- Confirm the CLAUDE.md "API Client Sync" reminder (`bun run gen:api`) was actually given downstream, and confirm no global auth interceptor added elsewhere inadvertently covers this route (project-standards).
+- If this DTO shape becomes a template for future toy/fixture endpoints, the loose `string` status field may get copy-pasted forward (kieran-typescript, api-contract).
+- assumption-audit independently verified as accurate (non-findings): GetInfoResponseDto has no class-validator decorators; api-patterns.md's one-DTO-file-per-controller rule matches verbatim; @Controller() has no path prefix and GET /info is a real sibling; the plan's cited M0.T "Design constraint" section is real and locatable in .omc/research/toy-feature-spec.md.
+
+Learnings & Past Solutions:
+- No relevant past solutions found in docs/solutions/ (only 2 entries exist in the corpus, both unrelated to controllers/DTOs/Swagger/health-checks/gen:api). Flagged by ce-learnings-researcher as a plausible kb:capture candidate once this "toy-fixture Swagger contract for cross-lane client-gen" pattern recurs.
+
+Testing gaps:
+- No unit test for getHealthArchon() / GetHealthArchonResponseDto (correctness, kieran-typescript).
+- No test asserts GET /health-archon returns 200 without an Authorization header, which would pin the intentional public-access decision as a regression guard (security).
+- No unit/e2e test asserts the exact response shape { status: 'ok' } (api-contract).
+- The plan's stated local-verification command (`bun run test -- "app.controller.dto"`) never imports or executes app.controller.ts itself and would not type-check it; largely mitigated in practice since CI's test-unit job runs the full unqualified suite regardless (testing; corroborated by validator finding below).
+
+Requirements Completeness (plan: explicit, /Users/eduardopicazo/.archon/workspaces/_folder/goodword/artifacts/runs/d3aa3b55a4b819854d6025e115f997c2/plan.md):
+- DTO addition (GetHealthArchonResponseDto with status field) — Met
+- Controller handler addition (GET /health-archon, no guard, hardcoded { status: 'ok' }, placed after getInfo()) — Met
+- No module/service/repository/guard changes — Met (only 2 files touched)
+- No new spec file, per plan's stated test-value-gate reasoning — Met
+All plan-described requirements are implemented as specified; no unaddressed items.
+
+Coverage:
+- Suppressed: 0 findings below anchor 75 via the confidence gate (no non-demoted anchor-50 findings remained after dedup/promotion)
+- Mode-aware demotion suppressions: 1 finding suppressed (maintainability-only, P3/advisory, anchor 50: "health-archon naming mixes health-check semantics with an internal codename")
+- Validator drops: 2 findings rejected by Stage 5b validator
+  - apps/api/src/app/app.controller.ts:382 -- "A real, well-known /health endpoint already exists in main.ts for App Runner; the explicit 'Toy'/'Archon fixture' qualifiers make accidental reuse of this description string as a liveness probe implausible."
+  - apps/api/src/app/app.controller.dto.ts:540 -- "Dependency/filter-exclusion claims are technically accurate, but CI's test-unit job runs the full unqualified `bun run test` suite on every PR regardless of the plan's narrower local-verification suggestion, so this is a moot documentation nitpick, not a real regression risk."
+- Validator over-budget drops: 0 (4 findings validated, under the 15-cap)
+- Untracked files excluded: none
+- Failed reviewers: none (10/10 completed)
+- Persona-selection: diff size 12-15 lines (< 150-line threshold) capped conditional personas at 3; natural selection (security, api-contract, kieran-typescript) already met the cap exactly.
+- waivers.md: not present in the artifacts run directory; no previously-waived findings to carry forward.
+
+Review complete
+```

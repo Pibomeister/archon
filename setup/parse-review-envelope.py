@@ -7,7 +7,9 @@ New contract (CE >= ~3.19 mode:agent, mode:headless aliased): ONE raw JSON objec
 with fields status (complete|failed|degraded|skipped) and verdict (same enum).
 
 Usage: parse-review-envelope.py <envelope-file>
-Prints shell-eval-able lines:
+Prints shell-eval-able lines (values are shlex-quoted: every enum verdict
+contains a space, and an unquoted `VERDICT=Ready with fixes` makes `eval`
+run the command `with` — observed live 2026-08-28, run d3aa3b55 round 2):
   G1=PASS|FAIL   terminal signal present (review actually completed)
   G2=PASS|FAIL   not degraded
   VERDICT=<enum or empty>
@@ -16,6 +18,7 @@ Prints shell-eval-able lines:
 
 import json
 import re
+import shlex
 import sys
 
 ENUM = ("Ready to merge", "Ready with fixes", "Not ready")
@@ -60,7 +63,7 @@ def main():
         v = obj.get("verdict") if obj.get("verdict") in ENUM else ""
         print(f"G1={g1}")
         print(f"G2={g2}")
-        print(f"VERDICT={v}")
+        print(f"VERDICT={shlex.quote(v)}")
         print("VSRC=json")
         return
     g1 = "PASS" if "Review complete" in text else "FAIL"
@@ -69,7 +72,7 @@ def main():
     v = m.group(1) if m else ""
     print(f"G1={g1}")
     print(f"G2={g2}")
-    print(f"VERDICT={v}")
+    print(f"VERDICT={shlex.quote(v)}")
     print("VSRC=envelope" if (m or g1 == "PASS") else "VSRC=none")
 
 
