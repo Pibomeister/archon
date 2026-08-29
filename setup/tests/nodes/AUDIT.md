@@ -51,15 +51,14 @@ Coverage as swept at `NODE_STRESS=100` (a "group" is one fixture run N times;
 Every group reported `identical=<N> untyped_exits=0 unstable_slots=0`; zero
 non-identical runs, zero untyped exits, zero values that moved between runs.
 
-That `NODE_STRESS=100` sweep was taken against the NARROWER observation
-described below (artifacts plus tracked git state). The widened one has been
-re-swept at `NODE_STRESS=25` — the same 119 groups, 2783 executions, 165s in
-one process — with the same result: zero non-identical runs, zero untyped
-exits, zero unstable slots. No covered fixture writes anything unstable to
-`$TMPDIR`, `$HOME`, a `CE_REVIEW_ROOT` or a gitignored worktree path. Re-taking
-the full `NODE_STRESS=100` sweep against the widened observation is the tracked
-follow-up; the per-node execution counts in the table above are the earlier
-sweep's.
+The full `NODE_STRESS=100` sweep was re-taken against the widened observation
+described below (commit 4ee81ca, one process, `python3 -u`): `Ran 96 tests in
+630.224s OK`, 111 groups at `N=100 identical=100 untyped_exits=0
+unstable_slots=0` plus the 8 `N=1` env-invariance baseline/perturbed lines —
+the 119 groups / 11108 executions in the table, zero anomalies. An
+intermediate `NODE_STRESS=25` sweep (2783 executions, 165s) gave the same
+result. No covered fixture writes anything unstable to `$TMPDIR`, `$HOME`, a
+`CE_REVIEW_ROOT` or a gitignored worktree path.
 
 **What the observation covers.** Three things per run: the exit code, the
 typed lines in order, and every regular file and symlink the node left anywhere
