@@ -212,10 +212,12 @@ its DB events (`remote_agent_workflow_events`) carry the exact node durations th
 no events at all, and its artifacts were untouched. Mechanism (bundled CLI source, 0.8.0): the `resume` command resolves your id only to check it is
 failed/paused, then calls the executor with `{resume: true}` and NO id; the executor picks the run with
 `findResumableRun(workflow_name, working_path)` = `status IN ('failed','paused') OR (running AND stale > 3 days)
-ORDER BY started_at DESC LIMIT 1` — the NEWEST resumable run of that lane on that path. Not fixed in 0.9.0. Before and after any resume: `sqlite3 ~/.archon/archon.db "select id,status,last_activity_at
-from remote_agent_workflow_runs where workflow_name='bugfix' order by last_activity_at desc limit 3"` and confirm the
-run whose `last_activity_at` moved is the one you named. Never resume while another failed/paused run of the same lane
-exists on the path; abandon or finish it first.
+ORDER BY started_at DESC LIMIT 1` — the NEWEST resumable run of that lane on that path. Not fixed in 0.9.0. **Resume through `bash .archon/setup/resume.sh <run-id-or-prefix> [archon args]`, never the raw CLI.** It computes the
+same selection the CLI will make and refuses with `RESUME=REFUSED would_resume=<8> named=<8>
+reason=newer-resumable-run-of-lane` (printing the `abandon` command for the other run) unless the named run is the one
+that query returns; after the resume it re-reads `archon.db` and prints `RESUME=OK run=<8>` only if the named run — and
+no other run of the lane — advanced (`RESUME=WRONG_RUN named=<8> moved=<8>` otherwise). Tests:
+`setup/tests/test_resume_guard.py` (synthetic DB + archon shim).
 
 ## 5. Stalls, orphans, and locks
 

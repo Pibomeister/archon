@@ -282,7 +282,9 @@ reviewer. Stops here:
 
 ## 5. When to resume, and when to stop
 
-Resume (`archon workflow resume <run-id>`) is right for the transient class:
+Resume — always via `bash .archon/setup/resume.sh <run-id>`, which wraps `archon workflow resume` with a
+wrong-run guard (archon 0.8.0 resumes the NEWEST failed run of the lane on the path, not the id you pass; RUNBOOK §4) —
+is right for the transient class:
 `dag.node_empty_output` / "provider stream closed without yielding content", a
 review gate that ended "waiting for background reviewers", and a session-limit
 message once the stated reset has passed. All observed, all cleared by a plain
