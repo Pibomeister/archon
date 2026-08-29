@@ -424,6 +424,7 @@ nodes:
           bash: |
             set -euo pipefail
             N=$(cat "$ARTIFACTS_DIR/plan-round.txt" 2>/dev/null) || { echo "CRITIC_GATE=FAIL no plan-round.txt"; exit 1; }
+            case "$N" in ''|*[!0-9]*) echo "CRITIC_GATE=FAIL plan-round.txt is not an integer: [$N]"; exit 1 ;; esac
             RD="$ARTIFACTS_DIR/plan-round-$N"
             test -s "$RD/critique.json" || { echo "CRITIC_GATE=FAIL no critique.json round=$N"; exit 1; }
             # parse-critique.py prints its own CRITIC_GATE=FAIL <reason> and exits 1
