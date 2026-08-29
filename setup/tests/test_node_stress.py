@@ -1065,6 +1065,247 @@ class ConvergeStress(unittest.TestCase):
 
 
 # ==========================================================================
+# round-pre: the PRODUCER half of the pair ReviewGateScanIsolation covers from
+# the consumer side. It writes `round-N/prerun-dirs.txt` — the baseline
+# `review-gate` later takes `comm -13` against — so RG-1 lives in this node as
+# much as in the gate (AUDIT.md counts six sites; three of them are here).
+#
+# The api and bugfix lanes reach their worktree through params.json; the web
+# lane hardcodes its toy worktree (AUDIT row GT-2) and is bound to the fixture
+# exactly as GateTestsStress binds gate-tests.
+# ==========================================================================
+ROUND_PRE_GUARD = '2>/dev/null | LC_ALL=C sort > "$RD/prerun-dirs.txt"'
+ROUND_PRE_UNGUARDED = '2>/dev/null | sort > "$RD/prerun-dirs.txt"'
+WEB_WT_SUB = [(WEB_TOY_WT, '"$WT_FIXTURE"')]
+ROUND_PRE_LANES = ("full-sdlc-api", "full-sdlc-web", "bugfix")
+
+
+def seeded_listing(names):
+    """`prerun-dirs.txt` as the snapshot normalizes it: one absolute path per
+    seeded dir, trailing slash, the fixture root collapsed to <ROOT>."""
+    return "".join(f"<ROOT>/ce-review-root/{n}/\n" for n in names)
+
+
+def round_pre_fixture(seeds=C_ORDER, counter=None):
+    """A per-run CE_REVIEW_ROOT holding exactly `seeds`, plus a throwaway
+    worktree for the `git rev-parse HEAD` the node opens with.
+
+    The default seeds are C_ORDER — `ce-Beta`, `ce-alpha` — because C collation
+    orders them Beta-before-alpha and en_US.UTF-8 orders them the other way, so
+    the file this node writes is only stable if the sort's collation is pinned.
+    """
+    def build(tmp):
+        art = tmp / "artifacts"
+        wt = tmp / "wt"
+        init_worktree(wt)
+        jdump(art / "params.json", params(tmp, wt))
+        if counter is not None:
+            (art / "round.txt").write_text(f"{counter}\n", encoding="utf-8")
+        ce = tmp / "ce-review-root"
+        ce.mkdir()
+        for name in seeds:
+            (ce / name).mkdir()
+        return {"CE_REVIEW_ROOT": str(ce), "WT_FIXTURE": str(wt)}
+
+    return build
+
+
+class RoundPreStress(unittest.TestCase):
+    """The producer side of the ce-code-review discovery pair, all three lanes."""
+
+    def _run(self, workflow, fixture, **kw):
+        subs = kw.pop("subs", [])
+        if workflow == "full-sdlc-web":
+            subs = WEB_WT_SUB + list(subs)
+        return run_node(workflow, "round-pre", fixture, subs=subs or None, **kw)
+
+    def test_first_round_lists_exactly_the_seeded_dirs_in_c_order(self):
+        for workflow in ROUND_PRE_LANES:
+            with self.subTest(workflow=workflow):
+                r = self._run(workflow, round_pre_fixture())
+                self.assertEqual(r["rc"], 0, r["output"])
+                self.assertIn("ROUND=1 head=<SHA:1>", r["output"])
+                self.assertEqual(r["files"]["round.txt"], "1\n")
+                self.assertEqual(r["files"]["round-1/pre-head.txt"], "<SHA:1>\n")
+                self.assertEqual(r["files"]["round-1/prerun-dirs.txt"],
+                                 seeded_listing(C_ORDER))
+
+    def test_counter_advances_and_writes_into_the_new_round_dir(self):
+        for workflow in ROUND_PRE_LANES:
+            with self.subTest(workflow=workflow):
+                r = self._run(workflow, round_pre_fixture(counter=2))
+                self.assertEqual(r["rc"], 0, r["output"])
+                self.assertIn("ROUND=3 head=<SHA:1>", r["output"])
+                self.assertEqual(r["files"]["round-3/prerun-dirs.txt"],
+                                 seeded_listing(C_ORDER))
+
+    def test_empty_ce_review_root_yields_an_empty_listing_not_a_failure(self):
+        """`ls` of an empty root exits non-zero; `|| true` plus the `touch` is
+        what turns that into an empty baseline rather than a dead round. With
+        `set -euo pipefail` above it, that swallow is load-bearing."""
+        for workflow in ROUND_PRE_LANES:
+            with self.subTest(workflow=workflow):
+                r = self._run(workflow, round_pre_fixture(seeds=()))
+                self.assertEqual(r["rc"], 0, r["output"])
+                self.assertEqual(r["files"]["round-1/prerun-dirs.txt"], "")
+
+    def test_listing_is_c_ordered_under_a_utf8_locale(self):
+        """RG-1, producer side. The consumer sorts with `LC_ALL=C`; if this node
+        honored the ambient locale instead, the two listings would disagree and
+        `comm` would report a pre-existing dir as new."""
+        require_locale(self, UTF8_LOCALE)
+        for workflow in ROUND_PRE_LANES:
+            with self.subTest(workflow=workflow):
+                r = self._run(workflow, round_pre_fixture(),
+                              env={"LC_ALL": UTF8_LOCALE})
+                self.assertEqual(r["files"]["round-1/prerun-dirs.txt"],
+                                 seeded_listing(C_ORDER))
+
+    def test_negative_control_unguarded_sort_follows_the_ambient_locale(self):
+        """The guard above is load-bearing: revert `LC_ALL=C sort` to a bare
+        `sort` and the same fixture writes alpha-before-Beta under en_US.UTF-8.
+        If this ever starts producing C order the fixture stopped reproducing
+        and the guard test above is proving nothing."""
+        require_locale(self, UTF8_LOCALE)
+        r = self._run("full-sdlc-api", round_pre_fixture(),
+                      env={"LC_ALL": UTF8_LOCALE},
+                      subs=[(ROUND_PRE_GUARD, ROUND_PRE_UNGUARDED)])
+        self.assertEqual(r["files"]["round-1/prerun-dirs.txt"],
+                         seeded_listing(tuple(reversed(C_ORDER))))
+
+
+# ==========================================================================
+# wrap-review: the standalone W6 wrapper, same snapshot-then-set-difference
+# shape as round-pre/review-gate with two differences that matter — the two
+# listings live directly in ARTIFACTS_DIR rather than under round-N/, and the
+# head_sha match is EXACT rather than a prefix, with no envelope fallback, so
+# a run dir the gate cannot claim is a typed FAIL rather than a fallback read.
+#
+# Both nodes hardcode the M0.6c fixture repo the wrapper was proven against;
+# `pre` cd's into it, so it is bound to the harness worktree the same way the
+# web lane's is. `gate` assigns the same literal and never reads it.
+# ==========================================================================
+WRAP_REVIEW_REPO = (
+    "/private/tmp/claude-501/-Users-eduardopicazo-Documents-Workspace-Goodword/"
+    "88bb31f2-0094-41b2-bd3f-8409f1264538/scratchpad/m1-fixture/repo"
+)
+WRAP_PRE_SUB = [(WRAP_REVIEW_REPO, '"$WT_FIXTURE"')]
+
+
+def wrap_review_pre_fixture(seeds=C_ORDER):
+    def build(tmp):
+        wt = tmp / "wt"
+        init_worktree(wt)
+        ce = tmp / "ce-review-root"
+        ce.mkdir()
+        for name in seeds:
+            (ce / name).mkdir()
+        return {"CE_REVIEW_ROOT": str(ce), "WT_FIXTURE": str(wt)}
+
+    return build
+
+
+def wrap_review_gate_fixture(head_sha=PREHEAD, verdict="Ready with fixes"):
+    """`head_sha=None` seeds no run dir at all. This gate has no envelope
+    fallback, so that is its FAIL path, not a degraded PASS."""
+    def build(tmp):
+        art = tmp / "artifacts"
+        (art / "pre-head.txt").write_text(PREHEAD + "\n", encoding="utf-8")
+        (art / "prerun-dirs.txt").write_text("", encoding="utf-8")
+        ce = tmp / "ce-review-root"
+        ce.mkdir()
+        if head_sha is not None:
+            run = ce / "run-0001"
+            run.mkdir()
+            jdump(run / "metadata.json", {"head_sha": head_sha, "verdict": verdict})
+        return {"CE_REVIEW_ROOT": str(ce)}
+
+    return build
+
+
+class WrapReviewStress(unittest.TestCase):
+    WF = "wrap-review"
+
+    def test_pre_snapshots_head_and_the_run_dir_set(self):
+        r = run_node(self.WF, "pre", wrap_review_pre_fixture(), subs=WRAP_PRE_SUB)
+        self.assertEqual(r["rc"], 0, r["output"])
+        self.assertIn("PRE_OK head=<SHA:1>", r["output"])
+        self.assertEqual(r["files"]["pre-head.txt"], "<SHA:1>\n")
+        self.assertEqual(r["files"]["prerun-dirs.txt"], seeded_listing(C_ORDER))
+
+    def test_gate_reads_the_matching_run_dir(self):
+        r = run_node(self.WF, "gate", wrap_review_gate_fixture(),
+                     outputs={"review": envelope_with("Ready with fixes")})
+        self.assertEqual(r["rc"], 0, r["output"])
+        self.assertIn("GATE_1_review_complete_present=PASS", r["output"])
+        self.assertIn("GATE_2_degraded_absent=PASS", r["output"])
+        self.assertIn(
+            "GATE_3_verdict_in_enum=PASS verdict=[Ready with fixes] "
+            "rundir=[<ROOT>/ce-review-root/run-0001/]", r["output"])
+        self.assertIn("W6_GATE=PASS", r["output"])
+        self.assertEqual(
+            json.loads(r["files"]["review-summary.json"]),
+            {"verdict": "Ready with fixes", "residual_count": -1, "degraded": False})
+
+    def test_gate_without_a_matching_run_dir_is_a_typed_fail(self):
+        """Exact-match, no fallback: an envelope carrying a valid verdict does
+        NOT rescue a missing metadata.json here, unlike the lanes' review-gate."""
+        r = run_node(self.WF, "gate", wrap_review_gate_fixture(head_sha=None),
+                     outputs={"review": envelope_with("Ready to merge")})
+        self.assertEqual(r["rc"], 1)
+        self.assertIn("GATE_3_verdict_in_enum=FAIL verdict=[] rundir=[]", r["output"])
+        self.assertIn("W6_GATE=FAIL", r["output"])
+
+    def test_gate_rejects_a_run_dir_from_a_different_head(self):
+        r = run_node(self.WF, "gate", wrap_review_gate_fixture(head_sha=FOREIGN_SHA),
+                     outputs={"review": envelope_with("Ready to merge")})
+        self.assertEqual(r["rc"], 1)
+        self.assertIn("GATE_3_verdict_in_enum=FAIL verdict=[] rundir=[]", r["output"])
+        self.assertIn("W6_GATE=FAIL", r["output"])
+
+
+# ==========================================================================
+# AUDIT row RG-4, the residual: CE_REVIEW_ROOT is honored on the READ side
+# only, so on a real host every concurrent lane scans ONE directory. Every
+# other group here hands each repetition a private root, which is what makes
+# them hermetic — and also means none of them exercises the arrangement
+# production actually runs in. This one deliberately gives all N repetitions
+# the SAME root, holding a foreign run dir, and requires the gate to stay on
+# the envelope. No new harness hook was needed: `run_node(env=…)` is applied to
+# every repetition before the fixture's own vars, so a builder that simply
+# declines to return CE_REVIEW_ROOT leaves the shared value standing.
+# ==========================================================================
+class ReviewGateSharedRoot(unittest.TestCase):
+    def test_concurrent_repetitions_sharing_one_root_ignore_a_foreign_run(self):
+        shared = Path(tempfile.mkdtemp(prefix="nodestress-shared-ce-"))
+        self.addCleanup(shutil.rmtree, shared, ignore_errors=True)
+        foreign = shared / "ce-foreign"
+        foreign.mkdir()
+        jdump(foreign / "metadata.json",
+              {"head_sha": FOREIGN_SHA, "verdict": "Not ready"})
+
+        def build(tmp):
+            art = tmp / "artifacts"
+            rd = art / "round-1"
+            rd.mkdir(parents=True)
+            (art / "round.txt").write_text("1\n", encoding="utf-8")
+            (rd / "pre-head.txt").write_text(PREHEAD + "\n", encoding="utf-8")
+            (rd / "prerun-dirs.txt").write_text("", encoding="utf-8")
+            # Deliberately no CE_REVIEW_ROOT: the shared one from env stands.
+            return {}
+
+        r = run_node("full-sdlc-api", "review-gate", build,
+                     outputs={"review": envelope_with("Ready to merge")},
+                     env={"CE_REVIEW_ROOT": str(shared)})
+        self.assertEqual(r["rc"], 0, r["output"])
+        self.assertEqual(r["identical"], r["n"])
+        self.assertIn(
+            "GATE_3_verdict_in_enum=PASS verdict=[Ready to merge] "
+            "source=envelope rundir=[]", r["output"])
+        self.assertIn("REVIEW_GATE=PASS round=1", r["output"])
+
+
+# ==========================================================================
 # AUDIT row ENV-1: no covered node body reads NODE_ENV, DISABLE_OMC, HOME or
 # TZ, and after the LC_ALL=C fix none is collation-sensitive either. That is a
 # claim about the bodies, so it gets a test rather than a comment.

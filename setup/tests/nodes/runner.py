@@ -67,6 +67,7 @@ PASS_TOKENS = {
     "PLAN_ROUND_PROGRESSED", "RCA_PLAN_ROUND_PROGRESSED",
     "CONVERGED", "ROUND_PROGRESSED",
     "CRITIQUE",                      # parse-critique.py success line
+    "PRE_OK",                        # wrap-review:pre success (PRE_OK head=…)
     "GREEN_CHECK",                   # green-check ALWAYS exits 0 by design:
                                      # fix-converge owns the verdict, this node
                                      # only measures. green=false is still a
@@ -79,6 +80,16 @@ FAIL_TOKENS = {
     "PLAN_SCOPE_DISPUTE", "RCA_PLAN_SCOPE_DISPUTE",
     "FIXER_BLOCKED", "SCOPE_BREACH",
 }
+
+# Whole-line PASS forms, for a key that is NOT on its own a PASS token.
+# `round-pre` announces success as `ROUND=N head=<sha>` — but `converge` opens
+# with `ROUND=N verdict=[…]` and must still be typed by its OWN discriminator
+# (CONVERGED / ROUND_PROGRESSED / NO_PROGRESS / ROUND_CAP_REACHED). Putting
+# `ROUND` in PASS_TOKENS would let a future converge that exits 0 without any
+# discriminator read as typed, so the key stays ambiguous and only round-pre's
+# full line shape classifies. Matched against NORMALIZED text, so the sha is
+# `<SHA:1>` by the time this sees it.
+PASS_LINE_RES = (re.compile(r"^ROUND=\d+ head=\S+$"),)
 
 _TYPED_RE = re.compile(r"^(?P<key>[A-Z][A-Za-z0-9_]{2,})(?:=(?P<val>\S*))?(?:\s|$)")
 
@@ -168,6 +179,8 @@ def classify(lines):
             has_pass = True
         elif key in FAIL_TOKENS:
             has_fail = True
+        elif any(p.match(line) for p in PASS_LINE_RES):
+            has_pass = True
     return has_pass, has_fail
 
 
@@ -510,6 +523,13 @@ def stress(label, body, fixture_builder, n=None, env=None, volatile=()):
         "label": label, "n": n, "identical": identical,
         "untyped_exits": untyped, "rc": firsts[0], "typed": firsts[2],
         "output": firsts[1], "slots": slotmaps[0],
+        # The observed artifact snapshot, keyed by relative path (plus the
+        # `worktree:<name>` rows), with contents normalized exactly as the
+        # identity comparison saw them. Exposed so a test can assert WHAT a
+        # node wrote, not only that it wrote the same thing N times: the
+        # snapshot already exists, and the temp dir is gone by the time the
+        # caller gets this dict.
+        "files": dict(observations[0][2]),
     }
 
 

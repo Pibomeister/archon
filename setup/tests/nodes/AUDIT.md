@@ -10,16 +10,17 @@ Covered nodes:
 
 | Workflow | Nodes |
 |---|---|
-| `full-sdlc-api` | `review-gate`, `plan-round-pre`, `plan-critic-gate`, `plan-converge`, `deslop-recheck`, `deslop-review-gate`, `gate-tests`, `converge` |
-| `full-sdlc-web` | `review-gate`, `gate-tests` |
-| `bugfix` | `review-gate`, `rca-gate`, `rca-plan-shape`, `rca-round-pre`, `rca-critic-gate`, `rca-converge`, `deslop-recheck`, `deslop-review-gate`, `deslop-commit`, `green-check`, `converge` |
+| `full-sdlc-api` | `round-pre`, `review-gate`, `plan-round-pre`, `plan-critic-gate`, `plan-converge`, `deslop-recheck`, `deslop-review-gate`, `gate-tests`, `converge` |
+| `full-sdlc-web` | `round-pre`, `review-gate`, `gate-tests` |
+| `bugfix` | `round-pre`, `review-gate`, `rca-gate`, `rca-plan-shape`, `rca-round-pre`, `rca-critic-gate`, `rca-converge`, `deslop-recheck`, `deslop-review-gate`, `deslop-commit`, `green-check`, `converge` |
+| `wrap-review` | `pre`, `gate` |
 
 Coverage as swept at `NODE_STRESS=100` (a "group" is one fixture run N times;
 `N=1` groups are the `EnvInvariance` baseline/perturbed pairs):
 
 | Node | Groups | Executions |
 |---|---|---|
-| `full-sdlc-api:review-gate` | 14 | 1202 |
+| `full-sdlc-api:review-gate` | 15 | 1302 |
 | `full-sdlc-web:review-gate` | 11 | 1100 |
 | `bugfix:review-gate` | 11 | 1100 |
 | `full-sdlc-api:converge` | 9 | 702 |
@@ -29,10 +30,14 @@ Coverage as swept at `NODE_STRESS=100` (a "group" is one fixture run N times;
 | `full-sdlc-api:gate-tests` | 5 | 302 |
 | `full-sdlc-api:deslop-recheck` | 4 | 202 |
 | `full-sdlc-api:plan-round-pre` | 4 | 400 |
+| `full-sdlc-api:round-pre` | 5 | 500 |
+| `bugfix:round-pre` | 4 | 400 |
+| `full-sdlc-web:round-pre` | 4 | 400 |
 | `bugfix:deslop-commit` | 3 | 300 |
 | `bugfix:green-check` | 3 | 300 |
 | `bugfix:rca-round-pre` | 3 | 300 |
 | `full-sdlc-api:deslop-review-gate` | 3 | 300 |
+| `wrap-review:gate` | 3 | 300 |
 | `bugfix:deslop-recheck` | 2 | 200 |
 | `bugfix:deslop-review-gate` | 2 | 200 |
 | `bugfix:rca-critic-gate` | 2 | 200 |
@@ -40,7 +45,8 @@ Coverage as swept at `NODE_STRESS=100` (a "group" is one fixture run N times;
 | `full-sdlc-api:plan-critic-gate` | 2 | 200 |
 | `bugfix:rca-gate` | 1 | 100 |
 | `full-sdlc-web:gate-tests` | 1 | 100 |
-| **total** | **101** | **9308** |
+| `wrap-review:pre` | 1 | 100 |
+| **total** | **119** | **11108** |
 
 Every group reported `identical=<N> untyped_exits=0 unstable_slots=0`; zero
 non-identical runs, zero untyped exits, zero values that moved between runs.
@@ -70,8 +76,11 @@ NODE_STRESS=100 python3 -m unittest discover -s setup/tests -p 'test_node_stress
 
 Wall time, macOS 15.5 / 14 cores: ReviewGateStress 29s, ReviewGateScanIsolation
 8s, EnvInvariance 4s, PlanLoopStress (+RcaPlanLoopStress) 137s, GreenCheckStress
-53s, ConvergeStress 51s, GateTestsStress 217s, DeslopStress 367s — **866s
-total** for 9308 node executions. (Chunk wall times vary run to run with
+53s, ConvergeStress 51s, GateTestsStress 217s, DeslopStress 367s, and
+RoundPreStress + WrapReviewStress + ReviewGateSharedRoot swept together in 40s
+— **906s total** for 11108 node executions. (Only that last 40s chunk was
+re-measured when the producer-side groups were added; the other eight chunk
+times are the earlier sweep's and were not re-run.) (Chunk wall times vary run to run with
 machine load; an earlier identical sweep of the same 101 groups came in at
 595s. The group and execution counts, and the zero anomalies, were identical
 both times.) The unchunked default sweep is
@@ -99,7 +108,7 @@ contract instead), **recorded** (real, not fixed here; the reason is stated).
 | DS-2 | `deslop-recheck`, both lanes | `GIT_INDEX_FILE="$RD/index" git add -A` leaves a binary index in the artifacts dir | **normalized** | A git index carries per-file stat data (inode, ctime), so its bytes differ run to run even for identical content. `runner._git_index_digest` parses the DIRC format and keeps the three fields that are the index's actual content — mode, blob sha, path — the same way `_tar_digest` keeps what a tar restores. Unparseable bytes fall back to a sha256 content hash rather than being excused. (Recording it as `<BINARY bytes=N>`, as this did originally, compared two different files by LENGTH — see test_runner_selfcheck.py.) |
 | DS-3 | `deslop-review-gate`, both lanes | recomputes HEAD / live-index tree / full-tree checkpoint and `cmp`s | **harmless** | All three are content-addressed. Pinned in both directions: the CLEAN fixtures assert the compare passes, and `test_deslop_review_gate_api_detects_a_reviewer_edit` asserts a one-byte worktree edit trips `DESLOP_REVIEW=FAIL reviewer modified tree`. |
 | GT-1 | `gate-tests`, `deslop-recheck` | `rm -rf .omc` inside `$WT` | **harmless** | Idempotent, and load-bearing: it is what keeps agent session state out of the checkpoint and out of the scope guard. |
-| GT-2 | `gate-tests`, `full-sdlc-web` | `cd <goodword>/web-app/.worktrees/archon-toy` hardcoded | **recorded** | Not a determinism defect — a parameterization gap. The lane is toy-pinned by design (RUNBOOK.md §3, "Web-lane parity note"). The harness binds it with `run_node(subs=…)`; parameterizing the lane is the tracked follow-up, not this task. |
+| GT-2 | `gate-tests` and `round-pre`, `full-sdlc-web`; `pre` and `gate`, `wrap-review` | a hardcoded absolute repo path (`<goodword>/web-app/.worktrees/archon-toy`; `<scratchpad>/m1-fixture/repo`) | **recorded** | Not a determinism defect — a parameterization gap, at four sites rather than the one first recorded. The web lane is toy-pinned by design (RUNBOOK.md §3, "Web-lane parity note") and `wrap-review` is pinned to the M0.6c fixture repo it was proven against. The harness binds each with `run_node(subs=…)`, which fails loudly if the literal ever moves; parameterizing the lanes is the tracked follow-up, not this task. `wrap-review:gate` assigns the literal and never reads it, so it is left unbound. |
 | ENV-1 | every covered node | `NODE_ENV`, `DISABLE_OMC`, `HOME`, `TZ`, `LANG`, `LC_*` | **harmless** | No covered body reads any of them; `$HOME` appears only in `preflight` (not covered). Asserted, not assumed: `EnvInvariance` runs `review-gate`, `converge`, `gate-tests` and `deslop-recheck` under `NODE_ENV=production`, `DISABLE_OMC=1`, `TZ=Asia/Tokyo`, `LANG=tr_TR.UTF-8` and `LC_ALL=tr_TR.UTF-8` and requires the same rc and the same typed lines as the default environment. |
 | ENV-2 | `gate-tests`, `deslop-recheck`, `green-check` | PATH-resolved `bun` / `pnpm` / `mise` | **by design** | The node's verdict is supposed to depend on the toolchain. The harness stubs them with deterministic shims so what is being measured is the node, not the toolchain. |
 | PY-1 | `check-scope.py`, `check-slop.py`, `parse-critique.py` | set / dict iteration under `PYTHONHASHSEED` randomization | **harmless** | Every printed collection is either `sorted()` (`check-scope.py:45`, `check-slop.py:101`) or an insertion-ordered dict/list built by scanning lines in order (`check-slop.py:159`). Sets appear only in membership tests and `len()`. |
@@ -149,7 +158,7 @@ which additionally wrote its post listing to a fixed, shared
 `/tmp/wrap-review-post.txt` — now `$ARTIFACTS_DIR/post-dirs.txt`, matching what
 the three lanes already do.
 
-**Tests.** `ReviewGateScanIsolation`:
+**Tests, consumer side.** `ReviewGateScanIsolation`:
 `test_prerun_listing_in_another_collation_yields_no_phantom_new_dir` (all three
 lanes) asserts the verdict still comes from the envelope, and
 `test_negative_control_unguarded_sort_reads_the_foreign_dir` reverts
@@ -157,7 +166,47 @@ lanes) asserts the verdict still comes from the envelope, and
 **does** reproduce. If that negative control ever starts passing, the fixture
 stopped reproducing and the guard test above is proving nothing.
 
-**Residual, not fixed.** `CE_REVIEW_ROOT` is honored on the *read* side only.
+**Tests, producer side.** Those tests hand `review-gate` a `prerun-dirs.txt`
+written by the fixture, so they pin how the gate READS a mis-collated baseline
+without pinning who writes one. `RoundPreStress` covers the other half in all
+three lanes: it seeds `ce-Beta` and `ce-alpha` under a per-run
+`CE_REVIEW_ROOT` and asserts the file `round-pre` writes lists exactly those
+two dirs in C order — under the default environment and again under
+`LC_ALL=en_US.UTF-8`, where an unpinned sort would flip them.
+`test_negative_control_unguarded_sort_follows_the_ambient_locale` reverts this
+node's `LC_ALL=C sort` and asserts the order **does** flip, so the guard test
+cannot pass vacuously. `WrapReviewStress` does the same for the two sibling
+sites in `workflows/wrap-review.yaml`.
+
+Asserting the file's CONTENT (rather than only that N runs agreed on it) needed
+one additive harness hook: `stress` now returns the observed artifact snapshot
+as `summary["files"]`, keyed by relative path and normalized exactly as the
+identity comparison saw it. The snapshot already existed; the fixture's temp
+dir is deleted before the caller gets the summary, so there was no other way to
+read it back.
+
+`round-pre`'s success line, `ROUND=N head=<sha>`, also needed a typed-line
+entry. It is NOT added to `runner.PASS_TOKENS`: `converge` opens with
+`ROUND=N verdict=[…]`, and typing on the bare `ROUND` key would let a future
+`converge` that exits 0 without any of its four discriminators read as typed.
+The full line shape goes in `runner.PASS_LINE_RES` instead, so `converge`'s
+zero-exit still has to carry `CONVERGED` or `ROUND_PROGRESSED`.
+`wrap-review:pre`'s `PRE_OK` key is unambiguous and is a plain `PASS_TOKENS`
+entry.
+
+**Residual, not fixed — and now exercised.** Every other group hands each
+repetition a PRIVATE `CE_REVIEW_ROOT`, which is what makes them hermetic and
+also means none of them runs the arrangement production actually runs in.
+`ReviewGateSharedRoot` gives all N concurrent repetitions the SAME root, holding
+a foreign run dir whose `head_sha` does not prefix-match `pre-head.txt`, and
+requires every repetition to stay on the envelope (`source=envelope`,
+`rundir=[]`) and to agree. No new harness hook was needed for it:
+`run_node(env=…)` is applied to every repetition before the fixture's own vars,
+so a builder that declines to return `CE_REVIEW_ROOT` leaves the shared value
+standing. What that does NOT cover is the case below, which needs two run dirs
+on the same sha.
+
+`CE_REVIEW_ROOT` is honored on the *read* side only.
 The `ce-code-review` skill still writes to the default root, so the variable is
 an isolation and override affordance (it is what makes the node testable), not
 yet a per-run guarantee. Two concurrent lanes reviewing the **same** head sha can
