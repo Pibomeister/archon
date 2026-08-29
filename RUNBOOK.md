@@ -300,8 +300,9 @@ Lane-specific facts:
 - **Ports: this lane owns 4124 (api smoke) and 3124 (reserved). It never touches 4123/3123.** Ports are
   disjoint, but the runs still cannot overlap: archon 0.8.0 holds ONE active run per project path, and a
   second `workflow run` of any lane fails immediately with `Workflow already active on this path (running):
-  <lane>` (observed 2026-08-29 for both `full-sdlc-api` and `bugfix`). Wait for the active run to pause or
-  finish. Port sweeps follow §5 rules within that ownership.
+  <lane>` (observed 2026-08-29 for both `full-sdlc-api` and `bugfix`; a PAUSED run holds the lock too —
+  `already active on this path (paused)`). The CLI's `--branch <other>` escape needs the project path itself
+  to be a git repo, which the Goodword root is not. Wait for the active run to finish, or `abandon` it. Port sweeps follow §5 rules within that ownership.
 - **`aws login` before starting** is a soft prerequisite here, not a hard one: expired SSO degrades the
   evidence stage (`EVIDENCE_AWS=DEGRADED sso expired`) instead of failing preflight. Same for
   `SENTRY_AUTH_TOKEN` and `LINEAR_API_KEY` (`PREFLIGHT_WARN ... unset`). A local-only repro runs with zero
