@@ -42,8 +42,25 @@ Coverage as swept at `NODE_STRESS=100` (a "group" is one fixture run N times;
 | `full-sdlc-web:gate-tests` | 1 | 100 |
 | **total** | **101** | **9308** |
 
-Every group reported `identical=<N> untyped_exits=0`; zero non-identical runs,
-zero untyped exits. Swept in per-class chunks (the harness kills a detached
+Every group reported `identical=<N> untyped_exits=0 unstable_slots=0`; zero
+non-identical runs, zero untyped exits, zero values that moved between runs.
+
+**What `identical` means here.** Values that legitimately move — git shas,
+timestamps, the fixture's own temp root — are not collapsed to a single
+sentinel. Each distinct value gets an ordinal in first-appearance order
+(`<SHA:1>`), so the comparison sees the structure, and the raw value behind each
+ordinal must then be the same in every run unless the caller declares it
+`volatile`. `setup/tests/test_runner_selfcheck.py` holds the harness to that:
+synthetic nodes emitting a fresh random scratch path, a fresh 40-hex sha, a
+clock read, or 16 fresh random bytes of fixed length must all be reported as
+NOT identical, and a permanent negative control reinstates the original
+blanket normalization to show all four used to slip through it. One covered
+fixture needed a real change rather than a `volatile` declaration:
+`deslop-commit` creates a commit, and a commit sha embeds its timestamp, so the
+fixture pins `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` — otherwise the sha matched
+only when two concurrent runs happened to fall in the same second.
+
+Swept in per-class chunks (the harness kills a detached
 process between turns, and the whole module at N=100 exceeds a single 10-minute
 window):
 
@@ -78,12 +95,12 @@ contract instead), **recorded** (real, not fixed here; the reason is stated).
 | RG-4 | `review-gate`, all three lanes | `CE_REVIEW_ROOT` is honored for READS only | **recorded** | See "Residual" under RG-1. |
 | CONV-1 | `converge`, `full-sdlc-api` + `bugfix` | `exec > >(tee "$RD/converge.txt") 2>&1` | **harmless in-harness; see caveat** | Process substitution: bash does not reap the `tee` child, so in principle the shell can exit before `tee` has flushed the last lines. Measured at `NODE_STRESS=100` over 16 converge fixtures = **1402 executions**: exit code, typed lines and `round-N/converge.txt` byte-identical every time, discriminator line always present, zero truncation. **Caveat on what that proves:** the harness reads the node's stdout pipe to EOF, and the `tee` child holds the write end, so the harness necessarily waits for `tee` — it cannot observe a reader that stops at `waitpid()` instead. The result rules out a *file*-side flush race (`converge.txt` is what RUNBOOK.md §3 tells operators to read); it does not prove the archon engine's own capture is immune. Left as is: the tee is what makes the discriminator survive at all, since archon persists bash stderr but not stdout. |
 | CONV-2 | `converge`, `gate-tests`, `deslop-recheck`, `deslop-commit` | `git status --porcelain` line ordering | **harmless** | git emits porcelain in byte order irrespective of `LC_COLLATE`. Verified directly: `Beta.ts Zulu.ts able.ts alpha.ts` come back in that same order under both `LC_ALL=C` and `LC_ALL=en_US.UTF-8`, whereas `sort` reorders them. |
-| DS-1 | `deslop-recheck`, both lanes | `git archive "$CKTREE" > "$RD/checkpoint.tar"` | **normalized** | Archiving a bare *tree* has no commit date to take, so git stamps the CURRENT time into every member header: two runs over a byte-identical tree produce different tar bytes. The tar is a belt artifact for restoring bytes; the contract is the checkpoint TREE SHA, which is compared separately and is deterministic. Not fixed in the YAML because `git archive --mtime` needs git ≥ 2.39 and `install.sh` does not pin a git version. `runner._tar_digest` compares every member's name, type, mode, size and content hash instead, so a changed file still fails the run. |
-| DS-2 | `deslop-recheck`, both lanes | `GIT_INDEX_FILE="$RD/index" git add -A` leaves a binary index in the artifacts dir | **normalized** | A git index carries per-file stat data (inode, ctime), so its bytes differ run to run. It is a throwaway staging file; the tree sha written out of it is deterministic and is the thing `deslop-review-gate` compares. The harness records it as `<BINARY bytes=N>`. |
+| DS-1 | `deslop-recheck`, both lanes | `git archive "$CKTREE" > "$RD/checkpoint.tar"` | **normalized** | Archiving a bare *tree* has no commit date to take, so git stamps the CURRENT time into every member header: two runs over a byte-identical tree produce different tar bytes. The tar is a belt artifact for restoring bytes; the contract is the checkpoint TREE SHA, which the node writes to `deslop-round-N/checkpoint-tree.txt` and `deslop-tree.txt` — both ordinary files in the artifacts dir, so the snapshot compares them like any other. There is no separate tree-sha check beyond that. What protects the tar itself is `runner._tar_digest`, which compares every member's name, type, mode, size and content hash rather than the raw bytes, so a changed file still fails the run while the header mtime cannot. Not fixed in the YAML because `git archive --mtime` needs git ≥ 2.39 and `install.sh` does not pin a git version. |
+| DS-2 | `deslop-recheck`, both lanes | `GIT_INDEX_FILE="$RD/index" git add -A` leaves a binary index in the artifacts dir | **normalized** | A git index carries per-file stat data (inode, ctime), so its bytes differ run to run even for identical content. `runner._git_index_digest` parses the DIRC format and keeps the three fields that are the index's actual content — mode, blob sha, path — the same way `_tar_digest` keeps what a tar restores. Unparseable bytes fall back to a sha256 content hash rather than being excused. (Recording it as `<BINARY bytes=N>`, as this did originally, compared two different files by LENGTH — see test_runner_selfcheck.py.) |
 | DS-3 | `deslop-review-gate`, both lanes | recomputes HEAD / live-index tree / full-tree checkpoint and `cmp`s | **harmless** | All three are content-addressed. Pinned in both directions: the CLEAN fixtures assert the compare passes, and `test_deslop_review_gate_api_detects_a_reviewer_edit` asserts a one-byte worktree edit trips `DESLOP_REVIEW=FAIL reviewer modified tree`. |
 | GT-1 | `gate-tests`, `deslop-recheck` | `rm -rf .omc` inside `$WT` | **harmless** | Idempotent, and load-bearing: it is what keeps agent session state out of the checkpoint and out of the scope guard. |
 | GT-2 | `gate-tests`, `full-sdlc-web` | `cd <goodword>/web-app/.worktrees/archon-toy` hardcoded | **recorded** | Not a determinism defect — a parameterization gap. The lane is toy-pinned by design (RUNBOOK.md §3, "Web-lane parity note"). The harness binds it with `run_node(subs=…)`; parameterizing the lane is the tracked follow-up, not this task. |
-| ENV-1 | every covered node | `NODE_ENV`, `DISABLE_OMC`, `HOME`, `TZ`, `LANG`, `LC_*` | **harmless** | No covered body reads any of them; `$HOME` appears only in `preflight` (not covered). Asserted, not assumed: `EnvInvariance` runs `review-gate`, `converge`, `gate-tests` and `deslop-recheck` under `NODE_ENV=production DISABLE_OMC=1 TZ=Asia/Tokyo LANG=LC_ALL=tr_TR.UTF-8` and requires the same rc and the same typed lines as the default environment. |
+| ENV-1 | every covered node | `NODE_ENV`, `DISABLE_OMC`, `HOME`, `TZ`, `LANG`, `LC_*` | **harmless** | No covered body reads any of them; `$HOME` appears only in `preflight` (not covered). Asserted, not assumed: `EnvInvariance` runs `review-gate`, `converge`, `gate-tests` and `deslop-recheck` under `NODE_ENV=production`, `DISABLE_OMC=1`, `TZ=Asia/Tokyo`, `LANG=tr_TR.UTF-8` and `LC_ALL=tr_TR.UTF-8` and requires the same rc and the same typed lines as the default environment. |
 | ENV-2 | `gate-tests`, `deslop-recheck`, `green-check` | PATH-resolved `bun` / `pnpm` / `mise` | **by design** | The node's verdict is supposed to depend on the toolchain. The harness stubs them with deterministic shims so what is being measured is the node, not the toolchain. |
 | PY-1 | `check-scope.py`, `check-slop.py`, `parse-critique.py` | set / dict iteration under `PYTHONHASHSEED` randomization | **harmless** | Every printed collection is either `sorted()` (`check-scope.py:45`, `check-slop.py:101`) or an insertion-ordered dict/list built by scanning lines in order (`check-slop.py:159`). Sets appear only in membership tests and `len()`. |
 | — | all covered nodes | `date`, `$RANDOM`, `mktemp` | **not present** | Grepped across all 21 covered bodies; zero hits. |

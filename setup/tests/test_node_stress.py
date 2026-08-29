@@ -287,6 +287,27 @@ def has_locale(name):
     return name in {ln.strip() for ln in (r.stdout or "").splitlines()}
 
 
+def require_locale(case, name):
+    """A missing locale is a FAILURE, never a skip.
+
+    These tests are the regression cover for RG-1 — a collation mismatch that
+    makes `comm` report a pre-existing ce-code-review dir as new — and for
+    ENV-1. Skipping them on a machine without the locale is precisely backwards:
+    a minimal Linux CI image is where a collation bug is most likely to ship
+    unnoticed, and a green run would claim cover it never had.
+    """
+    if not has_locale(name):
+        case.fail(
+            f"locale {name} is not installed, so this test cannot run — and a "
+            f"skip here would silently drop the RG-1 / ENV-1 regression cover.\n"
+            f"  Debian/Ubuntu: sudo sed -i 's/^# *{name}/{name}/' /etc/locale.gen "
+            f"&& sudo locale-gen\n"
+            f"  Fedora/RHEL:   sudo dnf install glibc-langpack-en glibc-langpack-tr\n"
+            f"  Alpine:        apk add musl-locales\n"
+            f"  macOS ships both. See RUNBOOK.md 6a, 'Locales the test suite requires'."
+        )
+
+
 UTF8_LOCALE = "en_US.UTF-8"
 # C collation puts 'B' before 'a'; en_US.UTF-8 collation puts 'alpha' before
 # 'Beta'. Two dirs are enough to make the two orderings disagree.
@@ -343,13 +364,13 @@ class ReviewGateScanIsolation(unittest.TestCase):
             env={"LC_ALL": locale}, subs=subs,
         )
 
-    @unittest.skipUnless(has_locale(UTF8_LOCALE), f"{UTF8_LOCALE} not installed")
     def test_prerun_listing_in_another_collation_yields_no_phantom_new_dir(self):
         """RG-1. prerun-dirs.txt was written by round-pre, possibly from a
         differently-configured shell (a resume from another terminal). If the
         two listings are sorted in different collations, `comm` silently
         reports a PRE-EXISTING dir as new and the gate reads a foreign run's
         verdict. LC_ALL=C on both sorts pins the collation."""
+        require_locale(self, UTF8_LOCALE)
         for workflow in ("full-sdlc-api", "full-sdlc-web", "bugfix"):
             with self.subTest(workflow=workflow):
                 r = self._probe(workflow, "collation")
@@ -358,12 +379,12 @@ class ReviewGateScanIsolation(unittest.TestCase):
                 )
                 self.assertIn("rundir=[]", r["output"])
 
-    @unittest.skipUnless(has_locale(UTF8_LOCALE), f"{UTF8_LOCALE} not installed")
     def test_negative_control_unguarded_sort_reads_the_foreign_dir(self):
         """The guard above is load-bearing: revert `LC_ALL=C sort` to a bare
         `sort` and the same fixture reads ce-alpha's foreign verdict instead.
         If this test ever starts passing the fixture stopped reproducing and
         the guard test above is proving nothing."""
+        require_locale(self, UTF8_LOCALE)
         r = self._probe("full-sdlc-api", "collation",
                         subs=[(SORT_GUARD, SORT_UNGUARDED)])
         self.assertIn("verdict=[Not ready] source=metadata", r["output"])
@@ -792,6 +813,18 @@ def deslop_review_gate_fixture(lane, review_doc):
     return build
 
 
+# deslop-commit is the one covered node that CREATES a commit, and a commit sha
+# embeds the commit timestamp. Left to the clock, two runs land on the same sha
+# only when they fall in the same second — so the harness would pass on a fast
+# machine and report a moving SHA slot on a slow one. Pinning the dates makes
+# the timestamp an input like any other, and the resulting sha a value the
+# stability check genuinely verifies rather than one it has to excuse.
+GIT_FIXED_DATE = {
+    "GIT_AUTHOR_DATE": "2026-01-02T03:04:05+00:00",
+    "GIT_COMMITTER_DATE": "2026-01-02T03:04:05+00:00",
+}
+
+
 def deslop_commit_fixture(dirty=True):
     def build(tmp):
         art = tmp / "artifacts"
@@ -800,6 +833,7 @@ def deslop_commit_fixture(dirty=True):
         jdump(art / "params.json", params(tmp, wt))
         (art / "red-sha.txt").write_text(base + "\n", encoding="utf-8")
         jdump(art / "failing-test.json", failing_test_json())
+        return dict(GIT_FIXED_DATE)
     return build
 
 
@@ -865,12 +899,12 @@ class DeslopStress(unittest.TestCase):
     def test_deslop_commit_commits(self):
         r = run_node("bugfix", "deslop-commit", deslop_commit_fixture(dirty=True))
         self.assertEqual(r["rc"], 0, r["output"])
-        self.assertIn("DESLOP_COMMIT=OK sha=<SHA>", r["output"])
+        self.assertIn("DESLOP_COMMIT=OK sha=<SHA:1>", r["output"])
 
     def test_deslop_commit_skips_a_clean_tree(self):
         r = run_node("bugfix", "deslop-commit", deslop_commit_fixture(dirty=False))
         self.assertEqual(r["rc"], 0, r["output"])
-        self.assertIn("DESLOP_COMMIT=SKIP nothing to commit sha=<SHA>", r["output"])
+        self.assertIn("DESLOP_COMMIT=SKIP nothing to commit sha=<SHA:1>", r["output"])
 
     def test_deslop_commit_refuses_a_modified_repro(self):
         def build(tmp):
@@ -1050,23 +1084,23 @@ class EnvInvariance(unittest.TestCase):
         self.assertEqual(base["rc"], alt["rc"], alt["output"])
         self.assertEqual(base["typed"], alt["typed"], alt["output"])
 
-    @unittest.skipUnless(has_locale("tr_TR.UTF-8"), "tr_TR.UTF-8 not installed")
     def test_review_gate(self):
+        require_locale(self, "tr_TR.UTF-8")
         self._same("full-sdlc-api", "review-gate",
                    review_gate_fixture("Ready with fixes", "envelope"),
                    outputs={"review": envelope_with("Ready with fixes")})
 
-    @unittest.skipUnless(has_locale("tr_TR.UTF-8"), "tr_TR.UTF-8 not installed")
     def test_converge(self):
+        require_locale(self, "tr_TR.UTF-8")
         self._same("full-sdlc-api", "converge",
                    converge_fixture("full-sdlc-api", "Ready to merge"))
 
-    @unittest.skipUnless(has_locale("tr_TR.UTF-8"), "tr_TR.UTF-8 not installed")
     def test_gate_tests(self):
+        require_locale(self, "tr_TR.UTF-8")
         self._same("full-sdlc-api", "gate-tests", gate_tests_api_fixture)
 
-    @unittest.skipUnless(has_locale("tr_TR.UTF-8"), "tr_TR.UTF-8 not installed")
     def test_deslop_recheck(self):
+        require_locale(self, "tr_TR.UTF-8")
         self._same("full-sdlc-api", "deslop-recheck", deslop_recheck_fixture("api"))
 
 
