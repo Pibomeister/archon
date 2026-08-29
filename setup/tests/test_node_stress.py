@@ -520,6 +520,10 @@ class PlanLoopStress(unittest.TestCase):
         r = run_node(self.WF, "plan-converge", plan_converge_fixture("ACCEPT", moved=True))
         self.assertEqual(r["rc"], 0, r["output"])
         self.assertIn("PLAN_CONVERGED round=1", r["output"])
+        # archon persists bash stderr but not stdout: the discriminator must
+        # also land in a file, as review converge / fix-converge already do.
+        # Live 2026-08-29 (bugfix f90c20f9): RCA_PLAN_ROUND_CAP never reached the log.
+        self.assertIn("PLAN_CONVERGED round=1", r["files"].get("plan-round-1/converge.txt", ""))
 
     def test_plan_converge_revise_progressed(self):
         r = run_node(self.WF, "plan-converge", plan_converge_fixture("REVISE", moved=True))
@@ -669,6 +673,7 @@ class RcaPlanLoopStress(unittest.TestCase):
         r = run_node(self.WF, "rca-converge", rca_converge_fixture("ACCEPT", moved=True))
         self.assertEqual(r["rc"], 0, r["output"])
         self.assertIn("RCA_PLAN_CONVERGED round=1", r["output"])
+        self.assertIn("RCA_PLAN_CONVERGED round=1", r["files"].get("rca-round-1/converge.txt", ""))
 
     def test_rca_converge_revise_progressed(self):
         r = run_node(self.WF, "rca-converge", rca_converge_fixture("REVISE", moved=True))

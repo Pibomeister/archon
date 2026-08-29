@@ -1212,7 +1212,10 @@ nodes:
             # return 2, which `if` reads as "not taken", switching the cap off silently.
             case "$N" in ''|*[!0-9]*) echo "RCA_CONVERGE=FAIL rca-round.txt is not an integer: [$N]"; exit 1 ;; esac
             RD="$AD/rca-round-$N"
-            V=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1],encoding='utf-8'))['verdict'])" "$RD/critique.json" 2>/dev/null || echo UNKNOWN)
+            # archon persists bash stderr but not stdout; tee the discriminator to a
+            # file like review converge does (live 2026-08-29: RCA_PLAN_ROUND_CAP was invisible).
+            exec > >(tee "$RD/converge.txt") 2>&1
+                        V=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1],encoding='utf-8'))['verdict'])" "$RD/critique.json" 2>/dev/null || echo UNKNOWN)
             case "$V" in
               ACCEPT|REVISE|REJECT) ;;
               *) echo "RCA_CONVERGE=FAIL unknown verdict [$V] round=$N"; exit 1 ;;
