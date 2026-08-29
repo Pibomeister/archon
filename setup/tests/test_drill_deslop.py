@@ -25,6 +25,7 @@ import unittest
 from pathlib import Path
 
 from nodes.extract import runnable_body
+from nodes.gitutil import git
 
 BUN_SHIM = """#!/usr/bin/env bash
 set -euo pipefail
@@ -47,12 +48,6 @@ CLEAN_REVIEW = {
     },
     "findings": [],
 }
-
-
-def git(repo, *args, check=True):
-    return subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, text=True, check=check
-    )
 
 
 def write_json(path, obj):

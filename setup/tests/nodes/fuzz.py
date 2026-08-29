@@ -13,7 +13,7 @@ import copy
 import json
 import math
 import random
-from typing import Any, Optional
+from typing import Any
 
 
 def _dumps(obj: Any) -> bytes:

@@ -18,11 +18,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
-def git(repo, *args, check=True):
-    return subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, text=True, check=check
-    )
+from nodes.gitutil import git
 
 
 def sha256_manifest(repo, paths):
