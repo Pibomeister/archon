@@ -1,0 +1,8 @@
+{
+  "applied": [
+    {"kind": "verifiability", "confidence": 75, "citation": "added an assertion on the mfaToken branch in auth.service.spec.ts"}
+  ],
+  "declined": [
+    {"kind": "scope", "confidence": 100, "citation": "AuthService.login and SessionGuard.canActivate are pre-existing, unmodified by this diff — the critic misread the impact.json d1_callers list as callers of the CHANGED behavior when they only call the unchanged code path"}
+  ]
+}

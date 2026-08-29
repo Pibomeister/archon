@@ -1,0 +1,33 @@
+{
+  "verdict": "DIRTY",
+  "coverage": {
+    "complexity": {"status": "assessed", "evidence": "mergeContacts() branches on five source enums with no early return, cyclomatic complexity 9."},
+    "tautological_tests": {"status": "assessed", "evidence": "contacts.service.spec.ts asserts mergeContacts(a, a) equals a, a self-merge tautology that proves nothing about the real merge path."},
+    "yagni": {"status": "not_applicable", "evidence": "No new options or parameters were added in this diff."},
+    "open_closed": {"status": "assessed", "evidence": "A new source enum branch was added inline to the existing switch rather than a registry lookup, matching the file's existing style."},
+    "comments": {"status": "assessed", "evidence": "Two narrating comments were added that restate the following line rather than explaining why."}
+  },
+  "findings": [
+    {
+      "guard": "complexity",
+      "file": "apps/api/src/app/contacts/contacts.service.ts",
+      "line": 142,
+      "confidence": 100,
+      "evidence": "mergeContacts() now has 9 branches with no extraction; extract the per-source merge logic into named helpers."
+    },
+    {
+      "guard": "tautological_tests",
+      "file": "apps/api/src/app/contacts/contacts.service.spec.ts",
+      "line": 88,
+      "confidence": 75,
+      "evidence": "expect(mergeContacts(a, a)).toEqual(a) proves identity, not the merge logic; assert against two distinct source contacts instead."
+    },
+    {
+      "guard": "comments",
+      "file": "apps/api/src/app/contacts/contacts.service.ts",
+      "line": 150,
+      "confidence": 50,
+      "evidence": "// increment the counter above i++ restates the code; low-confidence advisory only."
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "verdict": "ACCEPT",
+  "summary": "Every ## Files entry and ## Approach step traces to an explicit spec line (Prong 1's route, DTO, body, Swagger decorator and deliberate absence of a guard), and both files match files-allowlist.json exactly, so there is no scope creep. impact.json status is SKIPPED, so the d1-caller half of the regression rule does not apply for this run; the reader-audit half is satisfied vacuously because reader-audit.json lists no columns and the change reads and writes no persisted state.",
+  "findings": [
+    {
+      "kind": "gap",
+      "severity": "P2",
+      "confidence": 75,
+      "section": "## Verification",
+      "evidence": [
+        {
+          "source": "spec",
+          "quote": "`GET /health-archon` returns `{\"status\":\"ok\"}` on the spike port and appears in `/api-docs-json`."
+        },
+        {
+          "source": "plan",
+          "quote": "bun run typecheck\nbun run lint\nbun run test -- \"app.controller.dto\""
+        },
+        {
+          "source": "repo",
+          "quote": "describe('McpEventBatchDto', () => {"
+        }
+      ],
+      "recommendation": "Add a verification step that actually exercises the new endpoint."
+    },
+    {
+      "kind": "gap",
+      "severity": "P2",
+      "confidence": 50,
+      "section": "## Goal",
+      "evidence": [
+        {
+          "source": "plan",
+          "quote": "so the web prong (owned by a separate lane) has a real OpenAPI contract to regenerate its client against"
+        },
+        {
+          "source": "spec",
+          "quote": "The web PR's diff to `api-client.d.ts` contains **only** the `/health-archon` hunk."
+        }
+      ],
+      "recommendation": "State in one line that this unit is api-only by construction."
+    }
+  ]
+}

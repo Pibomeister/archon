@@ -1,0 +1,28 @@
+{
+  "verdict": "REVISE",
+  "summary": "The plan modifies validateUser without covering its two direct callers, and the reader-audit skipped a column the diff actually changes the meaning of. Both are certain enough to block.",
+  "findings": [
+    {
+      "kind": "regression",
+      "severity": "P0",
+      "confidence": 100,
+      "section": "## Approach",
+      "evidence": [
+        {"source": "impact", "quote": "d1_callers: [\"AuthService.login\", \"SessionGuard.canActivate\"]"},
+        {"source": "plan", "quote": "## Approach\n1. Modify validateUser to accept an optional `mfaToken` param"}
+      ],
+      "recommendation": "Cover AuthService.login and SessionGuard.canActivate in ## Test scenarios or explain why they are unaffected."
+    },
+    {
+      "kind": "verifiability",
+      "severity": "P1",
+      "confidence": 75,
+      "section": "## Verification",
+      "evidence": [
+        {"source": "plan", "quote": "bun run test -- \"auth.service\""},
+        {"source": "repo", "quote": "describe('AuthService.validateUser', () => {"}
+      ],
+      "recommendation": "Name the specific assertion that proves the new mfaToken branch, not just that the suite passes."
+    }
+  ]
+}
