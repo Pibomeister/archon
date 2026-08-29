@@ -3,3 +3,4 @@ dist/
 .superpowers/
 .gist-id
 workflows/.bak/
+__pycache__/
