@@ -26,13 +26,14 @@ def run_gate(workflow, review_output="resumed"):
     (art / "round.txt").write_text("1\n")
     shutil.copy(ENVELOPE, rd / "review-envelope.txt")
     (rd / "pre-head.txt").write_text("0" * 40 + "\n")
-    live = subprocess.run(
-        "ls -1d /tmp/compound-engineering/ce-code-review/*/ 2>/dev/null | sort",
-        shell=True, capture_output=True, text=True,
-    ).stdout
-    (rd / "prerun-dirs.txt").write_text(live)
+    # Hermetic: the gate scans $CE_REVIEW_ROOT (default: the shared /tmp root);
+    # point it at an empty per-test dir so no ce-code-review run on this host
+    # can be mistaken for this round's, and the verdict must come from the envelope.
+    ce_root = art / "ce-root"
+    ce_root.mkdir()
+    (rd / "prerun-dirs.txt").write_text("")
     body = runnable_body(workflow, "review-gate", outputs={"review": review_output})
-    env = dict(os.environ, ARTIFACTS_DIR=str(art))
+    env = dict(os.environ, ARTIFACTS_DIR=str(art), CE_REVIEW_ROOT=str(ce_root))
     p = subprocess.run(["bash", "-c", body], capture_output=True, text=True, env=env)
     shutil.rmtree(art, ignore_errors=True)
     return p

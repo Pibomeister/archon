@@ -61,8 +61,8 @@ def main():
         g1 = "PASS" if status in ("complete", "degraded") or (not status and obj.get("verdict")) else "FAIL"
         g2 = "FAIL" if status == "degraded" else "PASS"
         v = obj.get("verdict") if obj.get("verdict") in ENUM else ""
-        print(f"G1={g1}")
-        print(f"G2={g2}")
+        print(f"G1={shlex.quote(g1)}")
+        print(f"G2={shlex.quote(g2)}")
         print(f"VERDICT={shlex.quote(v)}")
         print("VSRC=json")
         return
@@ -70,8 +70,8 @@ def main():
     g2 = "FAIL" if "Code review degraded (headless mode)" in text else "PASS"
     m = re.search(r"Verdict: (Ready to merge|Ready with fixes|Not ready)", text)
     v = m.group(1) if m else ""
-    print(f"G1={g1}")
-    print(f"G2={g2}")
+    print(f"G1={shlex.quote(g1)}")
+    print(f"G2={shlex.quote(g2)}")
     print(f"VERDICT={shlex.quote(v)}")
     print("VSRC=envelope" if (m or g1 == "PASS") else "VSRC=none")
 

@@ -34,7 +34,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent  # .archon/
 FIX = Path(__file__).resolve().parent / "nodes" / "fixtures" / "fuzz"
 SEEDS = FIX / "seeds"
 
-N = 100 if os.environ.get("NODE_STRESS") == "100" else 20
+N = max(20, int(os.environ.get("NODE_STRESS") or 0))  # NODE_STRESS=100 → the full corpus
 TRACEBACK = "Traceback (most recent call last)"
 
 
