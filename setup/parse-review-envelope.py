@@ -25,7 +25,9 @@ def find_json(text):
     """First parseable JSON object carrying status or verdict."""
     try:
         obj = json.loads(text)
-        if isinstance(obj, dict) and ("status" in obj or "verdict" in obj):
+        if isinstance(obj, dict) and (
+            str(obj.get("status", "")).lower() in ("complete", "degraded") or obj.get("verdict") in ENUM
+        ):
             return obj
     except ValueError:
         pass
@@ -35,7 +37,15 @@ def find_json(text):
             obj, _ = dec.raw_decode(text, m.start())
         except ValueError:
             continue
-        if isinstance(obj, dict) and ("status" in obj or "verdict" in obj):
+        if not isinstance(obj, dict):
+            continue
+        # Only a dict that carries the envelope's own vocabulary counts. Review
+        # prose routinely embeds persona JSON such as {"status": "ok"} — observed
+        # live 2026-08-28 (run d3aa3b55): that object won the search, VERDICT came
+        # back empty, and G1 failed a review whose text said "Verdict: Ready to
+        # merge". Anything else falls through to the text contract below.
+        status = str(obj.get("status", "")).lower()
+        if status in ("complete", "degraded") or obj.get("verdict") in ENUM:
             return obj
     return None
 
