@@ -317,9 +317,10 @@ def _snapshot(art, norm):
     return tuple(rows)
 
 
-def _git(repo, *args):
+def _git(repo, *args, env=None):
     p = subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
-                       encoding="utf-8", errors="replace")
+                       encoding="utf-8", errors="replace",
+                       env={**os.environ, **(env or {})})
     return p.stdout if p.returncode == 0 else f"<git {args[0]} rc={p.returncode}>"
 
 
@@ -332,20 +333,44 @@ def _worktree_snapshot(tmp, norm):
     that mutated the WORKTREE differently between runs was invisible to a
     snapshot that only walked the artifacts dir.
 
-    Three facts, all content-addressed and all normalized through the same
-    ordinal map: HEAD, the index (`ls-files -s` gives mode/sha/stage/path, and
-    mode 120000 entries carry symlinks), and `status --porcelain` for anything
-    untracked or unstaged. Every top-level dir holding a `.git` is picked up,
-    so a fixture cannot silently opt out by naming its worktree something else.
+    Four facts, all content-addressed and all normalized through the same
+    ordinal map:
+
+      HEAD      - the commit the node left the branch on.
+      WORKTREE  - a tree sha over the ENTIRE working tree, computed through a
+                  throwaway index (`GIT_INDEX_FILE=… git add -A; git
+                  write-tree`) — the same technique `deslop-recheck` uses for
+                  its own checkpoint. This is the one that sees CONTENT:
+                  HEAD/index/porcelain alone report that `src/foo.ts` is
+                  modified, never what it was modified TO, so a node writing
+                  random bytes into a tracked file was still invisible.
+      INDEX     - `ls-files -s` (mode/sha/stage/path; mode 120000 entries carry
+                  symlink targets), so STAGING moves are distinguishable from
+                  working-tree ones.
+      STATUS    - `status --porcelain`, which names the paths in a form a
+                  failure message can be read against.
+
+    Every top-level dir holding a `.git` is picked up, so a fixture cannot
+    silently opt out by naming its worktree something other than `wt`.
     """
     rows = []
     for path in sorted(p for p in Path(tmp).iterdir() if p.is_dir()):
         if not (path / ".git").exists():
             continue
+        # A scratch index OUTSIDE the worktree and outside ARTIFACTS_DIR, so
+        # observing the tree cannot itself show up as an artifact or as
+        # untracked drift. `add -A` only writes blobs; no ref or index of the
+        # repo's own is touched.
+        idx = Path(tmp) / f".obs-index-{path.name}"
+        idx.unlink(missing_ok=True)
+        genv = {"GIT_INDEX_FILE": str(idx)}
+        _git(path, "add", "-A", env=genv)
+        tree = _git(path, "write-tree", env=genv).strip()
         rows.append((
             f"worktree:{path.name}",
-            norm("HEAD=" + _git(path, "rev-parse", "HEAD").strip()
-                 + "\nINDEX\n" + _git(path, "ls-files", "-s")
+            norm(f"HEAD={_git(path, 'rev-parse', 'HEAD').strip()}\n"
+                 f"WORKTREE={tree}\n"
+                 + "INDEX\n" + _git(path, "ls-files", "-s")
                  + "STATUS\n" + _git(path, "status", "--porcelain")),
         ))
     return tuple(rows)
