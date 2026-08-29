@@ -51,10 +51,13 @@ window):
 NODE_STRESS=100 python3 -m unittest discover -s setup/tests -p 'test_node_stress.py' -k <Class>
 ```
 
-Wall time, macOS 15.5 / 14 cores: ReviewGateStress 27s, ReviewGateScanIsolation
-7s, EnvInvariance 3s, PlanLoopStress (+RcaPlanLoopStress) 126s, GateTestsStress
-133s, GreenCheckStress 27s, ConvergeStress 41s, DeslopStress 231s — **595s
-total** for 9308 node executions. The unchunked default sweep is
+Wall time, macOS 15.5 / 14 cores: ReviewGateStress 29s, ReviewGateScanIsolation
+8s, EnvInvariance 4s, PlanLoopStress (+RcaPlanLoopStress) 137s, GreenCheckStress
+53s, ConvergeStress 51s, GateTestsStress 217s, DeslopStress 367s — **866s
+total** for 9308 node executions. (Chunk wall times vary run to run with
+machine load; an earlier identical sweep of the same 101 groups came in at
+595s. The group and execution counts, and the zero anomalies, were identical
+both times.) The unchunked default sweep is
 `NODE_STRESS=100 python3 -m unittest discover -s setup/tests -p
 'test_node_stress.py'` and takes about the same time in one process.
 
