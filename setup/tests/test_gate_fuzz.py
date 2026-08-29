@@ -2,10 +2,16 @@
 AI-authored JSON envelopes (deslop-review.json, critique.json, revision.json)
 through the REAL extracted gate bodies (deslop-review-gate, plan-critic-gate /
 rca-critic-gate, plan-converge / rca-converge, both lanes) and asserts each
-variant produces exactly one documented gate-terminal typed line, no Python
-traceback on stderr, and an exit code consistent with that line's PASS/FAIL
-class. See RUNBOOK.md section 3/3a/3b for the typed-line vocabulary this
-tests against.
+variant produces exactly one documented gate-terminal typed line matching
+its FULL shape (not just a matching prefix — round=<N>, cap=<N>, closed
+enums, etc.), no Python traceback on EITHER stream, and an exit code
+consistent with that line's PASS/FAIL class. The pattern tables below are
+transcribed directly from the `echo`/`print` statements in workflows/*.yaml
+and setup/parse-critique.py (see RUNBOOK.md section 3/3a/3b for the prose
+summary of the same vocabulary). OracleSelfCheckTest below proves the
+oracle itself rejects two things a weaker check would rubber-stamp: a
+traceback printed to stdout instead of stderr, and a well-prefixed but
+structurally garbage terminal line.
 
 impact.json and recheck.json are NOT covered here: impact.json is read only
 by AI-node prompts (never `json.load`'d by any bash gate — see impact-probe
@@ -217,71 +223,168 @@ def make_critic_gate_fixture(tmp, round_file):
 
 
 # ---------------------------------------------------------------------------
-# Typed-line vocabulary and PASS/FAIL classification, per RUNBOOK.md section 3/3a/3b.
+# Typed-line vocabulary: one FULL-SHAPE regex per distinct `echo`/`print`
+# statement in the gate's own source (transcribed from workflows/*.yaml and
+# setup/parse-critique.py directly, not from RUNBOOK.md's prose summary).
+# Each pattern is matched with `fullmatch` against a single line — a prefix
+# match is not enough, so every numeric field is `\d+`, every enum field is
+# a closed alternation, and only genuinely free-text portions (a Python
+# `!r`-repr of an untrusted JSON value, an exception message) are left as
+# `.+`. A line that merely starts with the right token but has a garbage
+# value in a structured field (e.g. `round=garbage`) must NOT match.
 # ---------------------------------------------------------------------------
 
-def deslop_review_gate_classify(line):
-    if line.startswith("DESLOP=CLEAN"):
-        return True
-    if line.startswith("DESLOP=DIRTY") or line.startswith("DESLOP_REVIEW=FAIL"):
-        return False
-    return None
+def _alt(*parts):
+    return "(?:" + "|".join(parts) + ")"
 
 
-DESLOP_REVIEW_GATE_TERMINAL = re.compile(r"^(DESLOP=CLEAN\b.*|DESLOP=DIRTY\b.*|DESLOP_REVIEW=FAIL\b.*)$", re.MULTILINE)
+INT = r"\d+"
+FIVE_FILES = _alt(r"verify\.json", r"files-allowlist\.json", r"reader-audit\.json",
+                   r"premises\.json", r"smoke-probe\.json")
+FIVE_LIST = _alt("none", FIVE_FILES + r"(?:," + FIVE_FILES + r")*")
+THREE_FILES_RCA = _alt(r"files-allowlist\.json", r"verify\.json", r"failing-test\.json")
+THREE_LIST_RCA = _alt("none", THREE_FILES_RCA + r"(?:," + THREE_FILES_RCA + r")*")
+FOUR_FILES_RCA = _alt(r"fix-plan\.json", r"files-allowlist\.json", r"verify\.json", r"failing-test\.json")
+FOUR_LIST_RCA = _alt("NO", FOUR_FILES_RCA + r"(?:," + FOUR_FILES_RCA + r")*")
+SIX_FILES_RCA = _alt(r"rca\.md", r"causal-chain\.json", r"hypotheses\.json",
+                      r"residuals\.json", r"probe\.json", r"repo\.json")
+GUARD5 = _alt("complexity", "tautological_tests", "yagni", "open_closed", "comments")
 
-
-def critic_gate_classify(line):
-    if line.startswith("CRITIQUE "):
-        return True
-    if line.startswith("CRITIC_GATE=FAIL"):
-        return False
-    return None
-
-
-CRITIC_GATE_TERMINAL = re.compile(r"^(CRITIQUE round=.*|CRITIC_GATE=FAIL.*)$", re.MULTILINE)
-
-
-def plan_converge_classify(line):
-    if line.startswith("PLAN_CONVERGED") or line.startswith("PLAN_ROUND_PROGRESSED"):
-        return True
-    if line.startswith(("PLAN_REJECTED", "PLAN_SCOPE_DISPUTE", "PLAN_NO_PROGRESS", "PLAN_ROUND_CAP",
-                         "PLAN_CONVERGE=FAIL", "CRITIC_GATE=FAIL")):
-        return False
-    return None
-
-
-PLAN_CONVERGE_TERMINAL = re.compile(
-    r"^(PLAN_CONVERGED\b.*|PLAN_ROUND_PROGRESSED\b.*|PLAN_REJECTED\b.*|PLAN_SCOPE_DISPUTE\b.*|"
-    r"PLAN_NO_PROGRESS\b.*|PLAN_ROUND_CAP\b.*|PLAN_CONVERGE=FAIL\b.*|CRITIC_GATE=FAIL\b.*)$",
-    re.MULTILINE,
+# deslop-review-gate's embedded python validator: malformed()/incomplete()
+# reason strings, one alternative per distinct call site in the YAML.
+_MALFORMED_REASON = _alt(
+    r"unparseable json: .+",
+    r"top level is not an object",
+    r"extra top-level keys=\[.*\]",
+    r"verdict=.+",
+    r"findings is not an array",
+    rf"index={INT} finding is not an object",
+    rf"index={INT} guard=.+",
+    rf"index={INT} (?:file|evidence)=.+",
+    rf"index={INT} line=.+",
+    rf"index={INT} confidence=.+",
+)
+_INCOMPLETE_REASON = _alt(
+    r"coverage is not an object",
+    rf"missing={GUARD5}",
+    rf"guard={GUARD5} status=.+",
+    rf"guard={GUARD5} empty evidence",
 )
 
+DESLOP_REVIEW_GATE_PATTERNS = [
+    (rf"DESLOP=CLEAN round={INT}", True),
+    (rf"DESLOP=DIRTY round={INT} blocking={INT}", False),
+    (r"DESLOP_REVIEW=FAIL no deslop-round\.txt \(deslop-recheck did not run\)", False),
+    (rf"DESLOP_REVIEW=FAIL no checkpoint for round={INT}", False),
+    (rf"DESLOP_REVIEW=FAIL no deslop-review\.json round={INT}", False),
+    (rf"DESLOP_REVIEW=FAIL reviewer modified tree round={INT}", False),
+    (rf"DESLOP_REVIEW=FAIL recompute (?:add|write-tree|rev-parse|live-index tree) round={INT}", False),
+    (rf"DESLOP_REVIEW=FAIL malformed finding round={INT} {_MALFORMED_REASON}", False),
+    (rf"DESLOP_REVIEW=FAIL coverage incomplete round={INT} {_INCOMPLETE_REASON}", False),
+    (rf"DESLOP_REVIEW=FAIL verdict inconsistent round={INT} declared DIRTY with 0 blocking findings", False),
+    (rf"DESLOP_REVIEW=FAIL validator error rc={INT} round={INT}", False),
+]
 
-def rca_converge_classify(line):
-    if line.startswith("RCA_PLAN_CONVERGED") or line.startswith("RCA_PLAN_ROUND_PROGRESSED"):
-        return True
-    if line.startswith(("RCA_PLAN_REJECTED", "RCA_PLAN_SCOPE_DISPUTE", "RCA_PLAN_NO_PROGRESS",
-                         "RCA_PLAN_ROUND_CAP", "RCA_CONVERGE=FAIL", "RCA_PLAN=FAIL", "CRITIC_GATE=FAIL")):
-        return False
-    return None
-
-
-RCA_CONVERGE_TERMINAL = re.compile(
-    r"^(RCA_PLAN_CONVERGED\b.*|RCA_PLAN_ROUND_PROGRESSED\b.*|RCA_PLAN_REJECTED\b.*|RCA_PLAN_SCOPE_DISPUTE\b.*|"
-    r"RCA_PLAN_NO_PROGRESS\b.*|RCA_PLAN_ROUND_CAP\b.*|RCA_CONVERGE=FAIL\b.*|RCA_PLAN=FAIL\b.*|CRITIC_GATE=FAIL\b.*)$",
-    re.MULTILINE,
+# parse-critique.py's fail() reason strings, one per distinct call site.
+_CRITIC_REASON = _alt(
+    r"usage: parse-critique\.py <critique\.json> --round N",
+    r"cannot read/parse .+",
+    r"top level is not an object",
+    r"verdict out of enum: .+",
+    r"findings is not a list",
+    rf"finding {INT} is not an object",
+    rf"finding {INT} missing kind",
+    rf"finding {INT} severity out of enum: .+",
+    rf"finding {INT} confidence out of enum: .+",
+    rf"finding {INT} missing section",
+    rf"finding {INT} missing evidence",
+    rf"finding {INT} evidence {INT} malformed",
+    rf"finding {INT} missing recommendation",
 )
+CRITIC_GATE_PATTERNS = [
+    (rf"CRITIQUE round={INT} verdict={_alt('ACCEPT', 'REVISE', 'REJECT')} "
+     rf"scope={INT} regression={INT} gap={INT} verifiability={INT}", True),
+    (r"CRITIC_GATE=FAIL no plan-round\.txt", False),
+    (r"CRITIC_GATE=FAIL no rca-round\.txt", False),
+    (rf"CRITIC_GATE=FAIL no critique\.json round={INT}", False),
+    (rf"CRITIC_GATE=FAIL {_CRITIC_REASON}", False),
+]
+
+PLAN_CONVERGE_PATTERNS = [
+    (rf"PLAN_CONVERGED round={INT}", True),
+    (rf"PLAN_ROUND_PROGRESSED round={INT}", True),
+    (r"PLAN_CONVERGE=FAIL no plan-round\.txt", False),
+    (r"PLAN_CONVERGE=FAIL plan-round\.txt is not an integer: \[.*\]", False),
+    (rf"PLAN_CONVERGE=FAIL unknown verdict \[.*\] round={INT}", False),
+    (rf"PLAN_CONVERGE=FAIL no revision\.json round={INT}", False),
+    (rf"PLAN_CONVERGE=FAIL critique\.json findings unreadable round={INT}", False),
+    (rf"PLAN_CONVERGE=FAIL shape round={INT}", False),
+    (rf"PLAN_CONVERGE=FAIL revision\.json malformed round={INT}", False),
+    (rf"CRITIC_GATE=FAIL verdict inconsistent round={INT} declared ACCEPT with {INT} blocking findings", False),
+    (rf"PLAN_REJECTED round={INT} plan_mutated={_alt('YES', 'NO')} artifacts_mutated={FIVE_LIST}", False),
+    (rf"PLAN_SCOPE_DISPUTE round={INT} declined_scope_100={INT}", False),
+    (rf"PLAN_NO_PROGRESS round={INT} other_mutated={FIVE_LIST}", False),
+    (rf"PLAN_ROUND_CAP round={INT} cap={INT}", False),
+]
+
+RCA_CONVERGE_PATTERNS = [
+    (rf"RCA_PLAN_CONVERGED round={INT}", True),
+    (rf"RCA_PLAN_ROUND_PROGRESSED round={INT}", True),
+    (r"RCA_CONVERGE=FAIL no rca-round\.txt", False),
+    (r"RCA_CONVERGE=FAIL rca-round\.txt is not an integer: \[.*\]", False),
+    (rf"RCA_CONVERGE=FAIL unknown verdict \[.*\] round={INT}", False),
+    (rf"RCA_CONVERGE=FAIL no revision\.json round={INT}", False),
+    (rf"RCA_CONVERGE=FAIL missing durable anchor imm-{SIX_FILES_RCA} round={INT}", False),
+    (rf"RCA_PLAN=FAIL immutable artifact modified {SIX_FILES_RCA} round={INT}", False),
+    (rf"RCA_CONVERGE=FAIL critique\.json findings unreadable round={INT}", False),
+    (rf"RCA_CONVERGE=FAIL revision\.json malformed round={INT}", False),
+    (rf"CRITIC_GATE=FAIL verdict inconsistent round={INT} declared ACCEPT with {INT} blocking findings", False),
+    (rf"RCA_PLAN_REJECTED round={INT} mutated={FOUR_LIST_RCA}", False),
+    (rf"RCA_PLAN_SCOPE_DISPUTE round={INT} declined_scope_100={INT}", False),
+    (rf"RCA_PLAN_NO_PROGRESS round={INT} other_mutated={THREE_LIST_RCA}", False),
+    (rf"RCA_CONVERGE=FAIL shape round={INT}", False),
+    (rf"RCA_PLAN_ROUND_CAP round={INT} cap={INT}", False),
+]
+
+
+def compile_patterns(patterns):
+    return [(re.compile(p), is_pass) for p, is_pass in patterns]
+
+
+DESLOP_REVIEW_GATE_TERMINAL = compile_patterns(DESLOP_REVIEW_GATE_PATTERNS)
+CRITIC_GATE_TERMINAL = compile_patterns(CRITIC_GATE_PATTERNS)
+PLAN_CONVERGE_TERMINAL = compile_patterns(PLAN_CONVERGE_PATTERNS)
+RCA_CONVERGE_TERMINAL = compile_patterns(RCA_CONVERGE_PATTERNS)
+
+
+def find_terminal_lines(text, compiled_patterns):
+    """Every line in text that fullmatches one of compiled_patterns, paired
+    with that pattern's PASS/FAIL class. A line matching more than one
+    pattern is impossible by construction (the alternatives are disjoint
+    prefixes), so first-match is fine."""
+    out = []
+    for line in text.splitlines():
+        for regex, is_pass in compiled_patterns:
+            if regex.fullmatch(line):
+                out.append((line, is_pass))
+                break
+    return out
 
 
 class FuzzGateAssertions:
-    """Shared assertion body: given a completed subprocess, a compiled
-    terminal-line regex, and a classify(line) -> True/False/None function,
-    verify the three properties every gate must hold under any malformed
-    input: exactly one typed terminal line, no traceback, and an exit code
-    consistent with that line's PASS/FAIL class."""
+    """Shared assertion body: given a completed subprocess and this gate's
+    compiled (regex, is_pass) pattern table, verify the three properties
+    every gate must hold under any malformed input: exactly one FULL-SHAPE
+    typed terminal line (not just a matching prefix), no traceback on
+    EITHER stream, and an exit code consistent with that line's class."""
 
-    def assert_gate_fails_closed(self, proc, terminal_re, classify, variant_name):
+    def assert_gate_fails_closed(self, proc, compiled_patterns, variant_name):
+        # Check both streams: a traceback could in principle land on either
+        # (e.g. if a future change adds an unguarded print-then-raise), and
+        # an oracle that only checks stderr would rubber-stamp one that
+        # printed to stdout with rc=0 — see OracleSelfCheckTest below.
+        self.assertNotIn(TRACEBACK, proc.stdout,
+                          f"{variant_name}: python traceback leaked to stdout:\n{proc.stdout}")
         self.assertNotIn(TRACEBACK, proc.stderr,
                           f"{variant_name}: python traceback leaked to stderr:\n{proc.stderr}")
         # parse-critique.py's fail() does sys.exit(f"CRITIC_GATE=FAIL ...") — a
@@ -289,15 +392,14 @@ class FuzzGateAssertions:
         # by test_parse_critique.py, which checks both streams for the same
         # reason). The success line (print(...)) goes to stdout as usual, so
         # the terminal line for this gate can land in either stream.
-        matches = terminal_re.findall(proc.stdout + "\n" + proc.stderr)
+        matches = find_terminal_lines(proc.stdout + "\n" + proc.stderr, compiled_patterns)
         self.assertEqual(
             len(matches), 1,
-            f"{variant_name}: expected exactly one gate-terminal typed line, got {len(matches)}: "
-            f"{matches!r}\n--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}",
+            f"{variant_name}: expected exactly one gate-terminal typed line matching its full "
+            f"documented shape, got {len(matches)}: {matches!r}\n"
+            f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}",
         )
-        line = matches[0]
-        is_pass = classify(line)
-        self.assertIsNotNone(is_pass, f"{variant_name}: terminal line not classifiable as PASS/FAIL: {line!r}")
+        line, is_pass = matches[0]
         if is_pass:
             self.assertEqual(proc.returncode, 0, f"{variant_name}: PASS-class line {line!r} but rc={proc.returncode}")
         else:
@@ -319,7 +421,7 @@ class DeslopReviewGateFuzzTest(FuzzGateAssertions, unittest.TestCase):
                 with self.subTest(variant=v["name"]):
                     try:
                         _, is_pass = self.assert_gate_fails_closed(
-                            proc, DESLOP_REVIEW_GATE_TERMINAL, deslop_review_gate_classify, v["name"])
+                            proc, DESLOP_REVIEW_GATE_TERMINAL, v["name"])
                         results["pass" if is_pass else "typed_fail"] += 1
                     except AssertionError:
                         results["untyped"] += 1
@@ -348,7 +450,7 @@ class PlanCriticGateFuzzTest(FuzzGateAssertions, unittest.TestCase):
                 with self.subTest(variant=v["name"]):
                     try:
                         _, is_pass = self.assert_gate_fails_closed(
-                            proc, CRITIC_GATE_TERMINAL, critic_gate_classify, v["name"])
+                            proc, CRITIC_GATE_TERMINAL, v["name"])
                         results["pass" if is_pass else "typed_fail"] += 1
                     except AssertionError:
                         results["untyped"] += 1
@@ -380,7 +482,7 @@ class PlanConvergeCritiqueFuzzTest(FuzzGateAssertions, unittest.TestCase):
                 with self.subTest(variant=v["name"]):
                     try:
                         _, is_pass = self.assert_gate_fails_closed(
-                            proc, PLAN_CONVERGE_TERMINAL, plan_converge_classify, v["name"])
+                            proc, PLAN_CONVERGE_TERMINAL, v["name"])
                         results["pass" if is_pass else "typed_fail"] += 1
                     except AssertionError:
                         results["untyped"] += 1
@@ -403,7 +505,7 @@ class RcaConvergeCritiqueFuzzTest(FuzzGateAssertions, unittest.TestCase):
                 with self.subTest(variant=v["name"]):
                     try:
                         _, is_pass = self.assert_gate_fails_closed(
-                            proc, RCA_CONVERGE_TERMINAL, rca_converge_classify, v["name"])
+                            proc, RCA_CONVERGE_TERMINAL, v["name"])
                         results["pass" if is_pass else "typed_fail"] += 1
                     except AssertionError:
                         results["untyped"] += 1
@@ -429,7 +531,7 @@ class PlanConvergeRevisionFuzzTest(FuzzGateAssertions, unittest.TestCase):
                 with self.subTest(variant=v["name"]):
                     try:
                         _, is_pass = self.assert_gate_fails_closed(
-                            proc, PLAN_CONVERGE_TERMINAL, plan_converge_classify, v["name"])
+                            proc, PLAN_CONVERGE_TERMINAL, v["name"])
                         results["pass" if is_pass else "typed_fail"] += 1
                     except AssertionError:
                         results["untyped"] += 1
@@ -452,13 +554,81 @@ class RcaConvergeRevisionFuzzTest(FuzzGateAssertions, unittest.TestCase):
                 with self.subTest(variant=v["name"]):
                     try:
                         _, is_pass = self.assert_gate_fails_closed(
-                            proc, RCA_CONVERGE_TERMINAL, rca_converge_classify, v["name"])
+                            proc, RCA_CONVERGE_TERMINAL, v["name"])
                         results["pass" if is_pass else "typed_fail"] += 1
                     except AssertionError:
                         results["untyped"] += 1
                         raise
         print(f"FUZZ bugfix:rca-converge:revision.json n={len(vs)} "
               f"pass={results['pass']} typed_fail={results['typed_fail']} untyped={results['untyped']}")
+
+
+class FakeProc:
+    """Stand-in for a completed subprocess.CompletedProcess, so the oracle
+    itself (assert_gate_fails_closed) can be tested against hand-built
+    stdout/stderr/returncode without spawning bash."""
+
+    def __init__(self, stdout="", stderr="", returncode=0):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+
+
+class OracleSelfCheckTest(FuzzGateAssertions, unittest.TestCase):
+    """The fuzz oracle (assert_gate_fails_closed) must reject bad evidence,
+    not just bad gate output — a Codex review of this file found two ways
+    the PREVIOUS version of the oracle would have rubber-stamped a broken
+    gate:
+
+    (1) A traceback printed to STDOUT (not stderr) with rc=0. The old
+        oracle only checked `TRACEBACK not in proc.stderr`, so a node that
+        leaked a traceback to stdout alongside a coincidentally-valid
+        terminal line and exited 0 would have passed clean. Now checked on
+        both streams.
+    (2) A well-prefixed but structurally garbage terminal line, e.g.
+        `CRITIQUE round=garbage verdict=ACCEPT scope=0 regression=0 gap=0
+        verifiability=0` with rc=0. The old oracle classified by
+        `line.startswith("CRITIQUE ")`, which accepts this even though
+        `round=` isn't a number — a node that started emitting malformed
+        round numbers (or any other structured field) would have gone
+        undetected. Now matched with `fullmatch` against a full-shape
+        regex, so a garbage field produces zero matches, not a false PASS.
+
+    Both counterexamples must make the oracle raise AssertionError. This
+    test is meaningless run against the vocabulary tables alone — it tests
+    assert_gate_fails_closed's own logic, using FakeProc so no gate body
+    needs to run."""
+
+    def test_rejects_traceback_on_stdout_even_with_valid_terminal_line_and_rc_zero(self):
+        proc = FakeProc(
+            stdout=(
+                'Traceback (most recent call last):\n'
+                '  File "<string>", line 1, in <module>\n'
+                'ValueError: boom\n'
+                'DESLOP=CLEAN round=1\n'
+            ),
+            stderr="",
+            returncode=0,
+        )
+        with self.assertRaises(AssertionError):
+            self.assert_gate_fails_closed(proc, DESLOP_REVIEW_GATE_TERMINAL, "self-check-traceback-on-stdout")
+
+    def test_rejects_prefix_only_garbage_terminal_line(self):
+        proc = FakeProc(
+            stdout="CRITIQUE round=garbage verdict=ACCEPT scope=0 regression=0 gap=0 verifiability=0\n",
+            stderr="",
+            returncode=0,
+        )
+        with self.assertRaises(AssertionError):
+            self.assert_gate_fails_closed(proc, CRITIC_GATE_TERMINAL, "self-check-garbage-terminal-line")
+
+    def test_still_accepts_a_genuinely_valid_pass_line(self):
+        # Negative control for the two tests above: the oracle must not
+        # have become so strict that it rejects real, well-formed output.
+        proc = FakeProc(stdout="DESLOP=CLEAN round=1\n", stderr="", returncode=0)
+        line, is_pass = self.assert_gate_fails_closed(proc, DESLOP_REVIEW_GATE_TERMINAL, "self-check-valid-pass")
+        self.assertTrue(is_pass)
+        self.assertEqual(line, "DESLOP=CLEAN round=1")
 
 
 # ---------------------------------------------------------------------------
