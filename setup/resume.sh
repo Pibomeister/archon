@@ -36,7 +36,7 @@
 set -euo pipefail
 
 # The stale-'running' grace period baked into the CLI (Fw$ = 1 in the bundle).
-STALE_DAYS=3  # archon 0.8.0 findResumableRun: running AND last_activity_at older than 3 days counts as resumable
+STALE_DAYS=1  # archon 0.8.0 findResumableRun: Dw$(Y,3) binds placeholder $3 = Fw$ = 1 day, not "3 days"
 
 ARCHON_DB="${ARCHON_DB:-$HOME/.archon/archon.db}"
 
