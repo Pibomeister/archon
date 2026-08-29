@@ -205,6 +205,16 @@ archon workflow resume <run-id>
 - **`plan-loop`, `rca-plan-loop`, and `deslop-verify` are `loop_group`s too** (§3a/§3b, §12) and follow the same rule: a resume re-enters with a fresh iteration and re-runs every body AI node, even ones that "succeeded" in the failed iteration (a `DESLOP_REVIEW=FAIL` on the review-gate still re-runs `deslop-recheck` from scratch on resume, for example). Their durable counters are `plan-round.txt`, `rca-round.txt`, `deslop-round.txt`, and `deslop-dirty.txt` (the DIRTY-verdict counter, distinct from `deslop-round.txt`'s iteration count) in the run's artifacts.
 - Node outputs may not survive a resume — every consumer has a disk-artifact fallback (envelope files). If you're debugging, trust the files in `$ARTIFACTS_DIR`, not remembered node output.
 
+**`archon workflow resume <run-id>` can resume a DIFFERENT run (archon 0.8.0, observed 2026-08-29).** With two
+`bugfix` runs on the same path — `ab6ea8aa` (failed at its round cap) and `607fa834` (a different bug report, failed 16 s
+earlier) — `resume ab6ea8aa…` printed "Resuming workflow: bugfix" and then executed `607fa834`'s next loop iteration:
+its DB events (`remote_agent_workflow_events`) carry the exact node durations the resume printed, `ab6ea8aa` received
+no events at all, and its artifacts were untouched. Selection appears to be "the most recent failed run of that lane on
+this path", not the id. Before and after any resume: `sqlite3 ~/.archon/archon.db "select id,status,last_activity_at
+from remote_agent_workflow_runs where workflow_name='bugfix' order by last_activity_at desc limit 3"` and confirm the
+run whose `last_activity_at` moved is the one you named. Never resume while another failed/paused run of the same lane
+exists on the path; abandon or finish it first.
+
 ## 5. Stalls, orphans, and locks
 
 - **You killed the archon CLI (or it died): the run is orphaned as `running` and the worktree lock persists.** Recover with `archon workflow abandon <run-id>`. **There is no `cancel` verb.**
