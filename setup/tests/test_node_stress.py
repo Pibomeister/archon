@@ -909,6 +909,32 @@ class DeslopStress(unittest.TestCase):
         self.assertEqual(r["rc"], 1)
         self.assertIn("DESLOP=DIRTY round=1 blocking=1", r["output"])
 
+    def test_deslop_review_gate_junk_counter_fails_closed(self):
+        # The READER half of the same guard: deslop-review-gate builds
+        # `deslop-round-$N` from the counter, so `1/../deslop-round-1` would
+        # read the PREVIOUS round's checkpoint and review as this round's.
+        for workflow, lane in (("full-sdlc-api", "api"), ("bugfix", "bugfix")):
+            for bad in ("1/../deslop-round-1", "one", " 1"):
+                def build(tmp, lane=lane, bad=bad):
+                    deslop_review_gate_fixture(lane, deslop_review())(tmp)
+                    (tmp / "artifacts" / "deslop-round.txt").write_text(bad)
+                with self.subTest(workflow=workflow, value=bad):
+                    r = run_node(workflow, "deslop-review-gate", build)
+                    self.assertEqual(r["rc"], 1, r["output"])
+                    self.assertIn(
+                        f"DESLOP_REVIEW=FAIL deslop-round.txt is not an integer: [{bad}]",
+                        r["output"])
+
+    def test_deslop_review_gate_absent_counter_keeps_its_own_message(self):
+        for workflow, lane in (("full-sdlc-api", "api"), ("bugfix", "bugfix")):
+            def build(tmp, lane=lane):
+                deslop_review_gate_fixture(lane, deslop_review())(tmp)
+                (tmp / "artifacts" / "deslop-round.txt").write_text("")
+            with self.subTest(workflow=workflow):
+                r = run_node(workflow, "deslop-review-gate", build)
+                self.assertEqual(r["rc"], 1, r["output"])
+                self.assertIn("DESLOP_REVIEW=FAIL no deslop-round.txt", r["output"])
+
     def test_deslop_review_gate_api_detects_a_reviewer_edit(self):
         def build(tmp):
             deslop_review_gate_fixture("api", deslop_review())(tmp)
@@ -1085,6 +1111,44 @@ class ConvergeStress(unittest.TestCase):
                 r = run_node(lane, "converge", build)
                 self.assertEqual(r["rc"], 1)
                 self.assertIn("SCOPE_BREACH round=1 file=src/sneaky.ts", r["output"])
+
+
+
+# ==========================================================================
+# exit-gate: the last reader of `round.txt`, and the one that decides the run
+# shipped. It reaches the counter only after params-env.sh and `cd $WT`, so it
+# needs converge's fixture rather than a bare ARTIFACTS_DIR.
+# ==========================================================================
+def exit_gate_fixture(lane, counter="1"):
+    def build(tmp):
+        converge_fixture(lane, "Ready to merge")(tmp)
+        art = tmp / "artifacts"
+        if lane == "bugfix":
+            (art / "repo.txt").write_text("api\n", encoding="utf-8")
+        (art / "round.txt").write_text(counter, encoding="utf-8")
+    return build
+
+
+class ExitGateCounter(unittest.TestCase):
+    LANES = ("full-sdlc-api", "bugfix")
+
+    def test_junk_counter_fails_closed(self):
+        for lane in self.LANES:
+            for bad in ("1/../round-1", "one", " 1"):
+                with self.subTest(lane=lane, value=bad):
+                    r = run_node(lane, "exit-gate", exit_gate_fixture(lane, bad))
+                    self.assertEqual(r["rc"], 1, r["output"])
+                    self.assertIn(
+                        f"EXIT_GATE=FAIL round.txt is not an integer: [{bad}]",
+                        r["output"])
+
+    def test_empty_counter_fails_closed(self):
+        for lane in self.LANES:
+            with self.subTest(lane=lane):
+                r = run_node(lane, "exit-gate", exit_gate_fixture(lane, ""))
+                self.assertEqual(r["rc"], 1, r["output"])
+                self.assertIn("EXIT_GATE=FAIL round.txt is not an integer: []",
+                              r["output"])
 
 
 # ==========================================================================

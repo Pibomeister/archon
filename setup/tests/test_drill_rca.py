@@ -25,6 +25,7 @@ import unittest
 from pathlib import Path
 
 from nodes.extract import runnable_body
+from test_drill_plan import assert_cap_file
 
 MUTABLE = ["fix-plan.json", "files-allowlist.json", "verify.json", "failing-test.json"]
 IMMUTABLE = ["rca.md", "causal-chain.json", "hypotheses.json", "residuals.json", "probe.json", "repo.json"]
@@ -133,6 +134,7 @@ class RcaRoundPreCapFirstTest(unittest.TestCase):
         r = run_node("rca-round-pre", self.tmp)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("RCA_PLAN_ROUND_CAP round=3 cap=3", r.stdout)
+        assert_cap_file(self, self.tmp, "rca-plan-loop-exit.txt", "RCA_PLAN_ROUND_CAP round=3 cap=3")
 
     def test_cap_checked_before_round_is_spent(self):
         (self.tmp / "fix-plan.json").unlink()  # would fail differently if reached
@@ -140,6 +142,7 @@ class RcaRoundPreCapFirstTest(unittest.TestCase):
         r = run_node("rca-round-pre", self.tmp)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("RCA_PLAN_ROUND_CAP round=3 cap=3", r.stdout)
+        assert_cap_file(self, self.tmp, "rca-plan-loop-exit.txt", "RCA_PLAN_ROUND_CAP round=3 cap=3")
         self.assertFalse((self.tmp / "rca-round-4").exists())
 
     def test_missing_fix_plan_typed(self):
@@ -368,6 +371,7 @@ class RcaConvergeTest(unittest.TestCase):
         r = run_node("rca-converge", self.tmp)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("RCA_PLAN_ROUND_CAP round=3 cap=3", r.stdout)
+        assert_cap_file(self, self.tmp / "rca-round-3", "converge.txt", "RCA_PLAN_ROUND_CAP round=3 cap=3")
 
 
 class RcaPlanShapeWrapperTest(unittest.TestCase):

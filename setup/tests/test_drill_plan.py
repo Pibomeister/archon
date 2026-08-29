@@ -29,6 +29,16 @@ def run_plan_round_pre(art):
     return subprocess.run(["bash", "-c", body], capture_output=True, text=True, env=env)
 
 
+def assert_cap_file(case, art, name, line):
+    """The cap discriminator is `echo … | tee -a <artifacts>/<name>`. archon
+    persists a node's stderr but not its stdout, so this FILE — not the console
+    line — is what the operator and the babysit loop actually read; asserting
+    only on stdout would pass with the tee deleted."""
+    f = art / name
+    case.assertTrue(f.is_file(), f"{name} not written")
+    case.assertIn(line, f.read_text())
+
+
 class PlanRoundPreCapFirstTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -56,6 +66,7 @@ class PlanRoundPreCapFirstTest(unittest.TestCase):
         r = run_plan_round_pre(self.tmp)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("PLAN_ROUND_CAP round=3 cap=3", r.stdout)
+        assert_cap_file(self, self.tmp, "plan-loop-exit.txt", "PLAN_ROUND_CAP round=3 cap=3")
 
     def test_cap_checked_before_round_is_spent(self):
         # round=3 with the default cap=3: the cap must fire BEFORE plan.md is
@@ -65,6 +76,7 @@ class PlanRoundPreCapFirstTest(unittest.TestCase):
         r = run_plan_round_pre(self.tmp)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("PLAN_ROUND_CAP round=3 cap=3", r.stdout)
+        assert_cap_file(self, self.tmp, "plan-loop-exit.txt", "PLAN_ROUND_CAP round=3 cap=3")
         self.assertFalse((self.tmp / "plan-round-4").exists())
 
     def test_custom_cap_respected(self):
@@ -73,6 +85,7 @@ class PlanRoundPreCapFirstTest(unittest.TestCase):
         r = run_plan_round_pre(self.tmp)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("PLAN_ROUND_CAP round=5 cap=5", r.stdout)
+        assert_cap_file(self, self.tmp, "plan-loop-exit.txt", "PLAN_ROUND_CAP round=5 cap=5")
 
     def test_below_cap_progresses_and_snapshots_optional_files(self):
         (self.tmp / "plan-round.txt").write_text("1\n")

@@ -1297,6 +1297,7 @@ nodes:
             cd "$WT"
             N=$(cat "$ARTIFACTS_DIR/deslop-round.txt" 2>/dev/null || echo "")
             test -n "$N" || { echo "DESLOP_REVIEW=FAIL no deslop-round.txt (deslop-recheck did not run)"; exit 1; }
+            case "$N" in *[!0-9]*) echo "DESLOP_REVIEW=FAIL deslop-round.txt is not an integer: [$N]"; exit 1 ;; esac
             RD="$ARTIFACTS_DIR/deslop-round-$N"
             test -s "$RD/checkpoint-tree.txt" || { echo "DESLOP_REVIEW=FAIL no checkpoint for round=$N"; exit 1; }
             R="$ARTIFACTS_DIR/deslop-review.json"
@@ -1602,6 +1603,7 @@ nodes:
           bash: |
             set -uo pipefail
             N=$(cat "$ARTIFACTS_DIR/round.txt"); RD="$ARTIFACTS_DIR/round-$N"
+            case "$N" in ''|*[!0-9]*) echo "REVIEW_GATE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
             OUT=$review.output
             # Resume resilience: node outputs may not survive a resume; the envelope file does.
             if [ "${#OUT}" -lt 100 ] && [ -s "$RD/review-envelope.txt" ]; then
@@ -1732,6 +1734,7 @@ nodes:
           bash: |
             set -uo pipefail
             N=$(cat "$ARTIFACTS_DIR/round.txt"); RD="$ARTIFACTS_DIR/round-$N"
+            case "$N" in ''|*[!0-9]*) echo "CONVERGE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
             exec > >(tee "$RD/converge.txt") 2>&1
             eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
             cd "$WT"
@@ -1796,6 +1799,7 @@ nodes:
       eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
       cd "$WT"
       N=$(cat "$ARTIFACTS_DIR/round.txt"); RD="$ARTIFACTS_DIR/round-$N"
+      case "$N" in ''|*[!0-9]*) echo "EXIT_GATE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
       # A human accepting residuals waives the verdict and fixer checks — never
       # the clean-tree, scope, or unit-test checks (accepted findings, not a broken tree).
       if [ -f "$ARTIFACTS_DIR/accept-residuals.txt" ]; then
@@ -2028,7 +2032,9 @@ nodes:
       echo "ARTIFACTS_DIR=$ARTIFACTS_DIR"
       cat "$ARTIFACTS_DIR/worktrees.json" 2>/dev/null || echo "no worktrees.json"
       cat "$ARTIFACTS_DIR/pr-url.txt" 2>/dev/null || echo "PR=NOT_CREATED"
-      N=$(cat "$ARTIFACTS_DIR/round.txt" 2>/dev/null); test -n "$N" && cat "$ARTIFACTS_DIR/round-$N/review-summary.json" 2>/dev/null
+      N=$(cat "$ARTIFACTS_DIR/round.txt" 2>/dev/null)
+      case "$N" in *[!0-9]*) echo "REPORT=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
+      test -n "$N" && cat "$ARTIFACTS_DIR/round-$N/review-summary.json" 2>/dev/null
       # show-me: open the evidence report for the human when it exists. Print the
       # path either way — xdg-open/open may be absent (or be openvt(1) on Linux).
       if [ -s "$ARTIFACTS_DIR/run-report.html" ]; then

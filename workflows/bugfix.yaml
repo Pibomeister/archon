@@ -1964,6 +1964,7 @@ nodes:
             ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
             SETUP="$ROOT/.archon/setup"
             N=$(cat "$ARTIFACTS_DIR/fix-attempt.txt"); ADN="$ARTIFACTS_DIR/attempt-$N"
+            case "$N" in ''|*[!0-9]*) echo "GREEN_CHECK=FAIL fix-attempt.txt is not an integer: [$N]"; exit 1 ;; esac
             eval "$(bash "$SETUP/params-env.sh" "$ARTIFACTS_DIR/params.json")"
             REPO=$(cat "$ARTIFACTS_DIR/repo.txt")
             RED=$(cat "$ARTIFACTS_DIR/red-sha.txt")
@@ -2024,6 +2025,7 @@ nodes:
             set -uo pipefail
             ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
             N=$(cat "$ARTIFACTS_DIR/fix-attempt.txt"); ADN="$ARTIFACTS_DIR/attempt-$N"
+            case "$N" in ''|*[!0-9]*) echo "GREEN_GATE=FAIL fix-attempt.txt is not an integer: [$N]"; exit 1 ;; esac
             exec > >(tee "$ADN/converge.txt") 2>&1
             G="$ADN/green.json"
             test -s "$G" || { echo "FIX_CONVERGE=FAIL no green.json"; exit 1; }
@@ -2451,6 +2453,7 @@ nodes:
             cd "$WT"
             N=$(cat "$ARTIFACTS_DIR/deslop-round.txt" 2>/dev/null || echo "")
             test -n "$N" || { echo "DESLOP_REVIEW=FAIL no deslop-round.txt (deslop-recheck did not run)"; exit 1; }
+            case "$N" in *[!0-9]*) echo "DESLOP_REVIEW=FAIL deslop-round.txt is not an integer: [$N]"; exit 1 ;; esac
             RD="$ARTIFACTS_DIR/deslop-round-$N"
             test -s "$RD/checkpoint-tree.txt" || { echo "DESLOP_REVIEW=FAIL no checkpoint for round=$N"; exit 1; }
             R="$ARTIFACTS_DIR/deslop-review.json"
@@ -2733,6 +2736,7 @@ nodes:
           bash: |
             set -uo pipefail
             N=$(cat "$ARTIFACTS_DIR/round.txt"); RD="$ARTIFACTS_DIR/round-$N"
+            case "$N" in ''|*[!0-9]*) echo "REVIEW_GATE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
             OUT=$review.output
             # Resume resilience: node outputs may not survive a resume; the envelope file does.
             if [ "${#OUT}" -lt 100 ] && [ -s "$RD/review-envelope.txt" ]; then
@@ -2868,6 +2872,7 @@ nodes:
           bash: |
             set -uo pipefail
             N=$(cat "$ARTIFACTS_DIR/round.txt"); RD="$ARTIFACTS_DIR/round-$N"
+            case "$N" in ''|*[!0-9]*) echo "CONVERGE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
             exec > >(tee "$RD/converge.txt") 2>&1
             SETUP=/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup
             eval "$(bash "$SETUP/params-env.sh" "$ARTIFACTS_DIR/params.json")"
@@ -2936,6 +2941,7 @@ nodes:
       RED=$(cat "$ARTIFACTS_DIR/red-sha.txt")
       cd "$WT"
       N=$(cat "$ARTIFACTS_DIR/round.txt"); RD="$ARTIFACTS_DIR/round-$N"
+      case "$N" in ''|*[!0-9]*) echo "EXIT_GATE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
       # A human accepting residuals waives the verdict and fixer checks — never
       # the clean-tree, scope, repro, or negcontrol checks.
       if [ -f "$ARTIFACTS_DIR/accept-residuals.txt" ]; then
@@ -3682,7 +3688,9 @@ nodes:
       cat "$ARTIFACTS_DIR/smoke-result.txt" 2>/dev/null || true
       cat "$ARTIFACTS_DIR/smoke-matrix-result.txt" 2>/dev/null || true
       tail -1 "$ARTIFACTS_DIR/negcontrol-exit.txt" 2>/dev/null || true
-      N=$(cat "$ARTIFACTS_DIR/round.txt" 2>/dev/null); test -n "$N" && cat "$ARTIFACTS_DIR/round-$N/review-summary.json" 2>/dev/null
+      N=$(cat "$ARTIFACTS_DIR/round.txt" 2>/dev/null)
+      case "$N" in *[!0-9]*) echo "REPORT=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
+      test -n "$N" && cat "$ARTIFACTS_DIR/round-$N/review-summary.json" 2>/dev/null
       if [ -s "$ARTIFACTS_DIR/run-report.html" ]; then
         echo "REPORT=file://$ARTIFACTS_DIR/run-report.html"
         OPENER="$(command -v xdg-open 2>/dev/null || command -v open 2>/dev/null || true)"

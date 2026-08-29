@@ -408,6 +408,7 @@ nodes:
           bash: |
             set -uo pipefail
             N=$(cat "$ARTIFACTS_DIR/round.txt"); RD="$ARTIFACTS_DIR/round-$N"
+            case "$N" in ''|*[!0-9]*) echo "REVIEW_GATE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
             OUT=$review.output
             if [ "${#OUT}" -lt 100 ] && [ -s "$RD/review-envelope.txt" ]; then
               OUT=$(cat "$RD/review-envelope.txt")
@@ -534,6 +535,7 @@ nodes:
           bash: |
             set -uo pipefail
             N=$(cat "$ARTIFACTS_DIR/round.txt"); RD="$ARTIFACTS_DIR/round-$N"
+            case "$N" in ''|*[!0-9]*) echo "CONVERGE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
             exec > >(tee "$RD/converge.txt") 2>&1
             cd /Users/eduardopicazo/Documents/Workspace/Goodword/web-app/.worktrees/archon-toy
             V=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['verdict'])" "$RD/review-summary.json" 2>/dev/null || echo UNKNOWN)
