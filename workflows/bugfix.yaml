@@ -1959,8 +1959,9 @@ nodes:
           timeout: 1800000
           bash: |
             set -uo pipefail
-            # Always exits 0: fix-converge owns the verdict. This node only
-            # measures and writes attempt-N/green.json.
+            # Exits 0 whatever the tests say: fix-converge owns the verdict. This
+            # node only measures and writes attempt-N/green.json. The one exit 1 is
+            # a corrupt fix-attempt.txt (GREEN_CHECK=FAIL), which would misroute green.json.
             ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
             SETUP="$ROOT/.archon/setup"
             N=$(cat "$ARTIFACTS_DIR/fix-attempt.txt"); ADN="$ARTIFACTS_DIR/attempt-$N"
