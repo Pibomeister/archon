@@ -254,7 +254,7 @@ nodes:
               '') N=0 ;;
               *[!0-9]*) echo "PLAN_ROUND_PRE=FAIL plan-round.txt is not an integer: [$N]"; exit 1 ;;
             esac
-            if [ "$N" -ge "$CAP" ]; then echo "PLAN_ROUND_CAP round=$N cap=$CAP"; exit 1; fi
+            if [ "$N" -ge "$CAP" ]; then echo "PLAN_ROUND_CAP round=$N cap=$CAP" | tee -a "$ARTIFACTS_DIR/plan-loop-exit.txt"; exit 1; fi
             test -s "$ARTIFACTS_DIR/plan.md" || { echo "PLAN_ROUND_PRE=FAIL no plan.md round=$((N+1))"; exit 1; }
             # Durable round counter: survives resumes, unlike the loop's own iteration
             # index. Artifacts are round-scoped so a hand fix plus a resume cannot read
@@ -517,7 +517,7 @@ nodes:
             # archon persists bash stderr but not stdout; tee the discriminator to a
             # file like review converge does (live 2026-08-29: RCA_PLAN_ROUND_CAP was invisible).
             exec > >(tee "$RD/converge.txt") 2>&1
-                        eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+            eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
             V=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1],encoding='utf-8'))['verdict'])" "$RD/critique.json" 2>/dev/null || echo UNKNOWN)
             case "$V" in
               ACCEPT|REVISE|REJECT) ;;
@@ -1119,7 +1119,10 @@ nodes:
             # iteration index. Artifacts are round-scoped so a hand fix + resume
             # cannot read the previous round's verification as its own.
             C="$ARTIFACTS_DIR/deslop-round.txt"
-            N=$(cat "$C" 2>/dev/null || echo 0); N=$((N+1)); echo "$N" > "$C"
+            N=$(cat "$C" 2>/dev/null || echo 0)
+            # Hand-editable counter: reject junk before it is incremented or used as a path.
+            case "$N" in '') N=0 ;; *[!0-9]*) echo "DESLOP_RECHECK=FAIL deslop-round.txt is not an integer: [$N]"; exit 1 ;; esac
+            N=$((N+1)); echo "$N" > "$C"
             RD="$ARTIFACTS_DIR/deslop-round-$N"; mkdir -p "$RD"
             BASE=$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")
             # Every check runs even after one fails: recheck.json is the reviewer's
@@ -1535,7 +1538,10 @@ nodes:
           bash: |
             set -euo pipefail
             C="$ARTIFACTS_DIR/round.txt"
-            N=$(cat "$C" 2>/dev/null || echo 0); N=$((N+1)); echo "$N" > "$C"
+            N=$(cat "$C" 2>/dev/null || echo 0)
+            # Hand-editable counter: reject junk before it is incremented or used as a path.
+            case "$N" in '') N=0 ;; *[!0-9]*) echo "ROUND_PRE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
+            N=$((N+1)); echo "$N" > "$C"
             RD="$ARTIFACTS_DIR/round-$N"; mkdir -p "$RD"
             eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
             cd "$WT"

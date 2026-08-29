@@ -858,6 +858,19 @@ class DeslopStress(unittest.TestCase):
         self.assertEqual(r["rc"], 0, r["output"])
         self.assertIn("DESLOP_GATE=PASS files=1 round=1 checkpoint=", r["output"])
 
+    def test_deslop_recheck_junk_counter_fails_closed(self):
+        # Same class as the critic-gate / round-pre guards: a hand-editable
+        # counter must be rejected before it is incremented or used as a path.
+        for workflow, lane in (("full-sdlc-api", "api"), ("bugfix", "bugfix")):
+            for bad in ("1/../deslop-round-1", "one"):
+                def build(tmp, lane=lane, bad=bad):
+                    deslop_common(tmp, lane)
+                    (tmp / "artifacts" / "deslop-round.txt").write_text(bad)
+                with self.subTest(workflow=workflow, value=bad):
+                    r = run_node(workflow, "deslop-recheck", build)
+                    self.assertEqual(r["rc"], 1, r["output"])
+                    self.assertIn(f"DESLOP_RECHECK=FAIL deslop-round.txt is not an integer: [{bad}]", r["output"])
+
     def test_deslop_recheck_api_lint_failure_is_typed(self):
         r = run_node("full-sdlc-api", "deslop-recheck", deslop_recheck_fixture("api"),
                      env={"SHIM_RC_BUN_LINT": "1"})

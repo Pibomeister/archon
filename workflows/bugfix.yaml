@@ -461,6 +461,7 @@ nodes:
       /Users/eduardopicazo/Documents/Workspace/Goodword/api and
       /Users/eduardopicazo/Documents/Workspace/Goodword/web-app. There is NO
       worktree yet — do not modify any repository, do not create branches.
+      The checkouts may sit on a stale feature branch: read code as it is at origin/main (`git -C <repo> show origin/main:<path>`, `git -C <repo> ls-tree -r --name-only origin/main`), and cite repo-relative paths as they exist at origin/main; the gate resolves citations there when the checkout lacks the file.
       The manifest tells you exactly which evidence exists; reason only from
       sources marked gathered, and say plainly which sources you lacked.
 
@@ -665,7 +666,21 @@ nodes:
           assert q and len(q) >= 10, f"chain link {i+1} quote missing or under 10 chars"
           cands = [ref] if ref.startswith("/") else [os.path.join(root, ref), os.path.join(ad, ref)]
           path = next((c for c in cands if os.path.isfile(c)), None)
-          assert path, f"chain link {i+1} cites missing file {ref}"
+          if path is None:
+              # The main checkouts sit on whatever branch a human left them on, while
+              # every worktree this lane cuts comes from origin/main. A citation the RCA
+              # read from origin/main must not fail because the checkout is stale:
+              # materialise that revision's file into the artifacts dir and cite against
+              # it. Still fail-closed: the path must exist at origin/main.
+              parts = ref.split("/", 1)
+              if len(parts) == 2 and parts[0] in ("api", "web-app"):
+                  show = subprocess.run(["git", "-C", os.path.join(root, parts[0]), "show", f"origin/main:{parts[1]}"],
+                                        capture_output=True, encoding="utf-8", errors="replace")
+                  if show.returncode == 0:
+                      path = os.path.join(ad, "cite-cache", ref)
+                      os.makedirs(os.path.dirname(path), exist_ok=True)
+                      open(path, "w", encoding="utf-8").write(show.stdout)
+          assert path, f"chain link {i+1} cites missing file {ref} (not on disk, not at origin/main)"
           assert cited(q, path), f"chain link {i+1} uncited: quote not found verbatim in {ref}"
       last = chain[-1]
       assert last.get("fixable") is True and last.get("fix_site"), "final link must be fixable:true with fix_site"
@@ -802,6 +817,7 @@ nodes:
       main checkouts at
       /Users/eduardopicazo/Documents/Workspace/Goodword/api and
       /Users/eduardopicazo/Documents/Workspace/Goodword/web-app. Modify nothing.
+      The checkouts may sit on a stale feature branch: read code as it is at origin/main (`git -C <repo> show origin/main:<path>`, `git -C <repo> ls-tree -r --name-only origin/main`), and cite repo-relative paths as they exist at origin/main; the gate resolves citations there when the checkout lacks the file.
 
       Step 1: derive the root cause independently. Write chain-verify.json to
       the artifacts directory FIRST, before step 2:
@@ -870,7 +886,7 @@ nodes:
               '') N=0 ;;
               *[!0-9]*) echo "RCA_ROUND_PRE=FAIL rca-round.txt is not an integer: [$N]"; exit 1 ;;
             esac
-            if [ "$N" -ge "$CAP" ]; then echo "RCA_PLAN_ROUND_CAP round=$N cap=$CAP"; exit 1; fi
+            if [ "$N" -ge "$CAP" ]; then echo "RCA_PLAN_ROUND_CAP round=$N cap=$CAP" | tee -a "$ARTIFACTS_DIR/rca-plan-loop-exit.txt"; exit 1; fi
             test -s "$ARTIFACTS_DIR/fix-plan.json" || { echo "RCA_ROUND_PRE=FAIL no fix-plan.json round=$((N+1))"; exit 1; }
             # Durable round counter: survives resumes, unlike the loop's own iteration
             # index. Artifacts are round-scoped so a hand fix plus a resume cannot read
@@ -924,6 +940,7 @@ nodes:
             substituted for the actual number.
             The repository under analysis is named in repo.txt in that same
             directory. There is NO worktree yet: read the main checkouts
+            The checkouts may sit on a stale feature branch: read code as it is at origin/main (`git -C <repo> show origin/main:<path>`, `git -C <repo> ls-tree -r --name-only origin/main`), and cite repo-relative paths as they exist at origin/main; the gate resolves citations there when the checkout lacks the file.
             READ-ONLY at /Users/eduardopicazo/Documents/Workspace/Goodword/api
             and /Users/eduardopicazo/Documents/Workspace/Goodword/web-app (you
             are NOT cwd'd there — cd into the right one for every command).
@@ -987,6 +1004,7 @@ nodes:
             substituted for the actual number.
             The repository under analysis is named in repo.txt in that same
             directory. There is NO worktree yet: read the main checkouts READ-ONLY
+            The checkouts may sit on a stale feature branch: read code as it is at origin/main (`git -C <repo> show origin/main:<path>`, `git -C <repo> ls-tree -r --name-only origin/main`), and cite repo-relative paths as they exist at origin/main; the gate resolves citations there when the checkout lacks the file.
             at /Users/eduardopicazo/Documents/Workspace/Goodword/api and
             /Users/eduardopicazo/Documents/Workspace/Goodword/web-app (you are NOT
             cwd'd there — cd into the right one for every command).
@@ -1125,6 +1143,7 @@ nodes:
             The round number is the contents of rca-round.txt there; call it N.
             The repository under analysis is named in repo.txt in that same
             directory. There is NO worktree yet: read the main checkouts READ-ONLY
+            The checkouts may sit on a stale feature branch: read code as it is at origin/main (`git -C <repo> show origin/main:<path>`, `git -C <repo> ls-tree -r --name-only origin/main`), and cite repo-relative paths as they exist at origin/main; the gate resolves citations there when the checkout lacks the file.
             at /Users/eduardopicazo/Documents/Workspace/Goodword/api and
             /Users/eduardopicazo/Documents/Workspace/Goodword/web-app (you are NOT
             cwd'd there — cd into the right one for every command). Modify no
@@ -1215,7 +1234,7 @@ nodes:
             # archon persists bash stderr but not stdout; tee the discriminator to a
             # file like review converge does (live 2026-08-29: RCA_PLAN_ROUND_CAP was invisible).
             exec > >(tee "$RD/converge.txt") 2>&1
-                        V=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1],encoding='utf-8'))['verdict'])" "$RD/critique.json" 2>/dev/null || echo UNKNOWN)
+            V=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1],encoding='utf-8'))['verdict'])" "$RD/critique.json" 2>/dev/null || echo UNKNOWN)
             case "$V" in
               ACCEPT|REVISE|REJECT) ;;
               *) echo "RCA_CONVERGE=FAIL unknown verdict [$V] round=$N"; exit 1 ;;
@@ -1876,7 +1895,10 @@ nodes:
           bash: |
             set -euo pipefail
             C="$ARTIFACTS_DIR/fix-attempt.txt"
-            N=$(cat "$C" 2>/dev/null || echo 0); N=$((N+1)); echo "$N" > "$C"
+            N=$(cat "$C" 2>/dev/null || echo 0)
+            # Hand-editable counter: reject junk before it is incremented or used as a path.
+            case "$N" in '') N=0 ;; *[!0-9]*) echo "ATTEMPT_PRE=FAIL fix-attempt.txt is not an integer: [$N]"; exit 1 ;; esac
+            N=$((N+1)); echo "$N" > "$C"
             mkdir -p "$ARTIFACTS_DIR/attempt-$N"
             eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
             git -C "$WT" rev-parse HEAD > "$ARTIFACTS_DIR/attempt-$N/pre-head.txt"
@@ -2194,7 +2216,10 @@ nodes:
             # iteration index. Artifacts are round-scoped so a hand fix + resume
             # cannot read the previous round's verification as its own.
             C="$ARTIFACTS_DIR/deslop-round.txt"
-            N=$(cat "$C" 2>/dev/null || echo 0); N=$((N+1)); echo "$N" > "$C"
+            N=$(cat "$C" 2>/dev/null || echo 0)
+            # Hand-editable counter: reject junk before it is incremented or used as a path.
+            case "$N" in '') N=0 ;; *[!0-9]*) echo "DESLOP_RECHECK=FAIL deslop-round.txt is not an integer: [$N]"; exit 1 ;; esac
+            N=$((N+1)); echo "$N" > "$C"
             RD="$ARTIFACTS_DIR/deslop-round-$N"; mkdir -p "$RD"
             # Repro-untouched guard, working-tree form (same as green-check): the
             # deslop writer must not have moved the red test by a single byte.
@@ -2642,7 +2667,10 @@ nodes:
           bash: |
             set -euo pipefail
             C="$ARTIFACTS_DIR/round.txt"
-            N=$(cat "$C" 2>/dev/null || echo 0); N=$((N+1)); echo "$N" > "$C"
+            N=$(cat "$C" 2>/dev/null || echo 0)
+            # Hand-editable counter: reject junk before it is incremented or used as a path.
+            case "$N" in '') N=0 ;; *[!0-9]*) echo "ROUND_PRE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
+            N=$((N+1)); echo "$N" > "$C"
             RD="$ARTIFACTS_DIR/round-$N"; mkdir -p "$RD"
             eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
             cd "$WT"

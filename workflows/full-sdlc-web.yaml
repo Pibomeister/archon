@@ -346,7 +346,10 @@ nodes:
           bash: |
             set -euo pipefail
             C="$ARTIFACTS_DIR/round.txt"
-            N=$(cat "$C" 2>/dev/null || echo 0); N=$((N+1)); echo "$N" > "$C"
+            N=$(cat "$C" 2>/dev/null || echo 0)
+            # Hand-editable counter: reject junk before it is incremented or used as a path.
+            case "$N" in '') N=0 ;; *[!0-9]*) echo "ROUND_PRE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
+            N=$((N+1)); echo "$N" > "$C"
             RD="$ARTIFACTS_DIR/round-$N"; mkdir -p "$RD"
             cd /Users/eduardopicazo/Documents/Workspace/Goodword/web-app/.worktrees/archon-toy
             git rev-parse HEAD > "$RD/pre-head.txt"
