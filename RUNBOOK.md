@@ -211,7 +211,7 @@ earlier) — `resume ab6ea8aa…` printed "Resuming workflow: bugfix" and then e
 its DB events (`remote_agent_workflow_events`) carry the exact node durations the resume printed, `ab6ea8aa` received
 no events at all, and its artifacts were untouched. Mechanism (bundled CLI source, 0.8.0): the `resume` command resolves your id only to check it is
 failed/paused, then calls the executor with `{resume: true}` and NO id; the executor picks the run with
-`findResumableRun(workflow_name, working_path)` = `status IN ('failed','paused') OR (running AND stale > 3 days)
+`findResumableRun(workflow_name, working_path)` = `status IN ('failed','paused') OR (running AND last_activity_at older than 1 day)
 ORDER BY started_at DESC LIMIT 1` — the NEWEST resumable run of that lane on that path. Not fixed in 0.9.0. **Resume through `bash .archon/setup/resume.sh <run-id-or-prefix> [archon args]`, never the raw CLI.** It computes the
 same selection the CLI will make and refuses with `RESUME=REFUSED would_resume=<8> named=<8>
 reason=newer-resumable-run-of-lane` (printing the `abandon` command for the other run) unless the named run is the one
