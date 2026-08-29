@@ -209,8 +209,10 @@ archon workflow resume <run-id>
 `bugfix` runs on the same path — `ab6ea8aa` (failed at its round cap) and `607fa834` (a different bug report, failed 16 s
 earlier) — `resume ab6ea8aa…` printed "Resuming workflow: bugfix" and then executed `607fa834`'s next loop iteration:
 its DB events (`remote_agent_workflow_events`) carry the exact node durations the resume printed, `ab6ea8aa` received
-no events at all, and its artifacts were untouched. Selection appears to be "the most recent failed run of that lane on
-this path", not the id. Before and after any resume: `sqlite3 ~/.archon/archon.db "select id,status,last_activity_at
+no events at all, and its artifacts were untouched. Mechanism (bundled CLI source, 0.8.0): the `resume` command resolves your id only to check it is
+failed/paused, then calls the executor with `{resume: true}` and NO id; the executor picks the run with
+`findResumableRun(workflow_name, working_path)` = `status IN ('failed','paused') OR (running AND stale > 3 days)
+ORDER BY started_at DESC LIMIT 1` — the NEWEST resumable run of that lane on that path. Not fixed in 0.9.0. Before and after any resume: `sqlite3 ~/.archon/archon.db "select id,status,last_activity_at
 from remote_agent_workflow_runs where workflow_name='bugfix' order by last_activity_at desc limit 3"` and confirm the
 run whose `last_activity_at` moved is the one you named. Never resume while another failed/paused run of the same lane
 exists on the path; abandon or finish it first.
