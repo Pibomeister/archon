@@ -249,7 +249,7 @@ after implement.** The loop converges on toy diffs and *diverges* on real ones -
 more rounds past that is a signal to look, not to wait.
 
 **Before `review-loop`, `gate-tests` feeds `deslop` and `deslop-verify`** (RUNBOOK
-§3b; VERSION 2026.08.28-2, design-only - not yet observed live). Every path into
+§3b; VERSION 2026.08.28-2; api-lane path observed live 2026-08-28 on d3aa3b55). Every path into
 `review-loop` depends on `deslop-verify`, so no un-deslopped code reaches a
 reviewer. Stops here:
 
