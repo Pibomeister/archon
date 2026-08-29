@@ -9,7 +9,7 @@ nodes:
       REPO=/private/tmp/claude-501/-Users-eduardopicazo-Documents-Workspace-Goodword/88bb31f2-0094-41b2-bd3f-8409f1264538/scratchpad/m1-fixture/repo
       cd "$REPO"
       git rev-parse HEAD > "$ARTIFACTS_DIR/pre-head.txt"
-      ls -1d /tmp/compound-engineering/ce-code-review/*/ 2>/dev/null | sort > "$ARTIFACTS_DIR/prerun-dirs.txt" || true
+      ls -1d "${CE_REVIEW_ROOT:-/tmp/compound-engineering/ce-code-review}"/*/ 2>/dev/null | LC_ALL=C sort > "$ARTIFACTS_DIR/prerun-dirs.txt" || true
       touch "$ARTIFACTS_DIR/prerun-dirs.txt"
       echo "PRE_OK head=$(cat "$ARTIFACTS_DIR/pre-head.txt")"
 
@@ -49,8 +49,8 @@ nodes:
       echo "GATE_2_degraded_absent=$G2"
 
       # Run-dir discovery: set difference vs pre snapshot, head_sha as correctness proof.
-      ls -1d /tmp/compound-engineering/ce-code-review/*/ 2>/dev/null | sort > /tmp/wrap-review-post.txt || true
-      NEW=$(comm -13 "$ARTIFACTS_DIR/prerun-dirs.txt" /tmp/wrap-review-post.txt)
+      ls -1d "${CE_REVIEW_ROOT:-/tmp/compound-engineering/ce-code-review}"/*/ 2>/dev/null | LC_ALL=C sort > "$ARTIFACTS_DIR/post-dirs.txt" || true
+      NEW=$(comm -13 "$ARTIFACTS_DIR/prerun-dirs.txt" "$ARTIFACTS_DIR/post-dirs.txt")
       PREHEAD=$(cat "$ARTIFACTS_DIR/pre-head.txt")
       VERDICT=""; RUNDIR=""
       for d in $NEW; do

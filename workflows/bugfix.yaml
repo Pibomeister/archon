@@ -1249,7 +1249,7 @@ nodes:
             # would converge the loop on a plan carrying an unaddressed P0. Re-derive
             # the blocking count from the findings and refuse the mismatch; the group
             # fails, and the resume re-runs the critic, which is the fix.
-            BLOCKING=$(python3 -c "import json,sys; f=json.load(open(sys.argv[1],encoding='utf-8')).get('findings') or []; print(sum(1 for x in f if isinstance(x,dict) and x.get('severity') in ('P0','P1') and int(str(x.get('confidence')))>=75))" "$RD/critique.json") \
+            BLOCKING=$(python3 -c "import json,sys; f=json.load(open(sys.argv[1],encoding='utf-8')).get('findings') or []; print(sum(1 for x in f if isinstance(x,dict) and x.get('severity') in ('P0','P1') and int(str(x.get('confidence')))>=75))" "$RD/critique.json" 2>/dev/null) \
               || { echo "RCA_CONVERGE=FAIL critique.json findings unreadable round=$N"; exit 1; }
             if [ "$V" = ACCEPT ] && [ "$BLOCKING" != 0 ]; then
               echo "CRITIC_GATE=FAIL verdict inconsistent round=$N declared ACCEPT with $BLOCKING blocking findings"
@@ -2643,7 +2643,7 @@ nodes:
             eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
             cd "$WT"
             git rev-parse HEAD > "$RD/pre-head.txt"
-            ls -1d /tmp/compound-engineering/ce-code-review/*/ 2>/dev/null | sort > "$RD/prerun-dirs.txt" || true
+            ls -1d "${CE_REVIEW_ROOT:-/tmp/compound-engineering/ce-code-review}"/*/ 2>/dev/null | LC_ALL=C sort > "$RD/prerun-dirs.txt" || true
             touch "$RD/prerun-dirs.txt"
             echo "ROUND=$N head=$(cat "$RD/pre-head.txt")"
 
@@ -2713,7 +2713,7 @@ nodes:
             G1="$ENV_G1"; G2="$ENV_G2"
             echo "GATE_1_review_complete_present=$G1 (contract=$ENV_VSRC)"
             echo "GATE_2_degraded_absent=$G2"
-            ls -1d /tmp/compound-engineering/ce-code-review/*/ 2>/dev/null | sort > "$RD/post-dirs.txt" || true
+            ls -1d "${CE_REVIEW_ROOT:-/tmp/compound-engineering/ce-code-review}"/*/ 2>/dev/null | LC_ALL=C sort > "$RD/post-dirs.txt" || true
             NEW=$(comm -13 "$RD/prerun-dirs.txt" "$RD/post-dirs.txt")
             PREHEAD=$(cat "$RD/pre-head.txt")
             VERDICT=""; RUNDIR=""

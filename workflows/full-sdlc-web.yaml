@@ -350,7 +350,7 @@ nodes:
             RD="$ARTIFACTS_DIR/round-$N"; mkdir -p "$RD"
             cd /Users/eduardopicazo/Documents/Workspace/Goodword/web-app/.worktrees/archon-toy
             git rev-parse HEAD > "$RD/pre-head.txt"
-            ls -1d /tmp/compound-engineering/ce-code-review/*/ 2>/dev/null | sort > "$RD/prerun-dirs.txt" || true
+            ls -1d "${CE_REVIEW_ROOT:-/tmp/compound-engineering/ce-code-review}"/*/ 2>/dev/null | LC_ALL=C sort > "$RD/prerun-dirs.txt" || true
             touch "$RD/prerun-dirs.txt"
             echo "ROUND=$N head=$(cat "$RD/pre-head.txt")"
 
@@ -420,7 +420,7 @@ nodes:
             # shared host makes the redirect fail, `|| true` swallows it, and comm
             # then diffs against a foreign list — silently picking the wrong
             # ce-code-review run directory to read the verdict from.
-            ls -1d /tmp/compound-engineering/ce-code-review/*/ 2>/dev/null | sort > "$RD/post-dirs.txt" || true
+            ls -1d "${CE_REVIEW_ROOT:-/tmp/compound-engineering/ce-code-review}"/*/ 2>/dev/null | LC_ALL=C sort > "$RD/post-dirs.txt" || true
             NEW=$(comm -13 "$RD/prerun-dirs.txt" "$RD/post-dirs.txt")
             PREHEAD=$(cat "$RD/pre-head.txt")
             VERDICT=""; RUNDIR=""
