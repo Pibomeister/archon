@@ -51,6 +51,49 @@ Coverage as swept at `NODE_STRESS=100` (a "group" is one fixture run N times;
 Every group reported `identical=<N> untyped_exits=0 unstable_slots=0`; zero
 non-identical runs, zero untyped exits, zero values that moved between runs.
 
+That `NODE_STRESS=100` sweep was taken against the NARROWER observation
+described below (artifacts plus tracked git state). The widened one has been
+re-swept at `NODE_STRESS=25` — the same 119 groups, 2783 executions, 165s in
+one process — with the same result: zero non-identical runs, zero untyped
+exits, zero unstable slots. No covered fixture writes anything unstable to
+`$TMPDIR`, `$HOME`, a `CE_REVIEW_ROOT` or a gitignored worktree path. Re-taking
+the full `NODE_STRESS=100` sweep against the widened observation is the tracked
+follow-up; the per-node execution counts in the table above are the earlier
+sweep's.
+
+**What the observation covers.** Three things per run: the exit code, the
+typed lines in order, and every regular file and symlink the node left anywhere
+in its per-run temp root. The last one is deliberately the WHOLE root, not just
+`ARTIFACTS_DIR`. It is assembled from three row sets, in this fixed order:
+artifacts by relative path (`_snapshot`); one `worktree:<name>` row per
+throwaway git repo carrying HEAD, a full-tree sha computed through a scratch
+index, `ls-files -s` and `status --porcelain` (`_worktree_snapshot`); and a
+`tree:<relpath>` row for everything else (`_tree_snapshot`) — the isolated
+`$TMPDIR` and `$HOME` that `_isolation_env` redirects into the root, a
+fixture's `CE_REVIEW_ROOT`, and worktree paths `git` calls IGNORED, which the
+worktree row cannot see by construction. Only two things are skipped, both
+because they are covered better elsewhere: a repo's `.git/` (restated
+content-addressably by the worktree row, and otherwise pure per-run noise) and
+`artifacts/` (walked by `_snapshot`, under the keys callers assert on).
+Narrowing this to `ARTIFACTS_DIR` plus tracked-and-untracked git state, as it
+was, meant a node writing a fresh value to `$TMPDIR`, to `CE_REVIEW_ROOT`, or
+to a gitignored path still reported `identical`; `ObservationCoversTheWholeTempRoot`
+in `test_runner_selfcheck.py` keeps one synthetic node per hole.
+
+The instrument is isolated on the same terms as the node. The observation's own
+`git` calls run under `_isolation_env` (`GIT_CONFIG_GLOBAL=/dev/null`,
+`GIT_CONFIG_NOSYSTEM=1`, redirected `HOME`/`TMPDIR`/`XDG_CONFIG_HOME`), and so
+does `prerun()` in `test_node_stress.py`, which runs an upstream node to build
+the state under test. Inheriting the ambient environment there put a
+developer's `~/.gitconfig` back in the loop: a `core.excludesfile` listing
+`*.secret` makes `git add -A` and `git status` skip exactly those paths, so a
+node writing one was invisible on that machine and visible on the next.
+`AmbientGitConfigIsolation` builds that config under a temp `HOME` and asserts
+the worktree row still names the file. And a failed observation `git` now
+RAISES (`ObservationError`) instead of returning its stable `<git … rc=N>`
+placeholder — N runs of a command that cannot read the repo all produce the
+same string, so "the harness saw nothing" was reported as `identical`.
+
 **What `identical` means here.** Values that legitimately move — git shas,
 timestamps, the fixture's own temp root — are not collapsed to a single
 sentinel. Each distinct value gets an ordinal in first-appearance order

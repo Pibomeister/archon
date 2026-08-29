@@ -26,7 +26,7 @@ import unittest
 from pathlib import Path
 
 from nodes.extract import ARCHON_ROOT, runnable_body
-from nodes.runner import run_node
+from nodes.runner import _isolation_env, run_node
 
 FIXTURES = Path(__file__).resolve().parent / "nodes" / "fixtures"
 SHARED = Path(__file__).resolve().parent / "fixtures"
@@ -102,6 +102,11 @@ def prerun(workflow, node, tmp, env=None):
     """
     body = runnable_body(workflow, node)
     run_env = dict(os.environ)
+    # Same isolation `stress` gives the node under test. Without it the
+    # predecessor reads the developer's $HOME/.gitconfig and the real $TMPDIR,
+    # so the state the node under test is handed depends on the machine — and
+    # an ambient `core.excludesfile` can hide a path the prerun wrote.
+    run_env.update(_isolation_env(tmp))
     run_env.update(env or {})
     run_env["ARTIFACTS_DIR"] = str(tmp / "artifacts")
     shim = tmp / "bin"

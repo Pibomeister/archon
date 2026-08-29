@@ -15,7 +15,11 @@ bodies still slip through it — if it ever starts failing, the new
 normalization's tests above it have stopped proving anything.
 """
 import os
+import shutil
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from nodes import runner
@@ -193,6 +197,138 @@ class BlanketNormalizationNegativeControl(unittest.TestCase):
 
     def test_blanket_normalization_hid_random_bytes_of_equal_length(self):
         self.assertEqual(self._blind("nc:binary", RAND_BINARY)["identical"], N)
+
+
+# --- fixtures that write OUTSIDE the artifacts dir -------------------------
+# The observation used to read exactly two things: ARTIFACTS_DIR, and the
+# tracked/untracked-but-not-ignored state of every top-level git repo. A node
+# that wrote anywhere else in its own temp root — the isolated $TMPDIR, the
+# per-run CE_REVIEW_ROOT, a gitignored path inside the worktree — was invisible,
+# and N runs writing a fresh random value each time compared identical.
+def _mkrepo(path, files=None):
+    """A throwaway one-commit repo, built with ambient git config cut out."""
+    path.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null",
+           "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+
+    def g(*args):
+        subprocess.run(["git", "-C", str(path), *args], check=True,
+                       capture_output=True, env=env)
+
+    g("init", "-q", "-b", "main")
+    g("config", "user.email", "t@example.com")
+    g("config", "user.name", "t")
+    g("config", "commit.gpgsign", "false")
+    for name, text in (files or {}).items():
+        (path / name).write_text(text, encoding="utf-8")
+    (path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    g("add", "-A")
+    g("commit", "-q", "-m", "base")
+
+
+def ce_root_fixture(tmp):
+    ce = tmp / "ce"
+    ce.mkdir()
+    return {"CE_REVIEW_ROOT": str(ce)}
+
+
+def wt_fixture(tmp):
+    """A repo whose .gitignore hides `*.log`."""
+    wt = tmp / "wt"
+    _mkrepo(wt, {".gitignore": "*.log\n"})
+    return {"WT_FIXTURE": str(wt)}
+
+
+def broken_git_fixture(tmp):
+    """A dir the worktree scan will pick up (it has a `.git`) whose `.git`
+    points nowhere, so every observation git command fails."""
+    wt = tmp / "wt"
+    wt.mkdir()
+    (wt / ".git").write_text("gitdir: /nonexistent/definitely-not-here\n",
+                             encoding="utf-8")
+    (wt / "f.txt").write_text("stable\n", encoding="utf-8")
+    return None
+
+
+RAND_TMPDIR = 'echo "SELFCHECK=PASS"; echo "$RANDOM" > "$TMPDIR/hidden"'
+RAND_CE_ROOT = 'echo "SELFCHECK=PASS"; echo "$RANDOM" > "$CE_REVIEW_ROOT/x"'
+RAND_IGNORED = 'echo "SELFCHECK=PASS"; echo "$RANDOM" > "$WT_FIXTURE/build.log"'
+RAND_EXCLUDED = 'echo "SELFCHECK=PASS"; echo "$RANDOM" > "$WT_FIXTURE/leak.secret"'
+FIXED_EXCLUDED = 'echo "SELFCHECK=PASS"; echo "fixed" > "$WT_FIXTURE/leak.secret"'
+
+
+class ObservationCoversTheWholeTempRoot(unittest.TestCase):
+    """Every regular file and symlink the node leaves under its per-run temp
+    root is part of the observation, not only the ones under ARTIFACTS_DIR."""
+
+    def test_random_write_to_the_isolated_tmpdir_is_not_identical(self):
+        with self.assertRaisesRegex(AssertionError, "nondeterministic"):
+            stress("selfcheck:tmpdir-leak", RAND_TMPDIR, nofixture, n=N)
+
+    def test_random_write_to_the_ce_review_root_is_not_identical(self):
+        with self.assertRaisesRegex(AssertionError, "nondeterministic"):
+            stress("selfcheck:ce-root-leak", RAND_CE_ROOT, ce_root_fixture, n=N)
+
+    def test_random_write_to_a_gitignored_worktree_path_is_not_identical(self):
+        """`git add -A` and `status --porcelain` both skip an ignored path, so
+        the worktree snapshot cannot see this one by construction."""
+        with self.assertRaisesRegex(AssertionError, "nondeterministic"):
+            stress("selfcheck:ignored-leak", RAND_IGNORED, wt_fixture, n=N)
+
+
+class ObservationGitFailureIsAnError(unittest.TestCase):
+    """`_git` answers a failed command with a stable `<git … rc=N>` string. That
+    is fine for a diagnostic, and wrong for the observation: every run would
+    collapse to the same placeholder and report identical while the harness was
+    in fact seeing nothing."""
+
+    def test_failing_observation_git_raises_rather_than_reporting_identical(self):
+        with self.assertRaises(RuntimeError):
+            stress("selfcheck:broken-git", DETERMINISTIC, broken_git_fixture, n=N)
+
+
+class AmbientGitConfigIsolation(unittest.TestCase):
+    """The OBSERVER's own git must not read this machine's `~/.gitconfig`.
+
+    `core.excludesfile` is the sharp case: a developer (or a CI image) with an
+    excludes file listing `*.secret` makes the observation's `git add -A` and
+    `git status` skip exactly those paths, so a node writing one is invisible —
+    on that machine only.
+    """
+
+    def setUp(self):
+        self.fake = Path(tempfile.mkdtemp(prefix="nodestress-fakehome-"))
+        self.addCleanup(shutil.rmtree, self.fake, ignore_errors=True)
+        (self.fake / ".gitexcludes").write_text("*.secret\n", encoding="utf-8")
+        (self.fake / ".gitconfig").write_text(
+            "[core]\n\texcludesfile = " + str(self.fake / ".gitexcludes") + "\n",
+            encoding="utf-8")
+        self._saved = {k: os.environ.get(k) for k in
+                       ("HOME", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM",
+                        "XDG_CONFIG_HOME")}
+        self.addCleanup(self._restore)
+        os.environ["HOME"] = str(self.fake)
+        for k in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "XDG_CONFIG_HOME"):
+            os.environ.pop(k, None)
+
+    def _restore(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_worktree_row_names_a_path_the_ambient_excludes_file_hides(self):
+        """The F2 probe proper: content is FIXED, so only the worktree row can
+        fail. If the observer honors the ambient excludes file, `leak.secret`
+        never reaches INDEX or STATUS."""
+        r = stress("selfcheck:excluded-fixed", FIXED_EXCLUDED, wt_fixture, n=N)
+        self.assertIn("leak.secret", r["files"]["worktree:wt"])
+
+    def test_ambient_excludes_file_cannot_hide_a_random_write(self):
+        with self.assertRaisesRegex(AssertionError, "nondeterministic"):
+            stress("selfcheck:excluded-rand", RAND_EXCLUDED, wt_fixture, n=N)
+
 
 
 if __name__ == "__main__":
