@@ -102,9 +102,14 @@ short() { printf '%s' "${1:0:8}"; }
 # Sets QOUT. Runs in the parent shell -- a sqlite failure inside a command
 # substitution would otherwise exit silently under set -e.
 qq() {
-  if ! QOUT="$(sqlite3 -noheader -separator '|' "$ARCHON_DB" "$1" 2>/dev/null)"; then
+  local err
+  if ! QOUT="$(sqlite3 -noheader -separator '|' "$ARCHON_DB" "$1" 2>"${TMPDIR:-/tmp}/resume-sqlite-err.$$")"; then
+    err="$(sanitize "$(head -c 200 "${TMPDIR:-/tmp}/resume-sqlite-err.$$" 2>/dev/null)")"
+    rm -f "${TMPDIR:-/tmp}/resume-sqlite-err.$$"
+    printf 'sqlite: %s\n' "$err" >&2
     fail "sqlite-failed"
   fi
+  rm -f "${TMPDIR:-/tmp}/resume-sqlite-err.$$"
 }
 
 # Newline/space separated id list -> "aaaaaaaa,bbbbbbbb".
@@ -228,6 +233,9 @@ STAGE=pre
 snapshot
 BEFORE="$QOUT"
 
+# A kill in this window (SIGTERM to the group) must not read as a pre-archon
+# guard error: archon may already have moved the run. stage=exec says so.
+STAGE=exec
 set +e
 DISABLE_OMC=1 archon workflow resume "$RUN_ID" "$@" </dev/null
 ARCHON_RC=$?
