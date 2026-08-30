@@ -61,15 +61,34 @@ if target == "none":
     # Simulate archon resuming nothing at all.
     target = ""
 
-if target:
+resumes = [t for t in target.split(",") if t]
+inserts = [i for i in os.environ.get("FAKE_INSERTS", "").split(",") if i]
+
+if resumes or inserts:
     db = sqlite3.connect(os.environ["ARCHON_DB"])
-    db.execute(
-        "UPDATE remote_agent_workflow_runs "
-        "SET status = 'running', started_at = ?, last_activity_at = ? WHERE id = ?",
-        ("2026-08-30 12:00:00", "2026-08-30 12:00:00", target),
-    )
+    for run_id in resumes:
+        db.execute(
+            "UPDATE remote_agent_workflow_runs "
+            "SET status = 'running', started_at = ?, last_activity_at = ? WHERE id = ?",
+            ("2026-08-30 12:00:00", "2026-08-30 12:00:00", run_id),
+        )
+    for run_id in inserts:
+        # Another operator starting a run in the same lane while we resume.
+        db.execute(
+            "INSERT INTO remote_agent_workflow_runs "
+            "(id, workflow_name, status, started_at, last_activity_at, working_path, user_message) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (run_id, "bugfix", "cancelled", "2026-08-30 11:00:00",
+             "2026-08-30 11:00:00", os.environ["FAKE_LANE"], "someone else"),
+        )
     db.commit()
     db.close()
+
+if os.environ.get("FAKE_CORRUPT_AFTER"):
+    # The db becomes unreadable *after* archon ran -- the post-verification query
+    # must still produce a typed line and still report archon_rc.
+    with open(os.environ["ARCHON_DB"], "wb") as fh:
+        fh.write(b"this is definitely not a sqlite database")
 
 sys.exit(int(os.environ.get("FAKE_RC", "0")))
 """
@@ -112,19 +131,41 @@ class ResumeGuardTest(unittest.TestCase):
         con.commit()
         con.close()
 
-    def run_guard(self, arg, *extra, fake_resumes=None, fake_rc=None):
+    def break_tool(self, name):
+        """Shadow a coreutil the guard uses outside qq, so it fails unexpectedly."""
+        tool = self.bin / name
+        tool.write_text("#!/bin/sh\nexit 1\n")
+        tool.chmod(0o755)
+
+    def run_guard(self, arg, *extra, fake_resumes=None, fake_rc=None,
+                  fake_inserts=None, corrupt_after=False, archon_db=None):
         env = dict(os.environ)
         env["PATH"] = f"{self.bin}{os.pathsep}{env['PATH']}"
-        env["ARCHON_DB"] = str(self.db)
+        env["ARCHON_DB"] = str(archon_db or self.db)
         env["SHIM_LOG"] = str(self.shim_log)
+        env["FAKE_LANE"] = LANE
         if fake_resumes is not None:
             env["FAKE_RESUMES"] = fake_resumes
         if fake_rc is not None:
             env["FAKE_RC"] = fake_rc
+        if fake_inserts is not None:
+            env["FAKE_INSERTS"] = fake_inserts
+        if corrupt_after:
+            env["FAKE_CORRUPT_AFTER"] = "1"
         return subprocess.run(
             ["bash", str(SCRIPT), arg, *extra],
             capture_output=True, encoding="utf-8", env=env,
         )
+
+    def verdict_lines(self, res):
+        return [ln for ln in res.stdout.splitlines() if ln.startswith("RESUME=")]
+
+    def sole_verdict(self, res):
+        lines = self.verdict_lines(res)
+        self.assertEqual(len(lines), 1,
+                         f"expected exactly one RESUME= line, got {lines!r}\n"
+                         f"stdout={res.stdout!r} stderr={res.stderr!r}")
+        return lines[0]
 
     def shim_calls(self):
         if not self.shim_log.exists():
@@ -349,15 +390,220 @@ class ResumeGuardTest(unittest.TestCase):
         self.assertEqual(self.shim_calls(), [])
 
     # ---- exit code passthrough on a legitimate re-failure
-    def test_archon_exit_code_is_propagated(self):
+    # ---- P2-2: RESUME=OK is reserved for archon rc 0; rc != 0 is RESUME=RAN
+    def test_named_run_moved_but_archon_failed_is_ran_not_ok(self):
         named = "cafe0001" + "0" * 24
         self.add(named, "failed", "2026-08-29 10:00:00")
 
         res = self.run_guard(named[:8], fake_rc="3")
 
-        self.assertEqual(res.returncode, 3, res.stdout + res.stderr)
-        self.assertIn("RESUME=OK run=cafe0001", res.stdout)
-        self.assertIn("archon_rc=3", res.stdout)
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        line = self.sole_verdict(res)
+        self.assertTrue(line.startswith("RESUME=RAN run=cafe0001"), line)
+        self.assertIn("archon_rc=3", line)
+        self.assertNotIn("RESUME=OK", res.stdout)
+
+    def test_clean_run_is_ok_with_rc_zero(self):
+        named = "cafe0002" + "0" * 24
+        self.add(named, "failed", "2026-08-29 10:00:00")
+
+        res = self.run_guard(named[:8])
+
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(self.sole_verdict(res), "RESUME=OK run=cafe0002 archon_rc=0")
+
+    # ---- P2-1: nothing ran at all is NOT_EXECUTED, not WRONG_RUN
+    def test_archon_failed_and_nothing_moved_is_not_executed(self):
+        named = "cafe0003" + "0" * 24
+        self.add(named, "failed", "2026-08-29 10:00:00")
+
+        res = self.run_guard(named[:8], fake_resumes="none", fake_rc="2")
+
+        self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+        line = self.sole_verdict(res)
+        self.assertTrue(line.startswith("RESUME=NOT_EXECUTED named=cafe0003"), line)
+        self.assertIn("archon_rc=2", line)
+        self.assertNotIn("WRONG_RUN", res.stdout)
+
+    def test_archon_succeeded_but_nothing_moved_is_wrong_run(self):
+        """rc 0 with no row touched is still a silent no-op -- keep WRONG_RUN."""
+        named = "cafe0004" + "0" * 24
+        self.add(named, "failed", "2026-08-29 10:00:00")
+
+        res = self.run_guard(named[:8], fake_resumes="none")
+
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        line = self.sole_verdict(res)
+        self.assertTrue(line.startswith("RESUME=WRONG_RUN named=cafe0004 moved=none"), line)
+
+    # ---- P1-1: a row that APPEARED during the resume is not a moved row
+    def test_appeared_row_is_reported_not_treated_as_moved(self):
+        """The CLI cannot create a run on resume (Dn1 only UPDATEs), so a row that
+        shows up mid-resume belongs to another operator. Real precedent: c66c7cc0
+        was created 23:25:27, inside 607fa834's resume window (23:21:52-23:30:26).
+        """
+        named = "beef0001" + "0" * 24
+        intruder = "beef0002" + "0" * 24
+        self.add(named, "failed", "2026-08-29 10:00:00")
+
+        res = self.run_guard(named[:8], fake_inserts=intruder)
+
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        line = self.sole_verdict(res)
+        self.assertTrue(line.startswith("RESUME=OK run=beef0001"), line)
+        self.assertIn("appeared=beef0002", line)
+        self.assertNotIn("WRONG_RUN", res.stdout)
+
+    def test_appeared_rows_do_not_mask_a_real_wrong_run(self):
+        named = "beef0003" + "0" * 24
+        other = "beef0004" + "0" * 24
+        intruder = "beef0005" + "0" * 24
+        self.add(named, "failed", "2026-08-29 23:00:00")
+        self.add(other, "failed", "2026-08-29 21:00:00")
+
+        res = self.run_guard(named[:8], fake_resumes=other, fake_inserts=intruder)
+
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        line = self.sole_verdict(res)
+        self.assertTrue(line.startswith("RESUME=WRONG_RUN named=beef0003"), line)
+        self.assertIn("moved=beef0004", line)
+        self.assertIn("appeared=beef0005", line)
+
+    # ---- P3: every wrongly-moved run is listed, not just the last one
+    def test_all_wrongly_moved_runs_are_listed(self):
+        named = "d0d00001" + "0" * 24
+        a = "d0d00002" + "0" * 24
+        b = "d0d00003" + "0" * 24
+        self.add(named, "failed", "2026-08-29 23:00:00")
+        self.add(a, "failed", "2026-08-29 21:00:00")
+        self.add(b, "failed", "2026-08-29 20:00:00")
+
+        res = self.run_guard(named[:8], fake_resumes=f"{a},{b}")
+
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        line = self.sole_verdict(res)
+        self.assertIn("moved=d0d00002,d0d00003", line)
+
+    # ---- P3: a newline in working_path must not garble the verdict line
+    def test_newline_in_working_path_still_refuses_cleanly(self):
+        weird = "/tmp/lane\nbroken"
+        named = "ace00001" + "0" * 24
+        newer = "ace00002" + "0" * 24
+        self.add(named, "failed", "2026-08-29 10:00:00", path=weird)
+        self.add(newer, "failed", "2026-08-29 11:00:00", path=weird)
+
+        res = self.run_guard(named[:8])
+
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        line = self.sole_verdict(res)
+        self.assertTrue(line.startswith("RESUME=REFUSED"), line)
+        self.assertIn("would_resume=ace00002", line)
+        self.assertIn("named=ace00001", line)
+        self.assertEqual(self.shim_calls(), [])
+
+    def test_newline_in_working_path_lane_is_not_truncated(self):
+        """The truncated path '/tmp/lane' must not be used as the lane: a run
+        living at the truncated path must not be able to block or unblock."""
+        weird = "/tmp/lane\nbroken"
+        named = "ace00003" + "0" * 24
+        decoy = "ace00004" + "0" * 24
+        self.add(named, "failed", "2026-08-29 10:00:00", path=weird)
+        self.add(decoy, "failed", "2026-08-29 23:00:00", path="/tmp/lane")
+
+        res = self.run_guard(named[:8])
+
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        line = self.sole_verdict(res)
+        self.assertTrue(line.startswith("RESUME=OK run=ace00003"), line)
+
+    def test_newline_in_working_path_diagnostic_is_sanitized(self):
+        """The indented lane diagnostic must not smuggle extra lines into stdout."""
+        weird = "/tmp/lane\nbroken"
+        named = "ace00005" + "0" * 24
+        newer = "ace00006" + "0" * 24
+        self.add(named, "failed", "2026-08-29 10:00:00", path=weird)
+        self.add(newer, "failed", "2026-08-29 11:00:00", path=weird)
+
+        res = self.run_guard(named[:8])
+
+        lines = res.stdout.splitlines()
+        self.assertEqual(len(lines), 3, f"stray lines from the raw path: {lines!r}")
+        self.assertTrue(lines[0].startswith("RESUME=REFUSED"), lines)
+        self.assertIn("/tmp/lane?broken", lines[1])
+        self.assertNotIn("broken", lines[0])
+
+    def test_newline_in_db_path_keeps_one_line_verdict(self):
+        missing = Path(self.tmp.name) / "no\nsuch.db"
+
+        res = self.run_guard("abcd1234", archon_db=str(missing))
+
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        line = self.sole_verdict(res)
+        self.assertIn("reason=no-db", line)
+        self.assertIn("no?such.db", line)
+        self.assertEqual(len(res.stdout.splitlines()), 1, res.stdout)
+
+    # ---- P1-2: no silent exits -- every failure path prints a typed line
+    def test_unreadable_db_before_archon_is_typed_error(self):
+        junk = Path(self.tmp.name) / "not-a-db"
+        junk.write_text("plain text, definitely not sqlite\n")
+        named = "fade0001" + "0" * 24
+        self.add(named, "failed", "2026-08-29 10:00:00")
+
+        res = self.run_guard(named[:8], archon_db=str(junk))
+
+        self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+        line = self.sole_verdict(res)
+        self.assertTrue(line.startswith("RESUME=ERROR"), line)
+        self.assertIn("stage=resolve", line)
+        self.assertEqual(self.shim_calls(), [], "archon must not run after a resolve error")
+
+    def test_db_failure_after_archon_is_typed_error_with_archon_rc(self):
+        named = "fade0002" + "0" * 24
+        self.add(named, "failed", "2026-08-29 10:00:00")
+
+        res = self.run_guard(named[:8], corrupt_after=True, fake_rc="0")
+
+        self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+        line = self.sole_verdict(res)
+        self.assertTrue(line.startswith("RESUME=ERROR"), line)
+        self.assertIn("stage=post", line)
+        self.assertIn("archon_rc=0", line)
+        self.assertEqual(len(self.shim_calls()), 1, "archon did run")
+
+    def test_post_archon_error_exit_code_is_distinct_from_archons(self):
+        named = "fade0003" + "0" * 24
+        self.add(named, "failed", "2026-08-29 10:00:00")
+
+        res = self.run_guard(named[:8], corrupt_after=True, fake_rc="90")
+
+        line = self.sole_verdict(res)
+        self.assertTrue(line.startswith("RESUME=ERROR"), line)
+        self.assertIn("archon_rc=90", line)
+        self.assertNotEqual(res.returncode, 90,
+                            "guard error must be distinguishable from archon's own rc")
+        self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+
+    def test_unexpected_failure_still_prints_a_typed_line(self):
+        """The EXIT-trap backstop: N_MATCHES uses awk in a command substitution
+        that qq does not wrap, so a failing awk would exit silently under set -e."""
+        named = "fade0004" + "0" * 24
+        self.add(named, "failed", "2026-08-29 10:00:00")
+        self.break_tool("awk")
+
+        res = self.run_guard(named[:8])
+
+        self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+        line = self.sole_verdict(res)
+        self.assertTrue(line.startswith("RESUME=ERROR"), line)
+        self.assertIn("reason=unexpected-exit", line)
+        self.assertEqual(self.shim_calls(), [], "archon must not run after an internal error")
+
+    # ---- P2-3: stdin stays closed
+    def test_stdin_is_closed_for_archon(self):
+        self.assertIn("</dev/null", SCRIPT.read_text())
+        self.assertIn("archon workflow approve", SCRIPT.read_text(),
+                      "the header must say why stdin is closed")
 
     def test_bad_id_format_refused(self):
         res = self.run_guard("../../etc/passwd")
