@@ -325,6 +325,32 @@ recipe for it is.
 Never "fix" a verifier to get past a gate. If `premise-verify` contradicts the
 plan, the plan or the spec is wrong.
 
+## 5a. Concurrency: one run per project path, by measurement
+
+Archon's run lock keys on `working_path` and nothing else, and the Goodword root is a
+"folder" project, so **every run of every lane shares one lock**. Measured 2026-08-30
+(`workflows/lock-probe.yaml`, a zero-spend probe that holds its node 45 s; full analysis
+RUNBOOK §5a):
+
+- A second `workflow run` of ANY lane while one is `running` **or `paused`** is created
+  and instantly self-cancelled: `Workflow already active on this path (<status>): <lane>`.
+  A paused run at a gate holds the lock until a human decides it.
+- Symlinking a second directory does not help — the CLI realpaths the cwd.
+- `--branch <b>` DOES give each run its own worktree `working_path` (two probe runs ran
+  concurrently in a scratch git project), but it requires the project to be a git repo
+  with an `origin` remote, which the Goodword root is not today. Making it one, and
+  parameterizing the hardcoded smoke ports (4123 sdlc / 4124+3124 bugfix), are the two
+  changes that would make runs truly independent — a supervised decision, not a launch-time
+  flag. Until then:
+
+**Operating rules.** Before any launch or resume, `archon workflow runs` and clear the
+path: wait, `approve`/`reject` the paused run, or `archon workflow abandon <id>` a dead
+one. Never queue a second run and walk away — it is already cancelled. To test whether
+the path is actually free, launch `lock-probe` (costs nothing, exits in ~45 s). And
+because several failed runs of one lane can accumulate on the path, resume is only safe
+through `setup/resume.sh` (§5) — the raw CLI resumes the newest resumable run, not the
+one you name.
+
 ## 6. Quota - the real currency
 
 Runs bill the **Claude subscription via OAuth login**, not an API key.
