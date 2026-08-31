@@ -511,7 +511,7 @@ nodes:
         {"links": [
           {"index": 1, "cause": "<one sentence>",
            "evidence": {"source": "code|db|logs|sentry|linear|gitlog|gitnexus|report",
-                        "file": "<absolute path, or path relative to /Users/eduardopicazo/Documents/Workspace/Goodword, or relative to the artifacts dir>",
+                        "file": "<absolute path, or path relative to /Users/eduardopicazo/Documents/Workspace/Goodword, or relative to the artifacts dir; for source gitlog cite the commit as api@<sha> or web-app@<sha> and quote a line of its message or diff, never a bare repo name, commit description, or URL>",
                         "quote": "<verbatim substring of that file, at least 10 chars — a gate greps for it>"}},
           ...,
           {"index": N, "cause": "<the root cause>", "evidence": {...},
@@ -568,7 +568,10 @@ nodes:
       verify.json — {"test_patterns": ["<pattern>", ...]}: the suites that
       must stay green after the fix (existing specs for the touched files
       included), run as bun run test -- "<pattern>" (api) or
-      pnpm test --run <pattern> (web-app).
+      pnpm test --run <pattern> (web-app). UNIT specs only: the api unit
+      runner ignores .int.spec.ts / .e2e.spec.ts / .ai.spec.ts / .ext.spec.ts
+      ("No tests found"), so listing one fails the fix loop as a contract
+      error. Name integration coverage in the fix plan's risks instead.
 
       probe.json — read-only SQL the pipeline runs against prod (RO) right
       after this node, so the human sees RESULTS at the gate, not open
@@ -624,7 +627,7 @@ nodes:
       # against a chain nothing downstream is allowed to change, so there is no
       # second caller to share them with.
       LINKS=$(python3 - "$ARTIFACTS_DIR" "$ROOT" <<'PY'
-      import json, os, subprocess, sys
+      import json, os, re, subprocess, sys
       ad, root = sys.argv[1], sys.argv[2]
       def load(name):
           return json.load(open(os.path.join(ad, name), encoding="utf-8"))
@@ -663,24 +666,38 @@ nodes:
       for i, link in enumerate(chain):
           ev = link.get("evidence") or {}
           q, ref = ev.get("quote", ""), ev.get("file", "")
+          # A "path:N" / "path:N-M" line suffix is a formatting habit, not a different
+          # file: strip it before resolving. The quote still has to be found verbatim.
+          ref = re.sub(r":[0-9]+(?:-[0-9]+)?$", "", ref)
           assert q and len(q) >= 10, f"chain link {i+1} quote missing or under 10 chars"
           cands = [ref] if ref.startswith("/") else [os.path.join(root, ref), os.path.join(ad, ref)]
           path = next((c for c in cands if os.path.isfile(c)), None)
-          if path is None:
-              # The main checkouts sit on whatever branch a human left them on, while
-              # every worktree this lane cuts comes from origin/main. A citation the RCA
-              # read from origin/main must not fail because the checkout is stale:
-              # materialise that revision's file into the artifacts dir and cite against
-              # it. Still fail-closed: the path must exist at origin/main.
-              parts = ref.split("/", 1)
-              if len(parts) == 2 and parts[0] in ("api", "web-app"):
-                  show = subprocess.run(["git", "-C", os.path.join(root, parts[0]), "show", f"origin/main:{parts[1]}"],
-                                        capture_output=True, encoding="utf-8", errors="replace")
-                  if show.returncode == 0:
-                      path = os.path.join(ad, "cite-cache", ref)
-                      os.makedirs(os.path.dirname(path), exist_ok=True)
-                      open(path, "w", encoding="utf-8").write(show.stdout)
-          assert path, f"chain link {i+1} cites missing file {ref} (not on disk, not at origin/main)"
+          # The main checkouts sit on whatever branch a human left them on, while
+          # every worktree this lane cuts comes from origin/main. A citation the RCA
+          # read from origin/main must not fail because the checkout is stale or
+          # missing the file: materialise that revision into the artifacts dir and
+          # cite against it. Git history is an evidence tier too: "<repo>@<sha>"
+          # cites a commit (message + diff). Still fail-closed: origin/main or the
+          # sha must actually carry the quote.
+          def from_git(ref):
+              gm = re.fullmatch(r"(api|web-app)@([0-9a-f]{7,40})", ref)
+              parts = [gm.group(1), gm.group(2)] if gm else ref.split("/", 1)
+              if len(parts) != 2 or parts[0] not in ("api", "web-app"):
+                  return None
+              spec = parts[1] if gm else f"origin/main:{parts[1]}"
+              show = subprocess.run(["git", "-C", os.path.join(root, parts[0]), "show", spec],
+                                    capture_output=True, encoding="utf-8", errors="replace")
+              if show.returncode != 0:
+                  return None
+              out = os.path.join(ad, "cite-cache", ref)
+              os.makedirs(os.path.dirname(out), exist_ok=True)
+              open(out, "w", encoding="utf-8").write(show.stdout)
+              return out
+          if path is None or not cited(q, path):
+              alt = from_git(ref)
+              if alt is not None and (path is None or cited(q, alt)):
+                  path = alt
+          assert path, f"chain link {i+1} cites missing file {ref} (not on disk, not at origin/main, not a known <repo>@<sha>)"
           assert cited(q, path), f"chain link {i+1} uncited: quote not found verbatim in {ref}"
       last = chain[-1]
       assert last.get("fixable") is True and last.get("fix_site"), "final link must be fixable:true with fix_site"
@@ -886,7 +903,7 @@ nodes:
               '') N=0 ;;
               *[!0-9]*) echo "RCA_ROUND_PRE=FAIL rca-round.txt is not an integer: [$N]"; exit 1 ;;
             esac
-            if [ "$N" -ge "$CAP" ]; then echo "RCA_PLAN_ROUND_CAP round=$N cap=$CAP" | tee -a "$ARTIFACTS_DIR/rca-plan-loop-exit.txt"; exit 1; fi
+            if [ "$N" -ge "$CAP" ] && [ ! -f "$ARTIFACTS_DIR/rca-plan-accept.txt" ]; then echo "RCA_PLAN_ROUND_CAP round=$N cap=$CAP" | tee -a "$ARTIFACTS_DIR/rca-plan-loop-exit.txt"; exit 1; fi
             test -s "$ARTIFACTS_DIR/fix-plan.json" || { echo "RCA_ROUND_PRE=FAIL no fix-plan.json round=$((N+1))"; exit 1; }
             # Durable round counter: survives resumes, unlike the loop's own iteration
             # index. Artifacts are round-scoped so a hand fix plus a resume cannot read
@@ -1345,7 +1362,30 @@ nodes:
             # token would only appear on the next resume.
             CAP=$(cat "$AD/rca-round-cap.txt" 2>/dev/null || echo 3)
             case "$CAP" in ''|*[!0-9]*) CAP=3 ;; esac
-            if [ "$N" -ge "$CAP" ]; then echo "RCA_PLAN_ROUND_CAP round=$N cap=$CAP"; exit 1; fi
+            if [ "$N" -ge "$CAP" ]; then
+              # Accept by hand (RUNBOOK §12): rca-plan-accept.txt is a HUMAN act, the
+              # mirror of accept-residuals.txt in the review loop. It waives the critic's
+              # remaining P1/P2 findings at the cap, never a P0: a plan the critic still
+              # rates P0 at >=75 confidence stops regardless of the file.
+              if [ -f "$AD/rca-plan-accept.txt" ]; then
+                P0=$(python3 -c "import json,sys; f=json.load(open(sys.argv[1],encoding='utf-8')).get('findings') or []; print(sum(1 for x in f if isinstance(x,dict) and x.get('severity')=='P0' and int(str(x.get('confidence')))>=75))" "$RD/critique.json" 2>/dev/null || echo unreadable)
+                if [ "$P0" = 0 ]; then
+                  SHAPE=0
+                  OUT=$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/rca-shape.sh "$AD" 2>&1) || SHAPE=$?
+                  if [ "$SHAPE" != 0 ]; then
+                    printf '%s\n' "$OUT" | sed 's/^RCA_SHAPE=FAIL/RCA_PLAN_SHAPE=FAIL/'
+                    echo "RCA_CONVERGE=FAIL shape round=$N (human accept)"
+                    exit 1
+                  fi
+                  echo "RCA_PLAN_CONVERGED round=$N (human accepted at cap: $(head -1 "$AD/rca-plan-accept.txt"))"
+                  echo "<promise>RCA_PLAN_CONVERGED</promise>"
+                  exit 0
+                fi
+                echo "RCA_PLAN_ROUND_CAP round=$N cap=$CAP (rca-plan-accept.txt present but critique has P0=$P0 open at >=75; a P0 is never waivable)"
+                exit 1
+              fi
+              echo "RCA_PLAN_ROUND_CAP round=$N cap=$CAP"; exit 1
+            fi
             echo "RCA_PLAN_ROUND_PROGRESSED round=$N"
 
   - id: rca-plan-shape
@@ -2000,11 +2040,24 @@ nodes:
             if [ "$GREEN" = true ]; then
               while IFS= read -r PAT; do
                 test -n "$PAT" || continue
+                # A pattern the unit runner cannot see is a verify.json contract error,
+                # not a failed fix: the api jest config ignores .int/.e2e/.ai/.ext specs
+                # ("No tests found, exiting with code 1"), and a loop that counts that as
+                # a red suite burns every attempt and trips ARCHITECTURE_SUSPECT for
+                # nothing (live 2026-08-29, ENG-3816). Route it to VERIFY_CONTRACT.
+                case "$PAT" in
+                  *.int.spec.ts|*.e2e.spec.ts|*.ai.spec.ts|*.ext.spec.ts) GREEN=false; REASON="verify.json pattern is not a unit spec: $PAT"; break ;;
+                esac
+                RC2=0
                 if [ "$REPO" = web-app ]; then
-                  mise x node@20 -- pnpm test --run "$PAT" >> "$ADN/suite.log" 2>&1 || { GREEN=false; REASON="suite pattern=$PAT"; break; }
+                  mise x node@20 -- pnpm test --run "$PAT" >> "$ADN/suite.log" 2>&1 || RC2=$?
                 else
-                  bun run test -- "$PAT" >> "$ADN/suite.log" 2>&1 || { GREEN=false; REASON="suite pattern=$PAT"; break; }
+                  bun run test -- "$PAT" >> "$ADN/suite.log" 2>&1 || RC2=$?
                 fi
+                # Decide AFTER reading the log: the runner exits 1 on "No tests found" too, so a
+                # short-circuit on rc alone would file a contract error as a failed fix.
+                if tail -20 "$ADN/suite.log" | grep -q "No tests found"; then GREEN=false; REASON="verify.json pattern matched no tests: $PAT"; break; fi
+                if [ "$RC2" != 0 ]; then GREEN=false; REASON="suite pattern=$PAT"; break; fi
               done < "$ADN/patterns.txt"
             fi
             if [ "$GREEN" = true ]; then
@@ -2674,6 +2727,12 @@ nodes:
             N=$(cat "$C" 2>/dev/null || echo 0)
             # Hand-editable counter: reject junk before it is incremented or used as a path.
             case "$N" in '') N=0 ;; *[!0-9]*) echo "ROUND_PRE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
+            # Durable cap, checked BEFORE the round is spent (same doctrine as plan-round-pre,
+            # full-sdlc-api.yaml: a cap enforced only in converge is walked past by resuming
+            # after every group failure). accept-residuals.txt is the human bypass.
+            CAP=$(cat "$ARTIFACTS_DIR/round-cap.txt" 2>/dev/null || echo 2)
+            case "$CAP" in ''|*[!0-9]*) CAP=2 ;; esac
+            if [ "$N" -ge "$CAP" ] && [ ! -f "$ARTIFACTS_DIR/accept-residuals.txt" ]; then echo "ROUND_CAP_REACHED round=$N cap=$CAP (pre-round: a resume does not buy another review; write accept-residuals.txt or raise round-cap.txt)"; exit 1; fi
             N=$((N+1)); echo "$N" > "$C"
             RD="$ARTIFACTS_DIR/round-$N"; mkdir -p "$RD"
             eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"

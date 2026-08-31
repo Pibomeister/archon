@@ -1188,6 +1188,10 @@ def round_pre_fixture(seeds=C_ORDER, counter=None):
         jdump(art / "params.json", params(tmp, wt))
         if counter is not None:
             (art / "round.txt").write_text(f"{counter}\n", encoding="utf-8")
+            # round-pre now enforces the durable cap BEFORE spending a round
+            # (same doctrine as plan-round-pre); this fixture is about the
+            # counter/listing mechanics, so keep it under the cap explicitly.
+            (art / "round-cap.txt").write_text(f"{counter + 2}\n", encoding="utf-8")
         ce = tmp / "ce-review-root"
         ce.mkdir()
         for name in seeds:

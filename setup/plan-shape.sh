@@ -22,7 +22,7 @@ python3 -c "import json,sys; c=json.load(open(sys.argv[1]))['columns']; assert i
 
 if grep -q '^## Premises to verify' "$SPEC"; then
   python3 - "$AD/premises.json" "$WT" <<'PY' || { echo "PLAN_SHAPE=FAIL premises.json missing, empty, or uncited"; exit 1; }
-import json, os, subprocess, sys
+import json, os, re, subprocess, sys
 prem = json.load(open(sys.argv[1]))
 assert isinstance(prem, list) and prem, "empty premises list though spec declares premises"
 def cited(q, path):
@@ -41,7 +41,8 @@ for p in prem:
     assert ev, f"premise {p.get('id')} has no evidence"
     ok = False
     for e in ev:
-        f = os.path.join(sys.argv[2], e["file"])
+        # a "path:N" / "path:N-M" suffix is a formatting habit, not a different file
+        f = os.path.join(sys.argv[2], re.sub(r":[0-9]+(?:-[0-9]+)?$", "", e["file"]))
         if os.path.isfile(f) and cited(e["quote"], f):
             ok = True
             break

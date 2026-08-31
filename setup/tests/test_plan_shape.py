@@ -91,10 +91,21 @@ class PlanShapeWithPremisesTest(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("PLAN_SHAPE=FAIL premises.json missing, empty, or uncited", r.stdout)
 
+    def test_line_suffix_on_evidence_file_is_stripped(self):
+        # a "path:N-M" citation is a formatting habit (same class as rca-gate's fix)
+        prem = json.loads((WITH_PREMISES / "premises-cited.json").read_text(encoding="utf-8"))
+        for pr in prem:
+            for e in pr["evidence"]:
+                e["file"] = e["file"] + ":12-14"
+        (self.ad / "premises.json").write_text(json.dumps(prem), encoding="utf-8")
+        r = run(self.ad, self.wt, self.spec)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
     def test_missing_premises_json_fails(self):
         r = run(self.ad, self.wt, self.spec)  # premises.json never copied in
         self.assertEqual(r.returncode, 1)
         self.assertIn("PLAN_SHAPE=FAIL premises.json missing, empty, or uncited", r.stdout)
+
 
 
 if __name__ == "__main__":

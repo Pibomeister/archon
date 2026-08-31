@@ -254,7 +254,7 @@ nodes:
               '') N=0 ;;
               *[!0-9]*) echo "PLAN_ROUND_PRE=FAIL plan-round.txt is not an integer: [$N]"; exit 1 ;;
             esac
-            if [ "$N" -ge "$CAP" ]; then echo "PLAN_ROUND_CAP round=$N cap=$CAP" | tee -a "$ARTIFACTS_DIR/plan-loop-exit.txt"; exit 1; fi
+            if [ "$N" -ge "$CAP" ] && [ ! -f "$ARTIFACTS_DIR/plan-accept.txt" ]; then echo "PLAN_ROUND_CAP round=$N cap=$CAP" | tee -a "$ARTIFACTS_DIR/plan-loop-exit.txt"; exit 1; fi
             test -s "$ARTIFACTS_DIR/plan.md" || { echo "PLAN_ROUND_PRE=FAIL no plan.md round=$((N+1))"; exit 1; }
             # Durable round counter: survives resumes, unlike the loop's own iteration
             # index. Artifacts are round-scoped so a hand fix plus a resume cannot read
@@ -636,7 +636,26 @@ nodes:
             # token would only appear on the next resume.
             CAP=$(cat "$ARTIFACTS_DIR/plan-round-cap.txt" 2>/dev/null || echo 3)
             case "$CAP" in ''|*[!0-9]*) CAP=3 ;; esac
-            if [ "$N" -ge "$CAP" ]; then echo "PLAN_ROUND_CAP round=$N cap=$CAP"; exit 1; fi
+            if [ "$N" -ge "$CAP" ]; then
+              # Accept by hand (RUNBOOK §3a): plan-accept.txt is a HUMAN act, the mirror of
+              # rca-plan-accept.txt in the bugfix lane. It waives remaining P1/P2 findings at
+              # the cap, never a P0 rated >=75 by the critic.
+              if [ -f "$ARTIFACTS_DIR/plan-accept.txt" ]; then
+                P0=$(python3 -c "import json,sys; f=json.load(open(sys.argv[1],encoding='utf-8')).get('findings') or []; print(sum(1 for x in f if isinstance(x,dict) and x.get('severity')=='P0' and int(str(x.get('confidence')))>=75))" "$RD/critique.json" 2>/dev/null || echo unreadable)
+                if [ "$P0" = 0 ]; then
+                  SHAPE=0
+                  OUT=$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/plan-shape.sh \
+                    "$ARTIFACTS_DIR" "$WT" "$SPEC" 2>&1) || SHAPE=$?
+                  if [ "$SHAPE" != 0 ]; then printf '%s\n' "$OUT"; echo "PLAN_CONVERGE=FAIL shape round=$N (human accept)"; exit 1; fi
+                  echo "PLAN_CONVERGED round=$N (human accepted at cap: $(head -1 "$ARTIFACTS_DIR/plan-accept.txt"))"
+                  echo "<promise>PLAN_CONVERGED</promise>"
+                  exit 0
+                fi
+                echo "PLAN_ROUND_CAP round=$N cap=$CAP (plan-accept.txt present but critique has P0=$P0 open at >=75; a P0 is never waivable)"
+                exit 1
+              fi
+              echo "PLAN_ROUND_CAP round=$N cap=$CAP"; exit 1
+            fi
             echo "PLAN_ROUND_PROGRESSED round=$N"
 
   - id: plan-post-snapshot
@@ -1542,6 +1561,12 @@ nodes:
             N=$(cat "$C" 2>/dev/null || echo 0)
             # Hand-editable counter: reject junk before it is incremented or used as a path.
             case "$N" in '') N=0 ;; *[!0-9]*) echo "ROUND_PRE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
+            # Durable cap, checked BEFORE the round is spent (same doctrine as plan-round-pre,
+            # full-sdlc-api.yaml: a cap enforced only in converge is walked past by resuming
+            # after every group failure). accept-residuals.txt is the human bypass.
+            CAP=$(cat "$ARTIFACTS_DIR/round-cap.txt" 2>/dev/null || echo 4)
+            case "$CAP" in ''|*[!0-9]*) CAP=4 ;; esac
+            if [ "$N" -ge "$CAP" ] && [ ! -f "$ARTIFACTS_DIR/accept-residuals.txt" ]; then echo "ROUND_CAP_REACHED round=$N cap=$CAP (pre-round: a resume does not buy another review; write accept-residuals.txt or raise round-cap.txt)"; exit 1; fi
             N=$((N+1)); echo "$N" > "$C"
             RD="$ARTIFACTS_DIR/round-$N"; mkdir -p "$RD"
             eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
