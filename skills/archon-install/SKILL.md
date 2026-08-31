@@ -150,8 +150,10 @@ What its seven steps do, so you can read a failure:
    declaration on the node is the only mechanism that works.
 5. **Folder registration** - one `register-probe` run; must print
    `REGISTER_PROBE_OK` and `BASE_BRANCH=[main]`.
-6. **Workflow validation** - gates on the five shipped workflows only. Archon
-   validates its own bundled workflows too, and those can error harmlessly.
+6. **Workflow validation** - gates on OUR shipped workflows only (`babysit`,
+   `bugfix`, `bugfix-lite`, `bugfix-smoke-deployed`, `cleanup`, `full-sdlc-api`,
+   `full-sdlc-api-lite`, `full-sdlc-web`, `register-probe`). Archon validates its
+   own bundled workflows too, and those can error harmlessly.
 7. **Allowlist merge** (only with `-y`).
 
 ## 4. Reading failures

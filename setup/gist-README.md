@@ -47,7 +47,7 @@ Add `-y` to merge the derived permissions allowlist (`allowlist.json` — read-o
 
 Two Claude skills are staged into `<root>/.claude/skills/` alongside the CE ones: **`archon-install`** (set up or repair this stack) and **`archon-sdlc`** (start a run, read the plan-gate packet, interpret review-loop exits, decide resume vs escalate). Say the skill name in a Claude session at the root. Both cite the runbook rather than restating it, and neither will release the plan gate or merge a PR — those stay human.
 
-This gist ships seven workflows: `babysit`, `bugfix`, `bugfix-smoke-deployed`, `cleanup`, `full-sdlc-api`, `full-sdlc-web`, `register-probe`. If `archon workflow run <name>` reports `Workflow '<name>' not found`, compare against this list and `<root>/.archon/VERSION` — an older install predates the lane.
+This gist ships nine workflows: `babysit`, `bugfix`, `bugfix-lite`, `bugfix-smoke-deployed`, `cleanup`, `full-sdlc-api`, `full-sdlc-api-lite`, `full-sdlc-web`, `register-probe`. The two `-lite` lanes are generated files (`archon__setup__derive-lite.py` plus the `archon__setup__lite__*` manifests and overlays); never hand-edit them. If `archon workflow run <name>` reports `Workflow '<name>' not found`, compare against this list and `<root>/.archon/VERSION` — an older install predates the lane.
 
 Read `archon__RUNBOOK.md` (installed to `<root>/.archon/RUNBOOK.md`). Short version: run lanes with `DISABLE_OMC=1 archon workflow run …` from the root, capture full logs to a file, review the plan packet when the run pauses, release the gate with `archon workflow approve <run-id>` (backgrounded), and remember every run spends **your** Claude subscription quota.
 

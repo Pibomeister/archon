@@ -1,11 +1,11 @@
 ---
 name: archon-sdlc
-description: Use when driving or supervising a Goodword Archon SDLC, bugfix, or backfill run - starting full-sdlc-api on a feature spec, bugfix on a bug report, or backfill on a backfill spec, reading the plan-gate, RCA-gate, or backfill-packet, interpreting loop exits (CONVERGED, NO_PROGRESS, FIXER_BLOCKED, SCOPE_BREACH, ROUND_CAP_REACHED, CHAIN_CONFLICT, FIX_STALLED, ARCHITECTURE_SUSPECT, NEGCONTROL=FAIL, CLAIM_DIVERGED, SAMPLE_SUSPECT, BOUND_BREACH, RECONCILE_FAIL, PLAN_REJECTED, PLAN_NO_PROGRESS, PLAN_SCOPE_DISPUTE, PLAN_ROUND_CAP, RCA_PLAN_REJECTED, RCA_PLAN_SCOPE_DISPUTE, RCA_PLAN_SHAPE=FAIL, CRITIC_GATE=FAIL, IMPACT=UNAVAILABLE, IMPACT=SKIPPED, DESLOP=DIRTY, DESLOP_GATE=FAIL, DESLOP_REVIEW=FAIL, DESLOP_ROUND_CAP), deciding resume vs escalate, or running babysit/cleanup afterwards. Triggers on "archon run", "start the SDLC lane", "archon bugfix", "archon backfill", "the run is stuck", "resume the run", or any mention of a paused/failed archon workflow.
+description: Use when driving or supervising a Goodword Archon SDLC, bugfix, or backfill run - starting full-sdlc-api on a feature spec, bugfix on a bug report, or backfill on a backfill spec, reading the plan-gate, RCA-gate, or backfill-packet, interpreting loop exits (CONVERGED, NO_PROGRESS, FIXER_BLOCKED, SCOPE_BREACH, ROUND_CAP_REACHED, CHAIN_CONFLICT, FIX_STALLED, ARCHITECTURE_SUSPECT, NEGCONTROL=FAIL, CLAIM_DIVERGED, SAMPLE_SUSPECT, BOUND_BREACH, RECONCILE_FAIL, PLAN_REJECTED, PLAN_NO_PROGRESS, PLAN_SCOPE_DISPUTE, PLAN_ROUND_CAP, RCA_PLAN_REJECTED, RCA_PLAN_SCOPE_DISPUTE, RCA_PLAN_SHAPE=FAIL, CRITIC_GATE=FAIL, IMPACT=UNAVAILABLE, IMPACT=SKIPPED, DESLOP=DIRTY, DESLOP_GATE=FAIL, DESLOP_REVIEW=FAIL, DESLOP_ROUND_CAP, ROUTE=FULL, LITE_FIXES_UNREVIEWED), choosing between a lite lane (full-sdlc-api-lite, bugfix-lite) and the full lane, deciding resume vs escalate, or running babysit/cleanup afterwards. Triggers on "archon run", "start the SDLC lane", "archon bugfix", "archon backfill", "the run is stuck", "resume the run", or any mention of a paused/failed archon workflow.
 ---
 
 <WORKFLOW-NODE-STOP>
 If you are an Archon workflow node session (your prompt came from a `full-sdlc-*`,
-`bugfix`, `backfill`, `babysit`, or `cleanup` node), ignore this skill entirely. It is written for the
+`bugfix`, `bugfix-lite`, `backfill`, `babysit`, or `cleanup` node), ignore this skill entirely. It is written for the
 operator session that drives runs from the outside. Shipped workflows declare only
 `skills: [ce-code-review]` / `[ce-doc-review]`; anything else reaching a node is
 leakage. Do what your node prompt says and nothing here.
@@ -81,6 +81,65 @@ tickets are api-lane-only.** Do not start `full-sdlc-web` on a real spec.
 
 Before starting anything large, read §6 below - a run spends the operator's Claude
 subscription window.
+
+## 1a. Choosing the lane: lite or full
+
+Two lite lanes exist: `full-sdlc-api-lite` (feature spec in) and `bugfix-lite`
+(bug report in). They keep the human gate, one `ce-code-review` round, and the
+negative controls, and drop the planning critic, doc review, blind premise and
+chain verification, prod evidence, deslop, and the smoke matrix (RUNBOOK §14).
+Whether a ticket may take one is not your judgment alone: every lite run passes
+a fail-closed **routing envelope** whose thresholds live in ONE file. Read it,
+never restate it:
+
+```bash
+cat "$ROOT/.archon/setup/lite-envelope.json"
+```
+
+Route by these questions, in order. Any "yes" means the full lane:
+
+1. Does the change touch a `hot_paths` entry (migrations, entities, baseline
+   schema, auth, oauth, billing, global-search, infra, the integration or
+   bridge service, the web `api-client.d.ts`)?
+2. Will it touch more than `max_files` non-test files, or more than one repo?
+3. Is the mechanism unknown - would someone have to investigate before naming
+   the single cause or the single change? (Lite bugs need a `## Repro` block
+   with one test-runner command the reporter already ran and its observed
+   output; a bug that needs prod evidence to reproduce is a full-lane bug.)
+4. Does it change a contract another repo consumes, or authorization?
+5. For a feature spec: does it carry `## Premises to verify`? Premises are the
+   full lane's machine-read contract; the lite lane refuses them.
+
+If every answer is "no" or "probably no", **start lite**. It refuses cheaply
+and names why: `ROUTE=FULL reason=<check>` at `lite-envelope-pre` (bugfix, after
+intake only), at `lite-envelope` (before the gate), or at `lite-envelope-post`
+(after approval, against the plan as it stands then). On a refusal, relaunch
+the SAME spec on the full lane. Never edit `lite-envelope.json`, `triage.json`,
+`files-allowlist.json` or `fix-plan.json` to get past a refusal - the envelope
+is the whole point. The one sanctioned override is the spec line `Lane: lite-ok`,
+which lets a triage verdict of `M` (two mechanisms or one contract change) stay
+lite; `L` is never overridable. That line is a human's decision to write.
+
+```bash
+cd "$ROOT"
+DISABLE_OMC=1 archon workflow run full-sdlc-api-lite "$ROOT/.omc/research/<spec>.md" </dev/null 2>&1 | tee /tmp/archon-lite.log
+DISABLE_OMC=1 archon workflow run bugfix-lite "/abs/path/to/bug-report.md" </dev/null 2>&1 | tee /tmp/archon-bugfix-lite.log
+```
+
+Ports: `full-sdlc-api-lite` owns 4125, `bugfix-lite` owns 4126/3126, so leftover
+servers never collide across lanes. That does not make runs concurrent: Archon
+runs ONE workflow per folder project at a time and a second `workflow run`
+exits 1 with `Workflow already active on this path` (a run paused at its gate
+counts as active). Queue behind it. Everything in §0 applies unchanged.
+
+What the lite lanes give up, so you can say it plainly at the gate: on
+`full-sdlc-api-lite` the single review round means fixes the fixer lands are
+re-gated by typecheck, lint, the plan's tests and the scope check but are NOT
+re-read by a reviewer; the PR body lists them under "Reviewer-unverified fixes"
+and the run log prints `LITE_FIXES_UNREVIEWED`. On `bugfix-lite` there is no
+prod evidence and no smoke of any kind; the proof is the repro test going RED
+to GREEN plus two negative controls, and the PR body's "Proof" section carries
+the signatures. Both packets print the envelope block the run was allowed on.
 
 ## 2. Spec authoring
 
@@ -410,6 +469,8 @@ Full list in RUNBOOK §6. The ones that most often look like a code bug:
 
 `bugfix` is the sibling graph for bugs: bug report .md in, draft PR out, through
 Red -> Green root-cause discipline. RUNBOOK §12 has the verbatim discriminators.
+For a small, locally reproducible bug, §1a's `bugfix-lite` is the cheaper sibling
+(RUNBOOK §14); it refuses anything outside the envelope and you relaunch here.
 
 ```bash
 cd "$ROOT"
@@ -496,8 +557,8 @@ tee, quota). Differences that decide supervision calls:
   `rca-round-<N>/imm-<file>`**, that per-round copy is re-taken every round and
   may already hold a mutation; re-derive from the run's `rca-gate` outputs or
   abandon and re-run the RCA),
-  `GREEN_GATE=FAIL VERIFY_CONTRACT attempt=N` (`verify.json` unreadable or its
-  `test_patterns` empty — a contract error no fix attempt can repair; a human
+  `GREEN_GATE=FAIL VERIFY_CONTRACT attempt=N` (`verify.json` unreadable, its
+  `test_patterns` empty, a pattern that is not a unit spec, or a pattern matching no tests — a contract error no fix attempt can repair; a human
   fixes the file, then resume), and
   any `NEGCONTROL=FAIL` (the fix was proven non-causal or the failure mode
   changed under revert; the failure line names the recovery command).
