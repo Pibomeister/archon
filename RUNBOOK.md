@@ -214,6 +214,36 @@ failed/paused, then calls the executor with `{resume: true}` and NO id; the exec
 `findResumableRun(workflow_name, working_path)` = `status IN ('failed','paused') OR (running AND last_activity_at older than 1 day)
 ORDER BY started_at DESC LIMIT 1` — the NEWEST resumable run of that lane on that path. Not fixed in 0.9.0. **Always resume through `bash .archon/setup/resume.sh <run-id-or-prefix> [archon args]`, never through `archon workflow resume` directly.** The CLI validates the run id you name and then discards it: it calls the executor with `{resume:true}` and no id, and the executor re-selects the run by `workflow_name` and `working_path`, taking the newest resumable one (`ORDER BY started_at DESC LIMIT 1`, where resumable means `failed`, `paused`, or `running` with no activity for a day). If a later run of the same lane failed after the one you meant to resume, that later run is what executes — on 2026-08-29 `archon workflow resume ab6ea8aa` executed `607fa834`, a different bug report in the same lane. The wrapper computes the CLI's selection itself and refuses when it differs from the run you named (`RESUME=REFUSED would_resume=<8> named=<8> reason=newer-resumable-run-of-lane`, printing the exact `archon workflow abandon <other-run>` that clears the way, or `reason=started-at-tie` when the CLI's pick would be undefined); after a permitted resume it re-reads `archon.db` and prints `RESUME=OK run=<8>` only if the run you named — and only that run — advanced (`RESUME=WRONG_RUN named=<8> moved=<8>` otherwise). It accepts an id prefix, refuses an ambiguous one, sets `DISABLE_OMC=1` and `</dev/null` for you (gates are decided with `archon workflow approve`, never stdin), and honors `ARCHON_DB`. Every exit prints exactly one `RESUME=` line, guaranteed by an EXIT trap: `RESUME=OK run=<8> archon_rc=0` when the named run resumed and the workflow finished clean; `RESUME=RAN run=<8> archon_rc=<n>` when the guard held and the named run executed but the workflow ended non-zero; `RESUME=REFUSED …` when the guard blocked and archon never ran; `RESUME=NOT_EXECUTED named=<8> archon_rc=<n>` when archon failed before touching any run; `RESUME=WRONG_RUN named=<8> moved=<8>,<8>` when a different run of the lane moved; `RESUME=ERROR stage=<resolve|select|pre|exec|post> reason=<…>` when the guard itself could not complete (`stage=exec` means archon was already running — check the run before abandoning anything) — exit 90 (91 if archon returned 90), and a post-archon error still reports `archon_rc=<n>`. Any verdict may carry `appeared=<8>,<8>`: rows that showed up in the lane during the resume; the CLI cannot create a run while resuming, so those belong to another operator and never change the verdict. Tests: `setup/tests/test_resume_guard.py` (synthetic DB + archon shim, negative-controlled per guard).
 
+## 5a. Concurrency: why runs serialize today, and what actually unlocks them
+
+Measured 2026-08-30 with `lock-probe` (zero-spend, holds its node 45 s):
+
+- **The lock is `working_path`, nothing else.** `getActiveWorkflowRunByPath` keys on the run's `working_path`; a
+  second launch of ANY lane whose run would share that path is created and immediately self-cancelled
+  (`Workflow already active on this path`). Paused runs hold it too (§12).
+- **The Goodword root is a "folder" project, so every run shares one `working_path`** — that is OUR architecture
+  serializing the lanes, not an archon invariant. A symlinked second directory does NOT help: the CLI realpaths
+  the cwd (probe run `hold3` keyed to the real path and self-cancelled).
+- **Worktree isolation is the sanctioned unlock.** In a scratch git project with an `origin` remote, two
+  `archon workflow run lock-probe --branch <b> --detach` launches ran CONCURRENTLY, each with
+  `working_path = ~/.archon/workspaces/_local/<proj>/worktrees/archon/task-<b>` — disjoint locks by construction.
+  `--branch` requires the project itself to be a git repo with a remote ("Cannot determine git remote"), which the
+  Goodword root is not.
+- **A side benefit:** with one run per `working_path`, the §4 resume-wrong-run defect cannot trigger — the CLI's
+  `findResumableRun(lane, path)` has at most one candidate.
+
+To make "nothing blocks anything" true here, two changes are needed, in order:
+
+1. **Give each run its own `working_path`.** Options: (a) make the Goodword root a git repo (a shell: `.gitignore`
+   everything, one empty commit, a local bare `origin`) so `--branch` works — node bodies already use absolute
+   hardcoded paths, so the archon worktree is only a lock key and artifacts anchor, but this flips the project
+   kind and DEFAULT worktree behavior for every existing launch recipe, so it needs a supervised trial run first;
+   or (b) an upstream fix making the lock opt-out or keyed per run. Decision owner: Patrick/Edy.
+2. **Parameterize the smoke ports.** The lanes hardcode 4123 (sdlc) / 4124+3124 (bugfix), so even with disjoint
+   locks, two runs of the SAME lane collide at `preflight`/`smoke-stack`. Ports must derive from the run id (or an
+   allocator file) before same-lane concurrency is real. Until both land, treat one-run-per-lane as the operating
+   assumption and §12's path-lock rules as the law.
+
 ## 5. Stalls, orphans, and locks
 
 - **You killed the archon CLI (or it died): the run is orphaned as `running` and the worktree lock persists.** Recover with `archon workflow abandon <run-id>`. **There is no `cancel` verb.**
