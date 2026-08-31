@@ -1,0 +1,11 @@
+name: lock-probe
+description: Zero-spend concurrency probe - holds the path lock ~45s so a second launch can test it
+provider: claude
+nodes:
+  - id: hold
+    timeout: 120000
+    bash: |
+      set -uo pipefail
+      echo "LOCK_PROBE=START pid=$$"
+      sleep 45
+      echo "LOCK_PROBE=OK"
