@@ -1,0 +1,12 @@
+id: smoke-skip
+depends_on:
+- exit-gate
+timeout: 60000
+bash: |
+  set -euo pipefail
+  # LITE lane: no HTTP smoke and no in-app smoke matrix (user directive). The
+  # proof of the fix is the repro test going RED -> GREEN plus the two negative
+  # controls exit-gate just re-ran. These typed lines are what prbody,
+  # run-report and report quote, so the PR says so in the parent's own words.
+  echo "SMOKE=SKIP lane=bugfix-lite (RED->GREEN repro + negcontrol is the proof)" | tee "$ARTIFACTS_DIR/smoke-result.txt"
+  echo "SMOKE_MATRIX=SKIP lane=bugfix-lite" | tee "$ARTIFACTS_DIR/smoke-matrix-result.txt"

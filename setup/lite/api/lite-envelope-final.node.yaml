@@ -1,0 +1,13 @@
+id: lite-envelope-final
+depends_on:
+- exit-gate
+timeout: 120000
+bash: |
+  set -uo pipefail
+  # The envelope's last word, after EVERY scope widening point (converge and
+  # exit-gate both run check-scope.py, and widening files-allowlist.json is a
+  # sanctioned human act at either). Re-evaluate on the allowlist as it stands
+  # and overwrite envelope-post.txt, which prbody renders. Fail-closed: a widening
+  # past a cap stops here; relaunch on full-sdlc-api.
+  bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/lite-envelope.sh \
+    /Users/eduardopicazo/Documents/Workspace/Goodword "$ARTIFACTS_DIR" api post

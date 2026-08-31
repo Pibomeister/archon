@@ -1,0 +1,13 @@
+id: lite-envelope
+depends_on:
+- lite-impact
+timeout: 120000
+bash: |
+  set -uo pipefail
+  # LITE routing envelope (plan stage). Fail-closed: any check outside
+  # setup/lite-envelope.json stops the run with ROUTE=FULL reason=<check>.
+  # The operator relaunches the SAME spec on full-sdlc-api; never edit the
+  # envelope or the artifacts to pass. Output is persisted to
+  # envelope-plan.txt for the packet / PR body and for resume.
+  bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/lite-envelope.sh \
+    /Users/eduardopicazo/Documents/Workspace/Goodword "$ARTIFACTS_DIR" api plan

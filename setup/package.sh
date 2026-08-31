@@ -48,6 +48,8 @@ MANIFEST=(
   workflows/full-sdlc-api.yaml
   workflows/full-sdlc-web.yaml
   workflows/register-probe.yaml
+  workflows/full-sdlc-api-lite.yaml
+  workflows/bugfix-lite.yaml
   setup/allowlist.json
   setup/bind-repo.py
   setup/check-fixer-result.py
@@ -64,6 +66,7 @@ MANIFEST=(
   setup/plan-shape.sh
   setup/rca-shape.sh
   setup/resolve-params.sh
+  setup/resume.sh
   setup/run-repro.sh
   setup/selective-genapi-patch.py
   setup/stage-skills.sh
@@ -71,6 +74,44 @@ MANIFEST=(
   setup/thread-lane.py
   setup/update-waivers.py
   setup/write-review-summary.py
+  # Lite lanes: the two YAMLs above are GENERATED from these by derive-lite.py.
+  # package.sh regenerates and diffs them (LITE_DRIFT) before the secret gate.
+  setup/lite-envelope.json
+  setup/lite-envelope.sh
+  setup/derive-lite.py
+  setup/lite/api.json
+  setup/lite/bugfix.json
+  setup/lite/api/lite-envelope-post.node.yaml
+  setup/lite/api/lite-envelope-final.node.yaml
+  setup/lite/api/lite-envelope.node.yaml
+  setup/lite/api/lite-impact-post.node.yaml
+  setup/lite/api/lite-impact.node.yaml
+  setup/lite/api/plan-gate.on_reject.md
+  setup/lite/api/plan-render-gate.bash.sh
+  setup/lite/api/plan-render.prompt.md
+  setup/lite/api/plan-snapshot.bash.sh
+  setup/lite/api/post-fix-gate.node.yaml
+  setup/lite/api/prbody.prompt.md
+  setup/lite/api/preflight.bash.sh
+  setup/lite/api/ralplan.prompt.md
+  setup/lite/api/review-loop.converge.bash.sh
+  setup/lite/api/review-loop.round-pre.bash.sh
+  setup/lite/bugfix/intake-gate.bash.sh
+  setup/lite/bugfix/intake.prompt.md
+  setup/lite/bugfix/lite-envelope-post.node.yaml
+  setup/lite/bugfix/lite-envelope-final.node.yaml
+  setup/lite/bugfix/lite-envelope-pre.node.yaml
+  setup/lite/bugfix/lite-envelope.node.yaml
+  setup/lite/bugfix/lite-impact-post.node.yaml
+  setup/lite/bugfix/lite-impact.node.yaml
+  setup/lite/bugfix/prbody.prompt.md
+  setup/lite/bugfix/rca-approval.on_reject.md
+  setup/lite/bugfix/rca-render.prompt.md
+  setup/lite/bugfix/rca.prompt.md
+  setup/lite/bugfix/red-gate.bash.sh
+  setup/lite/bugfix/red-test.prompt.md
+  setup/lite/bugfix/review-loop.review.prompt.md
+  setup/lite/bugfix/smoke-skip.node.yaml
   # Claude skills staged into <root>/.claude/skills by stage-skills.sh. The flat
   # gist name is archon__skills__<name>__SKILL.md, so NO skill file or directory
   # name may contain a double underscore — install.sh un-flattens on '__'.
@@ -112,6 +153,9 @@ for f in "${MANIFEST[@]}"; do
   fi
   while IFS= read -r ref; do
     test -n "$ref" || continue
+    # A trailing slash is a directory mention (the lite lanes cite their
+    # overlay dir in their description), never a script call.
+    case "$ref" in */) continue ;; esac
     IN_MANIFEST=no
     for m in "${MANIFEST[@]}"; do
       [ "$m" = "$ref" ] && { IN_MANIFEST=yes; break; }
@@ -186,6 +230,14 @@ d = open(p, encoding="utf-8").read()
 open(p, "w", encoding="utf-8").write(d.replace("GIST_ID_HERE", gid))
 PY
 fi
+
+# --- Lite drift check (fail-closed) -----------------------------------------
+# The lite YAMLs are generated. A hand edit, or a parent edit that never got
+# regenerated into its lite twin, must fail packaging here rather than ship.
+echo "--- lite drift check ---"
+for lane in api bugfix; do
+  python3 "$ARCHON/setup/derive-lite.py" "$lane" --check || { echo "PACKAGE=FAIL lite drift ($lane): regenerate with python3 .archon/setup/derive-lite.py $lane"; exit 1; }
+done
 
 # --- Secret gate (fail-closed) -------------------------------------------------
 echo "--- secret gate ---"

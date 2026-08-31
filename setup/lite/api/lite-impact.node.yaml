@@ -1,0 +1,49 @@
+id: lite-impact
+depends_on:
+- plan-snapshot
+model: sonnet
+maxBudgetUsd: 2
+timeout: 600000
+prompt: |
+  You are the code-graph impact node on the LITE lane. What you write reflects
+  the plan as it stands right now. Ask no questions.
+
+  Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
+  Your output file is impact.json in that directory (overwrite it if present).
+  The repository checkout is the "worktree" field of params.json in that
+  same directory (you are NOT cwd'd there; cd into it for every command).
+
+  Read plan.md in the artifacts directory and collect every existing
+  symbol (function, class, method) that its ## Approach steps and ## Files
+  entries propose to MODIFY. Symbols the plan creates from scratch have no
+  callers yet and do not belong in the list.
+
+  Self-gating rules, in order; no external gate skips you, so you skip
+  yourself explicitly and visibly:
+  1. If the plan modifies no existing symbol, write impact.json with
+     "status": "SKIPPED" and an empty "symbols" array.
+  2. If the gitnexus MCP tools (mcp__gitnexus__impact and friends) are not
+     available in your session, write impact.json with
+     "status": "UNAVAILABLE" and an empty "symbols" array. On the lite
+     lane this routes the ticket to the full lane; that is correct.
+  3. Otherwise call mcp__gitnexus__impact with
+     {target: "<symbol>", direction: "upstream"} for each symbol, against
+     the indexed repo "mono" (it covers api/ only), and record what comes
+     back with "status": "GATHERED".
+
+  impact.json is ALWAYS valid JSON and carries NO token prepended to it;
+  the typed status line is this node's stdout only, never part of the file:
+    {"status": "GATHERED|UNAVAILABLE|SKIPPED",
+     "symbols": [{"name": "<symbol>",
+                  "file": "<repo-relative path>",
+                  "d1_callers": ["<caller symbol or path:line>", ...],
+                  "risk": "LOW|MEDIUM|HIGH|CRITICAL"}]}
+  Every d1_caller comes from tool output. Never invent one: a symbol the
+  graph does not know gets an empty d1_callers list and risk "LOW".
+
+  Your FIRST output line is exactly one of:
+    IMPACT=GATHERED symbols=<count>
+    IMPACT=UNAVAILABLE <one-line reason>
+    IMPACT=SKIPPED <one-line reason>
+  Do not modify the repository or any file other than impact.json.
+  End with the single line: IMPACT_DONE

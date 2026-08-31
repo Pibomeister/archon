@@ -1,0 +1,21 @@
+id: post-fix-gate
+depends_on:
+- review-loop
+timeout: 1200000
+bash: |
+  set -euo pipefail
+  # LITE lane: the single review round's fixer changes are not re-read by a
+  # reviewer, so re-run the mechanical gate on the tree as the fixer left it.
+  # exit-gate (next) re-runs the plan's unit patterns and the scope check;
+  # this node owns typecheck and lint, which exit-gate does not run.
+  eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+  cd "$WT"
+  rm -rf .omc
+  if [ -f "$ARTIFACTS_DIR/lite-fixes-unreviewed.txt" ]; then
+    echo "POST_FIX_GATE fixer landed changes; re-gating: $(head -1 "$ARTIFACTS_DIR/lite-fixes-unreviewed.txt")"
+  else
+    echo "POST_FIX_GATE no fixer changes landed; re-gating anyway"
+  fi
+  bun run typecheck || { echo "GATE_TESTS=FAIL typecheck (post-fix)"; exit 1; }
+  bun run lint || { echo "GATE_TESTS=FAIL lint (post-fix)"; exit 1; }
+  echo "POST_FIX_GATE=PASS"
