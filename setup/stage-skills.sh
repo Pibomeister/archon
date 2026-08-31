@@ -129,3 +129,21 @@ for s in archon-install archon-sdlc; do
   test -f "$DEST/$s/SKILL.md" || { echo "FAIL: staged link does not resolve: $DEST/$s"; exit 1; }
   echo "STAGED: $s -> $(readlink "$DEST/$s")"
 done
+
+# Codex skill staging (S1, codex-provider twins): codex discovers skills from
+# <root>/.agents/skills, so the SAME CE sources staged into .claude/skills above
+# are linked there too. Same fail-loud discipline. A pre-existing REAL directory
+# at the path is removed first: `ln -sfn` into an existing dir nests the link
+# inside it instead of replacing it, which would leave SKILL.md unresolvable at
+# the path the codex twins' preflight asserts.
+ADEST="$ROOT/.agents/skills"
+mkdir -p "$ADEST" || { echo "FAIL: cannot create $ADEST"; exit 1; }
+for s in ce-code-review ce-doc-review; do
+  if [ -e "$ADEST/$s" ] && [ ! -L "$ADEST/$s" ]; then rm -rf "$ADEST/$s"; fi
+  ln -sfn "$CE/$s" "$ADEST/$s" || { echo "FAIL: cannot stage codex link $ADEST/$s"; exit 1; }
+  test -f "$ADEST/$s/SKILL.md" || { echo "FAIL: staged codex link does not resolve: $ADEST/$s"; exit 1; }
+  echo "STAGED_CODEX: $s -> $(readlink "$ADEST/$s")"
+done
+# Validation sweep covers the codex path end-to-end, same as the .claude path.
+contract_ok "$ADEST" || { echo "FAIL: codex-staged skills lost the review contract (CE $CE_VER) — report to the maintainer, do not downgrade"; exit 1; }
+echo "PREFLIGHT_CODEX_TOKENS=OK"

@@ -1,0 +1,21 @@
+name: codex-probe
+description: S0 probe - provider codex end-to-end (adapter/CLI flag compat, ChatGPT auth pickup, default model, maxBudgetUsd warning capture). One trivial AI node + one bash gate; writes nothing to any repo.
+provider: codex
+nodes:
+  - id: probe
+    maxBudgetUsd: 1
+    timeout: 600000
+    prompt: |
+      Reply with exactly this single line and nothing else:
+      PROBE_OK=1
+      This is an unattended pipeline invocation. Ask no questions. Run no commands. Edit no files.
+
+  - id: gate
+    depends_on: [probe]
+    timeout: 120000
+    bash: |
+      set -uo pipefail
+      OUT=$probe.output
+      printf '%s\n' "$OUT" > "$ARTIFACTS_DIR/probe-output.txt"
+      printf '%s' "$OUT" | grep -q 'PROBE_OK=1' || { echo "CODEX_PROBE=FAIL output missing PROBE_OK=1"; exit 1; }
+      echo "CODEX_PROBE=PASS"

@@ -196,3 +196,36 @@ Then the first run is the toy dry-run, and driving it is a different job - use t
 One thing to say out loud before that first run: **it spends the operator's own
 Claude subscription window** (5-hour and weekly quota, shared with their
 interactive use), not an API budget. Cost caps in the workflows are quota guards.
+
+## 6. Codex lanes (optional, one-time)
+
+The `*-codex` twins bill the ChatGPT plan through a dedicated codex home so
+node sessions shed the operator's personal `~/.codex` config (preamble, hooks,
+MCP servers). Set it up once:
+
+```bash
+mkdir -p "$HOME/.archon/codex-home"
+printf 'preferred_auth_method = "chatgpt"\n' > "$HOME/.archon/codex-home/config.toml"
+CODEX_HOME="$HOME/.archon/codex-home" codex login   # ChatGPT login, opens a browser
+```
+
+The lanes' impact nodes call `mcp__gitnexus__*` tools, and codex reads MCP
+servers from its OWN home — without this the routing envelope fails closed
+with `ROUTE=FULL reason=impact` (observed on the first live codex run):
+
+```bash
+CODEX_HOME="$HOME/.archon/codex-home" codex mcp add gitnexus -- "$(command -v gitnexus)" mcp
+# Recommended: pin the server's cwd for deterministic default-repo selection:
+#   [mcp_servers.gitnexus]
+#   cwd = "/absolute/path/to/Goodword"   # add to $CODEX_HOME/config.toml
+# If impact nodes report a required repo (e.g. mono) absent, the index itself
+# is missing (same under claude) - re-run `npx gitnexus analyze` at the root.
+CODEX_HOME="$HOME/.archon/codex-home" codex mcp list   # gitnexus enabled
+```
+
+`stage-skills.sh` (installer step 4) already links the CE review skills into
+`$ROOT/.agents/skills/` — codex's discovery dir; the twins' preflight asserts
+it and the ChatGPT auth (`BILLING_GUARD=FAIL` typed line on a stale login).
+No `archon ai login` is needed; `archon doctor`'s "Codex not configured" line
+is about archon's own store and is expected. RUNBOOK §15 is the operating
+reference.

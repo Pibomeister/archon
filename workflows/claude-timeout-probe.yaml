@@ -1,0 +1,13 @@
+name: claude-timeout-probe
+description: S3 control - same stall probe as codex-timeout-probe but provider claude. Disambiguates "timeout inert on AI nodes generally" from "codex adapter lacks timeout enforcement".
+provider: claude
+nodes:
+  - id: stall
+    timeout: 45000
+    model: sonnet
+    maxBudgetUsd: 1
+    prompt: |
+      Run this exact shell command and wait for it to finish before replying:
+        sleep 300
+      Do not background it. Do not reply until it completes.
+      This is an unattended pipeline invocation; ask no questions.

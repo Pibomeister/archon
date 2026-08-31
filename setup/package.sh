@@ -79,6 +79,17 @@ MANIFEST=(
   setup/lite-envelope.json
   setup/lite-envelope.sh
   setup/derive-lite.py
+  # Codex twins: GENERATED from the five lane YAMLs above by derive-codex.py
+  # (provider: codex, ChatGPT-plan billing guard, .agents skill preflight).
+  # package.sh regenerates and diffs them (CODEX_DRIFT) before the secret gate.
+  workflows/full-sdlc-api-codex.yaml
+  workflows/bugfix-codex.yaml
+  workflows/full-sdlc-web-codex.yaml
+  workflows/full-sdlc-api-lite-codex.yaml
+  workflows/bugfix-lite-codex.yaml
+  setup/derive-codex.py
+  setup/codex-usage.py
+  setup/codex-watchdog.sh
   setup/lite/api.json
   setup/lite/bugfix.json
   setup/lite/api/lite-envelope-post.node.yaml
@@ -238,6 +249,13 @@ echo "--- lite drift check ---"
 for lane in api bugfix; do
   python3 "$ARCHON/setup/derive-lite.py" "$lane" --check || { echo "PACKAGE=FAIL lite drift ($lane): regenerate with python3 .archon/setup/derive-lite.py $lane"; exit 1; }
 done
+
+# --- Codex drift check (fail-closed) ------------------------------------------
+# The -codex twins are generated from their (already drift-checked) parents.
+# Order matters: LITE_DRIFT above validates the lite parents the codex lites
+# chain from; a hand edit or an unregenerated parent edit fails packaging here.
+echo "--- codex drift check ---"
+python3 "$ARCHON/setup/derive-codex.py" --all --check || { echo "PACKAGE=FAIL codex drift: regenerate with python3 .archon/setup/derive-codex.py --all"; exit 1; }
 
 # --- Secret gate (fail-closed) -------------------------------------------------
 echo "--- secret gate ---"

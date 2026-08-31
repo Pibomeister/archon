@@ -1,0 +1,11 @@
+name: codex-timeout-probe
+description: S3 probe - does archon's per-node timeout fire on a codex AI node? The node is told to stall (sleep) far past its 45s timeout; expected outcome is a typed node failure, run status failed, NOT a hang.
+provider: codex
+nodes:
+  - id: stall
+    timeout: 45000
+    prompt: |
+      Run this exact shell command and wait for it to finish before replying:
+        sleep 300
+      Do not background it. Do not reply until it completes.
+      This is an unattended pipeline invocation; ask no questions.
