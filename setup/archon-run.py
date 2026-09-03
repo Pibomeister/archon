@@ -1262,8 +1262,11 @@ def gate_discriminator(row: dict) -> str:
     RCA_INVESTIGATION_REQUIRED reason never reaches the operator through the
     log. rca-shape.sh writes each typed line to gate-status.txt in the run dir;
     read it back so a terminal `failed` carries a routable discriminator.
-    Absolute paths are stripped: this string is surfaced to operators and may
-    be pasted into tickets.
+    Machine-specific prefixes are stripped by literal substitution, not by a
+    path-shaped regex: the most useful reasons here ("fix-plan.files not subset
+    of files-allowlist: ['api/src/...']") ARE a repo-relative path, and a regex
+    general enough to catch an absolute path eats those too, while still missing
+    any path containing a space.
     """
     try:
         lines = [
@@ -1275,7 +1278,13 @@ def gate_discriminator(row: dict) -> str:
         return ""
     if not lines:
         return ""
-    return re.sub(r"(?:/[^\s:]+){2,}", "<path>", lines[-1])[:200]
+    reason = lines[-1]
+    for prefix, replacement in ((str(artifact_dir(row)), "<run>"),
+                               (str(row.get("output_root") or ""), "<out>"),
+                               (str(Path.home()), "~")):
+        if prefix:
+            reason = reason.replace(prefix, replacement)
+    return redact_control_tokens(reason)[:200]
 
 
 def supervise_exact_run(db: Path, run_id: str, timeout_s: int, interval_s: float = 2.0) -> dict:

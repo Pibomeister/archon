@@ -1011,7 +1011,7 @@ nodes:
     # copy would be two contracts drifting apart, and the drift would show up as
     # artifacts that pass here and fail after the loop, or worse, the reverse.
     SHAPE=0
-    OUT=$(bash "$ROOT/.archon/setup/rca-shape.sh" "$ARTIFACTS_DIR" 2>&1) || SHAPE=$?
+    OUT=$(bash "$ROOT/.archon/setup/rca-shape.sh" "$ARTIFACTS_DIR" RCA_GATE 2>&1) || SHAPE=$?
     if [ "$SHAPE" != 0 ]; then
       # This node keeps its own typed token: RCA_GATE=FAIL <reason> is what
       # RUNBOOK.md and every existing grep over run logs look for. rca-shape.sh
@@ -1711,7 +1711,7 @@ nodes:
         # mutable artifacts inconsistent with each other.
         if [ "$V" = ACCEPT ]; then
           SHAPE=0
-          OUT=$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/rca-shape.sh "$AD" 2>&1) || SHAPE=$?
+          OUT=$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/rca-shape.sh "$AD" RCA_PLAN_SHAPE 2>&1) || SHAPE=$?
           if [ "$SHAPE" != 0 ]; then
             printf '%s\n' "$OUT" | sed 's/^RCA_SHAPE=FAIL/RCA_PLAN_SHAPE=FAIL/'
             echo "RCA_CONVERGE=FAIL shape round=$N"
@@ -1782,7 +1782,7 @@ nodes:
             P0=$(python3 -c "import json,sys; f=json.load(open(sys.argv[1],encoding='utf-8')).get('findings') or []; print(sum(1 for x in f if isinstance(x,dict) and x.get('severity')=='P0' and int(str(x.get('confidence')))>=75))" "$RD/critique.json" 2>/dev/null || echo unreadable)
             if [ "$P0" = 0 ]; then
               SHAPE=0
-              OUT=$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/rca-shape.sh "$AD" 2>&1) || SHAPE=$?
+              OUT=$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/rca-shape.sh "$AD" RCA_PLAN_SHAPE 2>&1) || SHAPE=$?
               if [ "$SHAPE" != 0 ]; then
                 printf '%s\n' "$OUT" | sed 's/^RCA_SHAPE=FAIL/RCA_PLAN_SHAPE=FAIL/'
                 echo "RCA_CONVERGE=FAIL shape round=$N (human accept)"
@@ -1811,7 +1811,7 @@ nodes:
     # the human gate nothing else re-validates them — while nine downstream nodes,
     # the RED test and the scope gate all read them as contracts.
     SHAPE=0
-    OUT=$(bash "$ROOT/.archon/setup/rca-shape.sh" "$ARTIFACTS_DIR" 2>&1) || SHAPE=$?
+    OUT=$(bash "$ROOT/.archon/setup/rca-shape.sh" "$ARTIFACTS_DIR" RCA_PLAN_SHAPE 2>&1) || SHAPE=$?
     if [ "$SHAPE" != 0 ]; then
       case "$OUT" in
         *RCA_INVESTIGATION_REQUIRED*)

@@ -28,10 +28,19 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # unwritable, degrade to stdout rather than aborting before any typed message.
 GATE_STATUS="$AD/gate-status.txt"
 { : > "$GATE_STATUS"; } 2>/dev/null || true
-# Records typed STOPS only. The truncate above clears a previous round's stop,
-# so a run that passes this check and dies later has an empty file and no
-# discriminator, rather than inheriting a stale reason that misroutes triage.
-emit() { printf '%s\n' "$1"; { printf '%s\n' "$1" >> "$GATE_STATUS"; } 2>/dev/null || true; }
+# Each caller renames this script's token to its own node-specific form
+# (RCA_GATE=FAIL, RCA_PLAN_SHAPE=FAIL) and RUNBOOK.md gives those DIFFERENT
+# remediations, so the persisted line has to carry the caller's identity or an
+# operator cannot tell which of the four call sites stopped.
+TOKEN="${2:-RCA_SHAPE}"
+# Records typed STOPS only, one line, never a traceback. The truncate above
+# clears a previous round's stop, so a run that passes this check and dies later
+# has an empty file and no discriminator rather than a stale, misrouting one.
+record() {
+  line="$(printf '%s' "$1" | tr '\n' ' ')"
+  { printf '%s\n' "${line/#RCA_SHAPE/$TOKEN}" >> "$GATE_STATUS"; } 2>/dev/null || true
+}
+emit() { printf '%s\n' "$1"; record "$1"; }
 
 # V2 bugfix contract: the immutable source/effective symptom ledger, exact
 # disposition/coverage bijections, lineage, occurrence proof, and closure
@@ -39,7 +48,13 @@ emit() { printf '%s\n' "$1"; { printf '%s\n' "$1" >> "$GATE_STATUS"; } 2>/dev/nu
 python3 "$HERE/bugfix-contract.py" normalize-gather-more "$AD" \
   || { emit "RCA_SHAPE=FAIL gather-more normalization"; exit 1; }
 CONTRACT_OUT="$(python3 "$HERE/bugfix-contract.py" validate-causal-coverage --artifacts "$AD" 2>&1)" || {
-  emit "$(printf '%s\n' "$CONTRACT_OUT" | sed -E 's/^BUGFIX_(COVERAGE|CONTRACT)=FAIL/RCA_SHAPE=FAIL/')"
+  RETYPED="$(printf '%s\n' "$CONTRACT_OUT" | sed -E 's/^BUGFIX_(COVERAGE|CONTRACT)=FAIL/RCA_SHAPE=FAIL/')"
+  printf '%s\n' "$RETYPED"
+  # Persist exactly one typed line. A crash inside the contract produces a
+  # traceback with no typed token; record a typed stop for it rather than
+  # letting "AttributeError: ..." become the routing signal.
+  TYPED="$(printf '%s\n' "$RETYPED" | grep -m1 '^RCA_SHAPE=FAIL' || true)"
+  record "${TYPED:-RCA_SHAPE=FAIL contract crashed without a typed line (see run log)}"
   exit 1
 }
 python3 "$HERE/bugfix-contract.py" classify "$AD" >/dev/null \
@@ -66,7 +81,7 @@ if [ -n "$INVESTIGATION_REASON" ]; then
   exit 1
 fi
 
-python3 - "$AD" <<'PY'
+RCA_SHAPE_TOKEN="$TOKEN" python3 - "$AD" <<'PY'
 import json, os, re, sys
 
 ad = sys.argv[1]
@@ -76,11 +91,19 @@ def load(name):
     return json.load(open(os.path.join(ad, name), encoding="utf-8"))
 
 
+TOKEN = os.environ.get("RCA_SHAPE_TOKEN", "RCA_SHAPE")
+
+
 def emit(line):
     print(line)
+    # One line, carrying the caller's token: gate_discriminator reads the last
+    # line, so a reason wrapped over several lines would lose its typed prefix.
+    flat = " ".join(line.split())
+    if TOKEN != "RCA_SHAPE" and flat.startswith("RCA_SHAPE"):
+        flat = TOKEN + flat[len("RCA_SHAPE"):]
     try:
         with open(os.path.join(ad, "gate-status.txt"), "a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
+            fh.write(flat + "\n")
     except OSError:
         pass  # stdout is still the primary channel; never mask a typed stop
 

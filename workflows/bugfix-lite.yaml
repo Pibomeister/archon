@@ -843,7 +843,7 @@ nodes:
     # copy would be two contracts drifting apart, and the drift would show up as
     # artifacts that pass here and fail after the loop, or worse, the reverse.
     SHAPE=0
-    OUT=$(bash "$ROOT/.archon/setup/rca-shape.sh" "$ARTIFACTS_DIR" 2>&1) || SHAPE=$?
+    OUT=$(bash "$ROOT/.archon/setup/rca-shape.sh" "$ARTIFACTS_DIR" RCA_GATE 2>&1) || SHAPE=$?
     if [ "$SHAPE" != 0 ]; then
       # This node keeps its own typed token: RCA_GATE=FAIL <reason> is what
       # RUNBOOK.md and every existing grep over run logs look for. rca-shape.sh

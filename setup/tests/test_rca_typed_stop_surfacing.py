@@ -139,6 +139,51 @@ class TypedStopPersistence(unittest.TestCase):
         self.assertIn('print(f"RCA_SHAPE=OK', script)
 
 
+    def test_contract_crash_never_becomes_the_discriminator(self):
+        """A traceback is not a typed stop.
+
+        $CONTRACT_OUT is captured with 2>&1, so an uncaught exception inside
+        bugfix-contract.py would otherwise be persisted verbatim and surfaced
+        as the routing signal -- the exact opaque failure this file exists to
+        eliminate.
+        """
+        ad = self.artifacts()
+        path = ad / "symptom-dispositions.json"
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        for row in doc["dispositions"]:
+            if row["disposition"] == "separate-ticket":
+                row["authority"] = "report"
+        path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+        # A list where the contract expects an object: crashes it mid-validate.
+        (ad / "boundary-trace.json").write_text("[]", encoding="utf-8")
+
+        proc = subprocess.run(["bash", str(RCA_SHAPE), str(ad), "RCA_GATE"],
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 1)
+        lines = [l for l in (ad / "gate-status.txt").read_text(encoding="utf-8").splitlines() if l.strip()]
+        self.assertEqual(len(lines), 1, f"expected exactly one typed line, got {lines}")
+        self.assertTrue(lines[0].startswith("RCA_GATE=FAIL"), lines[0])
+        self.assertNotIn("Traceback", lines[0])
+        self.assertNotIn("AttributeError", lines[0])
+
+    def test_persisted_line_carries_the_caller_token(self):
+        for token, expected in (("RCA_GATE", "RCA_GATE=FAIL"),
+                                ("RCA_PLAN_SHAPE", "RCA_PLAN_SHAPE=FAIL"),
+                                (None, "RCA_SHAPE=FAIL")):
+            ad = self.artifacts()
+            argv = ["bash", str(RCA_SHAPE), str(ad)] + ([token] if token else [])
+            subprocess.run(argv, capture_output=True, text=True)
+            status = (ad / "gate-status.txt").read_text(encoding="utf-8").strip()
+            self.assertTrue(status.startswith(expected), f"{token}: {status}")
+
+    def test_persisted_reason_is_always_one_line(self):
+        ad = self.artifacts()
+        subprocess.run(["bash", str(RCA_SHAPE), str(ad), "RCA_GATE"],
+                       capture_output=True, text=True)
+        raw = (ad / "gate-status.txt").read_text(encoding="utf-8")
+        self.assertEqual(len([l for l in raw.splitlines() if l.strip()]), 1)
+
+
 class ContractAuthority(unittest.TestCase):
     """Report authority is admissible; a blank string never is."""
 
@@ -210,14 +255,43 @@ class TerminalDiscriminator(unittest.TestCase):
         self.assertIn("RCA_INVESTIGATION_REQUIRED", result["discriminator"])
         self.assertNotIn("earlier", result["discriminator"])
 
-    def test_absolute_paths_are_redacted(self):
+    def test_machine_prefixes_are_stripped(self):
         (self.ad / "gate-status.txt").write_text(
-            "RCA_SHAPE=FAIL cannot read /Users/someone/.archon/workspaces/run/x.json\n",
-            encoding="utf-8",
-        )
+            f"RCA_GATE=FAIL cannot read {self.ad}/x.json\n", encoding="utf-8")
         result = ar.supervise_exact_run(self.db, self.run_id, 1, 0.01)
-        self.assertIn("<path>", result["discriminator"])
-        self.assertNotIn("/Users/someone", result["discriminator"])
+        self.assertIn("<run>/x.json", result["discriminator"])
+        self.assertNotIn(str(self.ad), result["discriminator"])
+
+    def test_repo_relative_paths_survive_redaction(self):
+        """The path IS the diagnostic for these two reasons.
+
+        A path-shaped regex broad enough to catch an absolute path also eats
+        `api/src/...`, truncating the only actionable content in the message.
+        """
+        for reason in (
+            "RCA_GATE=FAIL fix-plan.files not subset of files-allowlist: "
+            "['api/src/search/hybrid.service.ts']",
+            "RCA_GATE=FAIL verify.json test_patterns must be unit specs: "
+            "['app/routes/x.int.spec.ts']",
+        ):
+            (self.ad / "gate-status.txt").write_text(reason + "\n", encoding="utf-8")
+            got = ar.supervise_exact_run(self.db, self.run_id, 1, 0.01)["discriminator"]
+            self.assertEqual(got, reason, "redaction destroyed the actionable path")
+
+    def test_home_is_stripped_even_with_a_space_in_the_path(self):
+        home = str(Path.home())
+        (self.ad / "gate-status.txt").write_text(
+            f"RCA_GATE=FAIL leaked {home}/my docs/secret.json\n", encoding="utf-8")
+        got = ar.supervise_exact_run(self.db, self.run_id, 1, 0.01)["discriminator"]
+        self.assertNotIn(home, got)
+        self.assertIn("~/my docs/secret.json", got)
+
+    def test_control_tokens_are_redacted(self):
+        (self.ad / "gate-status.txt").write_text(
+            "RCA_GATE=FAIL launch failed control_token=s3cr3tvalue\n", encoding="utf-8")
+        got = ar.supervise_exact_run(self.db, self.run_id, 1, 0.01)["discriminator"]
+        self.assertNotIn("s3cr3tvalue", got)
+        self.assertIn("control_token=<redacted>", got)
 
     def test_missing_gate_status_omits_key(self):
         result = ar.supervise_exact_run(self.db, self.run_id, 1, 0.01)
@@ -251,6 +325,18 @@ class WorkflowRouting(unittest.TestCase):
     def test_lite_lane_routes_the_investigation_stop(self):
         lite = (SETUP.parent / "workflows" / "bugfix-lite.yaml").read_text(encoding="utf-8")
         self.assertIn("*RCA_INVESTIGATION_REQUIRED*)", lite)
+
+    def test_every_call_site_passes_its_caller_token(self):
+        """All four call sites, or an operator cannot route the discriminator."""
+        text = WORKFLOW.read_text(encoding="utf-8")
+        calls = [ln for ln in text.splitlines() if "rca-shape.sh" in ln and "2>&1" in ln]
+        self.assertEqual(len(calls), 4, f"expected 4 call sites, found {len(calls)}")
+        for ln in calls:
+            self.assertRegex(ln.strip(), r"rca-shape\.sh.*(RCA_GATE|RCA_PLAN_SHAPE) 2>&1",
+                             f"call site passes no caller token: {ln.strip()}")
+        lite = (SETUP.parent / "workflows" / "bugfix-lite.yaml").read_text(encoding="utf-8")
+        for ln in [l for l in lite.splitlines() if "rca-shape.sh" in l and "2>&1" in l]:
+            self.assertRegex(ln.strip(), r"rca-shape\.sh.*(RCA_GATE|RCA_PLAN_SHAPE) 2>&1", ln.strip())
 
     def test_generated_twins_carry_the_fix(self):
         for name in ("bugfix-codex.yaml", "bugfix-lite-codex.yaml"):
