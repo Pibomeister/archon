@@ -54,6 +54,8 @@ MANIFEST=(
   setup/bind-repo.py
   setup/check-fixer-result.py
   setup/change-context.py
+  setup/check-browser-evidence.py
+  setup/check-feature-handoff-integrity.py
   setup/check-lite-prbody.py
   setup/check-scope.py
   setup/check-slop.py
@@ -69,6 +71,7 @@ MANIFEST=(
   setup/rca-shape.sh
   setup/repo-policy.py
   setup/resolve-params.sh
+  setup/resolve-web-params.sh
   setup/resume.sh
   setup/run-repro.sh
   setup/smoke-matrix.py

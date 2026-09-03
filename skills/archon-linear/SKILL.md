@@ -1,6 +1,6 @@
 ---
 name: archon-linear
-description: Fetch a Linear issue into an immutable evidence snapshot and route supported Goodword defects or API-only features into the current provider's Archon lane. Use for `/archon-linear ENG-1234`, a Linear issue URL, or when selecting a Linear ticket as Archon input.
+description: Fetch a Linear issue into an immutable evidence snapshot and route supported Goodword defects, API features, or cross-repo features into the current provider's Archon lane. Use for `/archon-linear ENG-1234`, a Linear issue URL, or when selecting a Linear ticket as Archon input.
 ---
 
 <WORKFLOW-NODE-STOP>
@@ -77,11 +77,18 @@ Classify from the ticket's requested outcome, not labels alone.
   The neutral launcher owns lite/full selection and same-provider fallback:
   Claude maps to `bugfix-lite`/`bugfix`; Codex maps to
   `bugfix-lite-codex`/`bugfix-codex`. Never cross that provider boundary.
-- **API-only feature:** invoke `archon-sdlc` with the existing
-  `full-sdlc-api` behavior (or `full-sdlc-api-codex` for Codex), preserving all
-  of that skill's controls. Do not invent a feature auto-router.
-- **Web or cross-repository feature:** stop with
-  `ARCHON_LINEAR=UNSUPPORTED kind=<classification>` and launch nothing.
+- **API-only feature:** launch the provider-neutral feature command and infer
+  scope `api`:
+  `python3 <Goodword>/.archon/setup/archon-run.py feature --provider <provider> --scope api <absolute-snapshot>`.
+- **Cross-repository feature:** launch the same provider through the generic
+  full-stack chain:
+  `python3 <Goodword>/.archon/setup/archon-run.py feature --provider <provider> --scope fullstack <absolute-snapshot>`.
+  It creates one immutable spec/plan baseline, runs API first, then starts the
+  web lane only from the tamper-checked API handoff. Never change provider
+  between the API and web lanes.
+- **Web-only feature:** classify explicitly and stop with
+  `ARCHON_LINEAR=UNSUPPORTED kind=web-feature` until a standalone web feature
+  chain exists.
 - Missing evidence does not make a defect unsupported; thin reports belong in
   the full bugfix graph.
 - Keep the ticket occurrence separate from incidental code-class findings. A

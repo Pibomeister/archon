@@ -5,6 +5,7 @@ import io
 import inspect
 import json
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from argparse import Namespace
@@ -25,10 +26,11 @@ class AdaptiveBugfix(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.db = self.root / "archon.db"
-        con = sqlite3.connect(self.db)
-        con.execute("CREATE TABLE remote_agent_workflow_runs "
-                    "(id TEXT, workflow_name TEXT, user_message TEXT, status TEXT, output_root TEXT, started_at TEXT)")
-        con.commit(); con.close()
+        with sqlite3.connect(self.db) as con:
+            con.execute(
+                "CREATE TABLE remote_agent_workflow_runs "
+                "(id TEXT, workflow_name TEXT, user_message TEXT, status TEXT, output_root TEXT, started_at TEXT)"
+            )
 
     def report(self, body):
         p = self.root / f"report-{len(list(self.root.glob('report-*')))}.md"
@@ -211,10 +213,11 @@ class BugfixChainLineage(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.db = self.root / "archon.db"
-        con = sqlite3.connect(self.db)
-        con.execute("CREATE TABLE remote_agent_workflow_runs "
-                    "(id TEXT, workflow_name TEXT, user_message TEXT, status TEXT, output_root TEXT, started_at TEXT)")
-        con.commit(); con.close()
+        with sqlite3.connect(self.db) as con:
+            con.execute(
+                "CREATE TABLE remote_agent_workflow_runs "
+                "(id TEXT, workflow_name TEXT, user_message TEXT, status TEXT, output_root TEXT, started_at TEXT)"
+            )
         self.control_dir = self.root / "control"
         self.report = self.root / "report.md"
         self.report.write_text("Repository: api\n## Repro\n```bash\nbun run test -- a\n```\nObserved fail\n", encoding="utf-8")
@@ -408,6 +411,364 @@ class BugfixChainLineage(unittest.TestCase):
     def test_watchdog_command_includes_chain_id_when_available(self):
         cmd = ar.watchdog_command("cafebabe99", 4321, "fp", 90, 1, self.db, self.root / "home", self.root / "arm", "chain123")
         self.assertEqual(cmd[cmd.index("--chain-id") + 1], "chain123")
+
+
+class FeatureFlow(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.control_dir = self.root / "control"
+        self.db = self.root / "archon.db"
+        with sqlite3.connect(self.db) as con:
+            con.execute(
+                "CREATE TABLE remote_agent_workflow_runs "
+                "(id TEXT, workflow_name TEXT, user_message TEXT, status TEXT, output_root TEXT, started_at TEXT)"
+            )
+        self.spec = self.root / "feature.md"
+        self.spec.write_text("# Feature\n", encoding="utf-8")
+        self.baseline = {"commits": {"api": "a" * 40, "web-app": "b" * 40}}
+        self.baseline["sha256"] = ar.hashlib.sha256(ar._canonical_json_bytes(self.baseline)).hexdigest()
+        for key in ("ARCHON_FEATURE_CHAIN_ID", "ARCHON_FEATURE_PROVIDER", "ARCHON_FEATURE_LANE", "ARCHON_FEATURE_HANDOFF"):
+            ar.os.environ.pop(key, None)
+
+    def test_feature_lanes_are_provider_neutral_and_full_codex_guarded(self):
+        self.assertEqual(ar.FEATURE_LANES["claude"], {"api": "full-sdlc-api", "web": "full-sdlc-web"})
+        self.assertEqual(ar.FEATURE_LANES["codex"], {"api": "full-sdlc-api-codex", "web": "full-sdlc-web-codex"})
+        self.assertEqual(ar.CODEX_LANES["full-sdlc-api-codex"], (240, 30_000_000))
+        self.assertEqual(ar.CODEX_LANES["full-sdlc-web-codex"], (240, 30_000_000))
+
+    def test_public_feature_handoff_detects_tampering_and_spec_drift(self):
+        payload = ar.signed_public_payload({
+            "schema_version": 1,
+            "kind": "archon-feature-api-handoff",
+            "logical_chain_id": "c" * 32,
+            "provider": "codex",
+            "spec": str(self.spec),
+            "spec_sha256": ar.hashlib.sha256(self.spec.read_bytes()).hexdigest(),
+            "api_run_id": "d" * 32,
+            "api_lane": "full-sdlc-api-codex",
+            "api_worktree": str(self.root / "api"),
+            "api_branch": "archon/feature",
+            "api_head_sha": "e" * 40,
+            "api_pr_url": "https://github.com/GoodwordTeam/api/pull/1",
+            "baseline": self.baseline,
+            "shared_plan_sha256": "f" * 64,
+        })
+        path = self.root / "handoff.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        self.assertEqual(ar.verify_public_handoff(path, "codex", self.spec)["api_run_id"], "d" * 32)
+        payload["provider"] = "claude"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            ar.verify_public_handoff(path, "codex", self.spec)
+
+
+    def signed_private_handoff(self, state, api_artifacts):
+        payload = ar.signed_public_payload({
+            "schema_version": 1,
+            "kind": "archon-feature-api-handoff",
+            "logical_chain_id": state["logical_chain_id"],
+            "provider": state["provider"],
+            "spec": state["spec"],
+            "spec_sha256": state["spec_sha256"],
+            "api_run_id": "d" * 32,
+            "api_lane": ar.FEATURE_LANES[state["provider"]]["api"],
+            "api_worktree": str(self.root / "api" / ".worktrees" / "feature"),
+            "api_branch": "archon/feature",
+            "api_head_sha": "e" * 40,
+            "api_pr_url": "https://github.com/GoodwordTeam/api/pull/1",
+            "api_artifacts": str(api_artifacts),
+            "baseline": self.baseline,
+            "shared_plan_sha256": ar.hashlib.sha256((api_artifacts / "plan.md").read_bytes()).hexdigest(),
+            "files_allowlist_sha256": ar.hashlib.sha256((api_artifacts / "files-allowlist.json").read_bytes()).hexdigest(),
+            "web_files_allowlist_sha256": ar.hashlib.sha256((api_artifacts / "web-files-allowlist.json").read_bytes()).hexdigest(),
+            "verify_sha256": ar.hashlib.sha256((api_artifacts / "verify.json").read_bytes()).hexdigest(),
+            "created_at": "2026-09-02T00:00:00Z",
+        })
+        payload["handoff_mac"] = ar.feature_handoff_mac(state["chain_secret"], payload)
+        state.update({
+            "api_run_id": payload["api_run_id"],
+            "api_head_sha": payload["api_head_sha"],
+            "api_pr_url": payload["api_pr_url"],
+            "api_handoff_sha256": payload["handoff_sha256"],
+            "api_handoff_mac": payload["handoff_mac"],
+        })
+        ar.write_feature_chain(self.control_dir, state)
+        path = self.root / "handoff.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path, payload
+
+    def api_artifacts(self):
+        ad = self.root / "api-artifacts"
+        ad.mkdir(exist_ok=True)
+        (ad / "plan.md").write_text("# Shared cross-repository plan\n", encoding="utf-8")
+        (ad / "files-allowlist.json").write_text('["src/foo.ts"]\n', encoding="utf-8")
+        (ad / "web-files-allowlist.json").write_text('["app/routes/feature.tsx"]\n', encoding="utf-8")
+        (ad / "verify.json").write_text('{"ok": true}\n', encoding="utf-8")
+        return ad
+
+    def test_feature_handoff_requires_private_mac_and_api_artifact_lineage(self):
+        state = ar.start_feature_chain(self.control_dir, "codex", self.spec, self.baseline)
+        handoff, payload = self.signed_private_handoff(state, self.api_artifacts())
+        artifacts = self.root / "web-artifacts"
+
+        verified = ar.verify_feature_handoff(
+            self.control_dir, handoff, "codex", "full-sdlc-web-codex", artifacts
+        )
+
+        self.assertEqual(verified["api_run_id"], "d" * 32)
+        integrity = json.loads((artifacts / "handoff-integrity.json").read_text())
+        self.assertTrue(all(integrity["checks"].values()))
+
+        payload["api_head_sha"] = "f" * 40
+        payload = ar.signed_public_payload(payload)
+        payload["handoff_mac"] = ar.feature_handoff_mac(state["chain_secret"], payload)
+        handoff.write_text(json.dumps(payload), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            ar.verify_feature_handoff(self.control_dir, handoff, "codex", "full-sdlc-web-codex")
+
+    def test_feature_handoff_rejects_provider_lane_and_chain_environment_drift(self):
+        state = ar.start_feature_chain(self.control_dir, "codex", self.spec, self.baseline)
+        handoff, _ = self.signed_private_handoff(state, self.api_artifacts())
+
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            ar.verify_feature_handoff(self.control_dir, handoff, "claude", "full-sdlc-web")
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            ar.verify_feature_handoff(self.control_dir, handoff, "codex", "full-sdlc-web")
+        payload = json.loads(handoff.read_text(encoding="utf-8"))
+        payload["api_lane"] = "full-sdlc-api"
+        payload = ar.signed_public_payload(payload)
+        payload["handoff_mac"] = ar.feature_handoff_mac(state["chain_secret"], payload)
+        handoff.write_text(json.dumps(payload), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            ar.verify_feature_handoff(self.control_dir, handoff, "codex", "full-sdlc-web-codex")
+        fresh, _ = self.signed_private_handoff(state, self.api_artifacts())
+        with mock.patch.dict(ar.os.environ, {"ARCHON_FEATURE_CHAIN_ID": "a" * 32}, clear=False), \
+             contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            ar.verify_feature_handoff(self.control_dir, fresh, "codex", "full-sdlc-web-codex")
+
+
+    def test_feature_control_records_restore_web_resume_environment(self):
+        state = ar.start_feature_chain(self.control_dir, "codex", self.spec, self.baseline)
+        handoff, _ = self.signed_private_handoff(state, self.api_artifacts())
+        row = {"id": "a" * 32, "workflow_name": "full-sdlc-web-codex", "user_message": str(handoff),
+               "status": "failed", "output_root": str(self.root / "out")}
+        with mock.patch.dict(ar.os.environ, {
+            "ARCHON_FEATURE_CHAIN_ID": state["logical_chain_id"],
+            "ARCHON_FEATURE_PROVIDER": "codex",
+            "ARCHON_FEATURE_LANE": "full-sdlc-web-codex",
+        }, clear=False):
+            ar.write_control_records(row, self.control_dir, "token", "run", 1, 1, "fp",
+                                     self.root / "workflow.log", self.root / "watchdog.log",
+                                     2, 2, "wfp", self.root / "arm", True, 240, 30_000_000)
+        control = ar.read_control_state(row, self.control_dir)
+        for key in ("ARCHON_FEATURE_CHAIN_ID", "ARCHON_FEATURE_PROVIDER", "ARCHON_FEATURE_LANE", "ARCHON_FEATURE_HANDOFF"):
+            ar.os.environ.pop(key, None)
+
+        try:
+            ar.restore_feature_control_env(row, self.control_dir, control)
+            self.assertEqual(ar.os.environ["ARCHON_FEATURE_CHAIN_ID"], state["logical_chain_id"])
+            self.assertEqual(ar.os.environ["ARCHON_FEATURE_PROVIDER"], "codex")
+            self.assertEqual(ar.os.environ["ARCHON_FEATURE_LANE"], "full-sdlc-web-codex")
+            self.assertEqual(ar.os.environ["ARCHON_FEATURE_HANDOFF"], str(handoff))
+        finally:
+            for key in ("ARCHON_FEATURE_CHAIN_ID", "ARCHON_FEATURE_PROVIDER", "ARCHON_FEATURE_LANE", "ARCHON_FEATURE_HANDOFF"):
+                ar.os.environ.pop(key, None)
+
+
+    def init_git_worktree(self, name):
+        wt = self.root / name
+        wt.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "-C", str(wt), "init"], check=True, stdout=subprocess.DEVNULL)
+        subprocess.run(["git", "-C", str(wt), "config", "user.email", "test@example.com"], check=True)
+        subprocess.run(["git", "-C", str(wt), "config", "user.name", "Test"], check=True)
+        (wt / "file.txt").write_text(name + "\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(wt), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(wt), "commit", "-m", "init"], check=True, stdout=subprocess.DEVNULL)
+        return wt, subprocess.check_output(["git", "-C", str(wt), "rev-parse", "HEAD"], text=True).strip()
+
+    def completed_row(self, run_id, lane, label, pr_url):
+        wt, head = self.init_git_worktree(label)
+        row = {"id": run_id, "workflow_name": lane, "user_message": str(self.spec),
+               "status": "completed", "output_root": str(self.root / "out")}
+        ad = ar.artifact_dir(row)
+        ad.mkdir(parents=True, exist_ok=True)
+        (ad / "params.json").write_text(json.dumps({"worktree": str(wt), "branch": f"archon/{label}"}), encoding="utf-8")
+        (ad / "worktrees.json").write_text(json.dumps({f"{label}_worktree": str(wt)}), encoding="utf-8")
+        (ad / "pr-url.txt").write_text(pr_url + "\n", encoding="utf-8")
+        with sqlite3.connect(self.db) as con:
+            con.execute(
+                "INSERT INTO remote_agent_workflow_runs VALUES (?,?,?,?,?,?)",
+                (
+                    row["id"],
+                    row["workflow_name"],
+                    row["user_message"],
+                    row["status"],
+                    row["output_root"],
+                    "2026-09-03",
+                ),
+            )
+        return row, head
+
+    def update_run(self, run_id, *, status=None, user_message=None):
+        with sqlite3.connect(self.db) as con:
+            if status is not None:
+                con.execute(
+                    "UPDATE remote_agent_workflow_runs SET status = ? WHERE id = ?",
+                    (status, run_id),
+                )
+            if user_message is not None:
+                con.execute(
+                    "UPDATE remote_agent_workflow_runs SET user_message = ? WHERE id = ?",
+                    (user_message, run_id),
+                )
+
+    def test_feature_receipt_requires_completed_web_with_pr_and_verifies_tamper(self):
+        state = ar.start_feature_chain(self.control_dir, "codex", self.spec, self.baseline)
+        api, api_head = self.completed_row("1" * 32, "full-sdlc-api-codex", "api", "https://github.com/GoodwordTeam/api/pull/1")
+        web, web_head = self.completed_row("2" * 32, "full-sdlc-web-codex", "web", "https://github.com/GoodwordTeam/web-app/pull/2")
+        state.update({
+            "api_run_id": api["id"],
+            "api_head_sha": api_head,
+            "api_pr_url": "https://github.com/GoodwordTeam/api/pull/1",
+            "api_handoff_sha256": "a" * 64,
+        })
+        state = ar.write_feature_chain(self.control_dir, state)
+
+        receipt = ar.write_chain_receipt(self.control_dir, state, api, web, self.root / "handoff.json", self.db)
+        verified = ar.verify_feature_chain_receipt(self.control_dir, receipt)
+
+        self.assertEqual(verified["api_run_id"], api["id"])
+        self.assertEqual(verified["web_run_id"], web["id"])
+        self.assertEqual(verified["api_pr_url"], "https://github.com/GoodwordTeam/api/pull/1")
+        self.assertEqual(verified["web_pr_url"], "https://github.com/GoodwordTeam/web-app/pull/2")
+        self.assertEqual(verified["api_head_sha"], api_head)
+        self.assertEqual(verified["web_head_sha"], web_head)
+        tampered = json.loads(receipt.read_text(encoding="utf-8"))
+        tampered["web_pr_url"] = "https://evil.example/pr"
+        receipt.write_text(json.dumps(tampered), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            ar.verify_feature_chain_receipt(self.control_dir, receipt)
+
+    def test_feature_receipt_refuses_failed_or_prless_web(self):
+        state = ar.start_feature_chain(self.control_dir, "codex", self.spec, self.baseline)
+        api, api_head = self.completed_row("3" * 32, "full-sdlc-api-codex", "api", "https://github.com/GoodwordTeam/api/pull/3")
+        web, _ = self.completed_row("4" * 32, "full-sdlc-web-codex", "web", "https://github.com/GoodwordTeam/web-app/pull/4")
+        state.update({"api_run_id": api["id"], "api_head_sha": api_head, "api_pr_url": "https://github.com/GoodwordTeam/api/pull/3"})
+        state = ar.write_feature_chain(self.control_dir, state)
+        self.update_run(web["id"], status="failed")
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            ar.write_chain_receipt(self.control_dir, state, api, web, self.root / "handoff.json", self.db)
+        self.update_run(web["id"], status="completed")
+        (ar.artifact_dir(web) / "pr-url.txt").unlink()
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            ar.write_chain_receipt(self.control_dir, state, api, web, self.root / "handoff.json", self.db)
+
+    def feature_args(self):
+        return Namespace(spec=str(self.spec), provider="codex", scope="fullstack", db=self.root / "archon.db",
+                         codex_home=self.root / "home", registry=self.root / "registry", control_dir=self.control_dir,
+                         no_watch=False, watch_timeout_seconds=1)
+
+    def test_adaptive_feature_finalizes_receipt_only_after_terminal_web_success(self):
+        chain = "b" * 32
+        state = {"logical_chain_id": chain, "provider": "codex", "spec": str(self.spec),
+                 "spec_sha256": ar.sha256_file(self.spec), "baseline": self.baseline, "chain_secret": "secret"}
+        api = {"id": "5" * 32, "workflow_name": "full-sdlc-api-codex", "output_root": str(self.root / "out")}
+        web = {"id": "6" * 32, "workflow_name": "full-sdlc-web-codex", "output_root": str(self.root / "out")}
+        handoff = self.root / "handoff.json"
+        handoff.write_text("{}", encoding="utf-8")
+        with mock.patch.object(ar, "capture_feature_baseline", return_value=self.baseline), \
+             mock.patch.object(ar, "start_feature_chain", return_value=state.copy()), \
+             mock.patch.object(ar, "write_feature_chain", side_effect=lambda _c, st: st), \
+             mock.patch.object(ar, "run_feature_lane", side_effect=[api, web]), \
+             mock.patch.object(ar, "supervise_exact_run", side_effect=[{"state": "terminal", "status": "completed", "run": api["id"]}, {"state": "terminal", "status": "completed", "run": web["id"]}]), \
+             mock.patch.object(ar, "api_handoff_from_run", return_value=handoff), \
+             mock.patch.object(ar, "verify_public_handoff", return_value={"logical_chain_id": chain}), \
+             mock.patch.object(ar, "run_row_by_id", return_value=dict(web, status="completed")), \
+             mock.patch.object(ar, "write_chain_receipt", return_value=self.root / "receipt.json") as write_receipt, \
+             mock.patch.object(ar, "verify_feature_chain_receipt"), \
+             contextlib.redirect_stdout(io.StringIO()):
+            ar.adaptive_feature(self.feature_args())
+        write_receipt.assert_called_once()
+
+    def test_adaptive_feature_does_not_finalize_receipt_for_paused_or_failed_web(self):
+        for web_result in ({"state": "gate", "status": "paused", "run": "8" * 32}, {"state": "terminal", "status": "failed", "run": "8" * 32}):
+            chain = "c" * 32
+            state = {"logical_chain_id": chain, "provider": "codex", "spec": str(self.spec),
+                     "spec_sha256": ar.sha256_file(self.spec), "baseline": self.baseline, "chain_secret": "secret"}
+            api = {"id": "7" * 32, "workflow_name": "full-sdlc-api-codex", "output_root": str(self.root / "out")}
+            web = {"id": "8" * 32, "workflow_name": "full-sdlc-web-codex", "output_root": str(self.root / "out")}
+            handoff = self.root / f"handoff-{web_result['status']}.json"
+            handoff.write_text("{}", encoding="utf-8")
+            with self.subTest(web_status=web_result["status"]), \
+                 mock.patch.object(ar, "capture_feature_baseline", return_value=self.baseline), \
+                 mock.patch.object(ar, "start_feature_chain", return_value=state.copy()), \
+                 mock.patch.object(ar, "write_feature_chain", side_effect=lambda _c, st: st), \
+                 mock.patch.object(ar, "run_feature_lane", side_effect=[api, web]), \
+                 mock.patch.object(ar, "supervise_exact_run", side_effect=[{"state": "terminal", "status": "completed", "run": api["id"]}, web_result]), \
+                 mock.patch.object(ar, "api_handoff_from_run", return_value=handoff), \
+                 mock.patch.object(ar, "verify_public_handoff", return_value={"logical_chain_id": chain}), \
+                 mock.patch.object(ar, "write_chain_receipt") as write_receipt, \
+                 contextlib.redirect_stdout(io.StringIO()):
+                ar.adaptive_feature(self.feature_args())
+            write_receipt.assert_not_called()
+
+
+    def test_supervise_command_refreshes_running_web_row_before_receipt_finalization(self):
+        state = ar.start_feature_chain(self.control_dir, "codex", self.spec, self.baseline)
+        api, api_head = self.completed_row("9" * 32, "full-sdlc-api-codex", "api", "https://github.com/GoodwordTeam/api/pull/9")
+        web, _ = self.completed_row("a" * 32, "full-sdlc-web-codex", "web", "https://github.com/GoodwordTeam/web-app/pull/10")
+        state.update({
+            "api_run_id": api["id"],
+            "api_head_sha": api_head,
+            "api_pr_url": "https://github.com/GoodwordTeam/api/pull/9",
+            "api_handoff_sha256": "b" * 64,
+            "web_run_id": web["id"],
+        })
+        state = ar.write_feature_chain(self.control_dir, state)
+        handoff = self.root / "handoff-supervise.json"
+        handoff.write_text("{}", encoding="utf-8")
+        self.update_run(web["id"], status="running", user_message=str(handoff))
+        web_running = dict(web, status="running", user_message=str(handoff))
+        with mock.patch.dict(ar.os.environ, {
+            "ARCHON_FEATURE_CHAIN_ID": state["logical_chain_id"],
+            "ARCHON_FEATURE_PROVIDER": "codex",
+            "ARCHON_FEATURE_LANE": "full-sdlc-web-codex",
+        }, clear=False):
+            ar.write_control_records(web_running, self.control_dir, "token", "run", 1, 1, "fp",
+                                     self.root / "workflow.log", self.root / "watchdog.log",
+                                     2, 2, "wfp", self.root / "arm", True, 240, 30_000_000)
+        for key in ("ARCHON_DB", "ARCHON_FEATURE_CHAIN_ID", "ARCHON_FEATURE_PROVIDER", "ARCHON_FEATURE_LANE", "ARCHON_FEATURE_HANDOFF"):
+            ar.os.environ.pop(key, None)
+
+        def complete(_db, run_id, _timeout, _interval):
+            self.update_run(run_id, status="completed")
+            return {"state": "terminal", "status": "completed", "run": run_id, "lane": "full-sdlc-web-codex"}
+
+        args = Namespace(db=self.db, run_id=web["id"], timeout_seconds=1, interval_s=0.01,
+                         handoff_file=None, control_dir=self.control_dir)
+        with mock.patch.object(ar, "supervise_exact_run", side_effect=complete), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            ar.supervise_command(args)
+
+        receipt = ar.artifact_dir(web) / "feature-chain-receipt.json"
+        self.assertTrue(receipt.is_file())
+        self.assertIn("feature_receipt=", out.getvalue())
+        verified = ar.verify_feature_chain_receipt(self.control_dir, receipt)
+        self.assertEqual(verified["web_run_id"], web["id"])
+
+    def test_feature_chain_private_state_is_provider_bound_and_mac_checked(self):
+        state = ar.start_feature_chain(self.control_dir, "codex", self.spec, self.baseline)
+        current = ar.read_feature_chain(self.control_dir, state["logical_chain_id"])
+        self.assertEqual(current["provider"], "codex")
+        path = ar.feature_state_path(self.control_dir, state["logical_chain_id"])
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["provider"] = "claude"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        path.chmod(0o600)
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            ar.read_feature_chain(self.control_dir, state["logical_chain_id"])
 
 
 if __name__ == "__main__":

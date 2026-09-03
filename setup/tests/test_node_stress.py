@@ -476,7 +476,7 @@ def plan_converge_fixture(verdict, moved, dispute=0, blocking=0):
         (rd / "plan.pre.md").write_text(
             pre.replace("Change foo.", "Change bar.") if moved else pre, encoding="utf-8"
         )
-        for f in ("verify.json", "files-allowlist.json", "reader-audit.json"):
+        for f in ("verify.json", "files-allowlist.json", "web-files-allowlist.json", "reader-audit.json"):
             shutil.copyfile(art / f, rd / f"pre-{f}")
         jdump(rd / "critique.json", critique(verdict, blocking=blocking))
         jdump(rd / "revision.json", revision(dispute))
@@ -723,13 +723,16 @@ def gate_tests_api_fixture(tmp):
     (art / "commit-msg.txt").write_text("feat(foo): add one\n", encoding="utf-8")
 
 
-WEB_TOY_WT = str(GOODWORD_ROOT / "web-app" / ".worktrees" / "archon-toy")
-
-
 def gate_tests_web_fixture(tmp):
+    art = tmp / "artifacts"
     write_shims(tmp, ("pnpm", "mise"))
-    init_worktree(tmp / "wt")   # toy lane has no plan stage -> no allowlist
-    return {"WT_FIXTURE": str(tmp / "wt")}
+    wt = tmp / "wt"
+    base = init_worktree(wt)
+    (wt / "src" / "foo.ts").write_text("export const x = 2;\n", encoding="utf-8")
+    jdump(art / "params.json", params(tmp, wt))
+    jdump(art / "files-allowlist.json", ["src/foo.ts"])
+    (art / "bootstrap-head.txt").write_text(base + "\n", encoding="utf-8")
+    return {}
 
 
 class GateTestsStress(unittest.TestCase):
@@ -756,12 +759,51 @@ class GateTestsStress(unittest.TestCase):
         self.assertIn("GATE_TESTS=FAIL scope breach", r["output"])
 
     def test_full_sdlc_web(self):
-        # The web lane hardcodes its toy worktree path; bind it to the fixture.
-        r = run_node("full-sdlc-web", "gate-tests", gate_tests_web_fixture,
-                     subs=[(WEB_TOY_WT, '"$WT_FIXTURE"')])
+        r = run_node("full-sdlc-web", "gate-tests", gate_tests_web_fixture)
         self.assertEqual(r["rc"], 0, r["output"])
-        self.assertIn("SCOPE_GUARD=SKIP no files-allowlist.json", r["output"])
+        self.assertIn("SCOPE_OK files=1", r["output"])
         self.assertIn("GATE_TESTS=PASS", r["output"])
+
+
+# ==========================================================================
+# uat-gate (web feature-derived browser evidence)
+# ==========================================================================
+def uat_gate_fixture(tmp, failed=False, missing=False):
+    art = tmp / "artifacts"
+    required = [
+        {"id": "browser-1", "criterion": "Open the changed Settings path"},
+        {"id": "browser-2", "criterion": "Toggle the feature control"},
+    ]
+    jdump(art / "browser-evidence.json", {"required": required})
+    if not missing:
+        (art / "uat-feature.png").write_bytes(b"png")
+    jdump(art / "uat-result.json", {
+        "passed": ([] if failed else [
+            {"criterion": "browser-1", "detail": "path loaded"},
+            {"criterion": "browser-2", "detail": "control toggled"},
+        ]),
+        "failed": ([{"criterion": "browser-2", "detail": "missing"}] if failed else []),
+        "evidence": [str(art / "uat-feature.png")],
+    })
+    return {}
+
+
+class UatGateStress(unittest.TestCase):
+    def test_full_sdlc_web_uses_spec_derived_browser_evidence(self):
+        r = run_node("full-sdlc-web", "uat-gate", uat_gate_fixture)
+        self.assertEqual(r["rc"], 0, r["output"])
+        self.assertIn("UAT_PASSED=2", r["output"])
+        self.assertIn("UAT_GATE=PASS", r["output"])
+
+    def test_full_sdlc_web_rejects_failed_browser_evidence(self):
+        r = run_node("full-sdlc-web", "uat-gate", lambda tmp: uat_gate_fixture(tmp, failed=True))
+        self.assertEqual(r["rc"], 1)
+        self.assertIn("UAT_GATE=FAIL failed criteria: browser-2", r["output"])
+
+    def test_full_sdlc_web_requires_feature_screenshot(self):
+        r = run_node("full-sdlc-web", "uat-gate", lambda tmp: uat_gate_fixture(tmp, missing=True))
+        self.assertEqual(r["rc"], 1)
+        self.assertIn("UAT_GATE=FAIL no screenshot", r["output"])
 
 
 # ==========================================================================
@@ -1161,13 +1203,11 @@ class ExitGateCounter(unittest.TestCase):
 # `review-gate` later takes `comm -13` against — so RG-1 lives in this node as
 # much as in the gate (AUDIT.md counts six sites; three of them are here).
 #
-# The api and bugfix lanes reach their worktree through params.json; the web
-# lane hardcodes its toy worktree (AUDIT row GT-2) and is bound to the fixture
-# exactly as GateTestsStress binds gate-tests.
+# The api, web, and bugfix lanes reach their worktree through params.json.
 # ==========================================================================
 ROUND_PRE_GUARD = '2>/dev/null | LC_ALL=C sort > "$RD/prerun-dirs.txt"'
 ROUND_PRE_UNGUARDED = '2>/dev/null | sort > "$RD/prerun-dirs.txt"'
-WEB_WT_SUB = [(WEB_TOY_WT, '"$WT_FIXTURE"')]
+WEB_WT_SUB = []
 ROUND_PRE_LANES = ("full-sdlc-api", "full-sdlc-web", "bugfix")
 
 

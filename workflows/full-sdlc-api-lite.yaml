@@ -594,14 +594,15 @@ nodes:
   maxBudgetUsd: 8
   timeout: 1800000
   prompt: |
-    Implement the single implementation unit from the plan at plan.md inside the
-    directory named by the ARTIFACTS_DIR environment variable (resolve via:
-    echo "$ARTIFACTS_DIR"). Read the whole plan first.
+    Implement the API portion of the approved cross-repository plan at plan.md
+    inside the directory named by ARTIFACTS_DIR (resolve via: echo
+    "$ARTIFACTS_DIR"). Read the whole plan first, including the web section,
+    but modify only the API paths allowed by files-allowlist.json.
 
     The working tree is the "worktree" field of params.json in that same
     directory (you are NOT cwd'd there; cd for every command).
 
-    Scope: change only the files listed under Files. Do not refactor adjacent code.
+    Scope: change only API files listed in files-allowlist.json. Do not refactor adjacent code or touch web-app.
     Do not edit the plan file. Do not create commits — a later node commits.
     Do not create branches or worktrees — you are already on the correct branch.
     If the unit's work already exists and satisfies Verification, say so and stop;

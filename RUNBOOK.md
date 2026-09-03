@@ -820,3 +820,8 @@ metadata into `change-context.json`. RCA must disposition every candidate as
 `change-context-assessment.json`, with current pinned-code evidence. RCA gate
 refuses missing candidates, so recent related work cannot disappear behind a
 plausible new diagnosis or a PR title alone.
+
+
+## Feature launcher
+
+Direct feature runs use `python3 .archon/setup/archon-run.py feature --provider claude|codex --scope api|fullstack <absolute-spec>`. Scope `api` starts only the API lane. Scope `fullstack` creates a controller-owned feature chain, waits for the API lane to complete, writes a tamper-checked `feature-api-handoff.json`, and starts the web lane with the same provider against that exact handoff. Codex full API and web lanes are guarded like bugfix lanes with 240 active minutes and 30M cumulative tokens per lane; GitNexus and AWS are optional evidence and never launch/control prerequisites.

@@ -11,7 +11,8 @@ sessions setting up a machine. A node never installs anything.
 # Installing the Archon SDLC stack
 
 The setup gist ships the **Archon layer only** - workflows, setup scripts,
-templates, the runbook, the operator skills, and a derived permissions allowlist.
+templates, the runbook, the operator skills, provider-neutral feature launcher,
+and a derived permissions allowlist.
 The dev environment is a **precondition**: `install.sh` asserts it and refuses to
 continue if anything is missing. It never installs dev tooling.
 
@@ -269,7 +270,7 @@ those roots. Real adapter probes must deny control-code writes and allow the
 single run artifact directory.
 
 `stage-skills.sh` (installer step 4) links the CE review and operator skills into
-`$ROOT/.agents/skills/`; the guarded launcher mirrors **only** the external CE
+`$ROOT/.agents/skills/`; the guarded launcher covers Codex API/web feature lanes plus bugfix lanes and mirrors **only** the external CE
 review targets into `$CODEX_HOME/skills/` because the narrowed Codex cwd is
 `api`. Operator skills retain `WORKFLOW-NODE-STOP` and are never exposed in
 that dedicated workflow-node home.

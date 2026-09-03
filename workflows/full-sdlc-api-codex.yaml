@@ -3,6 +3,34 @@ description: 'API prong end-to-end (spec -> plan -> doc-review -> approval -> im
 interactive: true
 provider: codex
 nodes:
+- id: codex-control-guard
+  always_run: true
+  timeout: 60000
+  bash: |
+    set -euo pipefail
+    python3 - "${ARCHON_CODEX_LITE_GUARD_FILE:-}" <<'PY_CONTROL' || exit 1
+    import os, pathlib, pwd, re, stat, sys
+    p = sys.argv[1]
+    try:
+        path = pathlib.Path(p)
+        expected_dir = pathlib.Path(pwd.getpwuid(os.getuid()).pw_dir) / ".archon" / "control" / "codex-lite"
+        if path.parent.resolve() != expected_dir.resolve():
+            raise RuntimeError("guard is outside the fixed private control directory")
+        match = re.fullmatch(r"guard-([0-9a-f]{64})", path.name)
+        if not match:
+            raise RuntimeError("guard filename is not a launcher nonce")
+        s = os.lstat(p)
+        if not stat.S_ISREG(s.st_mode) or s.st_uid != os.getuid() or s.st_mode & 0o077:
+            raise RuntimeError("guard must be an owned mode-0600 regular file")
+        with open(p, encoding="utf-8") as fh:
+            if fh.read() != f"codex-lite-one-time-guard:{match.group(1)}\n":
+                raise RuntimeError("guard nonce content mismatch")
+        os.unlink(p)
+    except Exception as e:
+        print("CODEX_CONTROL_GUARD=FAIL use the guarded archon-run.py surface: " + str(e))
+        raise SystemExit(1)
+    print("CODEX_CONTROL_GUARD=PASS provider=codex one_time=consumed")
+    PY_CONTROL
 - id: preflight
   timeout: 300000
   bash: |
@@ -76,6 +104,8 @@ nodes:
     test -d /Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb/wiki || { echo "PREFLIGHT=FAIL knowledge base missing"; exit 1; }
     git -C /Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb status --porcelain | sort > "$ARTIFACTS_DIR/kb-pre-porcelain.txt"
     echo "PREFLIGHT=PASS"
+  depends_on:
+  - codex-control-guard
 - id: kb-recon
   depends_on:
   - preflight
@@ -167,8 +197,11 @@ nodes:
     environment variable (resolve via: echo "$ARTIFACTS_DIR"). Its "spec"
     field is the feature spec path; its "worktree" field is the working tree
     to implement against (you are NOT cwd'd there).
-    Author an implementation plan for the API PRONG ONLY of that spec.
-    (Ignore any web-app prongs — a separate lane owns them.)
+    Author ONE SHARED CROSS-REPOSITORY implementation plan for the complete
+    feature: API responsibilities and web-app responsibilities together. The
+    API lane will implement only the API section after approval, but this gate
+    is the single approval for the full design; the later web lane must follow
+    this exact approved plan and its derived web scope contract.
 
     Then read kb-context.md in that same directory —
     the knowledge-base scout's report. Its DECISIONS section is binding: the
@@ -179,12 +212,15 @@ nodes:
     Then read the spec and the repository files it names, and write the plan
     as markdown to plan.md in that same directory.
 
-    The plan must contain exactly one implementation unit with these exact headings:
+    The plan must contain exactly one shared implementation unit with these exact headings:
       ## Goal
       ## Files
       ## Approach
       ## Test scenarios
       ## Verification
+    Under ## Files, separate API paths and web-app paths clearly; API paths are
+    relative to api/, web paths are relative to web-app/. The web section may
+    be empty only when the spec truly has no web-app prong.
     Under Verification list exactly three commands (they are the shell gate):
       bun run typecheck
       bun run lint
@@ -212,9 +248,15 @@ nodes:
     empty array [] only when the spec has no such section.
 
     Also write files-allowlist.json to that same directory: a JSON array of
-    every repo-relative path the unit may create or modify — the
-    machine-readable mirror of the plan's ## Files list. A scope gate fails
-    the run on any change outside this list.
+    every api repo-relative path the API lane may create or modify — the
+    machine-readable mirror of the API part of the plan's ## Files list. A
+    scope gate fails the run on any API change outside this list.
+
+    Also write web-files-allowlist.json to that same directory: a JSON array
+    of every web-app repo-relative path the web lane may create or modify —
+    the machine-readable mirror of the web-app part of the same approved plan.
+    The later web lane copies this artifact verbatim from the API handoff; the
+    implementation node is not allowed to invent or broaden its own scope.
 
     Also write reader-audit.json to that same directory. When the plan
     changes how any DB column or enum value is INTERPRETED or PRESENTED
@@ -294,7 +336,7 @@ nodes:
         # An `if` and not `test … && cp`: premises.json and smoke-probe.json are
         # both optional, so on the last iteration a bare AND-list would leave the
         # loop with status 1 and set -e would kill the node.
-        for f in verify.json files-allowlist.json reader-audit.json premises.json smoke-probe.json; do
+        for f in verify.json files-allowlist.json web-files-allowlist.json reader-audit.json premises.json smoke-probe.json; do
           if [ -f "$ARTIFACTS_DIR/$f" ]; then cp "$ARTIFACTS_DIR/$f" "$RD/pre-$f"; fi
         done
         echo "PLAN_ROUND=$N cap=$CAP"
@@ -367,8 +409,8 @@ nodes:
         same directory (you are NOT cwd'd there — cd into it for every command).
         The feature spec is the "spec" field of that same params.json.
 
-        READ: the spec, plan.md, files-allowlist.json, reader-audit.json,
-        verify.json, kb-context.md, plan-round-N/impact.json, and the repository
+        READ: the spec, plan.md, files-allowlist.json, web-files-allowlist.json,
+        reader-audit.json, verify.json, kb-context.md, plan-round-N/impact.json, and the repository
         files the plan names.
 
         DO NOT READ any earlier round's critique.json or revision.json. You are
@@ -484,8 +526,8 @@ nodes:
         and end.
 
         Otherwise the verdict is REVISE. Read the spec, plan.md,
-        files-allowlist.json, verify.json, reader-audit.json, premises.json,
-        plan-round-N/impact.json and the repository files involved. Then, for
+        files-allowlist.json, web-files-allowlist.json, verify.json,
+        reader-audit.json, premises.json, plan-round-N/impact.json and the repository files involved. Then, for
         every finding at confidence 75 or 100, either apply it or decline it.
 
         Declining is allowed and sometimes correct, but it costs a citation: a
@@ -496,7 +538,8 @@ nodes:
         not a trace.
 
         When you change the plan, keep every contract consistent with it in the
-        same pass: files-allowlist.json lists every path the revised plan
+        same pass: files-allowlist.json lists every API path and
+        web-files-allowlist.json lists every web-app path the revised plan
         touches and nothing more, verify.json's patterns still select every spec
         the revised unit touches and match the ## Verification commands exactly,
         reader-audit.json lists any column whose interpretation or presentation
@@ -553,7 +596,7 @@ nodes:
           PM=NO
           cmp -s "$ARTIFACTS_DIR/plan.md" "$RD/plan.pre.md" || PM=YES
           AM=""
-          for f in verify.json files-allowlist.json reader-audit.json premises.json smoke-probe.json; do
+          for f in verify.json files-allowlist.json web-files-allowlist.json reader-audit.json premises.json smoke-probe.json; do
             CUR="$ARTIFACTS_DIR/$f"; PRE="$RD/pre-$f"
             if [ -f "$CUR" ] && [ -f "$PRE" ]; then
               cmp -s "$CUR" "$PRE" || AM="$AM,$f"
@@ -635,7 +678,7 @@ nodes:
         # and re-runs the same round instead of accepting the narrowed contract.
         if cmp -s "$ARTIFACTS_DIR/plan.md" "$RD/plan.pre.md"; then
           OTHER=""
-          for f in verify.json files-allowlist.json reader-audit.json premises.json smoke-probe.json; do
+          for f in verify.json files-allowlist.json web-files-allowlist.json reader-audit.json premises.json smoke-probe.json; do
             CUR="$ARTIFACTS_DIR/$f"; PRE="$RD/pre-$f"
             if [ -f "$CUR" ] && [ -f "$PRE" ]; then
               cmp -s "$CUR" "$PRE" || OTHER="$OTHER,$f"
@@ -861,13 +904,13 @@ nodes:
     how the stage is supposed to end and not a failure. Then the three
     commands, each in its own code chip with a short label saying when to
     pick it:
-      DISABLE_OMC=1 archon workflow approve <id> </dev/null >/tmp/archon-approve.log 2>&1 &
-      DISABLE_OMC=1 archon workflow reject <id> "why you are stopping it"
-      DISABLE_OMC=1 archon workflow abandon <id>
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/archon-run.py approve <id> --token CONTROL_TOKEN_FROM_LAST_LAUNCH
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/archon-run.py reject <id> "why you are stopping it" --token CONTROL_TOKEN_FROM_LAST_LAUNCH
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/archon-run.py abandon <id> --token CONTROL_TOKEN_FROM_LAST_LAUNCH
     Say that approve runs the rest of the workflow inside the terminal it is
     typed in and holds that terminal until the run ends, which is why it is
     backgrounded, and that a failed resume still leaves the approval
-    recorded so archon workflow resume <id> picks it up. Say that reject
+    recorded so python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/archon-run.py resume <id> --token CONTROL_TOKEN_FROM_LAST_LAUNCH picks it up. Say that reject
     records the reason typed after it and sends the plan back for one
     revision pass: the run reworks it against that reason and pauses here
     again, so reject holds the terminal exactly the way approve does and
@@ -895,8 +938,8 @@ nodes:
     done
     RID="$(basename "$ARTIFACTS_DIR")"
     grep -qF "$RID" "$H" || { echo "RENDER_GATE=FAIL DECIDE box does not carry this run's id verbatim"; exit 1; }
-    for v in approve reject abandon; do
-      grep -qF "archon workflow $v" "$H" || { echo "RENDER_GATE=FAIL DECIDE box missing the $v command"; exit 1; }
+    for v in approve reject abandon resume; do
+      grep -qF "archon-run.py $v" "$H" || { echo "RENDER_GATE=FAIL DECIDE box missing the $v command"; exit 1; }
     done
     cmp -s "$ARTIFACTS_DIR/plan.md" "$ARTIFACTS_DIR/plan.post-docreview.md" || { echo "RENDER_GATE=FAIL renderer modified plan.md"; exit 1; }
     # show-me: put the packet in front of the human exactly when the gate pauses.
@@ -915,7 +958,7 @@ nodes:
   depends_on:
   - plan-render-gate
   approval:
-    message: 'Plan review packet ready: open <this run''s ARTIFACTS_DIR>/plan-review.html in a browser (raw plan.md + docreview.diff alongside). The run is paused, which is how this stage is meant to end, not a failure; nothing degrades while it waits. The packet''s DECIDE box has the three commands with this run''s id filled in: approve continues (background it, it holds the terminal), reject records your reason and sends the work back for one revision pass, then pauses here again (it holds the terminal the way approve does, so background it too; the third rejection cancels the run instead of reworking), abandon ends the run outright. None of the three appear in archon --help; they are real.'
+    message: 'Plan review packet ready: open <this run''s ARTIFACTS_DIR>/plan-review.html in a browser (raw plan.md + docreview.diff alongside). The run is paused, which is how this stage is meant to end, not a failure; nothing degrades while it waits. The packet''s DECIDE box has the three commands with this run''s id filled in: approve continues (background it, it holds the terminal), reject records your reason and sends the work back for one revision pass, then pauses here again (it holds the terminal the way approve does, so background it too; the third rejection cancels the run instead of reworking), abandon ends the run outright. None of the three appear in archon --help; they are real. Codex control requirement: use python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/archon-run.py for approve, reject, abandon, and resume with the token printed by the previous STARTED line; raw archon control is rejected by the one-time always-run guard.'
     on_reject:
       max_attempts: 3
       prompt: |
@@ -929,13 +972,15 @@ nodes:
         output.
 
         Work in $ARTIFACTS_DIR.
-        1. Read plan.md, files-allowlist.json, reader-audit.json,
-           premises.json, docreview-envelope.txt, and plan-review.html.
+        1. Read plan.md, files-allowlist.json, web-files-allowlist.json,
+           reader-audit.json, premises.json, docreview-envelope.txt, and
+           plan-review.html.
         2. Rewrite plan.md to address the rejection and nothing else. Change
            only what the feedback requires. If the feedback asks a question
            rather than giving an instruction, answer it inside the plan.
         3. Keep the contracts consistent with the revised plan: every path
-           the plan now touches must appear in files-allowlist.json,
+           the plan now touches must appear in files-allowlist.json for API
+           paths or web-files-allowlist.json for web-app paths,
            reader-audit.json must list any column whose interpretation or
            presentation semantics the revision changes, and any premise
            answer you alter keeps at least one citation whose quote appears
@@ -969,14 +1014,15 @@ nodes:
   - plan-gate
   timeout: 1800000
   prompt: |
-    Implement the single implementation unit from the plan at plan.md inside the
-    directory named by the ARTIFACTS_DIR environment variable (resolve via:
-    echo "$ARTIFACTS_DIR"). Read the whole plan first.
+    Implement the API portion of the approved cross-repository plan at plan.md
+    inside the directory named by ARTIFACTS_DIR (resolve via: echo
+    "$ARTIFACTS_DIR"). Read the whole plan first, including the web section,
+    but modify only the API paths allowed by files-allowlist.json.
 
     The working tree is the "worktree" field of params.json in that same
     directory (you are NOT cwd'd there; cd for every command).
 
-    Scope: change only the files listed under Files. Do not refactor adjacent code.
+    Scope: change only API files listed in files-allowlist.json. Do not refactor adjacent code or touch web-app.
     Do not edit the plan file. Do not create commits — a later node commits.
     Do not create branches or worktrees — you are already on the correct branch.
     If the unit's work already exists and satisfies Verification, say so and stop;

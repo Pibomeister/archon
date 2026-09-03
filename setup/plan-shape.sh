@@ -2,7 +2,7 @@
 # Plan artifact shape checks, factored out of full-sdlc-api.yaml's
 # plan-snapshot node so plan-converge (U1's plan-loop) can re-run the same
 # checks on every ACCEPT round without duplicating the logic. Verifies
-# plan.md's five headings, verify.json/files-allowlist.json/reader-audit.json
+# plan.md's five headings, verify.json/files-allowlist.json/web-files-allowlist.json/reader-audit.json
 # shape, and — when the spec declares premises — that every premises.json
 # evidence quote is cited verbatim in the worktree (same cited() helper as
 # plan-snapshot, verbatim).
@@ -18,6 +18,7 @@ for h in "## Goal" "## Files" "## Approach" "## Test scenarios" "## Verification
 done
 python3 -c "import json,sys; p=json.load(open(sys.argv[1]))['test_patterns']; assert isinstance(p,list) and p and all(isinstance(x,str) and x.strip() for x in p)" "$AD/verify.json" || { echo "PLAN_SHAPE=FAIL verify.json missing or empty"; exit 1; }
 python3 -c "import json,sys; a=json.load(open(sys.argv[1])); assert isinstance(a,list) and a and all(isinstance(x,str) and x.strip() for x in a)" "$AD/files-allowlist.json" || { echo "PLAN_SHAPE=FAIL files-allowlist.json missing or empty"; exit 1; }
+python3 -c "import json,sys; a=json.load(open(sys.argv[1])); assert isinstance(a,list) and all(isinstance(x,str) and x.strip() for x in a)" "$AD/web-files-allowlist.json" || { echo "PLAN_SHAPE=FAIL web-files-allowlist.json missing or malformed"; exit 1; }
 python3 -c "import json,sys; c=json.load(open(sys.argv[1]))['columns']; assert isinstance(c,list)" "$AD/reader-audit.json" || { echo "PLAN_SHAPE=FAIL reader-audit.json missing or malformed"; exit 1; }
 
 if grep -q '^## Premises to verify' "$SPEC"; then
