@@ -225,6 +225,11 @@ Every hard failure must state the invariant, the observed contradiction, and a
 safe unblock path. A gate that cannot do so is a workflow defect, not evidence
 that the product change is wrong. Do not circumvent it; repair its contract.
 
+Knowledge capture is run-local first. A workflow node writes and validates
+`kb-capture.md` in its own artifacts directory; an external/team KB is an
+optional operator promotion sink. Missing write authority to that sink never
+turns a shipped, verified PR into a failed delivery.
+
 The run pauses (`status: paused`) after doc-review and prints
 `RENDER_GATE=PASS packet=file://<...>/plan-review.html`. It opens in a browser
 when an opener is available; the path is printed either way, so read the file
@@ -512,11 +517,12 @@ Runs bill the **Claude subscription via OAuth login**, not an API key.
   branches and dirty trees, exiting 1 as `CLEANUP=PARTIAL`. That refusal is
   deliberate (RUNBOOK §10) - report what it refused, do not force past it. Port
   sweeps touch only 4123 and 3123; kill by PID, never `pkill -f`.
-- **KB duty (RUNBOOK §9).** Each lane's `kb-capture` writes exactly one file to
-  `goodword-kb/wiki/change-history/`. Its "Promotion candidates" section is raw
-  intake. After a run ships, say `kb:compound` in an interactive session to curate
-  those candidates into glossary/ADR/pattern pages. Unattended runs never touch
-  curated pages - if the KB is to compound, that pass has to happen.
+- **KB duty (RUNBOOK §9).** Each lane's `kb-capture` writes exactly one required
+  run-local `kb-capture.md` inside its artifacts directory. External KB promotion
+  is optional operator work and missing sink access cannot fail an otherwise
+  shipped, verified PR. After a run ships, say `kb:compound` in an interactive
+  session when the human wants to curate promotion candidates into
+  glossary/ADR/pattern pages. Unattended runs never touch external curated pages.
 
 ## 8. Environment traps worth remembering
 
@@ -728,8 +734,8 @@ quota). What decides supervision calls here:
 - To stop a running apply by hand: `touch <artifacts>/KILL_SWITCH` - the
   executor checks it between chunks, terminates the instrument, and exits
   typed. Removing the file is equally a deliberate human act.
-- KB duty as in §7: `kb-capture` writes one change-history file; run
-  `kb:compound` afterwards.
+- KB duty as in §7: `kb-capture` writes run-local `kb-capture.md`; run
+  `kb:compound` afterwards only when promoting into an external KB.
 
 ## Setting the pipeline up
 

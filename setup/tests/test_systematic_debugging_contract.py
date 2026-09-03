@@ -72,9 +72,25 @@ class SystematicDebuggingContractTest(unittest.TestCase):
         self.assertIn("mechanism and belongs in causal citations", workflow)
         self.assertIn('SEARCH_V4_COMPANY_MIN_CORPUS="${SEARCH_V4_COMPANY_MIN_CORPUS:-1}"', workflow)
         self.assertIn('--project=chromium --workers=1 --reporter=json', workflow)
+        self.assertIn('Write EXACTLY ONE file: kb-capture.md', workflow)
+        self.assertIn('external_kb=optional', workflow)
         self.assertIn('validate-smoke-readiness', workflow)
         self.assertIn('ticket_disposition=RESOLVED', workflow)
         self.assertIn('auto product failures have been blocked', workflow)
+
+    def test_runbook_and_operator_skill_keep_external_kb_promotion_optional(self):
+        archon = WORKFLOW.parent.parent
+        runbook = (archon / "RUNBOOK.md").read_text(encoding="utf-8")
+        skill = (archon / "skills/archon-sdlc/SKILL.md").read_text(encoding="utf-8")
+        for document in (runbook, skill):
+            self.assertIn("run-local", document)
+            self.assertIn("kb-capture.md", document)
+            self.assertIn("optional operator", document)
+        self.assertNotIn("Each lane's `kb-capture` node writes **exactly one** new file to `goodword-kb", runbook)
+        self.assertNotIn("Each lane's `kb-capture` writes exactly one file to", skill)
+        self.assertNotIn("wiki/change-history/<date>-archon-bugfix", runbook)
+        self.assertNotIn("wiki/change-history/<date>-archon-backfill", runbook)
+        self.assertNotIn("writes one change-history file", skill)
 
     def test_multiple_active_hypotheses_fail(self):
         write(self.tmp, "hypotheses.json", [

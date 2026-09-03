@@ -584,7 +584,9 @@
       ]
     },
     "kb-capture": {
-      "produces": [],
+      "produces": [
+        "kb-capture.md"
+      ],
       "consumes": [
         "rca.md",
         "causal-chain.json",
@@ -598,11 +600,9 @@
       ]
     },
     "kb-capture-gate": {
-      "produces": [
-        "kb-post-capture.txt"
-      ],
+      "produces": [],
       "consumes": [
-        "kb-pre-porcelain.txt"
+        "kb-capture.md"
       ]
     },
     "report": {

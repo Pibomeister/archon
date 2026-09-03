@@ -4096,14 +4096,12 @@ nodes:
       sibling-sweep.json, residuals.json, fix-attempt.txt,
       round.txt, and each round-<N>/fixer-result.json.
 
-      Write EXACTLY ONE new markdown file into
-      /Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb/wiki/change-history/
-      named <YYYY-MM-DD>-archon-bugfix-<slug>.md (get the date with the date
-      command; the slug is the "slug" field of params.json in the artifacts
-      directory).
-      That one new file is your ENTIRE write surface: never edit or delete any
-      existing knowledge-base file. Curation into concepts, patterns, glossary,
-      or ADRs belongs to a human-attended kb:compound session, not to you.
+      Write EXACTLY ONE file: kb-capture.md inside the resolved artifacts
+      directory. That run-local file is your ENTIRE write surface. Never write
+      directly to a repository, external knowledge base, current directory, or
+      /tmp. External KB availability is optional and must not invalidate a
+      successfully shipped change. Promotion into concepts, patterns, glossary,
+      ADRs, or a team KB belongs to the operator/human curation layer.
 
       Frontmatter: title, date, source (archon bugfix, run id = the artifacts
       directory basename), pr (the URL), status: captured.
@@ -4132,18 +4130,13 @@ nodes:
     timeout: 120000
     bash: |
       set -euo pipefail
-      KB=/Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb
-      git -C "$KB" status --porcelain | sort > "$ARTIFACTS_DIR/kb-post-capture.txt"
-      NEW=$(comm -13 "$ARTIFACTS_DIR/kb-pre-porcelain.txt" "$ARTIFACTS_DIR/kb-post-capture.txt" || true)
-      COUNT=$(printf '%s\n' "$NEW" | grep -c "^?? wiki/change-history/" || true)
-      TOTAL=$(printf '%s\n' "$NEW" | grep -c . || true)
-      test "$COUNT" = "1" || { echo "KB_CAPTURE_GATE=FAIL expected exactly one new capture file, delta: [$NEW]"; exit 1; }
-      test "$TOTAL" = "$COUNT" || { echo "KB_CAPTURE_GATE=FAIL KB changes outside change-history: [$NEW]"; exit 1; }
-      F="$KB/$(printf '%s\n' "$NEW" | sed -n 's/^?? //p')"
+      F="$ARTIFACTS_DIR/kb-capture.md"
+      test -s "$F" || { echo "KB_CAPTURE_GATE=FAIL missing run-local kb-capture.md"; exit 1; }
       grep -q "status: captured" "$F" || { echo "KB_CAPTURE_GATE=FAIL missing frontmatter"; exit 1; }
       grep -qi "Why the tests missed it" "$F" || { echo "KB_CAPTURE_GATE=FAIL missing why-tests-missed section"; exit 1; }
       grep -qi "Promotion candidates" "$F" || { echo "KB_CAPTURE_GATE=FAIL missing promotion candidates"; exit 1; }
-      echo "KB_CAPTURE_GATE=PASS file=$F"
+      grep -q '^KB_CAPTURE_DONE$' "$F" || { echo "KB_CAPTURE_GATE=FAIL missing completion marker"; exit 1; }
+      echo "KB_CAPTURE_GATE=PASS run_local=$F external_kb=optional"
 
   - id: report
     depends_on: [kb-capture-gate]

@@ -71,6 +71,10 @@ unblock path. If it cannot, treat that as a workflow defect. This is not an
 override mechanism: the correction must preserve or replace the gate's actual
 safety purpose with tested evidence.
 
+Knowledge capture follows the same boundary: the required artifact is
+run-local `kb-capture.md`. Promotion to `goodword-kb` or another external sink
+is optional operator work and cannot retroactively fail a delivered PR.
+
 After doc-review, the run pauses (`status: paused`) and `plan-render-gate` prints `RENDER_GATE=PASS packet=file://…/plan-review.html`. **The packet opens in your browser automatically when an opener is available** (`xdg-open`, else `open`); the `file://` path is printed either way, and the message says which happened — it never claims "opened in browser" unless the opener actually ran. Read it: GIST (plain-language summary), KB (what prior art the plan honors), MAP (files and units), PLAN (verbatim), REVIEW (doc-review's edits and unapplied findings, plus a "Premise check" block summarizing each blind premise-verify verdict — `cannot_determine` entries deserve your attention; `conflict` entries never reach this packet, they stop the run earlier), CRITIC (below), DECIDE (the commands below).
 
 This is the pipeline's highest-leverage human moment — one wrong plan line becomes a thousand wrong code lines. Do not rubber-stamp.
@@ -327,7 +331,14 @@ Runs bill the **Claude subscription via OAuth login**, not an API key. `total_co
 
 ## 9. KB duty (do not skip)
 
-Each lane's `kb-capture` node writes **exactly one** new file to `goodword-kb/wiki/change-history/` (provably additive — the gate hard-fails on anything else). Its "Promotion candidates" section is raw intake. **After a run ships, a human runs `kb:compound`** in an interactive session to curate promotions into glossary/ADRs/patterns. Unattended runs never touch curated pages; if the KB is to compound, the promotion pass is on you.
+Each lane's `kb-capture` node writes exactly one required run-local artifact,
+`kb-capture.md`, inside that run's artifacts directory. Its "Promotion
+candidates" section is raw intake. Promotion into
+`goodword-kb/wiki/change-history/` or another external sink is optional operator
+work; missing sink access cannot retroactively fail a shipped, verified PR.
+When promotion is desired, a human runs `kb:compound` interactively to curate
+the capture into glossary/ADR/pattern pages. Unattended nodes never touch
+external curated pages.
 
 ## 10. Cleanup and rollback
 
@@ -478,8 +489,9 @@ Failure taxonomy (in addition to the shared discriminators of §3 — same resum
 | `NEGCONTROL=FAIL refailed without predicted signature` | Reverting the fix re-fails, but differently. | Engineer; the failure mode changed under revert. |
 | `SMOKE=SKIP repo=web-app` | Typed, expected: the BOOT smoke is api-only. The in-app matrix still runs for web bugs, so behavior is covered. Visible in the PR body. | None. |
 
-KB duty applies as in §9: `kb-capture` writes one `wiki/change-history/<date>-archon-bugfix-<slug>.md` with a
-"Why the tests missed it" section — run `kb:compound` after the PR ships.
+KB duty applies as in §9: `kb-capture` writes run-local `kb-capture.md`
+with a "Why the tests missed it" section. Run `kb:compound` after the PR
+ships only when a human wants to promote the capture into an external KB.
 
 ## 13. The backfill lane (`backfill`)
 
@@ -589,9 +601,9 @@ executor checks it between chunks and terminates the instrument, typed.
   detached checkout of origin/main: `git -C api worktree remove <path>` when the run is done.
 - A backfill too large to snapshot is too large for one run — chunk it into multiple runs by spec.
 
-KB duty applies as in §9: `kb-capture` writes one
-`wiki/change-history/<date>-archon-backfill-<slug>.md` with a "Population claim vs measured"
-section — run `kb:compound` after the run ships.
+KB duty applies as in §9: `kb-capture` writes run-local `kb-capture.md`
+with a "Population claim vs measured" section. Run `kb:compound` after the
+run ships only when a human wants to promote the capture into an external KB.
 
 The lane is NOT in the gist manifest until it has a clean trial (same bar as the bugfix lane).
 Trial candidate: the #1896 follow-up 44k indexer gap — real, bounded, already censused once.
