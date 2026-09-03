@@ -13,16 +13,19 @@
 # rca-gate: it (re)writes repo.txt = "<repo>\n" idempotently (9 downstream
 # nodes `cat` it) and re-emits the RCA_NOTE=integration mutex line for
 # kind=integration.
-# Usage: rca-shape.sh <artifacts-dir>
+# Usage: rca-shape.sh <artifacts-dir> [caller-token]
+# caller-token (default RCA_SHAPE) stamps the persisted stop with the calling
+# node's identity -- RCA_GATE or RCA_PLAN_SHAPE -- which RUNBOOK.md routes on.
+# stdout is unchanged either way: callers still sed RCA_SHAPE= themselves.
 set -euo pipefail
-AD="${1:?usage: rca-shape.sh <artifacts-dir>}"
+AD="${1:?usage: rca-shape.sh <artifacts-dir> [caller-token]}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 # A typed stop is the operator's only routing signal, but a failing node's
 # stdout does not survive the workflow executor's failure path -- it reports a
 # fragment of the script source instead, so every RCA_SHAPE=FAIL/
 # RCA_INVESTIGATION_REQUIRED reason is destroyed at the failure boundary.
-# Persist each typed line here, at the one chokepoint all four callers share,
+# Persist each typed line here, at the one chokepoint every caller shares,
 # so terminal supervision can read the discriminator back off the run dir.
 # Never let the surfacing path itself become a silent stop: if the run dir is
 # unwritable, degrade to stdout rather than aborting before any typed message.
@@ -31,12 +34,13 @@ GATE_STATUS="$AD/gate-status.txt"
 # Each caller renames this script's token to its own node-specific form
 # (RCA_GATE=FAIL, RCA_PLAN_SHAPE=FAIL) and RUNBOOK.md gives those DIFFERENT
 # remediations, so the persisted line has to carry the caller's identity or an
-# operator cannot tell which of the four call sites stopped.
+# operator cannot tell which call site stopped.
 TOKEN="${2:-RCA_SHAPE}"
 # Records typed STOPS only, one line, never a traceback. The truncate above
 # clears a previous round's stop, so a run that passes this check and dies later
 # has an empty file and no discriminator rather than a stale, misrouting one.
 record() {
+  local line
   line="$(printf '%s' "$1" | tr '\n' ' ')"
   { printf '%s\n' "${line/#RCA_SHAPE/$TOKEN}" >> "$GATE_STATUS"; } 2>/dev/null || true
 }
@@ -57,8 +61,12 @@ CONTRACT_OUT="$(python3 "$HERE/bugfix-contract.py" validate-causal-coverage --ar
   record "${TYPED:-RCA_SHAPE=FAIL contract crashed without a typed line (see run log)}"
   exit 1
 }
-python3 "$HERE/bugfix-contract.py" classify "$AD" >/dev/null \
-  || { emit "RCA_SHAPE=FAIL classification"; exit 1; }
+CLASSIFY_OUT="$(python3 "$HERE/bugfix-contract.py" classify "$AD" 2>&1)" || {
+  printf '%s\n' "$CLASSIFY_OUT" | sed -E 's/^BUGFIX_(COVERAGE|CONTRACT)=FAIL/RCA_SHAPE=FAIL/'
+  CTYPED="$(printf '%s\n' "$CLASSIFY_OUT" | sed -E 's/^BUGFIX_(COVERAGE|CONTRACT)=FAIL/RCA_SHAPE=FAIL/' | grep -m1 '^RCA_SHAPE=FAIL' || true)"
+  record "${CTYPED:-RCA_SHAPE=FAIL classification crashed without a typed line (see run log)}"
+  exit 1
+}
 
 # A thin report may truthfully end investigation without an implementation
 # plan. That is valid open work, but it must stop with a typed evidence request

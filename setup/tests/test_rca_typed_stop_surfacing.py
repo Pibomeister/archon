@@ -96,42 +96,26 @@ class TypedStopPersistence(unittest.TestCase):
 
 
     def test_success_leaves_no_stale_discriminator(self):
-        """A passing shape check must not leave a reason behind.
+        """A passing shape check must persist nothing.
 
-        gate-status.txt is read on ANY terminal failure. If a successful check
+        gate-status.txt is read on ANY terminal status. If a successful check
         recorded RCA_SHAPE=OK, a run that died later at an unrelated node would
         report that stale line as its discriminator and misroute triage.
+
+        This uses rca-minimal, which reaches a clean exit 0 -- the thin-report
+        fixture cannot pass, so asserting against it proved nothing.
         """
-        ad = self.artifacts()
-        # Take the fixture all the way to a clean pass.
-        path = ad / "symptom-dispositions.json"
-        doc = json.loads(path.read_text(encoding="utf-8"))
-        for row in doc["dispositions"]:
-            if row["disposition"] == "separate-ticket":
-                row["authority"] = "report"
-        path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
-        plan = ad / "fix-plan.json"
-        plan.write_text(json.dumps({
-            "approach": "bind the scalar Note.content mapping to every labeled source column",
-            "fix_site": "libs/external-services/src/lib/ai/ai.service.ts:120",
-            "files": ["libs/external-services/src/lib/ai/ai.service.ts"],
-            "risks": ["mapping shape change"],
-            "alternatives": [{"label": "none", "approach": "no deeper fix exists"}],
-        }, indent=2), encoding="utf-8")
-        debug = ad / "debug-phase.json"
-        dbg = json.loads(debug.read_text(encoding="utf-8"))
-        dbg["reproduction_status"] = "reproduced"
-        debug.write_text(json.dumps(dbg, indent=2), encoding="utf-8")
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        ad = Path(tmp.name) / "run"
+        shutil.copytree(Path(__file__).resolve().parent / "fixtures" / "rca-minimal", ad)
 
         proc = self.run_shape(ad)
-        status = (ad / "gate-status.txt").read_text(encoding="utf-8").strip()
-        if proc.returncode == 0:
-            self.assertEqual(status, "", "a passing check must persist nothing")
-            self.assertIn("RCA_SHAPE=OK", proc.stdout)
-        else:
-            # Fixture did not reach a full pass; the invariant under test is
-            # still that no OK line is ever persisted.
-            self.assertNotIn("RCA_SHAPE=OK", status)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("RCA_SHAPE=OK", proc.stdout)
+        self.assertEqual(
+            (ad / "gate-status.txt").read_text(encoding="utf-8").strip(), "",
+            "a passing check persisted a discriminator")
 
     def test_ok_line_is_never_persisted(self):
         script = (SETUP / "rca-shape.sh").read_text(encoding="utf-8")
@@ -305,9 +289,10 @@ class WorkflowRouting(unittest.TestCase):
     def test_investigation_required_has_a_case_arm(self):
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertEqual(
-            text.count("*RCA_INVESTIGATION_REQUIRED*)"), 2,
-            "rca-gate and rca-plan-shape must each route RCA_INVESTIGATION_REQUIRED "
-            "before the untyped-stop fallback",
+            text.count("*RCA_INVESTIGATION_REQUIRED*)"), 4,
+            "all four call sites must route RCA_INVESTIGATION_REQUIRED: rca-gate, "
+            "rca-plan-shape, and both planning-loop converge sites -- the loop sites "
+            "otherwise mistype a valid open investigation as shape drift",
         )
 
     def test_prompt_states_the_unresolved_fallback(self):
@@ -319,7 +304,8 @@ class WorkflowRouting(unittest.TestCase):
         # bugfix-lite overlays its own rca prompt, so the parent fix does not
         # reach it: the lane would keep emitting blank-authority rows.
         overlay = (SETUP / "lite" / "bugfix" / "rca.prompt.md").read_text(encoding="utf-8")
-        self.assertIn("correct disposition is\n`unresolved`", overlay)
+        self.assertIn("correct disposition is", overlay)
+        self.assertIn("`unresolved`", overlay)
         self.assertIn("Select the repository that OWNS the mechanism", overlay)
 
     def test_lite_lane_routes_the_investigation_stop(self):
@@ -337,6 +323,23 @@ class WorkflowRouting(unittest.TestCase):
         lite = (SETUP.parent / "workflows" / "bugfix-lite.yaml").read_text(encoding="utf-8")
         for ln in [l for l in lite.splitlines() if "rca-shape.sh" in l and "2>&1" in l]:
             self.assertRegex(ln.strip(), r"rca-shape\.sh.*(RCA_GATE|RCA_PLAN_SHAPE) 2>&1", ln.strip())
+
+    def test_converge_sites_type_the_investigation_stop_distinctly(self):
+        """The loop sites must not report an open investigation as shape drift.
+
+        A reviser that blanks fix-plan.approach leaves a valid open
+        investigation; typing it `RCA_CONVERGE=FAIL shape` routes the operator
+        to the repair-the-contracts row instead of evidence-gathering.
+        """
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertEqual(text.count("RCA_CONVERGE=FAIL investigation-required"), 2,
+                         "both planning-loop converge sites need the distinct token")
+
+    def test_authority_prompt_demands_a_citation_not_a_bare_token(self):
+        """A bare `report` is self-certifying; the contract only checks truthiness."""
+        for path in (WORKFLOW, SETUP / "lite" / "bugfix" / "rca.prompt.md"):
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("report:<verbatim clause from the sealed report>", text, str(path))
 
     def test_generated_twins_carry_the_fix(self):
         for name in ("bugfix-codex.yaml", "bugfix-lite-codex.yaml"):

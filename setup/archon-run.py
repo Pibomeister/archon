@@ -1261,7 +1261,9 @@ def gate_discriminator(row: dict) -> str:
     node's own script source, not its stdout, so a typed RCA_SHAPE=FAIL /
     RCA_INVESTIGATION_REQUIRED reason never reaches the operator through the
     log. rca-shape.sh writes each typed line to gate-status.txt in the run dir;
-    read it back so a terminal `failed` carries a routable discriminator.
+    read it back so a terminal run carries a routable discriminator. This runs
+    for every TERMINAL_STATUS, not just `failed`; a completed run is silent only
+    because rca-shape.sh never persists a success, so do not add one.
     Machine-specific prefixes are stripped by literal substitution, not by a
     path-shaped regex: the most useful reasons here ("fix-plan.files not subset
     of files-allowlist: ['api/src/...']") ARE a repo-relative path, and a regex

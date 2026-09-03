@@ -204,15 +204,16 @@ fixed requires occurrence attribution plus cause/diff/RED/counterfactual;
 class-hardening-only cannot close the ticket; by-design requires product
 authority; product-semantics and unresolved stay open.
 `authority` is REQUIRED for by-design and for separate-ticket, and the only
-admissible values are an explicit receipt you can cite: "report" (the sealed
-bug report itself authorizes the split or states the intended behavior — a
-report that says to split independent causes after diagnosis IS report
-authority; cite it), "human:<one-line receipt>", or
-"controller:<one-line receipt>". Never infer authority from code or from your
+admissible values are an explicit receipt you can cite:
+"report:<verbatim clause from the sealed report>" (the report itself authorizes
+the split or states the intended behavior — a report that says to split
+independent causes after diagnosis IS report authority; quote the clause, since
+a bare "report" is self-certifying and tells a human reviewer nothing),
+"human:<one-line receipt>", or "controller:<one-line receipt>". Never infer authority from code or from your
 own judgement. When no such receipt exists the correct disposition is
-`unresolved` — which keeps the ticket open and costs nothing — NOT a
-separate-ticket row with an empty authority, which the deterministic contract
-rejects and which stops the whole run. Keep mechanism_valid and
+`unresolved`, which keeps the ticket open — NOT a separate-ticket row with an
+empty authority, which the deterministic contract rejects and which stops the
+whole run. Keep mechanism_valid and
 occurrence_attributed separate. Record the ordered phases root-cause-
 When occurrence_attributed is true, proof-assessment.json must include
 occurrence_evidence_sources. Use "report" for a direct report/repro; any named

@@ -777,10 +777,13 @@ nodes:
     allowed only when this occurrence is attributed to the selected cause.
     `authority` is REQUIRED for by-design and for separate-ticket, and the
     only admissible values are an explicit receipt you can cite:
-      - "report"     — the sealed bug report itself authorizes the split or
-                       states the intended behavior. A report that says to
-                       split independent causes after diagnosis IS report
-                       authority for separate-ticket; cite it.
+      - "report:<verbatim clause from the sealed report>" — the report
+                       itself authorizes the split or states the intended
+                       behavior. A report that says to split independent
+                       causes after diagnosis IS report authority for
+                       separate-ticket. Quote the clause; a bare "report"
+                       with nothing after it is self-certifying and tells a
+                       human reviewer nothing at the gate.
       - "human:<one-line receipt>"      — an operator instruction in this run.
       - "controller:<one-line receipt>" — a protected controller decision.
     Never infer authority from code, from your own judgement, or from the
@@ -1714,7 +1717,14 @@ nodes:
           OUT=$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/rca-shape.sh "$AD" RCA_PLAN_SHAPE 2>&1) || SHAPE=$?
           if [ "$SHAPE" != 0 ]; then
             printf '%s\n' "$OUT" | sed 's/^RCA_SHAPE=FAIL/RCA_PLAN_SHAPE=FAIL/'
-            echo "RCA_CONVERGE=FAIL shape round=$N"
+            # A reviser that blanked fix-plan.approach leaves a valid open
+            # investigation, not shape drift. Typing it as shape sends the
+            # operator to the "repair the contracts" row instead of the
+            # evidence-gathering one.
+            case "$OUT" in
+              *RCA_INVESTIGATION_REQUIRED*) echo "RCA_CONVERGE=FAIL investigation-required round=$N" ;;
+              *) echo "RCA_CONVERGE=FAIL shape round=$N" ;;
+            esac
             exit 1
           fi
           echo "RCA_PLAN_CONVERGED round=$N"
@@ -1785,7 +1795,10 @@ nodes:
               OUT=$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/rca-shape.sh "$AD" RCA_PLAN_SHAPE 2>&1) || SHAPE=$?
               if [ "$SHAPE" != 0 ]; then
                 printf '%s\n' "$OUT" | sed 's/^RCA_SHAPE=FAIL/RCA_PLAN_SHAPE=FAIL/'
-                echo "RCA_CONVERGE=FAIL shape round=$N (human accept)"
+                case "$OUT" in
+                  *RCA_INVESTIGATION_REQUIRED*) echo "RCA_CONVERGE=FAIL investigation-required round=$N (human accept)" ;;
+                  *) echo "RCA_CONVERGE=FAIL shape round=$N (human accept)" ;;
+                esac
                 exit 1
               fi
               echo "RCA_PLAN_CONVERGED round=$N (human accepted at cap: $(head -1 "$AD/rca-plan-accept.txt"))"
