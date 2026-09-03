@@ -98,6 +98,51 @@ class ShippedEqualsRegeneration(unittest.TestCase):
             self.assertIn("LITE_DRIFT=OK", r.stdout)
 
 
+class LiteSafetyNodes(unittest.TestCase):
+    def test_approval_lanes_are_interactive(self):
+        for lane in LANES:
+            with self.subTest(lane=lane):
+                m = json.loads((SETUP / "lite" / f"{lane}.json").read_text())
+                parent = load(ARCHON / "workflows" / m["parent"])
+                self.assertIs(parent.get("interactive"), True)
+
+    def test_control_guard_is_first_and_always_run(self):
+        for lane in LANES:
+            with self.subTest(lane=lane):
+                m = json.loads((SETUP / "lite" / f"{lane}.json").read_text())
+                self.assertEqual(m["nodes"][0], "codex-control-guard")
+                self.assertEqual(m["depends_on"]["preflight"], ["codex-control-guard"])
+                derived = Path(m["parent"]).stem + "-lite.yaml"
+                node = load(ARCHON / "workflows" / derived)["nodes"][0]
+                self.assertIs(node.get("always_run"), True)
+
+    def test_prbody_gate_is_between_prbody_and_ship(self):
+        for lane in LANES:
+            with self.subTest(lane=lane):
+                m = json.loads((SETUP / "lite" / f"{lane}.json").read_text())
+                self.assertLess(m["nodes"].index("prbody"), m["nodes"].index("prbody-gate"))
+                self.assertLess(m["nodes"].index("prbody-gate"), m["nodes"].index("ship"))
+                self.assertEqual(m["depends_on"]["prbody-gate"], ["prbody"])
+                self.assertEqual(m["depends_on"]["ship"], ["prbody-gate"])
+
+    def test_impact_overlays_require_successful_query_provenance(self):
+        for lane in LANES:
+            for suffix in ("lite-impact.node.yaml", "lite-impact-post.node.yaml"):
+                with self.subTest(lane=lane, overlay=suffix):
+                    text = (SETUP / "lite" / lane / suffix).read_text(encoding="utf-8")
+                    for token in ("query_status", "query_repo", "query_target", "ANY impact call"):
+                        self.assertIn(token, text)
+
+    def test_lite_approval_messages_match_actual_gate_count(self):
+        api = load(ARCHON / "workflows" / "full-sdlc-api-lite.yaml")
+        plan = next(n for n in api["nodes"] if n["id"] == "plan-gate")
+        self.assertIn("provider-appropriate commands", plan["approval"]["message"])
+        bug = load(ARCHON / "workflows" / "bugfix-lite.yaml")
+        rca = next(n for n in bug["nodes"] if n["id"] == "rca-approval")
+        self.assertIn("only gate", rca["approval"]["message"])
+        self.assertIn("no in-app smoke gate", rca["approval"]["message"])
+
+
 class GeneratorRefusals(unittest.TestCase):
     """Copy the api manifest + overlays into a temp setup/ tree next to a copy of
     the generator, mutate one thing, and assert the typed failure."""

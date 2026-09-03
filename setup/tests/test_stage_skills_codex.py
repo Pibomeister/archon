@@ -38,7 +38,7 @@ class Base(unittest.TestCase):
         self.cache = self.home / ".claude/plugins/cache/compound-engineering-plugin/compound-engineering/3.2.0/skills"
         make_ce_skills(self.cache)
         # shipped operator skills the script also stages
-        for s in ("archon-install", "archon-sdlc"):
+        for s in ("archon-install", "archon-sdlc", "archon-linear"):
             d = self.root / ".archon/skills" / s
             d.mkdir(parents=True)
             (d / "SKILL.md").write_text("operator skill\n", encoding="utf-8")
@@ -61,6 +61,9 @@ class CodexStaging(Base):
             self.assertTrue((link / "SKILL.md").is_file(), f"{link}/SKILL.md does not resolve")
         self.assertIn("STAGED_CODEX: ce-code-review", r.stdout)
         self.assertIn("STAGED_CODEX: ce-doc-review", r.stdout)
+        for s in ("archon-install", "archon-sdlc", "archon-linear"):
+            self.assertTrue((self.root / ".agents/skills" / s / "SKILL.md").is_file())
+            self.assertTrue((self.root / ".claude/skills" / s / "SKILL.md").is_file())
 
     def test_agents_and_claude_point_at_same_source(self):
         r = self.run_script()

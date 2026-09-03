@@ -1,0 +1,7 @@
+{
+  "schema_version": 2,
+  "coverage": [
+    {"symptom_id": "E2", "cause_id": "H3", "occurrence_attributed": true, "planned_diff": ["web-app/src/groupParticipants.ts"], "red_test": "test::Sahiba", "counterfactual_user_visible": true},
+    {"symptom_id": "E3", "cause_id": "H3", "occurrence_attributed": true, "planned_diff": ["web-app/src/groupParticipants.ts"], "red_test": "test::Outputs", "counterfactual_user_visible": true}
+  ]
+}

@@ -1,6 +1,8 @@
 set -euo pipefail
 ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
 SETUP="$ROOT/.archon/setup"
+python3 "$SETUP/repo-policy.py" validate-plan --root "$ROOT" --artifacts "$ARTIFACTS_DIR" \
+  || { echo "RED_GATE=FAIL repository policy"; exit 1; }
 eval "$(bash "$SETUP/params-env.sh" "$ARTIFACTS_DIR/params.json")"
 TESTF=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1], encoding='utf-8'))['test_file'])" "$ARTIFACTS_DIR/failing-test.json")
 SIG=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1], encoding='utf-8'))['predicted_failure_signature'])" "$ARTIFACTS_DIR/failing-test.json")
@@ -10,6 +12,8 @@ python3 -c "import json,sys;json.dump([sys.argv[2]], open(sys.argv[1],'w'))" "$A
 python3 "$SETUP/check-scope.py" "$ARTIFACTS_DIR/red-allowlist.json" "$WT" "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" --exclude pnpm-lock.yaml \
   || { echo "RED_GATE=FAIL scope breach (red node touched more than the test file)"; exit 1; }
 test -f "$WT/$TESTF" || { echo "RED_GATE=FAIL test file not created: $TESTF"; exit 1; }
+python3 "$SETUP/repo-policy.py" validate-diff --root "$ROOT" --artifacts "$ARTIFACTS_DIR" \
+  || { echo "RED_GATE=FAIL repository test-content policy"; exit 1; }
 # LITE lane: no deslop pass runs, so the tautology guard is mechanical here.
 # A repro test that is skipped, focused, a todo, or asserts a literal cannot
 # be the RED->GREEN proof this lane rests on. The signature checks below are

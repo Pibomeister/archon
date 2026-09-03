@@ -144,8 +144,9 @@ What its seven steps do, so you can read a failure:
    `GOODWORD_ROOT` placeholder. Archon has no per-node cwd, so every path in the
    workflows is absolute and machine-specific by construction.
 4. **Stage skills** - symlinks `ce-code-review` and `ce-doc-review` from the
-   pinned CE cache, plus `archon-sdlc` and `archon-install` from
-   `$ROOT/.archon/skills/`, into `$ROOT/.claude/skills/`. Node sessions do not
+   pinned CE cache, plus `archon-sdlc`, `archon-install`, and `archon-linear`
+   from `$ROOT/.archon/skills/`, into both `$ROOT/.claude/skills/` and
+   `$ROOT/.agents/skills/`. Node sessions do not
    load installed plugins (proven), so the project-scope symlink plus a `skills:`
    declaration on the node is the only mechanism that works.
 5. **Folder registration** - one `register-probe` run; must print
@@ -205,27 +206,75 @@ MCP servers). Set it up once:
 
 ```bash
 mkdir -p "$HOME/.archon/codex-home"
-printf 'preferred_auth_method = "chatgpt"\n' > "$HOME/.archon/codex-home/config.toml"
+printf 'preferred_auth_method = "chatgpt"\nsandbox_mode = "workspace-write"\n' > "$HOME/.archon/codex-home/config.toml"
 CODEX_HOME="$HOME/.archon/codex-home" codex login   # ChatGPT login, opens a browser
 ```
 
-The lanes' impact nodes call `mcp__gitnexus__*` tools, and codex reads MCP
-servers from its OWN home — without this the routing envelope fails closed
-with `ROUTE=FULL reason=impact` (observed on the first live codex run):
+The lanes use GitNexus as optional evidence acceleration. Codex reads MCP
+servers from its OWN home; when GitNexus is absent, stale, missing MCP, or
+not visible to the node, the workflows must emit `GITNEXUS=UNAVAILABLE` or
+`IMPACT=UNAVAILABLE` and continue with repo-local investigation rather than
+blocking launch/control:
 
 ```bash
-CODEX_HOME="$HOME/.archon/codex-home" codex mcp add gitnexus -- "$(command -v gitnexus)" mcp
 # Recommended: pin the server's cwd for deterministic default-repo selection:
 #   [mcp_servers.gitnexus]
 #   cwd = "/absolute/path/to/Goodword"   # add to $CODEX_HOME/config.toml
-# If impact nodes report a required repo (e.g. mono) absent, the index itself
-# is missing (same under claude) - re-run `npx gitnexus analyze` at the root.
+# The Goodword root is not a git repo. Build the pinned API main index from a
+# dedicated clean worktree so lite impact is deterministic:
+git -C "$ROOT/api" fetch origin main
+# GitNexus names indexes from the remote repo. Remove the old main-checkout
+# index first so the pinned worktree is the ONE registry entry named `api`.
+if [ -f "$ROOT/api/.gitnexus/run.cjs" ]; then
+  (cd "$ROOT/api" && node .gitnexus/run.cjs clean --force)
+fi
+INDEX_WT="$HOME/.archon/gitnexus/api-main"
+mkdir -p "$(dirname "$INDEX_WT")"
+if [ ! -e "$INDEX_WT/.git" ]; then
+  git -C "$ROOT/api" worktree add --detach "$INDEX_WT" origin/main
+else
+  test -z "$(git -C "$INDEX_WT" status --porcelain)" || { echo "api index worktree is dirty - GitNexus acceleration disabled until inspected"; exit 0; }
+  git -C "$INDEX_WT" switch --detach origin/main
+fi
+(cd "$INDEX_WT" && npx gitnexus analyze)
+# Re-run through the generated runner so status provenance matches the exact
+# binary the MCP command will execute (npx/pnpm resolver paths can differ).
+(cd "$INDEX_WT" && node .gitnexus/run.cjs analyze)
+CODEX_HOME="$HOME/.archon/codex-home" codex mcp remove gitnexus >/dev/null 2>&1 || true
+CODEX_HOME="$HOME/.archon/codex-home" codex mcp add gitnexus -- \
+  python3 "$ROOT/.archon/setup/gitnexus-mcp-dispatch.py"
 CODEX_HOME="$HOME/.archon/codex-home" codex mcp list   # gitnexus enabled
+python3 "$ROOT/.archon/setup/archon-run.py" check
 ```
 
-`stage-skills.sh` (installer step 4) already links the CE review skills into
-`$ROOT/.agents/skills/` — codex's discovery dir; the twins' preflight asserts
-it and the ChatGPT auth (`BILLING_GUARD=FAIL` typed line on a stale login).
+AWS CLI, a live SSO session, and GitNexus are optional evidence capabilities
+for code workflows, not install/readiness failures. Do not make setup, launch,
+resume, approve, reject, or abandon fail because AWS is missing/expired or
+GitNexus is absent/stale/missing MCP. Backfill production execution remains
+the exception because its read/write authority genuinely comes from AWS.
+
+The pinned index has two legitimate targets when GitNexus is available: current
+`origin/main` for a new run, and the immutable `bugfix-chain.json` baseline when
+resuming an existing run. The launcher reports `GITNEXUS=UNAVAILABLE` with
+`expected-origin/main` versus `expected-stored-run-baseline` details instead of
+blocking; rebuild/switch to the named target when graph evidence is wanted.
+
+`sandbox_mode = "workspace-write"` is mandatory, but Archon v0.8.0 overrides it
+with a danger-full-access CLI flag. The guarded launcher therefore installs a
+private mode-0500 `codex-workspace-wrapper.sh` and points `CODEX_BIN_PATH` at it;
+the wrapper replaces the adapter flag with workspace-write, narrows writable
+code roots to `api`/`web-app`, and adds only the prompt-bound run artifact root.
+The nonce, control-token hash, signal targets, and GitNexus runner stay outside
+those roots. Real adapter probes must deny control-code writes and allow the
+single run artifact directory.
+
+`stage-skills.sh` (installer step 4) links the CE review and operator skills into
+`$ROOT/.agents/skills/`; the guarded launcher mirrors **only** the external CE
+review targets into `$CODEX_HOME/skills/` because the narrowed Codex cwd is
+`api`. Operator skills retain `WORKFLOW-NODE-STOP` and are never exposed in
+that dedicated workflow-node home.
+The twins' preflight asserts the project links and ChatGPT auth
+(`BILLING_GUARD=FAIL` typed line on a stale login).
 No `archon ai login` is needed; `archon doctor`'s "Codex not configured" line
 is about archon's own store and is expected. RUNBOOK §15 is the operating
 reference.

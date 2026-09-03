@@ -70,21 +70,21 @@ def valid_files():
     return {
         "repo.json": {"repo": "api"},
         "failing-test.json": {
-            "repo": "api", "kind": "unit", "test_file": "src/foo.spec.ts",
+            "repo": "api", "kind": "unit", "test_file": "src/__tests__/foo.spec.ts",
             "test_name": "does the thing", "command": "bun run test -- foo",
             "predicted_failure_signature": "expected 1 to equal 2",
         },
         "fix-plan.json": {
             "approach": "fix the off-by-one", "fix_site": "src/foo.ts:42",
             "alternatives": [{"label": "widen the check", "why_not": "hides the bug"}],
-            "files": ["src/foo.ts", "src/foo.spec.ts"],
+            "files": ["src/foo.ts", "src/__tests__/foo.spec.ts"],
         },
         "probe.json": {"probes": [], "none_reason": "root cause already evidenced in the chain"},
         "residuals.json": {"residuals": [
             {"symptom": "off-by-one on last page", "disposition": "fixed-by-this-chain", "citation": "src/foo.ts:42"}
         ]},
-        "verify.json": {"test_patterns": ["src/foo.spec.ts"]},
-        "files-allowlist.json": ["src/foo.ts", "src/foo.spec.ts"],
+        "verify.json": {"test_patterns": ["src/__tests__/foo.spec.ts"]},
+        "files-allowlist.json": ["src/foo.ts", "src/__tests__/foo.spec.ts"],
         "causal-chain.json": {"links": [
             {"claim": "signature reproduces",
              "evidence": {"quote": "expected 1 to equal 2", "file": "failing-test.json"}, "fixable": False},
@@ -99,6 +99,16 @@ def valid_files():
 def seed_valid_artifacts(art):
     for name, obj in valid_files().items():
         write_json(art, name, obj)
+    fixture = Path(__file__).resolve().parent / "fixtures" / "rca-minimal"
+    for name in ("symptoms.json", "symptom-dispositions.json", "causal-coverage.json",
+                 "bugfix-chain.json", "proof-assessment.json", "debug-phase.json",
+                 "boundary-trace.json", "pattern-comparison.json", "evidence-provenance.json",
+                 "change-context.json", "change-context-assessment.json",
+                 "bug-report.md"):
+        shutil.copyfile(fixture / name, art / name)
+    proof = json.loads((art / "proof-assessment.json").read_text())
+    proof["selected_hypothesis_id"] = "h1"
+    write_json(art, "proof-assessment.json", proof)
     (art / "rca.md").write_text(RCA_MD, encoding="utf-8")
 
 

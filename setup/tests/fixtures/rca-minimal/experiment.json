@@ -1,0 +1,1 @@
+{"schema_version":2,"adapter":"unit-test","repo":"api","argv":["bun","test"],"timeout_seconds":30,"rca_hypothesis_id":"H1","hypotheses":[{"id":"H1","signature":"signature observed"}]}

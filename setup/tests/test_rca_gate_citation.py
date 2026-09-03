@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """bugfix rca-gate chain-citation check: citations resolve against the on-disk
-checkout first, then against origin/main of the cited repo (the checkouts are
-whatever branch a human left them on; the lane's worktrees come from
-origin/main). Fail-closed: a path on neither is still a missing file.
+checkout first, then against the chain-pinned baseline of the cited repo.
+Fail-closed: a path on neither is still a missing file.
 
 The python under test is extracted from the workflow YAML itself (the
 `LINKS=$(python3 - ... <<'PY' ... PY)` block of the rca-gate node), so this
@@ -57,6 +56,13 @@ class CitationResolution(unittest.TestCase):
         sh("git add . && git commit -qm advance && git push -q origin HEAD:main", adv)
         sh("git fetch -q origin", api)
         self.assertFalse((api / "only-on-main.ts").exists())
+        baseline = subprocess.run(
+            "git rev-parse origin/main", cwd=api, shell=True,
+            capture_output=True, encoding="utf-8", check=True,
+        ).stdout.strip()
+        (self.ad / "bugfix-chain.json").write_text(json.dumps({
+            "baseline": {"commits": {"api": baseline, "web-app": baseline}}
+        }))
         (self.ad / "hypotheses.json").write_text(json.dumps([{"id": 1, "status": "open"}]))
 
     def chain(self, file, quote):
@@ -95,7 +101,7 @@ class CitationResolution(unittest.TestCase):
             self.chain("api/never-existed.ts", "anything at all here")
             r = self.run_gate(wf)
             self.assertNotEqual(r.returncode, 0, wf.name)
-            self.assertIn("not on disk, not at origin/main", r.stderr)
+            self.assertIn("not on disk, not at the pinned baseline", r.stderr)
 
     def test_commit_citation_resolves_via_git_show(self):
         api = self.root / "api"
@@ -121,8 +127,9 @@ class CitationResolution(unittest.TestCase):
             r = self.run_gate(wf)
             self.assertNotEqual(r.returncode, 0, wf.name)
 
-    def test_stale_on_disk_file_falls_through_to_origin_main(self):
-        # the file exists on disk but the quoted line only exists at origin/main
+    def test_remote_advance_after_chain_start_does_not_change_citation_universe(self):
+        # The file exists on disk and remote main advances after the baseline was
+        # captured. The new quote must remain outside this chain's evidence.
         api = self.root / "api"
         adv = self.tmp / "adv"
         (adv / "on-disk.ts").write_text("export const onDisk = 'quote-on-disk';\nexport const added = 'quote-added-at-main';\n")
@@ -132,7 +139,8 @@ class CitationResolution(unittest.TestCase):
         for wf in WORKFLOWS:
             self.chain("api/on-disk.ts", "quote-added-at-main")
             r = self.run_gate(wf)
-            self.assertEqual(r.returncode, 0, wf.name + r.stderr)
+            self.assertNotEqual(r.returncode, 0, wf.name)
+            self.assertIn("uncited", r.stderr)
             self.chain("api/on-disk.ts", "quote-nowhere-at-all")
             r = self.run_gate(wf)
             self.assertNotEqual(r.returncode, 0, wf.name)

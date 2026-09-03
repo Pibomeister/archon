@@ -4,7 +4,7 @@ Operator guide for the Goodword two-lane Archon pipeline (`full-sdlc-api` → `f
 
 Platform note: macOS or desktop Linux. The workflows surface human packets through a browser opener (`xdg-open`, else `open`) and always print the `file://` path, so a host without an opener degrades to "read the path" rather than failing. §6 has the Linux-specific traps.
 
-Driving this from Claude Code: two skills ship with the layer and are staged into `<root>/.claude/skills/` by the installer — `archon-install` (set up or repair the stack) and `archon-sdlc` (start, supervise, and escalate a run). They are decision procedures; this runbook stays the reference they cite.
+Driving this from Claude Code or Codex: three operator skills ship with the layer and are staged into both `<root>/.claude/skills/` and `<root>/.agents/skills/` by the installer — `archon-install` (set up or repair the stack), `archon-sdlc` (start, supervise, and escalate a run), and `archon-linear` (immutable Linear intake and supported routing). They are not exposed in the dedicated workflow-node Codex home. These are decision procedures; this runbook stays the reference they cite.
 
 ---
 
@@ -25,7 +25,14 @@ Rules that are load-bearing, not stylistic:
 - **Never shell into a workflow worktree from an OMC-hooked terminal.** Same contamination, from your side instead of the node's.
 - **Capture the full log to a file; never pipe the launch through `tail` or a filter.** Bash-node stdout/stderr tails inside failure events are unreliable and truncated — the file is the only complete record. Filter at read time.
 - **`</dev/null` on every archon invocation.** Guarantees the CLI cannot block on stdin.
-- **Fresh `aws login` first.** The api boots against AWS Secrets Manager and SSO credentials expire in ~15 minutes. Preflight fails with `PREFLIGHT=FAIL aws session expired - run: aws login`.
+- **AWS and GitNexus are optional evidence capabilities for code workflows.**
+  Launch, resume, approval, and rejection never require a live AWS session, the
+  AWS CLI, GitNexus MCP, or a fresh graph index. Evidence/probe nodes emit typed
+  `DEGRADED`, `GITNEXUS=UNAVAILABLE`, or `IMPACT=UNAVAILABLE` results when an
+  optional source is unavailable. A later runtime integration that truly needs
+  AWS may still fail at that exact operation. Backfill is the exception:
+  production reads/writes require fresh credentials at the guarded execution
+  point.
 - **Spec paths are absolute.** Node sessions and operator sessions cwd'd inside a child repo resolve relative `.omc/` paths against the wrong directory.
 - A run consumes **your personal Claude subscription quota** — see §7 before starting anything large.
 - **`package.sh --publish` ships the WORKING TREE, not HEAD.** Uncommitted edits go to the gist; a dirty tree makes the published version unreproducible from any commit. Commit (or stash) first.
@@ -46,6 +53,23 @@ A spec section titled exactly `## Premises to verify` (numbered questions) is a 
 The planner also writes `files-allowlist.json` (every path the unit may touch — the scope gate's contract) and `reader-audit.json` (columns whose interpretation/presentation semantics the plan changes; `{"columns": []}` when none).
 
 ## 2a. The plan gate (human review packet)
+
+### Hard-gate audit
+
+Hard gates are strict mechanisms, not unquestionable product authority. Classify
+each failure before acting:
+
+| Gate class | Response |
+|---|---|
+| Authority or safety invariant | Never bypass. Obtain the required human authority or preserve the stop. |
+| Evidence adequacy | Gather/rework, or emit a typed open state. Never fabricate proof. |
+| Harness or environment health | Repair/degrade the harness. Never change product semantics just to make the gate green. |
+| Obsolete premise | Fix the gate contract and add a regression proving the new invariant, then resume the exact failed node. |
+
+A useful hard failure names the invariant, observed contradiction, and safe
+unblock path. If it cannot, treat that as a workflow defect. This is not an
+override mechanism: the correction must preserve or replace the gate's actual
+safety purpose with tested evidence.
 
 After doc-review, the run pauses (`status: paused`) and `plan-render-gate` prints `RENDER_GATE=PASS packet=file://…/plan-review.html`. **The packet opens in your browser automatically when an opener is available** (`xdg-open`, else `open`); the `file://` path is printed either way, and the message says which happened — it never claims "opened in browser" unless the opener actually ran. Read it: GIST (plain-language summary), KB (what prior art the plan honors), MAP (files and units), PLAN (verbatim), REVIEW (doc-review's edits and unapplied findings, plus a "Premise check" block summarizing each blind premise-verify verdict — `cannot_determine` entries deserve your attention; `conflict` entries never reach this packet, they stop the run earlier), CRITIC (below), DECIDE (the commands below).
 
@@ -431,14 +455,20 @@ Failure taxonomy (in addition to the shared discriminators of §3 — same resum
 | `EXPERIMENT_AMBIGUOUS matched=...` | The observation matched zero or several predicted outcomes. | Human reads `experiment-results.txt`; fix `experiment.json` or the RCA, resume. |
 | `EXPERIMENT=DEGRADED reason=...` | Experiment could not run (env missing, command failed). Non-fatal, typed. | Run continues; gate 1 shows the dispute unsettled. Treat like `cannot_determine`. |
 | `RED_GATE=FAIL premise_evidence missing or uncited` | The repro mocks behavior nobody observed live. | Resume re-runs the red node once; recurring = the RCA's premise is unobserved — engineer. |
-| `EVAL_DIVERGED lane=...` | A search-touching fix shifted the offline eval lanes (cassette or baseline). | Human decision: legitimate ranking change -> re-record with `--subset` + additive pin merge inside the fix PR; otherwise revisit the fix. |
+| `RCA_SHAPE=FAIL ... runtime equivalence` | `boundary-trace.json` could not prove that the reported surface, runtime owner, RED test, and planned smoke traverse the same implementation. | Fix the RCA or stop. The runtime, test, and smoke owner identifiers must match exactly and each ownership link needs its own typed evidence. Similar services/shared types are not ownership evidence, and adjacent-path class hardening must not be presented as a user-surface fix. |
+| `RCA_SHAPE=FAIL ... reproduction precondition equivalence` | RED reaches the named owner but changes a condition that controls the failing branch, such as fixture cardinality/threshold, flag state, caller context, planner output, cache/fallback state, permissions, or tenant scope. | Restore the observed condition or add a separate surface-equivalent proof. Never pad fixtures above a threshold or stub away the first divergence to obtain a convenient RED. |
+| Smoke-only behavior differs from the accepted integration/eval profile | The smoke stack omitted a required seed, override, feature flag, clock, or provider stub, so its output is not product-runtime evidence. | Classify harness drift and repair the harness profile. Do not change production defaults merely to make a toy fixture behave like the accepted profile. |
+| `RCA_INVESTIGATION_REQUIRED reason=surface-ambiguous ticket=open no_implementation=true` | A thin report maps to multiple runtime entrypoints and no report/runtime reproduction selects one. This is valid open investigation, not a malformed RCA. | Gather the missing surface/repro evidence or create a distinct class-hardening report. Never force owner strings to match or close the source ticket. |
+| `EVAL_DIVERGED lane=... cause=missing-reranker-fixture` / `cause=behavior-regression` | A search-touching fix changed candidate shape or actual outcomes. Missing reranker keys are transport drift; replayed failures after those keys exist are product regressions. | For missing keys only, freeze planner/embed inputs and run `run.ts --replay <baseline-cassette> --record-reranker --subset <ids>`. Require every existing fixture to remain byte-identical and only new keys to be added, then replay the full corpus. If the full replay has regressions, revisit the fix. Never overwrite planner fixtures, lower floors, or rewrite a passing baseline merely to make the gate green. |
 | `SMOKE_STACK=FAIL ...` | The matrix stack failed to boot (compose, migrations, seed, api, or web). | Resume once (boot flake); recurring = stack recipe broke — engineer. Sweep 4124/3124 by PID first. |
+| Smoke auto row `failure_class=product|harness|infrastructure|unknown` | The runner separates visibly wrong behavior from selector/route drift and unavailable execution. | `product`: reject/reopen. `harness`: inspect the current reported surface manually and repair the locator; never ignore wrong visible content. `infrastructure`/`unknown`: unverified. Screenshots and visible responses outrank stale testids. |
 | `MATRIX_RENDER_GATE=FAIL ...` | The matrix page broke its contract. | Resume re-runs the renderer. |
 | `RED_GATE=FAIL test passed - does not reproduce the bug` | The repro test passes on the buggy tree. | Engineer: the chain is wrong, or the bug needs an environment the test lacks. |
 | `RED_GATE=FAIL error-not-failure` | Suite errored (missing import, setup) instead of the test failing. | Resume re-runs the red node; recurring = engineer. |
 | `RED_GATE=FAIL predicted signature not found` | Test fails but not with the predicted output. | Chain wrong -> engineer. Signature merely over-specific -> a human edits `failing-test.json` (the edit is the approval), then resume. |
 | `GREEN_GATE=FAIL VERIFY_CONTRACT attempt=N reason=[<reason>]` — `<reason>` one of `verify.json unreadable`, `verify.json yielded no patterns`, `verify.json pattern is not a unit spec: <p>`, `verify.json pattern matched no tests: <p>` | `green-check` could not read `verify.json`, or its `test_patterns` array is empty, so there is no suite for the attempt to run. `fix-converge` types this as a hard stop rather than counting a failed attempt: a broken contract file is not something another fix attempt can repair, and letting it run would burn the three-attempt `ARCHITECTURE_SUSPECT` breaker on an unfixable input. Before this stop existed the empty case was worse than a stop — the pattern loop iterated zero times and `GREEN` stayed true, so the attempt passed having run no suites at all. | Fix `verify.json`'s `test_patterns` by hand (it must select every suite that has to stay green for the files the fix touches), then resume. If the file is corrupt rather than empty, restore it from `rca-round-<N>/pre-verify.json`. |
 | `GREEN_GATE=FAIL repro test modified` / `REVIEW_SCOPE=FAIL repro test modified in review` | Something edited the frozen repro test. Hard stop. | Restore the test (`git checkout <red-sha> -- <test_file>`), investigate why, resume. |
+| `RED_GATE=FAIL repository test-content policy` | RED violated a pinned blocking repository rule (for example raw SQL setup, real timer waits, barrel imports, or non-collision-safe profile fixtures). | Fix during RED before freezing. A completed/frozen RED cannot be silently rewritten downstream; use an explicit re-proof or fresh run. |
 | `DESLOP=FAIL repro test modified` (deslop, VERSION 2026.08.28-2, design-only) | Same class as `GREEN_GATE=FAIL repro test modified` above — the deslop writer or the resulting worktree moved the frozen repro test by a byte. Checked in three places: `deslop-recheck` (before the mechanical re-verify runs), `deslop-commit` (before staging, and again after committing, closing the window where something staged a change to the repro between the two). | Restore the test the same way as `GREEN_GATE` (`git checkout <red-sha> -- <test_file>`) — restoring the test is a human act, same as that row. Then resume. |
 | `DESLOP_GATE=FAIL repro harness error rc=97` (deslop-verify, VERSION 2026.08.28-2, design-only) | `run-repro.sh`'s own reserved infra-failure code (missing `failing-test.json`, missing worktree) surfaced inside `deslop-recheck` — a broken harness, not a regressed fix. | Fix the harness/environment, then resume. Full detail in §3b. |
 | `beyond_five_guards` finding in `deslop-review.json` (VERSION 2026.08.28-2, design-only) | Bugfix-only sixth reviewer value (findings-only, not a coverage key). This lane is causal-minimal: the deslop writer may fix only the five guards (complexity, tautological tests, YAGNI, open/closed, comments) and must report anything else under `reported_not_fixed`. The reviewer diffs the writer's actual edits against what it declared and files `beyond_five_guards` for any edit that is neither one of the five guards nor listed in `deslop-result.json`'s `passes[]` — it blocks at confidence 75/100 exactly like the other five. | Same handling as any `DESLOP=DIRTY` (§3b) — a hand fix (typically reverting the out-of-scope edit) then resume. A cleanup the writer correctly listed under `reported_not_fixed` and did not make is never a finding. |
@@ -615,20 +645,22 @@ Writing that line is a human act, the same convention as `files-allowlist.json` 
 
 ### 14b. Lane facts
 
-- **`full-sdlc-api-lite`** (27 nodes): `review-loop` runs ONE round with `round-cap.txt=1`. Its
+- **`full-sdlc-api-lite`** (29 nodes): `review-loop` runs ONE round with `round-cap.txt=1`. Its
   `converge` overlay converges on a `Ready*` verdict even when the fixer landed changes, writing
   `lite-fixes-unreviewed.txt` and printing `LITE_FIXES_UNREVIEWED round=1 <n> file(s)`; those hunks are
   re-gated by `post-fix-gate` (typecheck, lint) and `exit-gate` (plan tests, scope) but NOT re-read
-  by a reviewer, and the PR body lists them under "Reviewer-unverified fixes". `Not ready` on round 1
+  by a reviewer, and `prbody-gate` requires the PR body to list them verbatim under
+  "Reviewer-unverified fixes". `Not ready` on round 1
   is `ROUND_CAP_REACHED round=1` (human `accept-residuals.txt` path unchanged, §3). HTTP `smoke` is
   mandatory on this lane. Cap sum ≈ $47.
-- **`bugfix-lite`** (36 nodes): one human gate (`rca-approval`); no `evidence-aws`, `probe-run`,
+- **`bugfix-lite`** (38 nodes): one human gate (`rca-approval`); no `evidence-aws`, `probe-run`,
   `chain-verify`, experiment, critic, deslop, `smoke`, or smoke matrix. The report MUST carry a
   `## Repro` block: one fenced command from the envelope's `repro_command_allow` prefixes
   (`bun run test `, `bun run test:integration `, `pnpm test --run `) and the observed output below it.
   The proof is `red-gate` (predicted signature at RED) → `fix-loop` GREEN → `negcontrol` → review
-  → `exit-gate`'s second negcontrol; `smoke-skip` writes `SMOKE=SKIP lane=bugfix-lite` so the PR says
-  so verbatim. Because no live experiment runs on this lane, the parent's premise-evidence contract in `red-gate` (mocked fixtures must cite `experiment.json` observations) is omitted, not merely dormant. `red-gate` also refuses `.skip(`/`.only(`/`.todo(`/literal-`expect` shapes as
+  → `exit-gate`'s second negcontrol; `smoke-skip` writes `SMOKE=SKIP lane=bugfix-lite` and
+  `SMOKE_MATRIX=SKIP lane=bugfix-lite`; `prbody-gate` requires both lines, both negative
+  controls, and the routing envelope verbatim before ship. Because no live experiment runs on this lane, the parent's premise-evidence contract in `red-gate` (mocked fixtures must cite `experiment.json` observations) is omitted, not merely dormant. `red-gate` also refuses `.skip(`/`.only(`/`.todo(`/literal-`expect` shapes as
   `RED_GATE=FAIL tautology-marker`, and the reviewer carries a P0 lens for a tautological or
   non-reproducing test. Cap sum ≈ $83 (four fix attempts, two review rounds as the parent).
 
@@ -659,29 +691,120 @@ cost here for the first five runs, then revisit `max_files` and `hot_paths`.
 
 ## 15. Codex lanes (`*-codex` twins)
 
+Bug reports have one provider-neutral entrypoint. Shell callers must choose a
+provider explicitly; `archon-linear` infers it from the current operator client:
+
+```bash
+python3 .archon/setup/archon-run.py bugfix --provider claude "/abs/path/to/report.md"
+python3 .archon/setup/archon-run.py bugfix --provider codex "/abs/path/to/report.md"
+```
+
+The launcher conservatively sends thin/ambiguous reports straight to the matching
+full lane. A report with one allow-listed `## Repro` command, observed output, and
+one explicit `Repository: api|web-app` starts the matching lite lane; only its
+typed pre-envelope `ROUTE=FULL` can trigger same-provider fallback. Intake,
+infrastructure, auth, guard, and malformed-artifact failures never fall back. The
+active run receives `bugfix-routing-receipt.json`, and the terminal emits
+`ARCHON_BUGFIX=STARTED provider=... lane=... run=... routed_by=...`.
+
 Every shipped lane has a GENERATED codex twin — `full-sdlc-api-codex`, `bugfix-codex`, `full-sdlc-web-codex`, `full-sdlc-api-lite-codex`, `bugfix-lite-codex` (plus local `wrap-*-codex` dev smokes) — the same DAG with `provider: codex`: OpenAI Codex CLI executes the AI nodes, billed to the operator's **ChatGPT plan** (ChatGPT OAuth login, never an API key). Bash nodes, gates, loop caps, ports, and typed-line contracts are the parent's bytes.
 
-Start one exactly like its parent, plus the `CODEX_HOME` env:
+The two lite lanes and full **`bugfix-codex`** lane have one supported control surface. It validates the dedicated
+ChatGPT login and staged skills; GitNexus is optional evidence acceleration; launches into an
+exact process group; resolves the exact run id; and arms the wall/token watchdog before returning.
+The workflows carry an `always_run` guard, so raw `archon workflow run/resume/approve/reject`
+fails before Codex work on every initial invocation and resume.
 
 ```bash
 cd /Users/eduardopicazo/Documents/Workspace/Goodword
-CODEX_HOME=$HOME/.archon/codex-home DISABLE_OMC=1 archon workflow run bugfix-lite-codex "<abs path to report>" --detach </dev/null
+python3 .archon/setup/archon-run.py check
+python3 .archon/setup/archon-run.py run bugfix-lite-codex "/abs/path/to/report.md"
+python3 .archon/setup/archon-run.py run bugfix-codex "/abs/path/to/report.md"
+python3 .archon/setup/archon-run.py run full-sdlc-api-lite-codex "/abs/path/to/spec.md"
+```
+
+At a gate, use the commands rendered in the packet; their shapes are:
+
+```bash
+python3 .archon/setup/archon-run.py approve <run-id> --token CONTROL_TOKEN_FROM_LAST_LAUNCH
+python3 .archon/setup/archon-run.py reject <run-id> "reason" --token CONTROL_TOKEN_FROM_LAST_LAUNCH
+python3 .archon/setup/archon-run.py resume <run-id> --token CONTROL_TOKEN_FROM_LAST_LAUNCH    # failed runs only
+python3 .archon/setup/archon-run.py abandon <run-id> --token CONTROL_TOKEN_FROM_LAST_LAUNCH
 ```
 
 Rules and observed behavior (S0–S4 probes, 2026-08-31; evidence in `.omc/state/codex-provider-evidence.md`):
 
-- **Twins are generated — never hand-edit.** `setup/derive-codex.py --all` regenerates; `package.sh` fails packaging on any divergence (`CODEX_DRIFT=FAIL`). The only transformations vs the parent: name/description, `provider: codex`, model map (`sonnet` stripped → adapter default `gpt-5.6-sol`; the two `opus` critic nodes → explicit `gpt-5.6-sol`), the billing-guard swap, and the `.agents` skill preflight. Lite twins chain from the generated lite YAMLs, so regenerate lites first (package.sh orders this correctly).
-- **One-time setup:** `CODEX_HOME=$HOME/.archon/codex-home codex login` (ChatGPT), with a minimal `config.toml` (`preferred_auth_method = "chatgpt"`). A dedicated home sheds the operator's personal `~/.codex` config — a 77KB preamble, per-tool hooks, 4 MCP servers were observed there — and holds its own refresh-token pair. `CODEX_HOME` propagates through the adapter to the spawned CLI (verified: session rollouts land under the dedicated home). Copying `~/.codex/auth.json` works but shares a refresh pair with the personal home; a real login is the durable setup.
+- **Twins are generated — never hand-edit.** `setup/derive-codex.py --all` regenerates; `package.sh` fails packaging on any divergence (`CODEX_DRIFT=FAIL`). Transformations vs the parent: name/description, `provider: codex`, model map, billing guard, `.agents` skill preflight, explicit `$skill-name` prompt tokens, removal of inert `maxBudgetUsd`, provider-capability lint, and guarded controls on both lite twins plus full bugfix. Lite twins chain from the generated lite YAMLs, so regenerate lites first.
+- **One-time setup:** `CODEX_HOME=$HOME/.archon/codex-home codex login` (ChatGPT), with `preferred_auth_method = "chatgpt"` and `sandbox_mode = "workspace-write"` in `config.toml`. A dedicated home sheds the operator's personal `~/.codex` config — a 77KB preamble, per-tool hooks, 4 MCP servers were observed there — and holds its own refresh-token pair. `CODEX_HOME` propagates through the adapter to the spawned CLI. Copying `~/.codex/auth.json` works but shares a refresh pair with the personal home; a real login is the durable setup.
 - **Billing guard:** the twin preflight asserts `auth_mode == "chatgpt"` with tokens present in `$CODEX_HOME/auth.json` (`${CODEX_HOME:-$HOME/.codex}`), typed `BILLING_GUARD=FAIL` otherwise. An exported `OPENAI_API_KEY` did NOT outrank ChatGPT auth on the probe, but keep keys out of the environment anyway.
-- **`maxBudgetUsd` is INERT under codex.** The adapter lacks costControl; every cap warns and is ignored: `Warning: Node '<id>' uses maxBudgetUsd but codex doesn't support it — this will be ignored.` (log event `dag.unsupported_capabilities`, `unsupported:["maxBudgetUsd"]`). The keys stay in the twins for parent-diffability only.
+- **`maxBudgetUsd` is unsupported under codex.** The derive script removes the inert fields rather than shipping a false cap; any other unsupported provider field fails derivation. `archon-run.py` defaults lite invocations to 90 active minutes/8M cumulative tokens and full bugfix invocations to 240 active minutes/30M cumulative tokens. Continuations inherit the run's authenticated stored limits unless explicitly overridden.
 - **Node `timeout` does not kill a stalled codex AI node.** S3 probe: a 45s-timeout node told to sleep 300s ran 313.7s and COMPLETED. (No AI-node timeout has ever been observed firing under claude on this machine either; treat AI-node timeouts as non-lethal generally.) Surviving controls on a codex lane: loop `max_iterations`, the ChatGPT quota itself, and operator supervision.
 - **Quota wall:** on `rate_limit` the adapter retries 3× (2s base backoff), then the node fails typed and the run goes `failed` — never jammed. Resume after the window resets with `setup/resume.sh` (same recipe as RUNBOOK §4).
-- **Skills:** `setup/stage-skills.sh` links `ce-code-review`/`ce-doc-review` into `$ROOT/.agents/skills/` too (codex's discovery dir; look for `STAGED_CODEX:` lines), and the twin preflight asserts it. The CE review skill runs codex-native: the S0-4 probe produced the full persona pipeline, `/tmp/compound-engineering/ce-code-review/<ts>/metadata.json` with correct `head_sha` and verdict, and the `Review complete` envelope the unchanged gates parse. Fallback if a future CE version breaks under codex: regenerate twins with `derive-codex.py --all --pin-review-claude` (review nodes pinned to claude, hybrid billing).
+- **Skills:** `setup/stage-skills.sh` links `ce-code-review`/`ce-doc-review` into `$ROOT/.agents/skills/`; generated Codex prompts invoke them with explicit `$ce-code-review` / `$ce-doc-review` tokens, and the unsupported YAML `skills:` key is removed. The S0-4 probe produced the full persona pipeline and head-SHA metadata. Fallback remains `derive-codex.py --all --pin-review-claude`.
 - **Flag compat:** archon 0.8.0's bundled SDK spawns `codex exec --experimental-json`; works against codex-cli 0.149.1. If a future codex removes the flag, pin an older binary via `assistants.codex.codexBinaryPath`.
 - **Container mode:** the codex adapter hard-throws — codex lanes run in place only, like the folder project already does.
 - **Ports:** twins keep the parents' ports. One-run-per-root still serializes lanes on this machine; a claude lane and a codex lane on *different* roots would still contend on the same api/web ports.
-- **Run-level guardrails (`setup/codex-watchdog.sh`, `setup/codex-usage.py`).** Because budget caps are inert and AI-node timeouts non-lethal, supervise any large codex run with the watchdog: `bash setup/codex-watchdog.sh <run-id-prefix> --wall-minutes 90 [--max-total-tokens N]` — it polls the run, and past either budget kills the detached launcher's process group (codex children included), printing `WATCHDOG=TRIPPED reason=wall|tokens ...`; the run lands `failed` and resumes normally. It never kills a run that already left `running`, and an accounting failure downgrades the token cap to a one-time `WATCHDOG=WARN` instead of a kill. Per-run burn any time: `python3 setup/codex-usage.py <run-id-prefix>` → `CODEX_USAGE run=... sessions=N input=... total=... rate_used_pct=...` (sums the dedicated home's session rollouts across resumes; also reports the ChatGPT weekly-window percent the CLI last saw).
+- **Run-level guardrails.** `archon-run.py` is mandatory. Archon v0.8.0 forces its Codex child to `danger-full-access`, so the launcher installs a mode-0500 wrapper under the private control directory and sets `CODEX_BIN_PATH`; that wrapper replaces the adapter flag with `--sandbox workspace-write`, narrows writable code roots to `api` and `web-app`, and parses the runtime prompt to add only its single 32-hex run artifact directory. Real adapter probes denied writes to both `.archon` control-code locations while successfully writing the exact run artifact; rollouts recorded precisely those three writable roots. The launcher then starts `codex-watchdog.sh` with one exact run id, the exact launcher PGID, and its process fingerprint (defaults: 90 running minutes, 8M total tokens). It returns `STARTED` only after the watchdog observes that run become `running`, publishes its arming handshake, and the first always-run node consumes a one-time guard file outside the workspace; every pre-arm error terminates both fingerprint-matched process groups. The `STARTED` line also prints a per-run control token. Keep the latest token in the operator terminal and supply it to the next approve/reject/resume/abandon command; it is hashed only in private mode-0600 control state, never stored in run artifacts. This prevents a workflow node from releasing its own gate with the inherited launch environment. Ambiguous prefixes and basename process matching are refused. Past either budget the watchdog kills only a still fingerprint-matched process group and prints `WATCHDOG=TRIPPED`; if the kill leaves Archon's row orphaned as `running`, it abandons the exact run to release the worktree lock. Per-run accounting remains `python3 setup/codex-usage.py <unique-id>`; ambiguous ids fail.
 - **Codex triages more conservatively — expect more `ROUTE=FULL` exits on evidence-thin tickets.** Observed live: on the same bug report the claude lane sized post-triage S/ROUTE=LITE, the codex lane sized L (`ROUTE=FULL reason=triage`) because the production exception had "not been independently attributed to this runtime path" — an unknown the lite lane leaves open by design. That is the fail-closed envelope working; relaunch on the full lane per §14, don't fight the routing.
-- **MCP servers must be configured in the codex home.** Claude node sessions inherit `gitnexus` from the operator's Claude config; codex reads `$CODEX_HOME/config.toml` only. Without `codex mcp add gitnexus` in that home, `lite-impact`/`impact-probe` report `IMPACT=UNAVAILABLE` and the lite routing envelope fails closed with `ROUTE=FULL reason=impact` (observed live, first bugfix-lite-codex attempt). One-time fix in the install skill §6; verify with `CODEX_HOME=$HOME/.archon/codex-home codex mcp list`. Resolution is registry-based (`~/.gitnexus/registry.json`), identical under both providers — a control from a Claude session returned the same repo list as the codex node. If an impact node reports a required repo (e.g. `mono`) absent, the INDEX is gone, not the provider: re-run `npx gitnexus analyze` at the root (claude lanes hit the same wall). Pinning `cwd = "<Goodword root>"` on the server entry in `$CODEX_HOME/config.toml` is still recommended so the default-repo selection is deterministic.
+- **GitNexus readiness is optional, not a launch prerequisite.** Codex reads `$CODEX_HOME/config.toml`; when enabled, `gitnexus` must use the protected dispatcher plus the registry's unique `api` entry pinned to `$HOME/.archon/gitnexus/api-main`, with `lastCommit` matching the run baseline and `run.cjs status` up-to-date. The index worktree remains outside writable API/web roots so a node cannot rewrite graph evidence or the MCP runner. Build it with `git -C api worktree add --detach "$HOME/.archon/gitnexus/api-main" origin/main`, then run `npx gitnexus analyze` followed by `node .gitnexus/run.cjs analyze` there so analyzer provenance matches the MCP runner. Missing MCP, missing/stale index, stale analyzer runtime, or unavailable target writes explicit `GITNEXUS=UNAVAILABLE`/`IMPACT=UNAVAILABLE`; workflows continue with repo-local investigation. A `GATHERED` artifact must carry successful per-symbol query provenance or the envelope routes FULL.
 - **Observed cost (2026-08-31 trials, ChatGPT plan).** bugfix-lite-codex to its routing stop: 0.85–1.08M tokens (~85% cached), 5–19 min wall, 4–7 sessions; api-lite-codex to routing stop: 0.54–0.92M tokens; one CE code review through the adapter (wrap-review): ~8.5 min and 3.69M tokens across 13 sessions — the skill's persona fan-out multiplies under codex too; budget reviews accordingly. Four lane attempts plus probes moved the weekly ChatGPT window 9%→13%. Check any run with `python3 setup/codex-usage.py <run-id>`.
 - **`archon doctor` says "Codex not configured" — ignore it.** Doctor checks archon's own credential store; the spawned CLI reads `$CODEX_HOME/auth.json` and never consults it. No `archon ai login` is needed.
+
+## 16. Bugfix evidence and recovery contract (v2)
+
+New bugfix runs treat the immutable symptom ledger, not an RCA narrative, as the ticket boundary. `symptoms.json` preserves source and effective symptom IDs; `symptom-dispositions.json`, `proof-assessment.json`, and `causal-coverage.json` distinguish mechanism proof from occurrence attribution and drive `fix-classification.json`.
+
+Classification has orthogonal fields: `implementation_result` (`NONE`, `CLASS_HARDENING`, `PARTIAL_FIX`, `FULL_FIX`), `ticket_disposition` (`OPEN`, `PRODUCT_DECISION_NEEDED`, `DISPOSITION_COMPLETE`, `RESOLVED`), `approval_scope`, and `ticket_closure_allowed`. `FULL_FIX`/closure require every effective symptom to be occurrence-attributed, changed, and verified absent. Code behavior alone is not by-design authority. Lite routes every non-full classification to the matching full provider.
+
+The full bugfix shipping path now rechecks readiness before the smoke approval,
+again during teardown, and again immediately before PR creation. Without an
+explicit residual-acceptance artifact, only `ticket_disposition=RESOLVED` with
+`ticket_closure_allowed=true` may reach PR shipment. A smoke-matrix auto row
+with `failure_class=product` blocks approval and shipment even if the boot
+smoke says `SMOKE=PASS` and offline evals passed; boot smoke proves process
+health, not ticket resolution. Harness drift, infrastructure, and unknown auto
+rows remain unverified evidence that the operator must judge on the live
+reported surface, but they cannot mask a product-failing observation.
+
+The proof order is evidence → blind verification → bounded enumerated experiment → typed reconciliation → proof manifest/attestation → final critic → approval manifest/attestation → packet. A contradiction emits `RECOVERY_SUCCESSOR_REQUIRED` with active symptom IDs; it never means the ticket is resolved. The provider-neutral launcher owns the logical chain, protected continuation seed, source/index baseline, and exact-run supervision. `ARCHON_BUGFIX=STARTED` is only a launch receipt; the command watches to a gate or terminal state unless `--no-watch` is explicitly supplied.
+
+Experiments accept only the enumerated no-shell adapters in `setup/experiment-runner.py`. Production probes keep connection/statement bounds and record provenance/expiry. Reviewer attestations and continuation authority live outside AI-writable artifacts. Handoff files contain token placeholders only.
+
+Continuation bundles are controller-MAC-sealed and import the exact parent
+ledger, contradictory verifier/experiment evidence, and retired hypotheses
+before successor intake. Gate approval is immutable: any artifact edit makes
+the post-approval manifest/attestation check fail, while rejection records
+feedback for a guarded successor rather than mutating reviewed bytes. Causal
+fix attempts run once per pristine worktree. The first two failed patches are
+sealed as evidence and continued; the third emits `ARCHITECTURE_SUSPECT` and
+blocks attempt four until an operator runs
+`archon-run.py bugfix-architecture-approve ...` to create a private human
+review receipt and single-use successor seed.
+
+Repository policy is enforced inside existing stages, not with extra DAG
+nodes. Preflight snapshots baseline `AGENTS.md`/`CLAUDE.md` and path-scoped
+rules into `repo-policy.json`. RCA gate derives `test-placement.json` and
+rejects a scenario-specific test when the pinned repository already has the
+preferred spec for that production file. RED gate rechecks the plan, the
+existing review loop treats cited blocking rules as blocking findings, and
+exit gate checks the actual diff for unplanned test files. Rules come from the
+target repository's pinned bytes; Archon does not impose one test layout on
+every engineering team.
+The current deterministic rule adapters cover existing-spec reuse, test-file
+naming, unit-test colocation, real timer waits, barrel imports, and raw-SQL test
+setup. An adapter activates only when pinned repository guidance marks the rule
+blocking and carries the exact source line into the failure.
+
+Codex headless `exec` currently has an upstream failure mode where configured
+stdio MCP servers appear in `codex mcp list` but their tools are not injected
+into the model-visible registry. The existing `evidence-gitnexus` node therefore
+uses `gitnexus-evidence.py` as a protected no-shell CLI fallback against the
+same chain-pinned index and commit; it records `transport=cli-fallback` rather
+than misreporting graph evidence as unavailable.
+
+`evidence-cheap` also captures bounded structured open and recently merged PR
+metadata into `change-context.json`. RCA must disposition every candidate as
+`solves`, `partial`, `unrelated`, or `superseded` in
+`change-context-assessment.json`, with current pinned-code evidence. RCA gate
+refuses missing candidates, so recent related work cannot disappear behind a
+plausible new diagnosis or a PR title alone.

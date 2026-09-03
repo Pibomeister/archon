@@ -6,6 +6,10 @@ BUG FIX: a red repro test plus a minimal fix; rca.md in the
 artifacts directory plays the plan's role.
 
 Resolve the artifacts directory by running: echo "$ARTIFACTS_DIR"
+Read repo-policy.json and test-placement.json there before review. Treat every
+blocking repository rule as a blocking finding with its exact cited source.
+Verify that a new test file is permitted when a baseline test for the same
+production file already exists.
 
 Persona selection happens in this session, so three instructions
 BEFORE you invoke the skill:
@@ -34,7 +38,7 @@ BEFORE you invoke the skill:
   evidence that was absent when the waiver was recorded.
 
 Then invoke the ce-code-review skill with arguments exactly:
-  mode:headless base:origin/main plan:<that directory>/rca.md
+  mode:headless base:<SHA from bugfix-chain.json baseline.commits[repo]> plan:<that directory>/rca.md
 Do not expand scope beyond the diff against that base.
 The staged ce-code-review may be either contract generation: CE 3.2.0's
 markdown headless envelope, or the newer agent-JSON contract (there

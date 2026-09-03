@@ -1,0 +1,82 @@
+{
+  "schema_version": 2,
+  "revision": 1,
+  "ledger_root_hash": "8868058f9976beee39270fa2796b54e2c22f82fb578d859986b0c9f3a7944a11",
+  "source_symptoms": [
+    {
+      "id": "S1",
+      "claim": "Granola shown: expected Granola is not present in the visible people list.; actual Granola appears as a visible participant/provider.",
+      "source_quote": "The group shows **Granola** as a participant/provider even though Granola should not be present in the visible people list.",
+      "source_order": 1,
+      "source_document": "report.md",
+      "source_field": "report",
+      "byte_span": {
+        "start": 0,
+        "end": 123
+      },
+      "expected_behavior": "expected behavior from report",
+      "actual_behavior": "Granola shown: expected Granola is not present in the visible people list.; actual Granola appears as a visible participant/provider."
+    },
+    {
+      "id": "S2",
+      "claim": "Sahiba missing: expected Sahiba is visible in the participants list.; actual Sahiba is absent from the visible participants.",
+      "source_quote": "**Sahiba** is missing from the visible participants.",
+      "source_order": 2,
+      "source_document": "report.md",
+      "source_field": "report",
+      "byte_span": {
+        "start": 0,
+        "end": 52
+      },
+      "expected_behavior": "expected behavior from report",
+      "actual_behavior": "Sahiba missing: expected Sahiba is visible in the participants list.; actual Sahiba is absent from the visible participants."
+    },
+    {
+      "id": "S3",
+      "claim": "Outputs one contact: expected Multiple Outputs contacts are shown for the group.; actual Outputs shows only one contact.",
+      "source_quote": "**Outputs** shows only one contact, even though the reporter expected multiple Outputs contacts in the group.",
+      "source_order": 3,
+      "source_document": "report.md",
+      "source_field": "report",
+      "byte_span": {
+        "start": 0,
+        "end": 109
+      },
+      "expected_behavior": "expected behavior from report",
+      "actual_behavior": "Outputs one contact: expected Multiple Outputs contacts are shown for the group.; actual Outputs shows only one contact."
+    }
+  ],
+  "effective_symptoms": [
+    {
+      "id": "E1",
+      "claim": "Granola shown: expected Granola absent from visible people list; actual Granola visible",
+      "source_ids": [
+        "S1"
+      ],
+      "relation": "same-as-source",
+      "expected_behavior": "expected behavior from report",
+      "actual_behavior": "Granola shown: expected Granola absent from visible people list; actual Granola visible"
+    },
+    {
+      "id": "E2",
+      "claim": "Sahiba missing: expected Sahiba visible; actual Sahiba absent",
+      "source_ids": [
+        "S2"
+      ],
+      "relation": "same-as-source",
+      "expected_behavior": "expected behavior from report",
+      "actual_behavior": "Sahiba missing: expected Sahiba visible; actual Sahiba absent"
+    },
+    {
+      "id": "E3",
+      "claim": "Outputs one contact: expected multiple Outputs contacts; actual one Outputs contact",
+      "source_ids": [
+        "S3"
+      ],
+      "relation": "same-as-source",
+      "expected_behavior": "expected behavior from report",
+      "actual_behavior": "Outputs one contact: expected multiple Outputs contacts; actual one Outputs contact"
+    }
+  ],
+  "ledger_revision_hash": "859f7e921574e1f3510a2fd077f5b20dee98048ae0c75eae369195503d26870b"
+}

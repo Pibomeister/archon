@@ -155,7 +155,8 @@ def _template_repo():
             # empty dir inside it would read as untracked drift.
             git(repo.parent, "config", "core.hooksPath", str(hooks))
             (repo / "foo.ts").write_text(BASE_FOO, encoding="utf-8")
-            (repo / "foo.spec.ts").write_text(BASE_SPEC, encoding="utf-8")
+            (repo / "__tests__").mkdir()
+            (repo / "__tests__" / "foo.spec.ts").write_text(BASE_SPEC, encoding="utf-8")
             git(repo.parent, "add", "-A")
             git(repo.parent, "commit", "-q", "-m", "base")
             base = git(repo.parent, "rev-parse", "HEAD").stdout.strip()
@@ -164,7 +165,7 @@ def _template_repo():
 
 
 def init_worktree(path, dirty=True):
-    """A throwaway repo with src/foo.ts + src/foo.spec.ts committed, and (by
+    """A throwaway repo with src/foo.ts + src/__tests__/foo.spec.ts committed, and (by
     default) a one-line uncommitted edit to src/foo.ts so scope/slop/status
     guards have something in the plan's allowlist to look at.
     Returns the base commit sha."""
@@ -572,6 +573,9 @@ def rca_artifacts(art):
          "evidence": {"quote": "const pageSize = limit - 1;", "file": "chain-evidence.ts"}},
     ]})
     jdump(art / "hypotheses.json", [{"id": "h1", "status": "confirmed-by-experiment"}])
+    proof = json.loads((art / "proof-assessment.json").read_text(encoding="utf-8"))
+    proof["selected_hypothesis_id"] = "h1"
+    jdump(art / "proof-assessment.json", proof)
 
 
 def rca_gate_fixture(tmp):
@@ -713,7 +717,7 @@ def gate_tests_api_fixture(tmp):
     wt = tmp / "wt"
     base = init_worktree(wt)
     jdump(art / "params.json", params(tmp, wt))
-    jdump(art / "verify.json", {"test_patterns": ["src/foo.spec.ts"]})
+    jdump(art / "verify.json", {"test_patterns": ["src/__tests__/foo.spec.ts"]})
     jdump(art / "files-allowlist.json", ["src/foo.ts"])
     (art / "bootstrap-head.txt").write_text(base + "\n", encoding="utf-8")
     (art / "commit-msg.txt").write_text("feat(foo): add one\n", encoding="utf-8")
@@ -769,7 +773,7 @@ DESLOP_RESULT = {"changed_files": ["src/foo.ts"], "passes": ["comments"]}
 
 def failing_test_json(command="true"):
     return {
-        "repo": "api", "kind": "unit", "test_file": "src/foo.spec.ts",
+        "repo": "api", "kind": "unit", "test_file": "src/__tests__/foo.spec.ts",
         "test_name": "does the thing", "command": command,
         "predicted_failure_signature": "expected 1 to equal 2",
     }
@@ -781,8 +785,8 @@ def deslop_common(tmp, lane):
     wt = tmp / "wt"
     base = init_worktree(wt)
     jdump(art / "params.json", params(tmp, wt))
-    jdump(art / "verify.json", {"test_patterns": ["src/foo.spec.ts"]})
-    jdump(art / "files-allowlist.json", ["src/foo.ts", "src/foo.spec.ts"])
+    jdump(art / "verify.json", {"test_patterns": ["src/__tests__/foo.spec.ts"]})
+    jdump(art / "files-allowlist.json", ["src/foo.ts", "src/__tests__/foo.spec.ts"])
     jdump(art / "deslop-result.json", DESLOP_RESULT)
     if lane == "api":
         (art / "bootstrap-head.txt").write_text(base + "\n", encoding="utf-8")
@@ -958,7 +962,7 @@ class DeslopStress(unittest.TestCase):
     def test_deslop_commit_refuses_a_modified_repro(self):
         def build(tmp):
             deslop_commit_fixture(dirty=True)(tmp)
-            (tmp / "wt" / "src" / "foo.spec.ts").write_text(
+            (tmp / "wt" / "src" / "__tests__" / "foo.spec.ts").write_text(
                 BASE_SPEC.replace("toBe(2)", "toBe(3)"), encoding="utf-8")
         r = run_node("bugfix", "deslop-commit", build)
         self.assertEqual(r["rc"], 1)
@@ -980,10 +984,10 @@ def green_check_fixture(modify_repro=False, command="true"):
         (art / "repo.txt").write_text("api\n", encoding="utf-8")
         (art / "red-sha.txt").write_text(base + "\n", encoding="utf-8")
         jdump(art / "failing-test.json", failing_test_json(command))
-        jdump(art / "verify.json", {"test_patterns": ["src/foo.spec.ts"]})
-        jdump(art / "files-allowlist.json", ["src/foo.ts", "src/foo.spec.ts"])
+        jdump(art / "verify.json", {"test_patterns": ["src/__tests__/foo.spec.ts"]})
+        jdump(art / "files-allowlist.json", ["src/foo.ts", "src/__tests__/foo.spec.ts"])
         if modify_repro:
-            (wt / "src" / "foo.spec.ts").write_text(
+            (wt / "src" / "__tests__" / "foo.spec.ts").write_text(
                 BASE_SPEC.replace("toBe(2)", "toBe(3)"), encoding="utf-8")
     return build
 

@@ -14,9 +14,9 @@ exactly these sections:
 Summary opens with the line: Lane: full-sdlc-api-lite
 Lane contains the contents of envelope-post.txt VERBATIM in a fenced block
 (this is the routing evidence: the file counts, hot-path result and caller
-count the run was allowed to proceed on), followed by one sentence stating
-that the lite lane ran ONE code-review round and did not run the planning
-critic, doc review, premise verification, deslop pass or reader audit.
+count the run was allowed to proceed on), followed by this exact sentence:
+"Lite omissions: one code-review round; no planning critic, doc review,
+premise verification, deslop pass, or reader audit."
 Reviewer-unverified fixes: when lite-fixes-unreviewed.txt exists, quote it
 verbatim (the fixer commit sha, the files it touched, the count of applied
 findings) and say plainly that these hunks were applied by the fixer after

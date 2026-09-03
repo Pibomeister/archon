@@ -1,0 +1,20 @@
+{
+  "schema_version": 2,
+  "dispositions": [
+    {
+      "symptom_id": "E1",
+      "disposition": "fixed",
+      "authority": "occurrence-attributed diff plus GREEN user-visible verification"
+    },
+    {
+      "symptom_id": "E2",
+      "disposition": "fixed",
+      "authority": "occurrence-attributed diff plus GREEN user-visible verification"
+    },
+    {
+      "symptom_id": "E3",
+      "disposition": "fixed",
+      "authority": "occurrence-attributed diff plus GREEN user-visible verification"
+    }
+  ]
+}

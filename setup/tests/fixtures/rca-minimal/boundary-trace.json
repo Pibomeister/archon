@@ -1,0 +1,35 @@
+{
+  "schema_version": 5,
+  "surface_equivalence": {
+    "reported_surface": "API pagination response",
+    "reported_surface_status": "explicit",
+    "surface_selection_basis": "The report names the API pagination response.",
+    "runtime_entrypoint": "src/pagination.controller.ts:list",
+    "runtime_owner": "src/pagination.service.ts:page",
+    "test_entrypoint": "src/__tests__/pagination.spec.ts",
+    "test_runtime_owner": "src/pagination.service.ts:page",
+    "smoke_entrypoint": "GET /pagination",
+    "smoke_runtime_owner": "src/pagination.service.ts:page",
+    "test_matches_runtime": true,
+    "smoke_matches_runtime": true,
+    "reproduction_equivalence": {
+      "observed_preconditions": ["last-page cursor at the final page"],
+      "test_preconditions": ["last-page cursor at the final page"],
+      "material_differences": [],
+      "equivalent": true
+    },
+    "evidence": [
+      {"claim": "runtime-entrypoint-to-owner", "file": "src/pagination.controller.ts", "quote": "return paginationService.page(request)"},
+      {"claim": "test-entrypoint-to-owner", "file": "src/__tests__/pagination.spec.ts", "quote": "paginationService.page"},
+      {"claim": "smoke-entrypoint-to-owner", "file": "src/pagination.controller.ts", "quote": "GET /pagination"}
+    ]
+  },
+  "boundaries": [
+    {
+      "component": "pagination service",
+      "input": "last-page cursor",
+      "output": "incorrect final count",
+      "evidence": "causal-chain.json link 1"
+    }
+  ]
+}

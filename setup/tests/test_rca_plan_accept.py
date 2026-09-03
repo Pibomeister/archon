@@ -41,6 +41,9 @@ class AcceptByHand(unittest.TestCase):
         (self.ad / "rca.md").write_text("## Observation\nx\n")
         (self.ad / "causal-chain.json").write_text(json.dumps({"links": [{"index": 1, "cause": "a"}, {"index": 2, "cause": "b", "fixable": True, "fix_site": "x:1"}]}))
         (self.ad / "hypotheses.json").write_text(json.dumps([{"id": 1, "status": "open"}]))
+        proof = json.loads((self.ad / "proof-assessment.json").read_text())
+        proof["selected_hypothesis_id"] = "1"
+        (self.ad / "proof-assessment.json").write_text(json.dumps(proof))
         for f in IMM:
             shutil.copy(self.ad / f, self.ad / f"imm-{f}")
         shutil.copy(self.ad / "rca.md", self.ad / "rca.pre.md")

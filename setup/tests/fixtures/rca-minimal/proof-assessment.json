@@ -1,0 +1,16 @@
+{
+  "schema_version": 2,
+  "selected_hypothesis_id": "H1",
+  "mechanism_valid": true,
+  "occurrence_attributed": true,
+  "incidental_finding": false,
+  "experiment": {
+    "prediction": "RED test shows off-by-one",
+    "disconfirming_observation": "RED test passes on current code",
+    "result": "prediction observed"
+  },
+  "ticket_resolution_claim": "fixed",
+  "occurrence_evidence_sources": [
+    "report"
+  ]
+}

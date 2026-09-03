@@ -4,5 +4,5 @@
   "alternatives": [
     {"label": "widen the check", "why_not": "hides the bug"}
   ],
-  "files": ["src/foo.ts", "src/foo.spec.ts"]
+  "files": ["src/foo.ts", "src/__tests__/foo.spec.ts"]
 }

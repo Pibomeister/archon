@@ -1,1 +1,1 @@
-["src/foo.ts", "src/foo.spec.ts"]
+["src/foo.ts", "src/__tests__/foo.spec.ts"]

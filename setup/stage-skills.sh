@@ -122,7 +122,7 @@ echo "PREFLIGHT_TOKENS=OK contract=$([ -f "$DEST/ce-code-review/references/modes
 # fail-loud discipline as the CE loop above — a broken link is a setup bug, not a
 # degraded mode. These are OPERATOR-session skills; workflow nodes declare only
 # ce-code-review / ce-doc-review and must never load them.
-for s in archon-install archon-sdlc; do
+for s in archon-install archon-sdlc archon-linear; do
   SRC="$ROOT/.archon/skills/$s"
   test -f "$SRC/SKILL.md" || { echo "FAIL: shipped skill missing: $SRC/SKILL.md"; exit 1; }
   ln -sfn "$SRC" "$DEST/$s"
@@ -147,3 +147,14 @@ done
 # Validation sweep covers the codex path end-to-end, same as the .claude path.
 contract_ok "$ADEST" || { echo "FAIL: codex-staged skills lost the review contract (CE $CE_VER) — report to the maintainer, do not downgrade"; exit 1; }
 echo "PREFLIGHT_CODEX_TOKENS=OK"
+
+# Operator skills are available to normal Codex sessions at project scope, but
+# are deliberately NOT copied into the dedicated workflow-node CODEX_HOME.
+for s in archon-install archon-sdlc archon-linear; do
+  SRC="$ROOT/.archon/skills/$s"
+  test -f "$SRC/SKILL.md" || { echo "FAIL: shipped operator skill missing: $SRC/SKILL.md"; exit 1; }
+  if [ -e "$ADEST/$s" ] && [ ! -L "$ADEST/$s" ]; then rm -rf "$ADEST/$s"; fi
+  ln -sfn "$SRC" "$ADEST/$s"
+  test -f "$ADEST/$s/SKILL.md" || { echo "FAIL: staged Codex operator skill does not resolve: $ADEST/$s"; exit 1; }
+  echo "STAGED_CODEX_OPERATOR: $s -> $(readlink "$ADEST/$s")"
+done

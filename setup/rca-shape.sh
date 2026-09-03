@@ -16,6 +16,40 @@
 # Usage: rca-shape.sh <artifacts-dir>
 set -euo pipefail
 AD="${1:?usage: rca-shape.sh <artifacts-dir>}"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+
+# V2 bugfix contract: the immutable source/effective symptom ledger, exact
+# disposition/coverage bijections, lineage, occurrence proof, and closure
+# classification are deterministic gates rather than RCA prose.
+python3 "$HERE/bugfix-contract.py" normalize-gather-more "$AD" \
+  || { echo "RCA_SHAPE=FAIL gather-more normalization"; exit 1; }
+CONTRACT_OUT="$(python3 "$HERE/bugfix-contract.py" validate-causal-coverage --artifacts "$AD" 2>&1)" || {
+  printf '%s\n' "$CONTRACT_OUT" | sed -E 's/^BUGFIX_(COVERAGE|CONTRACT)=FAIL/RCA_SHAPE=FAIL/'
+  exit 1
+}
+python3 "$HERE/bugfix-contract.py" classify "$AD" >/dev/null \
+  || { echo "RCA_SHAPE=FAIL classification"; exit 1; }
+
+# A thin report may truthfully end investigation without an implementation
+# plan. That is valid open work, but it must stop with a typed evidence request
+# rather than masquerading as malformed JSON or flowing into RED/fix nodes.
+INVESTIGATION_REASON="$(python3 - "$AD" <<'PY'
+import json, os, sys
+ad = sys.argv[1]
+load = lambda name: json.load(open(os.path.join(ad, name), encoding="utf-8"))
+plan = load("fix-plan.json")
+if plan.get("approach"):
+    print("")
+elif load("boundary-trace.json").get("surface_equivalence", {}).get("reported_surface_status") == "ambiguous":
+    print("surface-ambiguous")
+else:
+    print("reproduction-or-causal-proof-missing")
+PY
+)"
+if [ -n "$INVESTIGATION_REASON" ]; then
+  echo "RCA_INVESTIGATION_REQUIRED reason=$INVESTIGATION_REASON ticket=open no_implementation=true"
+  exit 1
+fi
 
 python3 - "$AD" <<'PY'
 import json, os, re, sys
@@ -67,10 +101,15 @@ try:
     fp = load("fix-plan.json")
 except Exception as e:
     fail(f"fix-plan.json missing or malformed: {e}")
-if not (fp.get("approach") and fp.get("fix_site")):
+debug = load("debug-phase.json")
+gather_more = debug.get("reproduction_status") == "gather-more"
+if gather_more:
+    if fp.get("approach") or fp.get("fix_site") or fp.get("files"):
+        fail("gather-more fix plan must remain blocked")
+elif not (fp.get("approach") and fp.get("fix_site")):
     fail("fix-plan.json missing approach/fix_site")
 alts = fp.get("alternatives")
-if not (isinstance(alts, list) and (alts or fp.get("approach"))):
+if not (isinstance(alts, list) and (gather_more or alts or fp.get("approach"))):
     fail("fix-plan.json missing alternatives (list; may hold a 'none' entry)")
 
 try:
@@ -95,6 +134,12 @@ for pb in probes:
         fail(f"probe {pb['id']}: write/DDL keyword rejected")
     if ";" in sql:
         fail(f"probe {pb['id']}: single statement only")
+    limits = [int(x) for x in re.findall(r"(?i)\blimit\s+(\d+)\b", sql)]
+    aggregate_only = bool(re.search(r"(?i)\b(count|sum|avg|min|max)\s*\(", sql))
+    if not aggregate_only and not limits:
+        fail(f"probe {pb['id']}: row-returning query requires LIMIT <= 100")
+    if limits and max(limits) > 100:
+        fail(f"probe {pb['id']}: LIMIT exceeds 100")
 
 try:
     res = load("residuals.json")["residuals"]
@@ -122,6 +167,9 @@ except Exception as e:
     fail(f"verify.json missing or malformed: {e}")
 if not (isinstance(pats, list) and pats and all(isinstance(p, str) and p.strip() for p in pats)):
     fail("verify.json empty")
+non_unit = [p for p in pats if p.endswith((".int.spec.ts", ".e2e.spec.ts", ".ai.spec.ts", ".ext.spec.ts"))]
+if non_unit:
+    fail(f"verify.json test_patterns must be unit specs: {non_unit}")
 
 try:
     allow = load("files-allowlist.json")

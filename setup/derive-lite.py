@@ -16,6 +16,7 @@ The lite lane is DEFINED by three things and nothing else:
   2. setup/lite/<lane>/       overlay files, whole-field replacement:
        <id>.prompt.md            replaces node.prompt
        <id>.bash.sh              replaces node.bash
+       <id>.approval.md          replaces node.approval.message
        <id>.on_reject.md         replaces node.approval.on_reject.prompt
        <id>.node.yaml            a complete node (NEW nodes only)
        <loop>.<id>.bash.sh|.prompt.md   loop-body node fields
@@ -76,7 +77,7 @@ def load_yaml(path):
 
 
 # --------------------------------------------------------------- overlays
-OVERLAY_RE = re.compile(r"^(?P<id>[A-Za-z0-9-]+)(?:\.(?P<sub>[A-Za-z0-9-]+))?\.(?P<kind>prompt\.md|bash\.sh|on_reject\.md|node\.yaml)$")
+OVERLAY_RE = re.compile(r"^(?P<id>[A-Za-z0-9-]+)(?:\.(?P<sub>[A-Za-z0-9-]+))?\.(?P<kind>prompt\.md|bash\.sh|approval\.md|on_reject\.md|node\.yaml)$")
 
 
 def read_overlays(lane_dir):
@@ -115,6 +116,11 @@ def apply_field_overlays(node, ov, where):
                 node["approval"]["on_reject"]["prompt"] = text
             except (KeyError, TypeError):
                 raise LiteError(f"{where}: on_reject overlay on a node without approval.on_reject")
+        elif kind == "approval.md":
+            try:
+                node["approval"]["message"] = text.strip()
+            except (KeyError, TypeError):
+                raise LiteError(f"{where}: approval overlay on a node without approval.message")
         elif kind == "node.yaml":
             raise LiteError(f"{where}: node.yaml overlay is only valid for NEW nodes (id not in the parent)")
 

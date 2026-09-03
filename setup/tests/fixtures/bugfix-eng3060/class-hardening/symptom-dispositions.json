@@ -1,0 +1,20 @@
+{
+  "schema_version": 2,
+  "dispositions": [
+    {
+      "symptom_id": "E1",
+      "disposition": "class-hardening-only",
+      "reason": "H3 does not alter or occurrence-attribute the Granola provider/icon symptom"
+    },
+    {
+      "symptom_id": "E2",
+      "disposition": "fixed",
+      "authority": "covered by numeric-string participant metadata RED/GREEN"
+    },
+    {
+      "symptom_id": "E3",
+      "disposition": "fixed",
+      "authority": "covered by numeric-string participant metadata RED/GREEN"
+    }
+  ]
+}

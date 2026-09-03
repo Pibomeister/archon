@@ -1,7 +1,7 @@
 {
   "repo": "api",
   "kind": "unit",
-  "test_file": "src/foo.spec.ts",
+  "test_file": "src/__tests__/foo.spec.ts",
   "test_name": "does the thing",
   "command": "bun run test -- foo",
   "predicted_failure_signature": "expected 1 to equal 2"

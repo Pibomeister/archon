@@ -1,0 +1,36 @@
+{
+  "schema_version": 2,
+  "ledger_root_hash": "9312cfd40c9c9672e2c140b4ab81d0ae0a4e11a63349712d2d894d5ae6efd6c3",
+  "revision": 1,
+  "previous_revision_hash": null,
+  "source_symptoms": [
+    {
+      "id": "S1",
+      "claim": "off-by-one on last page",
+      "source_document": "bug-report.md",
+      "source_field": "description",
+      "byte_span": {
+        "start": 14,
+        "end": 37
+      },
+      "source_quote": "off-by-one on last page",
+      "verbatim_evidence": "off-by-one on last page",
+      "source_order": 1,
+      "expected_behavior": "final page count is accurate",
+      "actual_behavior": "off-by-one on last page"
+    }
+  ],
+  "effective_symptoms": [
+    {
+      "id": "E1",
+      "source_ids": [
+        "S1"
+      ],
+      "relation": "same-as-source",
+      "claim": "off-by-one on last page",
+      "expected_behavior": "final page count is accurate",
+      "actual_behavior": "off-by-one on last page"
+    }
+  ],
+  "ledger_revision_hash": "f3b55b6123aa90eb8d0c3eb1fdf8e65d62687104d70e4eaf5b60506fe6adb37d"
+}

@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "working_comparison": "first-page pagination path",
+  "differences": [
+    "last-page branch applies exclusive bound where working path applies inclusive bound"
+  ]
+}

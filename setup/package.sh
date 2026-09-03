@@ -53,6 +53,8 @@ MANIFEST=(
   setup/allowlist.json
   setup/bind-repo.py
   setup/check-fixer-result.py
+  setup/change-context.py
+  setup/check-lite-prbody.py
   setup/check-scope.py
   setup/check-slop.py
   setup/detach.py
@@ -65,9 +67,11 @@ MANIFEST=(
   setup/parse-review-envelope.py
   setup/plan-shape.sh
   setup/rca-shape.sh
+  setup/repo-policy.py
   setup/resolve-params.sh
   setup/resume.sh
   setup/run-repro.sh
+  setup/smoke-matrix.py
   setup/selective-genapi-patch.py
   setup/stage-skills.sh
   setup/strip-premise-answers.py
@@ -90,6 +94,18 @@ MANIFEST=(
   setup/derive-codex.py
   setup/codex-usage.py
   setup/codex-watchdog.sh
+  setup/codex-workspace-wrapper.sh
+  setup/archon-run.py
+  setup/codex-lite-run.py
+  setup/bugfix-contract.py
+  setup/control_contract.py
+  setup/controller-attest.py
+  setup/evidence-provenance.py
+  setup/experiment-runner.py
+  setup/eval-quality-differential.sh
+  setup/gitnexus-mcp-dispatch.py
+  setup/gitnexus-evidence.py
+  setup/proof-assess.py
   setup/lite/api.json
   setup/lite/bugfix.json
   setup/lite/api/lite-envelope-post.node.yaml
@@ -97,12 +113,15 @@ MANIFEST=(
   setup/lite/api/lite-envelope.node.yaml
   setup/lite/api/lite-impact-post.node.yaml
   setup/lite/api/lite-impact.node.yaml
+  setup/lite/api/codex-control-guard.node.yaml
   setup/lite/api/plan-gate.on_reject.md
+  setup/lite/api/plan-gate.approval.md
   setup/lite/api/plan-render-gate.bash.sh
   setup/lite/api/plan-render.prompt.md
   setup/lite/api/plan-snapshot.bash.sh
   setup/lite/api/post-fix-gate.node.yaml
   setup/lite/api/prbody.prompt.md
+  setup/lite/api/prbody-gate.node.yaml
   setup/lite/api/preflight.bash.sh
   setup/lite/api/ralplan.prompt.md
   setup/lite/api/review-loop.converge.bash.sh
@@ -116,8 +135,12 @@ MANIFEST=(
   setup/lite/bugfix/lite-impact-post.node.yaml
   setup/lite/bugfix/lite-impact.node.yaml
   setup/lite/bugfix/prbody.prompt.md
+  setup/lite/bugfix/prbody-gate.node.yaml
+  setup/lite/bugfix/post-approval-integrity.bash.sh
   setup/lite/bugfix/rca-approval.on_reject.md
+  setup/lite/bugfix/rca-approval.approval.md
   setup/lite/bugfix/rca-render.prompt.md
+  setup/lite/bugfix/rca-render-gate.bash.sh
   setup/lite/bugfix/rca.prompt.md
   setup/lite/bugfix/red-gate.bash.sh
   setup/lite/bugfix/red-test.prompt.md
@@ -127,6 +150,7 @@ MANIFEST=(
   # gist name is archon__skills__<name>__SKILL.md, so NO skill file or directory
   # name may contain a double underscore — install.sh un-flattens on '__'.
   skills/archon-install/SKILL.md
+  skills/archon-linear/SKILL.md
   skills/archon-sdlc/SKILL.md
   templates/implement-node.md
   templates/repo-conventions-api.md

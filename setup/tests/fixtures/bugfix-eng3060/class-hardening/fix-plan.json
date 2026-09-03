@@ -1,0 +1,6 @@
+{
+  "approach": "harden participant metadata normalization for numeric-string IDs",
+  "fix_site": "src/groupParticipants.ts:120",
+  "alternatives": [{"label": "change provider icon semantics", "why_not": "not exercised by H3 current-code reproduction"}],
+  "files": ["src/groupParticipants.ts", "src/groupParticipants.h3.test.ts"]
+}

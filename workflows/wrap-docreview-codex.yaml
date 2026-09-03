@@ -13,11 +13,10 @@ nodes:
 - id: review
   depends_on:
   - snapshot
-  maxBudgetUsd: 8
   timeout: 1800000
-  skills:
-  - ce-doc-review
   prompt: |
+    Use $ce-doc-review explicitly for this node.
+
     Invoke the ce-doc-review skill with arguments exactly:
       mode:headless /private/tmp/claude-501/-Users-eduardopicazo-Documents-Workspace-Goodword/88bb31f2-0094-41b2-bd3f-8409f1264538/scratchpad/m1-fixture/docs/toy-plan.md
     This is an unattended pipeline invocation; ask no questions.

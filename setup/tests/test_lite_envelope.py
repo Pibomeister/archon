@@ -22,6 +22,18 @@ def write(ad, name, obj):
     (ad / name).write_text(json.dumps(obj) if not isinstance(obj, str) else obj, encoding="utf-8")
 
 
+def gathered_symbol(name, file, callers, risk="LOW"):
+    return {
+        "name": name,
+        "file": file,
+        "d1_callers": callers,
+        "risk": risk,
+        "query_status": "GATHERED",
+        "query_repo": "api",
+        "query_target": name,
+    }
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -60,7 +72,7 @@ class Base(unittest.TestCase):
         write(self.ad, "files-allowlist.json", ["apps/api/src/notes/notes.service.ts", "apps/api/src/notes/notes.service.spec.ts"])
         write(self.ad, "reader-audit.json", {"columns": []})
         write(self.ad, "impact.json", {"status": "GATHERED", "symbols": [
-            {"name": "NotesService.list", "file": "apps/api/src/notes/notes.service.ts", "d1_callers": ["a", "b", "c"], "risk": "LOW"}]})
+            gathered_symbol("NotesService.list", "apps/api/src/notes/notes.service.ts", ["a", "b", "c"])]})
         write(self.ad, "triage-post.json" if stage == "post" else "triage.json",
               {"size": "S", "reasons": ["one mechanism"], "hot_path_hits": [], "unknowns": []})
 
@@ -82,7 +94,7 @@ class Base(unittest.TestCase):
                                                 "libs/business-logic/src/lib/services/__tests__/meeting-notes-sync.service.spec.ts"])
         write(self.ad, "causal-chain.json", {"links": [{"index": 1, "cause": "a"}, {"index": 2, "cause": "b"}, {"index": 3, "cause": "c", "fixable": True}]})
         write(self.ad, "impact.json", {"status": "GATHERED", "symbols": [
-            {"name": "upsertSyntheticCalendarEvent", "file": "x.ts", "d1_callers": ["processMeeting"], "risk": "LOW"}]})
+            gathered_symbol("upsertSyntheticCalendarEvent", "x.ts", ["processMeeting"])]})
         write(self.ad, "triage-post.json" if stage == "post" else "triage.json",
               {"size": "S", "reasons": [], "hot_path_hits": [], "unknowns": []})
 
@@ -224,10 +236,37 @@ class ApiPlanStage(Base):
         self.assert_lite(r)
         self.assertIn("ENVELOPE d1_callers=0/", r.stdout)
 
+    def test_gathered_impact_requires_symbol_query_provenance(self):
+        self.api_plan_baseline()
+        write(self.ad, "impact.json", {"status": "GATHERED", "symbols": [{
+            "name": "NotesService.list", "file": "x.ts", "d1_callers": [], "risk": "LOW"}]})
+        r = self.run_gate("api", "plan")
+        self.assert_full(r, "impact")
+        self.assertIn("query_status", r.stdout)
+
+    def test_gathered_impact_rejects_unavailable_symbol_query(self):
+        self.api_plan_baseline()
+        symbol = gathered_symbol("NotesService.list", "x.ts", [])
+        symbol["query_status"] = "UNAVAILABLE"
+        write(self.ad, "impact.json", {"status": "GATHERED", "symbols": [symbol]})
+        self.assert_full(self.run_gate("api", "plan"), "impact")
+
+    def test_gathered_impact_rejects_wrong_repo_provenance(self):
+        self.api_plan_baseline()
+        symbol = gathered_symbol("NotesService.list", "x.ts", [])
+        symbol["query_repo"] = "spec-typecheck-staging"
+        write(self.ad, "impact.json", {"status": "GATHERED", "symbols": [symbol]})
+        self.assert_full(self.run_gate("api", "plan"), "impact")
+
+    def test_gathered_impact_accepts_successful_symbol_provenance(self):
+        self.api_plan_baseline()
+        self.assert_lite(self.run_gate("api", "plan"))
+
     def test_d1_callers_over_cap(self):
         self.api_plan_baseline()
         n = ENVELOPE["max_d1_callers"] + 1
-        write(self.ad, "impact.json", {"status": "GATHERED", "symbols": [{"name": "x", "file": "f", "d1_callers": [str(i) for i in range(n)], "risk": "HIGH"}]})
+        write(self.ad, "impact.json", {"status": "GATHERED", "symbols": [
+            gathered_symbol("x", "f", [str(i) for i in range(n)], "HIGH")]})
         self.assert_full(self.run_gate("api", "plan"), "d1_callers")
 
     def test_malformed_impact_json(self):

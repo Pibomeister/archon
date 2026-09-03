@@ -1,0 +1,8 @@
+{
+  "schema_version": 2,
+  "coverage": [
+    {"symptom_id": "E1", "cause_id": "H1", "occurrence_attributed": false, "planned_diff": [], "red_test": null, "counterfactual_user_visible": false},
+    {"symptom_id": "E2", "cause_id": "H1", "occurrence_attributed": false, "planned_diff": [], "red_test": null, "counterfactual_user_visible": false},
+    {"symptom_id": "E3", "cause_id": "H1", "occurrence_attributed": false, "planned_diff": [], "red_test": null, "counterfactual_user_visible": false}
+  ]
+}

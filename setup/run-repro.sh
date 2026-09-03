@@ -20,6 +20,22 @@ CMD=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1], encoding='ut
 KIND=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1], encoding='utf-8'))['kind'])" "$FT") || { echo "REPRO_EXIT=97"; exit 97; }
 if [ "$KIND" = integration ]; then
   echo "REPRO_NOTE=integration mutex: this run owns ports 54322/8001 machine-globally (a concurrent 'down -v' destroys this run's DB)"
+  # Integration worktrees intentionally do not copy the ignored credentialed
+  # .env.e2e file. Resolve the main checkout through the shared git dir and
+  # export its existing harness environment for every RED/GREEN/negcontrol run.
+  COMMON=$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
+    || { echo "REPRO=FAIL cannot resolve integration git common dir" | tee "$OUT"; echo "REPRO_EXIT=97"; exit 97; }
+  BASE=$(dirname "$COMMON")
+  E2E_ENV="$BASE/.env.e2e"
+  if [ ! -f "$E2E_ENV" ]; then
+    echo "REPRO=FAIL missing integration env $E2E_ENV" | tee "$OUT"
+    echo "REPRO_EXIT=97"
+    exit 97
+  fi
+  set -a
+  # shellcheck disable=SC1090 -- protected main-checkout harness file.
+  source "$E2E_ENV"
+  set +a
 fi
 cd "$WT"
 CODE=0

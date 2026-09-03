@@ -13,7 +13,6 @@ nodes:
 - id: implement
   depends_on:
   - pre
-  maxBudgetUsd: 5
   timeout: 1800000
   prompt: |
     Implement the following unit in the repository at this absolute path

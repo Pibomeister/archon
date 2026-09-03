@@ -1,0 +1,14 @@
+{
+  "schema_version": 2,
+  "logical_chain_id": "fixture-chain",
+  "provider": "claude",
+  "root_run_id": "fixture-run",
+  "current_run_id": "fixture-run",
+  "parent_run_id": null,
+  "root_source_ids": [
+    "S1"
+  ],
+  "transition_reason": "initial",
+  "ledger_root_hash": "9312cfd40c9c9672e2c140b4ab81d0ae0a4e11a63349712d2d894d5ae6efd6c3",
+  "ledger_revision_hash": "f3b55b6123aa90eb8d0c3eb1fdf8e65d62687104d70e4eaf5b60506fe6adb37d"
+}

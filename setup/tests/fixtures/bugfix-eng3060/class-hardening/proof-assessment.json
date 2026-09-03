@@ -1,0 +1,17 @@
+{
+  "schema_version": 2,
+  "selected_hypothesis": "H3",
+  "hypotheses": [
+    {
+      "id": "H3",
+      "summary": "Numeric-string participant metadata can hide real person rows on current code.",
+      "mechanism_validity": "proven",
+      "occurrence_attribution": "missing",
+      "evidence": [
+        "current-code synthetic reproduction exercises numeric-string participant metadata"
+      ]
+    }
+  ],
+  "human_occurrence_gap_waiver": false,
+  "incidental_finding": false
+}

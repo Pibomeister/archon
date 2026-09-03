@@ -93,7 +93,7 @@ echo "=== 1. Preconditions (asserted, never installed) ==="
 OPENER="$(command -v xdg-open 2>/dev/null || command -v open 2>/dev/null || true)"
 [ -n "$OPENER" ] && pass "browser opener: $OPENER ($(uname -s))" || fail "no browser opener ($(uname -s)): install xdg-open (Linux) — human packets would print a file:// path only"
 
-for cmd in bun pnpm mise gh python3 agent-browser claude aws git curl diff; do
+for cmd in bun pnpm mise gh python3 agent-browser claude git curl diff; do
   command -v "$cmd" >/dev/null 2>&1 && pass "command: $cmd" || fail "command missing: $cmd (install it, then re-run)"
 done
 
@@ -122,7 +122,12 @@ if command -v gh >/dev/null 2>&1; then
   git -C "$ROOT/web-app" ls-remote --heads origin >/dev/null 2>&1 && pass "fetch access to web-app remote" || fail "cannot fetch $ROOT/web-app origin — check your GitHub org access"
 fi
 
-aws sts get-caller-identity >/dev/null 2>&1 && pass "aws session valid" || fail "aws session expired or unconfigured — run: aws login (SSO creds last ~15 min; also needed before every run)"
+if command -v aws >/dev/null 2>&1; then
+  aws sts get-caller-identity >/dev/null 2>&1 && pass "aws session valid (optional evidence capability)" \
+    || echo "INFO  aws session unavailable — code workflows continue; AWS evidence degrades until aws login"
+else
+  echo "INFO  aws CLI missing — code workflows continue; AWS evidence is unavailable"
+fi
 
 BILLING_OK=yes
 for v in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_PROFILE; do
@@ -218,7 +223,8 @@ echo "=== 6. Validate workflows ==="
 VAL_LOG="$(mktemp)"
 ( cd "$ROOT" && archon validate workflows </dev/null >"$VAL_LOG" 2>&1 ) || true
 VAL_FAIL=0
-for w in babysit bugfix bugfix-lite bugfix-smoke-deployed cleanup full-sdlc-api full-sdlc-api-lite full-sdlc-web register-probe; do
+for w in babysit bugfix bugfix-lite bugfix-smoke-deployed cleanup full-sdlc-api full-sdlc-api-lite full-sdlc-web register-probe \
+         full-sdlc-api-codex bugfix-codex full-sdlc-web-codex full-sdlc-api-lite-codex bugfix-lite-codex; do
   if "$GREP" -Eq "^[[:space:]]+$w[[:space:]]+ok[[:space:]]*$" "$VAL_LOG"; then
     pass "workflow validates: $w"
   else
@@ -230,7 +236,40 @@ done
 [ "$VAL_FAIL" = 0 ] || exit 1
 rm -f "$VAL_LOG"
 
-echo "=== 7. Permissions allowlist ==="
+echo "=== 7. Optional GitNexus evidence acceleration ==="
+setup_gitnexus() {
+  command -v npx >/dev/null 2>&1 || { echo "INFO  npx missing — GitNexus acceleration unavailable; code workflows continue"; return 0; }
+  command -v codex >/dev/null 2>&1 || { echo "INFO  codex missing — GitNexus MCP config skipped; code workflows continue"; return 0; }
+  git -C "$ROOT/api" fetch origin main >/dev/null 2>&1 || { echo "INFO  cannot refresh api origin/main — GitNexus acceleration unavailable; code workflows continue"; return 0; }
+  INDEX_WT="$HOME/.archon/gitnexus/api-main"
+  mkdir -p "$(dirname "$INDEX_WT")" || { echo "INFO  cannot create $HOME/.archon/gitnexus — GitNexus acceleration unavailable; code workflows continue"; return 0; }
+  if [ ! -e "$INDEX_WT/.git" ]; then
+    git -C "$ROOT/api" worktree add --detach "$INDEX_WT" origin/main >/dev/null 2>&1 \
+      || { echo "INFO  cannot create pinned GitNexus worktree — GitNexus acceleration unavailable; code workflows continue"; return 0; }
+  else
+    if [ -n "$(git -C "$INDEX_WT" status --porcelain 2>/dev/null || true)" ]; then
+      echo "INFO  pinned GitNexus worktree is dirty ($INDEX_WT) — leaving it untouched; code workflows continue"
+      return 0
+    fi
+    git -C "$INDEX_WT" switch --detach origin/main >/dev/null 2>&1 \
+      || { echo "INFO  cannot switch pinned GitNexus worktree — GitNexus acceleration unavailable; code workflows continue"; return 0; }
+  fi
+  (cd "$INDEX_WT" && npx gitnexus analyze >/dev/null 2>&1) \
+    || { echo "INFO  npx gitnexus analyze failed — GitNexus acceleration unavailable; code workflows continue"; return 0; }
+  if [ -f "$INDEX_WT/.gitnexus/run.cjs" ]; then
+    (cd "$INDEX_WT" && node .gitnexus/run.cjs analyze >/dev/null 2>&1) \
+      || { echo "INFO  pinned GitNexus runner analyze failed — GitNexus acceleration unavailable; code workflows continue"; return 0; }
+  fi
+  mkdir -p "$HOME/.archon/codex-home"
+  CODEX_HOME="$HOME/.archon/codex-home" codex mcp remove gitnexus >/dev/null 2>&1 || true
+  CODEX_HOME="$HOME/.archon/codex-home" codex mcp add gitnexus -- \
+    python3 "$ROOT/.archon/setup/gitnexus-mcp-dispatch.py" >/dev/null 2>&1 \
+    || { echo "INFO  codex gitnexus MCP registration failed — GitNexus acceleration unavailable; code workflows continue"; return 0; }
+  pass "GitNexus optional acceleration configured for pinned api index"
+}
+setup_gitnexus
+
+echo "=== 8. Permissions allowlist ==="
 if [ "$MERGE_ALLOWLIST" = yes ]; then
   python3 - "$SRC/allowlist.json" "$ROOT/.claude/settings.json" <<'PY'
 import json, os, sys
@@ -259,10 +298,10 @@ fi
 
 echo
 echo "=== DONE — next steps ==="
-echo "1. Before every run: 'aws login' (SSO creds last ~15 min; api boot reads Secrets Manager)."
+echo "1. Optional evidence: refresh aws login or GitNexus when you need those sources; code workflows continue without them."
 echo "2. Read the runbook: $ROOT/.archon/RUNBOOK.md"
-echo "   (Driving it from Claude Code? The 'archon-sdlc' skill is staged at"
-echo "    \$ROOT/.claude/skills/archon-sdlc — say 'archon-sdlc' in a session at the root.)"
+echo "   Operator skills archon-install, archon-sdlc, and archon-linear are staged for"
+echo "   Claude (\$ROOT/.claude/skills) and Codex (\$ROOT/.agents/skills)."
 echo "3. Start the toy dry-run from the root:"
 echo "     cd $ROOT"
 echo "     DISABLE_OMC=1 archon workflow run full-sdlc-api \"$ROOT/.omc/research/toy-feature-spec.md\" </dev/null 2>&1 | tee /tmp/archon-run.log"

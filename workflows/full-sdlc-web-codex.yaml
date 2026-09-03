@@ -21,7 +21,8 @@ nodes:
     mise x node@20 -- node -v | grep -q '^v20' || { echo "PREFLIGHT=FAIL node20 via mise unavailable"; exit 1; }
     command -v gh >/dev/null && gh auth status >/dev/null 2>&1 || { echo "PREFLIGHT=FAIL gh unauthenticated"; exit 1; }
     command -v agent-browser >/dev/null || { echo "PREFLIGHT=FAIL agent-browser missing"; exit 1; }
-    aws sts get-caller-identity >/dev/null 2>&1 || { echo "PREFLIGHT=FAIL aws session expired - run: aws login"; exit 1; }
+    command -v aws >/dev/null 2>&1 && aws sts get-caller-identity >/dev/null 2>&1 \
+      || echo "PREFLIGHT_WARN aws unavailable or expired - AWS evidence/runtime integrations may degrade; workflow control continues"
     # Billing guard (codex): runs MUST bill the ChatGPT plan (auth_mode "chatgpt"
     # in the effective CODEX_HOME), never an API key. Fail closed when the auth
     # file is missing, unreadable, keyed to the API, or token-less.
@@ -109,7 +110,6 @@ nodes:
 - id: premise-verify
   depends_on:
   - premise-strip
-  maxBudgetUsd: 3
   timeout: 1200000
   prompt: |
     You are the premise-verification node: a blind re-derivation check. The
@@ -222,7 +222,6 @@ nodes:
   depends_on:
   - gen-api-sync
   - premise-gate
-  maxBudgetUsd: 8
   timeout: 1800000
   prompt: |
     Implement the web prong of the toy feature described in the spec at:
@@ -279,7 +278,6 @@ nodes:
 - id: reader-audit
   depends_on:
   - gate-tests
-  maxBudgetUsd: 3
   timeout: 1200000
   prompt: |
     You are the reader-audit node: when a diff changes what a DB column's
@@ -382,11 +380,10 @@ nodes:
     - id: review
       depends_on:
       - round-pre
-      maxBudgetUsd: 15
       timeout: 1800000
-      skills:
-      - ce-code-review
       prompt: |
+        Use $ce-code-review explicitly for this node.
+
         The repository checkout to review is at this absolute path (you are NOT cwd'd
         there — cd into it for every git command):
           /Users/eduardopicazo/Documents/Workspace/Goodword/web-app/.worktrees/archon-toy
@@ -493,7 +490,6 @@ nodes:
     - id: fixer
       depends_on:
       - commit-fixes
-      maxBudgetUsd: 5
       timeout: 1200000
       prompt: |
         You are the fixer node in an unattended review-fix pipeline. Ask no questions.
@@ -668,7 +664,6 @@ nodes:
 - id: uat
   depends_on:
   - smoke
-  maxBudgetUsd: 5
   timeout: 1200000
   prompt: |
     You are the acceptance-testing node, standing in for a human tester. Ask no
@@ -742,7 +737,6 @@ nodes:
 - id: prbody
   depends_on:
   - uat-gate
-  maxBudgetUsd: 2
   timeout: 600000
   prompt: |
     You are the PR-body composition node. Ask no questions.
@@ -794,7 +788,6 @@ nodes:
 - id: run-report
   depends_on:
   - ship
-  maxBudgetUsd: 2
   timeout: 600000
   prompt: |
     You are the final-report node: the last thing a human sees from this run,
@@ -831,7 +824,6 @@ nodes:
 - id: kb-capture
   depends_on:
   - run-report
-  maxBudgetUsd: 2
   timeout: 600000
   prompt: |
     You are the knowledge-capture node: compound what this run learned so the

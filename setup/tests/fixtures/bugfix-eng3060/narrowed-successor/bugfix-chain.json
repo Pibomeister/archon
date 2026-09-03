@@ -1,0 +1,17 @@
+{
+  "schema_version": 2,
+  "logical_chain_id": "chain-eng3060-synthetic",
+  "provider": "codex",
+  "root_run_id": "run-eng3060-root",
+  "current_run_id": "run-eng3060-narrowed",
+  "parent_run_id": null,
+  "transition_reason": "manual-relaunch-without-lineage",
+  "root_source_ids": [
+    "S1",
+    "S2",
+    "S3"
+  ],
+  "report_sha256": "sha256:report-eng3060-synthetic",
+  "ledger_root_hash": "3deed1641cfbd01fcc214af78a85409d1eb745798150f1f0a4b648f60bcfd311",
+  "ledger_revision_hash": "1e4b59a230247c401475f3349c2fb85b71804d8cbe17e1142ec534274b1379b8"
+}

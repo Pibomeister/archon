@@ -4,6 +4,8 @@ mechanical transformations and NOTHING else. Includes the CODEX_DRIFT
 negative control (tamper a twin, the gate must fail)."""
 import copy
 import importlib.util
+import os
+import pwd
 import subprocess
 import sys
 import tempfile
@@ -59,20 +61,45 @@ class TwinShape(unittest.TestCase):
                 self.assertEqual(p.get("model"), t.get("model"), f"{nid}: model drifted")
             # per-node provider never appears in the codex-native default
             self.assertNotIn("provider", t, f"{nid}: unexpected per-node provider")
+            self.assertNotIn("maxBudgetUsd", t, f"{nid}: inert Codex cap survived")
+            if p.get("skills"):
+                self.assertNotIn("skills", t, f"{nid}: unsupported Codex skills key survived")
+                for skill in p["skills"]:
+                    self.assertIn(f"${skill}", t.get("prompt", ""), f"{nid}: explicit skill token missing")
+            if "prompt" in p:
+                if p.get("skills"):
+                    self.assertTrue(t["prompt"].endswith(p["prompt"]), f"{nid}: parent prompt was not preserved")
+                elif target in dc.GUARDED_TARGETS:
+                    expected, _ = dc.rewrite_lite_controls(p["prompt"])
+                    self.assertEqual(t.get("prompt"), expected, f"{nid}: guarded control rewrite drifted")
+                else:
+                    self.assertEqual(t.get("prompt"), p["prompt"], f"{nid}: prompt drifted")
             # every field except model/bash byte-identical
             for k in set(p) | set(t):
-                if k in ("model", "bash", "loop_group"):
+                if k in ("model", "bash", "loop_group", "maxBudgetUsd", "skills", "prompt"):
+                    continue
+                if k == "approval" and target in dc.GUARDED_TARGETS:
+                    self.assertIn("Codex control requirement", t["approval"]["message"])
                     continue
                 self.assertEqual(p.get(k), t.get(k), f"{nid}: field {k} drifted")
-            # bash: identical unless the parent bash carried the guard or SK asserts
+            # Bash is the exact composition of the documented mechanical
+            # transforms. Lite control-validator rewrites may change a bash
+            # node that has no billing guard of its own.
             if "bash" in p:
-                if p["bash"] == t.get("bash"):
-                    continue
-                self.assertNotIn("ANTHROPIC_API_KEY", t["bash"], f"{nid}: claude guard survived")
-                self.assertIn("BILLING_GUARD=FAIL", t["bash"], f"{nid}: codex guard missing")
-                if 'test -f "$SK/ce-code-review/SKILL.md"' in p["bash"]:
+                expected_bash = p["bash"]
+                if nid == "codex-control-guard" and target in dc.GUARDED_TARGETS:
+                    expected_bash = dc.CODEX_CONTROL_GUARD
+                expected_bash, guard_count = dc.swap_billing_guard(expected_bash)
+                expected_bash, agents_count = dc.add_agents_asserts(expected_bash)
+                if target in dc.GUARDED_TARGETS:
+                    expected_bash, _ = dc.rewrite_lite_controls(expected_bash)
+                self.assertEqual(t.get("bash"), expected_bash, f"{nid}: bash transform drifted")
+                if guard_count:
+                    self.assertNotIn("ANTHROPIC_API_KEY", t["bash"], f"{nid}: claude guard survived")
+                    self.assertIn("BILLING_GUARD=FAIL", t["bash"], f"{nid}: codex guard missing")
+                if agents_count and 'test -f "$SK/ce-code-review/SKILL.md"' in p["bash"]:
                     self.assertIn('$ASK/ce-code-review/SKILL.md', t["bash"], f"{nid}: .agents mirror missing")
-                if 'test -f "$SK/ce-doc-review/SKILL.md"' in p["bash"]:
+                if agents_count and 'test -f "$SK/ce-doc-review/SKILL.md"' in p["bash"]:
                     self.assertIn('$ASK/ce-doc-review/SKILL.md', t["bash"], f"{nid}: .agents doc mirror missing")
 
     def test_all_main_targets(self):
@@ -87,6 +114,10 @@ class TransformStats(unittest.TestCase):
             _, _, stats = dc.derive(t)
             self.assertEqual(stats["guard_swaps"], 1, f"{t}: guard_swaps={stats['guard_swaps']}")
             self.assertEqual(stats["agents_inserts"], 1, f"{t}: agents_inserts={stats['agents_inserts']}")
+            self.assertGreater(stats["caps_stripped"], 0, f"{t}: no Codex caps stripped")
+            self.assertEqual(stats["control_guards"], 1 if t in dc.GUARDED_TARGETS else 0, t)
+            expected_rewrites = 12 if t == "bugfix" else (6 if t in dc.LITE_TARGETS else 0)
+            self.assertEqual(stats["control_rewrites"], expected_rewrites, t)
 
     def test_wraps_have_no_guard(self):
         for t in ["wrap-review", "wrap-docreview", "wrap-fixer", "wrap-implement"]:
@@ -105,12 +136,27 @@ class PinReviewClaude(unittest.TestCase):
             self.assertEqual(n.get("model"), "sonnet", f"{n['id']}: pinned node lost its model")
 
     def test_default_is_codex_native(self):
+        parent = load(ARCHON / "workflows" / "bugfix.yaml")
+        skill_ids = {n["id"]: n["skills"] for n in walk(parent["nodes"]) if n.get("skills")}
         _, text, _ = dc.derive("bugfix")
         twin = yaml.safe_load(text)
         for n in walk(twin["nodes"]):
-            if n.get("skills"):
+            if n["id"] in skill_ids:
                 self.assertNotIn("provider", n, f"{n['id']}: pinned without the flag")
                 self.assertNotIn("model", n, f"{n['id']}: sonnet not stripped on skills node")
+                self.assertNotIn("skills", n, f"{n['id']}: unsupported skills key survived")
+                for skill in skill_ids[n["id"]]:
+                    self.assertIn(f"${skill}", n["prompt"])
+
+    def test_capability_lint_rejects_unsupported_fields(self):
+        for field in sorted(dc.UNSUPPORTED_CODEX_FIELDS):
+            with self.subTest(field=field):
+                with self.assertRaises(dc.CodexError):
+                    dc.enforce_capabilities({"id": "x", field: True}, "fixture")
+
+    def test_capability_lint_rejects_named_resume(self):
+        with self.assertRaises(dc.CodexError):
+            dc.enforce_capabilities({"id": "x", "context": {"resume": "plan"}}, "fixture")
 
 
 class DriftGate(unittest.TestCase):
@@ -147,6 +193,71 @@ class GuardTextProperties(unittest.TestCase):
         self.assertIn("\nPY_BILLING\n", pre["bash"], "heredoc terminator indented or missing")
         r = subprocess.run(["bash", "-n"], input=pre["bash"], capture_output=True, encoding="utf-8")
         self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_lite_control_guard_requires_guarded_launcher(self):
+        _, text, stats = dc.derive("bugfix-lite")
+        twin = yaml.safe_load(text)
+        guard = next(n for n in twin["nodes"] if n["id"] == "codex-control-guard")
+        self.assertTrue(guard["always_run"])
+        self.assertIn("ARCHON_CODEX_LITE_GUARD_FILE", guard["bash"])
+        self.assertIn("os.unlink(p)", guard["bash"])
+        self.assertIn("CODEX_CONTROL_GUARD=FAIL", guard["bash"])
+        self.assertEqual(stats["control_guards"], 1)
+
+    def test_lite_control_guard_consumes_one_time_file(self):
+        _, text, _ = dc.derive("bugfix-lite")
+        guard = next(n for n in yaml.safe_load(text)["nodes"] if n["id"] == "codex-control-guard")
+        with tempfile.TemporaryDirectory() as td:
+            nonce = "a" * 64
+            control_dir = Path(pwd.getpwuid(os.getuid()).pw_dir) / ".archon/control/codex-lite"
+            control_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+            marker = control_dir / f"guard-{nonce}"
+            if marker.exists():
+                marker.unlink()
+            marker.write_text(f"codex-lite-one-time-guard:{nonce}\n", encoding="utf-8")
+            marker.chmod(0o600)
+            env = dict(os.environ, HOME=td, ARCHON_CODEX_LITE_GUARD_FILE=str(marker))
+            first = subprocess.run(["bash", "-c", guard["bash"]], capture_output=True, encoding="utf-8", env=env)
+            second = subprocess.run(["bash", "-c", guard["bash"]], capture_output=True, encoding="utf-8", env=env)
+            if marker.exists():
+                marker.unlink()
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertIn("one_time=consumed", first.stdout)
+        self.assertEqual(second.returncode, 1)
+        self.assertIn("CODEX_CONTROL_GUARD=FAIL", second.stdout)
+
+    def test_lite_control_guard_refuses_attacker_selected_marker(self):
+        _, text, _ = dc.derive("bugfix-lite")
+        guard = next(n for n in yaml.safe_load(text)["nodes"] if n["id"] == "codex-control-guard")
+        with tempfile.TemporaryDirectory() as td:
+            marker = Path(td) / ("guard-" + "b" * 64)
+            marker.write_text("codex-lite-one-time-guard:" + "b" * 64 + "\n", encoding="utf-8")
+            marker.chmod(0o600)
+            env = dict(os.environ, HOME=str(Path(td) / "home"), ARCHON_CODEX_LITE_GUARD_FILE=str(marker))
+            result = subprocess.run(["bash", "-c", guard["bash"]], capture_output=True, encoding="utf-8", env=env)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("fixed private control directory", result.stdout)
+
+    def test_lite_packets_use_guarded_control_commands(self):
+        for target in dc.LITE_TARGETS:
+            with self.subTest(target=target):
+                _, text, stats = dc.derive(target)
+                self.assertIn("archon-run.py approve <id>", text)
+                self.assertIn("archon-run.py reject <id>", text)
+                self.assertIn("archon-run.py abandon <id>", text)
+                self.assertIn("archon-run.py resume <id>", text)
+                self.assertIn("--token CONTROL_TOKEN_FROM_LAST_LAUNCH", text)
+                self.assertNotIn("DISABLE_OMC=1 archon workflow approve <id>", text)
+                self.assertIn('grep -qF "archon-run.py $v"', text)
+                self.assertNotIn('grep -qF "archon workflow $v"', text)
+                self.assertIn("for v in approve reject abandon resume; do", text)
+                self.assertEqual(stats["control_rewrites"], 6)
+
+    def test_full_bugfix_packets_guard_resume_recovery_too(self):
+        _, text, stats = dc.derive("bugfix")
+        self.assertNotIn("archon workflow resume <id>", text)
+        self.assertIn("archon-run.py resume <id> --token CONTROL_TOKEN_FROM_LAST_LAUNCH", text)
+        self.assertEqual(stats["control_rewrites"], 12)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,1 @@
+{"schema_version": 2, "coverage": [{"symptom_id": "E1", "cause_id": "H1", "occurrence_attributed": true, "planned_diff": ["src/foo.ts"], "red_test": "src/__tests__/foo.spec.ts::does the thing", "counterfactual_user_visible": true}]}

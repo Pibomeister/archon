@@ -56,26 +56,25 @@ packet carries. Resolve this run's id by running: basename "$ARTIFACTS_DIR"
 and use that literal id in every command below. Never print the
 placeholder <run-id>. Lead with one sentence saying the run is paused
 because it finished this stage and is now waiting on a person, which is
-how the stage is supposed to end and not a failure. Then the three
+how the stage is supposed to end and not a failure. Then the four
 commands, each in its own code chip with a short label saying when to
 pick it:
   DISABLE_OMC=1 archon workflow approve <id> </dev/null >/tmp/archon-approve.log 2>&1 &
   DISABLE_OMC=1 archon workflow reject <id> "why you are stopping it"
   DISABLE_OMC=1 archon workflow abandon <id>
-Say that approve runs the rest of the workflow inside the terminal it is
-typed in and holds that terminal until the run ends, which is why it is
-backgrounded, and that a failed resume still leaves the approval
-recorded so archon workflow resume <id> picks it up. Say that reject
+  DISABLE_OMC=1 archon workflow resume <id>
+Say to run each command exactly as rendered: it already manages whether
+backgrounding is required for this provider. A failed continuation still
+leaves the approval recorded, so the rendered resume command picks it up.
+Say that reject
 records the reason typed after it and sends the plan back for one
 revision pass: the run reworks it against that reason and pauses here
-again, so reject holds the terminal exactly the way approve does and
-wants the same backgrounding. Say the third rejection cancels the run
+again. Say the third rejection cancels the run
 instead of reworking, and that abandon ends the run outright with no
 rework. Say that after approval the envelope is checked AGAIN against the
 plan as it stands then, so a plan that grew at this gate stops before any
-code is written. Files already written stay on disk either way. Close
-with one line: these three verbs do not appear in archon --help, but they
-are real.
+code is written. Files already written stay on disk either way. Close by
+saying the rendered control commands are the supported interface for this run.
 
 Writing rules for every section: plain sentences with varied length; no
 em dashes; no vocabulary like "crucial", "leverage", "robust", "seamless",

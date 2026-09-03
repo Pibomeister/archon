@@ -84,10 +84,25 @@ class CodexUsage(unittest.TestCase):
         self.assertIn("CODEX_USAGE run=feedbeef sessions=1 input=10", r.stdout)
 
     def test_unknown_run_fails_typed(self):
-        r = subprocess.run([sys.executable, str(SCRIPT), "nope", "--codex-home", str(self.home), "--db", str(self.db)],
+        r = subprocess.run([sys.executable, str(SCRIPT), "deadbeef", "--codex-home", str(self.home), "--db", str(self.db)],
                            capture_output=True, encoding="utf-8")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("CODEX_USAGE=FAIL no run matching", r.stdout + r.stderr)
+
+    def test_ambiguous_prefix_fails_typed(self):
+        con = sqlite3.connect(self.db)
+        con.execute("INSERT INTO remote_agent_workflow_runs VALUES ('feedbeef5678', '2026-08-31 12:01:00', NULL, NULL)")
+        con.commit(); con.close()
+        r = self.run_script("--json")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("CODEX_USAGE=FAIL ambiguous prefix", r.stdout + r.stderr)
+
+    def test_invalid_prefix_fails_before_query(self):
+        r = subprocess.run([sys.executable, str(SCRIPT), "feedbeef%' OR 1=1 --",
+                            "--codex-home", str(self.home), "--db", str(self.db)],
+                           capture_output=True, encoding="utf-8")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("CODEX_USAGE=FAIL bad-id-format", r.stdout + r.stderr)
 
 
 if __name__ == "__main__":

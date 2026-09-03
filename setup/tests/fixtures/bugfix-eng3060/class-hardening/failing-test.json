@@ -1,0 +1,8 @@
+{
+  "repo": "web-app",
+  "kind": "unit",
+  "test_file": "src/groupParticipants.h3.test.ts",
+  "test_name": "keeps visible people when participant metadata uses numeric strings",
+  "command": "pnpm test -- groupParticipants.h3.test.ts",
+  "predicted_failure_signature": "Sahiba missing and Outputs contact collapsed"
+}

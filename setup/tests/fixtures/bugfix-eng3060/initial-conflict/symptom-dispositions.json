@@ -1,0 +1,20 @@
+{
+  "schema_version": 2,
+  "dispositions": [
+    {
+      "symptom_id": "E1",
+      "disposition": "unresolved",
+      "reason": "H1 contradicted; Granola symptom still active"
+    },
+    {
+      "symptom_id": "E2",
+      "disposition": "unresolved",
+      "reason": "H1 contradicted before occurrence attribution"
+    },
+    {
+      "symptom_id": "E3",
+      "disposition": "unresolved",
+      "reason": "H1 contradicted before occurrence attribution"
+    }
+  ]
+}

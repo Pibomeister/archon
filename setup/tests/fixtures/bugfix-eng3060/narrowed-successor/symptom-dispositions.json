@@ -1,0 +1,13 @@
+{
+  "schema_version": 2,
+  "dispositions": [
+    {
+      "symptom_id": "E2",
+      "disposition": "fixed"
+    },
+    {
+      "symptom_id": "E3",
+      "disposition": "fixed"
+    }
+  ]
+}

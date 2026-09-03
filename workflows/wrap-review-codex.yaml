@@ -15,11 +15,10 @@ nodes:
 - id: review
   depends_on:
   - pre
-  maxBudgetUsd: 15
   timeout: 1800000
-  skills:
-  - ce-code-review
   prompt: |
+    Use $ce-code-review explicitly for this node.
+
     The repository to review is at this absolute path:
       /private/tmp/claude-501/-Users-eduardopicazo-Documents-Workspace-Goodword/88bb31f2-0094-41b2-bd3f-8409f1264538/scratchpad/m1-fixture/repo
     Your current working directory is NOT that repository — cd into it for every git command.

@@ -1,0 +1,6 @@
+{
+  "residuals": [
+    {"symptom": "Sahiba missing", "disposition": "fixed-by-this-chain", "citation": "src/groupParticipants.h3.test.ts"},
+    {"symptom": "Outputs one contact", "disposition": "fixed-by-this-chain", "citation": "src/groupParticipants.h3.test.ts"}
+  ]
+}

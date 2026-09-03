@@ -45,11 +45,11 @@ Add `-y` to merge the derived permissions allowlist (`allowlist.json` — read-o
 
 ## After install
 
-Two Claude skills are staged into `<root>/.claude/skills/` alongside the CE ones: **`archon-install`** (set up or repair this stack) and **`archon-sdlc`** (start a run, read the plan-gate packet, interpret review-loop exits, decide resume vs escalate). Say the skill name in a Claude session at the root. Both cite the runbook rather than restating it, and neither will release the plan gate or merge a PR — those stay human.
+Three operator skills are staged into both `<root>/.claude/skills/` and `<root>/.agents/skills/`: **`archon-install`** (set up or repair this stack), **`archon-sdlc`** (start and supervise a run), and **`archon-linear`** (read-only Linear intake into an immutable snapshot, then supported routing). They are not copied into the dedicated workflow-node Codex home. Say the skill name in a Claude or Codex operator session at the root. They cite the runbook rather than restating it, and do not merge a PR.
 
-This gist ships nine workflows: `babysit`, `bugfix`, `bugfix-lite`, `bugfix-smoke-deployed`, `cleanup`, `full-sdlc-api`, `full-sdlc-api-lite`, `full-sdlc-web`, `register-probe`. The two `-lite` lanes are generated files (`archon__setup__derive-lite.py` plus the `archon__setup__lite__*` manifests and overlays); never hand-edit them. If `archon workflow run <name>` reports `Workflow '<name>' not found`, compare against this list and `<root>/.archon/VERSION` — an older install predates the lane.
+This gist ships fourteen workflows: the nine Claude workflows (`babysit`, `bugfix`, `bugfix-lite`, `bugfix-smoke-deployed`, `cleanup`, `full-sdlc-api`, `full-sdlc-api-lite`, `full-sdlc-web`, `register-probe`) plus five generated Codex twins. The two `-lite` lanes and all `-codex` lanes are generated; never hand-edit them. If a workflow is missing, compare against `<root>/.archon/VERSION`.
 
-Read `archon__RUNBOOK.md` (installed to `<root>/.archon/RUNBOOK.md`). Short version: run lanes with `DISABLE_OMC=1 archon workflow run …` from the root, capture full logs to a file, review the plan packet when the run pauses, release the gate with `archon workflow approve <run-id>` (backgrounded), and remember every run spends **your** Claude subscription quota.
+Read `archon__RUNBOOK.md` (installed to `<root>/.archon/RUNBOOK.md`). Claude lanes use `DISABLE_OMC=1 archon workflow run …`. Lite Codex lanes MUST use `python3 .archon/setup/archon-run.py`; it validates the dedicated home/external index, forces narrow workspace-write roots through a private wrapper, and arms the watchdog. Preserve the control token printed on each `STARTED` line and use it in the packet-rendered gate command.
 
 ## File naming
 

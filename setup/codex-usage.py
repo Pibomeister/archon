@@ -20,6 +20,7 @@ import json
 import os
 import sqlite3
 import sys
+import re
 
 
 def parse_ts(s):
@@ -31,13 +32,20 @@ def run_window(db, run_prefix):
     NOT usable: a resume rewrites started_at, so a resumed run's row covers only
     the last process and under-counts every earlier session."""
     con = sqlite3.connect(db)
-    row = con.execute(
-        "SELECT id FROM remote_agent_workflow_runs WHERE id LIKE ? ORDER BY started_at DESC LIMIT 1",
+    if not re.fullmatch(r"[0-9a-fA-F]{8,32}", run_prefix):
+        con.close()
+        raise SystemExit(f"CODEX_USAGE=FAIL bad-id-format {run_prefix!r}")
+    rows = con.execute(
+        "SELECT id FROM remote_agent_workflow_runs WHERE id LIKE ? ORDER BY started_at DESC LIMIT 3",
         (run_prefix + "%",),
-    ).fetchone()
-    if not row:
+    ).fetchall()
+    if not rows:
         con.close()
         raise SystemExit(f"CODEX_USAGE=FAIL no run matching {run_prefix!r}")
+    if len(rows) != 1:
+        con.close()
+        raise SystemExit(f"CODEX_USAGE=FAIL ambiguous prefix {run_prefix!r} matches={len(rows)}")
+    row = rows[0]
     ev = con.execute(
         "SELECT min(created_at), max(created_at) FROM remote_agent_workflow_events WHERE workflow_run_id = ?",
         (row[0],),

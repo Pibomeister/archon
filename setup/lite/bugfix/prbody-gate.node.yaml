@@ -1,0 +1,8 @@
+id: prbody-gate
+depends_on:
+- prbody
+timeout: 120000
+bash: |
+  set -euo pipefail
+  python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-lite-prbody.py \
+    bugfix "$ARTIFACTS_DIR"

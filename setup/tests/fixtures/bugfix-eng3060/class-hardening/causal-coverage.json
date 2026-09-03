@@ -1,0 +1,9 @@
+{
+  "schema_version": 2,
+  "coverage": [
+    {"symptom_id": "E1", "cause_id": "H3", "occurrence_attributed": false, "planned_diff": ["web-app/src/groupParticipants.ts"], "red_test": "web-app/src/groupParticipants.h3.test.ts::class hardening keeps provider row unchanged", "counterfactual_user_visible": false},
+    {"symptom_id": "E2", "cause_id": "H3", "occurrence_attributed": true, "planned_diff": ["web-app/src/groupParticipants.ts"], "red_test": "web-app/src/groupParticipants.h3.test.ts::keeps Sahiba visible with numeric-string metadata", "counterfactual_user_visible": true},
+    {"symptom_id": "E3", "cause_id": "H3", "occurrence_attributed": true, "planned_diff": ["web-app/src/groupParticipants.ts"], "red_test": "web-app/src/groupParticipants.h3.test.ts::keeps duplicate Outputs contacts visible", "counterfactual_user_visible": true}
+  ],
+  "expected_classification": {"implementation_result": "PARTIAL_FIX", "ticket_disposition": "OPEN", "ticket_closure_allowed": false, "open_symptom_ids": ["E1"]}
+}

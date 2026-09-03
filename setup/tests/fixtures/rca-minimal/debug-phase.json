@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "phases": [
+    "root-cause-investigation",
+    "pattern-analysis",
+    "hypothesis-testing",
+    "implementation"
+  ],
+  "reproduction_status": "reproduced",
+  "investigation_complete": true,
+  "fix_attempt_count": 0
+}

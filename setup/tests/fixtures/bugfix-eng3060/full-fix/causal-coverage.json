@@ -1,0 +1,9 @@
+{
+  "schema_version": 2,
+  "coverage": [
+    {"symptom_id": "E1", "cause_id": "H4", "occurrence_attributed": true, "planned_diff": ["web-app/src/groupParticipants.ts"], "red_test": "web-app/src/groupParticipants.eng3060.test.ts::hides Granola provider row", "counterfactual_user_visible": true},
+    {"symptom_id": "E2", "cause_id": "H4", "occurrence_attributed": true, "planned_diff": ["web-app/src/groupParticipants.ts"], "red_test": "web-app/src/groupParticipants.eng3060.test.ts::shows Sahiba", "counterfactual_user_visible": true},
+    {"symptom_id": "E3", "cause_id": "H4", "occurrence_attributed": true, "planned_diff": ["web-app/src/groupParticipants.ts"], "red_test": "web-app/src/groupParticipants.eng3060.test.ts::shows multiple Outputs contacts", "counterfactual_user_visible": true}
+  ],
+  "expected_classification": {"implementation_result": "FULL_FIX", "ticket_disposition": "RESOLVED", "ticket_closure_allowed": true}
+}

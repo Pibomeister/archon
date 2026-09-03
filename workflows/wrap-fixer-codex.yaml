@@ -13,7 +13,6 @@ nodes:
 - id: fixer
   depends_on:
   - seed-envelope
-  maxBudgetUsd: 5
   timeout: 1200000
   prompt: |
     You are the fixer node in an unattended review-fix loop. Ask no questions.

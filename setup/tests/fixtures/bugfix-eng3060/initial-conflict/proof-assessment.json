@@ -1,0 +1,21 @@
+{
+  "schema_version": 2,
+  "selected_hypothesis": "H1",
+  "hypotheses": [
+    {
+      "id": "H1",
+      "summary": "Granola matcher explains the observed group participant set.",
+      "mechanism_validity": "contradicted",
+      "occurrence_attribution": "rejected",
+      "evidence": [
+        "experiment showed the matcher does not control the Granola icon path"
+      ]
+    }
+  ],
+  "conflict": {
+    "type": "CHAIN_CONFLICT",
+    "retires_hypothesis": "H1",
+    "recovery_transition": "return-to-investigation"
+  },
+  "incidental_finding": false
+}

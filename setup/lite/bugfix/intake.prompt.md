@@ -2,8 +2,11 @@ You are the bug-intake node in an unattended pipeline. Ask no questions.
 Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
 Read bug-report.md there. The report may be thin (a Sentry link, a Linear
 id, a paragraph) or rich. Your job is normalization, not diagnosis.
+If continuation-context.json exists, also read every file under continuation/.
+The controller will restore the inherited symptoms.json after this node: do not
+reinterpret, narrow, renumber, or drop those inherited source symptoms.
 
-Write TWO files to that directory:
+Write FOUR files to that directory:
 
 1) bug-report-normalized.md — a short structured restatement (symptom,
 where observed, when, who reported), followed by the COMPLETE original
@@ -42,6 +45,18 @@ absence, never pad. Convert relative dates ("yesterday") to absolute
 using the date command. repo_hint is your best single guess from the
 report's surface (routes, component names, stack frames); "unknown" is
 allowed and common.
+3) symptoms.json — the immutable ticket-scope ledger, extracted from the
+ORIGINAL bug-report.md. Preserve every independently observable expected/actual
+pair and do not silently merge ambiguous duplicates. Use schema_version 2,
+revision 1, previous_revision_hash null, ledger_root_hash as 64 zeroes,
+ledger_revision_hash null, contiguous source_symptoms S1..Sn and matching
+effective_symptoms E1..En in source order. Each source row carries claim,
+source_document "bug-report.md", source_field "report", an exact source_quote,
+its UTF-8 byte_span {start,end exclusive}, source_order, expected_behavior and
+actual_behavior. Each effective row references its source ID, uses relation
+"same-as-source", and repeats claim/expected/actual. Use a byte-oriented script
+to find exact offsets; never estimate. At least one symptom is required.
+
 Also write triage.json to that same directory. It is the lite-lane size
 verdict; a mechanical gate (setup/lite-envelope.sh) reads it and routes an
 oversized ticket to the full lane. Schema:

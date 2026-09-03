@@ -100,14 +100,46 @@ class RcaShapeTest(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("files-allowlist must include test_file", r.stdout)
 
+    def test_verify_patterns_reject_non_unit_specs(self):
+        minimal_artifacts(self.tmp)
+        write(self.tmp, "verify.json", {"test_patterns": [
+            "src/__tests__/foo.spec.ts",
+            "apps/api-e2e/src/eval/search-eval.int.spec.ts",
+        ]})
+        r = run(self.tmp)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("test_patterns must be unit specs", r.stdout)
+
     def test_fix_plan_files_not_subset_of_allowlist_fails(self):
         minimal_artifacts(self.tmp)
         d = json.loads((self.tmp / "fix-plan.json").read_text())
-        d["files"] = ["src/foo.ts", "src/foo.spec.ts", "src/sneaky.ts"]
+        d["files"] = ["src/foo.ts", "src/__tests__/foo.spec.ts", "src/sneaky.ts"]
         write(self.tmp, "fix-plan.json", d)
         r = run(self.tmp)
         self.assertEqual(r.returncode, 1)
         self.assertIn("fix-plan.files not subset of files-allowlist", r.stdout)
+
+    def test_ambiguous_no_plan_investigation_stops_with_typed_open_state(self):
+        minimal_artifacts(self.tmp)
+        boundary = json.loads((self.tmp / "boundary-trace.json").read_text())
+        boundary["surface_equivalence"].update({
+            "reported_surface_status": "ambiguous",
+            "runtime_owner": "unselected",
+            "test_runtime_owner": "candidate-only",
+            "smoke_runtime_owner": "unselected",
+            "test_matches_runtime": False,
+            "smoke_matches_runtime": False,
+        })
+        write(self.tmp, "boundary-trace.json", boundary)
+        write(self.tmp, "fix-plan.json", {
+            "approach": "", "fix_site": "", "files": [], "risks": [], "alternatives": []
+        })
+        r = run(self.tmp)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn(
+            "RCA_INVESTIGATION_REQUIRED reason=surface-ambiguous ticket=open no_implementation=true",
+            r.stdout,
+        )
 
     def test_writes_repo_txt_on_pass(self):
         # rca-gate (bugfix.yaml:721) writes repo.txt after validation and 9
@@ -150,11 +182,11 @@ class RcaShapeTest(unittest.TestCase):
 
     def test_allowlist_files_wrapper_shape_normalized(self):
         minimal_artifacts(self.tmp)
-        write(self.tmp, "files-allowlist.json", {"files": ["src/foo.ts", "src/foo.spec.ts"]})
+        write(self.tmp, "files-allowlist.json", {"files": ["src/foo.ts", "src/__tests__/foo.spec.ts"]})
         r = run(self.tmp)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         normalized = json.loads((self.tmp / "files-allowlist.json").read_text())
-        self.assertEqual(normalized, ["src/foo.ts", "src/foo.spec.ts"])
+        self.assertEqual(normalized, ["src/foo.ts", "src/__tests__/foo.spec.ts"])
 
 
 if __name__ == "__main__":

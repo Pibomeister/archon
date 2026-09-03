@@ -17,7 +17,8 @@ nodes:
       mise x node@20 -- node -v | grep -q '^v20' || { echo "PREFLIGHT=FAIL node20 via mise unavailable"; exit 1; }
       command -v gh >/dev/null && gh auth status >/dev/null 2>&1 || { echo "PREFLIGHT=FAIL gh unauthenticated"; exit 1; }
       command -v agent-browser >/dev/null || { echo "PREFLIGHT=FAIL agent-browser missing"; exit 1; }
-      aws sts get-caller-identity >/dev/null 2>&1 || { echo "PREFLIGHT=FAIL aws session expired - run: aws login"; exit 1; }
+      command -v aws >/dev/null 2>&1 && aws sts get-caller-identity >/dev/null 2>&1 \
+        || echo "PREFLIGHT_WARN aws unavailable or expired - AWS evidence/runtime integrations may degrade; workflow control continues"
       for v in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_PROFILE; do
         test -z "$(printenv "$v")" || { echo "PREFLIGHT=FAIL $v is set - would bill API, not subscription"; exit 1; }
       done

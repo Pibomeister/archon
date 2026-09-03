@@ -1,0 +1,1 @@
+{"independent_root_cause":"exclusive bound","evidence":["src/foo.ts:42"],"comparison":{"verdict":"agree","links":[{"index":1,"verdict":"agree","note":"matches"}],"note":"agrees"}}

@@ -195,11 +195,34 @@ def check_impact():
     syms = imp.get("symbols")
     if not isinstance(syms, list):
         full("malformed", "impact.json symbols is not a list")
+    if status == "GATHERED" and not syms:
+        full("impact", "impact.json status=GATHERED but symbols is empty (new symbols must use SKIPPED)")
+    if status in ("UNAVAILABLE", "SKIPPED") and syms:
+        full("malformed", f"impact.json status={status} must carry an empty symbols list")
     d1 = 0
-    for s in syms:
+    for i, s in enumerate(syms):
+        if not isinstance(s, dict):
+            full("malformed", f"impact.json symbols[{i}] is not an object")
+        name = s.get("name")
+        file = s.get("file")
+        risk = s.get("risk")
+        if not isinstance(name, str) or not name.strip() or not isinstance(file, str) or not file.strip():
+            full("malformed", f"impact.json symbols[{i}] needs non-empty name/file")
+        if risk not in ("LOW", "MEDIUM", "HIGH", "CRITICAL"):
+            full("malformed", f"impact.json symbols[{i}] risk out of enum")
         callers = s.get("d1_callers") if isinstance(s, dict) else None
-        if not isinstance(callers, list):
+        if not isinstance(callers, list) or not all(isinstance(c, str) and c.strip() for c in callers):
             full("malformed", "impact.json symbol without d1_callers list")
+        if status == "GATHERED":
+            query_status = s.get("query_status")
+            query_repo = s.get("query_repo")
+            query_target = s.get("query_target")
+            if query_status != "GATHERED":
+                full("impact", f"symbol {name!r} query_status={query_status!r}; every graph query must succeed")
+            if query_repo != "api":
+                full("impact", f"symbol {name!r} query_repo={query_repo!r}; expected the pinned api index")
+            if not isinstance(query_target, str) or not query_target.strip():
+                full("impact", f"symbol {name!r} has no query_target provenance")
         d1 += len(callers)
     if d1 > env["max_d1_callers"]:
         full("d1_callers", f"{d1}/{env['max_d1_callers']}")

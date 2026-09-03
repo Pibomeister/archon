@@ -9,7 +9,8 @@ test -f "$SK/ce-doc-review/SKILL.md"  || { echo "PREFLIGHT=FAIL staged ce-doc-re
 command -v bun >/dev/null || { echo "PREFLIGHT=FAIL bun missing"; exit 1; }
 command -v gh >/dev/null || { echo "PREFLIGHT=FAIL gh missing"; exit 1; }
 gh auth status >/dev/null 2>&1 || { echo "PREFLIGHT=FAIL gh unauthenticated"; exit 1; }
-aws sts get-caller-identity >/dev/null 2>&1 || { echo "PREFLIGHT=FAIL aws session expired - run: aws login"; exit 1; }
+command -v aws >/dev/null 2>&1 && aws sts get-caller-identity >/dev/null 2>&1 \
+  || echo "PREFLIGHT_WARN aws unavailable or expired - AWS evidence/runtime integrations may degrade; workflow control continues"
 # Billing guard: runs MUST bill the Claude subscription (OAuth /login), never the API.
 # Any of these outranks the subscription login in Claude Code's auth precedence.
 for v in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_PROFILE; do

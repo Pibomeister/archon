@@ -1,0 +1,8 @@
+id: codex-control-guard
+always_run: true
+timeout: 60000
+bash: |
+  set -euo pipefail
+  # Claude lite is unrestricted here. derive-codex.py replaces this typed no-op
+  # with the mandatory guarded-launch assertion in the Codex twin.
+  echo "CODEX_CONTROL_GUARD=PASS provider=claude"

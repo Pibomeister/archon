@@ -1,8 +1,9 @@
 You are the PR-body composition node. Ask no questions.
 Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
-This is the LITE lane. Read there: rca.md, causal-chain.json,
+This is the LITE lane. Read there: fix-classification.json, symptoms.json,
+symptom-dispositions.json, causal-coverage.json, rca.md, causal-chain.json,
 failing-test.json, evidence-plan.json (repro_command, repro_observed),
-smoke-result.txt, residuals.json, eval-result.txt, sibling-sweep.json,
+smoke-result.txt, smoke-matrix-result.txt, residuals.json, eval-result.txt, sibling-sweep.json,
 negcontrol-postgreen.txt, negcontrol-exit.txt, red-sha.txt,
 envelope-post.txt, round.txt (final round N), then
 round-<N>/review-summary.json and round-<N>/fixer-result.json.
@@ -15,12 +16,16 @@ with exactly these sections:
   ## Proof
   ## Known Residuals
   ## Post-Deploy Monitoring & Validation
-Summary opens with the line: Lane: bugfix-lite
+Summary opens with the line: Lane: bugfix-lite, followed by the
+deterministic classification banner:
+implementation_result=<value> ticket_disposition=<value>
+approval_scope=<value> ticket_closure_allowed=<true|false>.
+For this lane the implementation_result must be FULL_FIX; otherwise the
+gate routes the same provider to the full bugfix lane before approval.
 Lane contains the contents of envelope-post.txt VERBATIM in a fenced
-block, then one sentence stating that this lane gathered no production
-evidence, ran no blind chain verification, planning critic, live
-experiment, deslop pass, HTTP smoke or in-app smoke matrix, and that
-its proof is the Proof section below.
+block, then this exact sentence:
+"Lite omissions: no production evidence, blind chain verification, planning
+critic, live experiment, deslop pass, HTTP smoke, or in-app smoke matrix."
 Root Cause presents the causal chain verbatim from causal-chain.json —
 every link, each with its citation — ending at the fix site.
 Proof tells the red-green-refail story with real values, in this order:
@@ -32,9 +37,13 @@ exactly as recorded in negcontrol-postgreen.txt and negcontrol-exit.txt
 (their final NEGCONTROL=PASS lines); the smoke line exactly as recorded
 in smoke-result.txt (it reads SMOKE=SKIP lane=bugfix-lite on this
 lane; say in one sentence that HTTP smoke is not run on this lane by
-design); plus the EVAL_GATE line from eval-result.txt when it says
+design); the smoke-matrix skip line exactly as recorded in
+smoke-matrix-result.txt; plus the EVAL_GATE line from eval-result.txt when it says
 anything other than SKIP.
-Known Residuals has three sources, all mandatory when non-empty:
+Known Residuals has four sources, all mandatory when non-empty:
+every non-fixed symptom-dispositions.json row, including product-semantics,
+class-hardening-only and unresolved rows, with a plain statement that this
+PR does not close those reported symptoms;
 every residuals.json entry with disposition separate-bug (quote the
 symptom, repo, and ticket_stub — these are split tickets, and the
 reader must see the symptom was scoped out deliberately, not lost) or
