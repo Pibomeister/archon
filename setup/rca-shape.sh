@@ -18,17 +18,32 @@ set -euo pipefail
 AD="${1:?usage: rca-shape.sh <artifacts-dir>}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
+# A typed stop is the operator's only routing signal, but a failing node's
+# stdout does not survive the workflow executor's failure path -- it reports a
+# fragment of the script source instead, so every RCA_SHAPE=FAIL/
+# RCA_INVESTIGATION_REQUIRED reason is destroyed at the failure boundary.
+# Persist each typed line here, at the one chokepoint all four callers share,
+# so terminal supervision can read the discriminator back off the run dir.
+# Never let the surfacing path itself become a silent stop: if the run dir is
+# unwritable, degrade to stdout rather than aborting before any typed message.
+GATE_STATUS="$AD/gate-status.txt"
+{ : > "$GATE_STATUS"; } 2>/dev/null || true
+# Records typed STOPS only. The truncate above clears a previous round's stop,
+# so a run that passes this check and dies later has an empty file and no
+# discriminator, rather than inheriting a stale reason that misroutes triage.
+emit() { printf '%s\n' "$1"; { printf '%s\n' "$1" >> "$GATE_STATUS"; } 2>/dev/null || true; }
+
 # V2 bugfix contract: the immutable source/effective symptom ledger, exact
 # disposition/coverage bijections, lineage, occurrence proof, and closure
 # classification are deterministic gates rather than RCA prose.
 python3 "$HERE/bugfix-contract.py" normalize-gather-more "$AD" \
-  || { echo "RCA_SHAPE=FAIL gather-more normalization"; exit 1; }
+  || { emit "RCA_SHAPE=FAIL gather-more normalization"; exit 1; }
 CONTRACT_OUT="$(python3 "$HERE/bugfix-contract.py" validate-causal-coverage --artifacts "$AD" 2>&1)" || {
-  printf '%s\n' "$CONTRACT_OUT" | sed -E 's/^BUGFIX_(COVERAGE|CONTRACT)=FAIL/RCA_SHAPE=FAIL/'
+  emit "$(printf '%s\n' "$CONTRACT_OUT" | sed -E 's/^BUGFIX_(COVERAGE|CONTRACT)=FAIL/RCA_SHAPE=FAIL/')"
   exit 1
 }
 python3 "$HERE/bugfix-contract.py" classify "$AD" >/dev/null \
-  || { echo "RCA_SHAPE=FAIL classification"; exit 1; }
+  || { emit "RCA_SHAPE=FAIL classification"; exit 1; }
 
 # A thin report may truthfully end investigation without an implementation
 # plan. That is valid open work, but it must stop with a typed evidence request
@@ -47,7 +62,7 @@ else:
 PY
 )"
 if [ -n "$INVESTIGATION_REASON" ]; then
-  echo "RCA_INVESTIGATION_REQUIRED reason=$INVESTIGATION_REASON ticket=open no_implementation=true"
+  emit "RCA_INVESTIGATION_REQUIRED reason=$INVESTIGATION_REASON ticket=open no_implementation=true"
   exit 1
 fi
 
@@ -61,8 +76,17 @@ def load(name):
     return json.load(open(os.path.join(ad, name), encoding="utf-8"))
 
 
+def emit(line):
+    print(line)
+    try:
+        with open(os.path.join(ad, "gate-status.txt"), "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        pass  # stdout is still the primary channel; never mask a typed stop
+
+
 def fail(msg):
-    print(f"RCA_SHAPE=FAIL {msg}")
+    emit(f"RCA_SHAPE=FAIL {msg}")
     sys.exit(1)
 
 
@@ -192,5 +216,5 @@ if fp_files:
         fail(f"fix-plan.files not subset of files-allowlist: {missing}")
 
 open(os.path.join(ad, "repo.txt"), "w", encoding="utf-8").write(repo + "\n")
-print(f"RCA_SHAPE=OK repo={repo} kind={ft['kind']}")
+print(f"RCA_SHAPE=OK repo={repo} kind={ft['kind']}")  # success is not a stop: never persisted
 PY

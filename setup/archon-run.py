@@ -1254,6 +1254,30 @@ def enrich_gate_handoff(row: dict, result: dict) -> dict:
     return result
 
 
+def gate_discriminator(row: dict) -> str:
+    """Last typed stop line rca-shape.sh persisted for this run.
+
+    The workflow executor's failure path reports a fragment of the failing
+    node's own script source, not its stdout, so a typed RCA_SHAPE=FAIL /
+    RCA_INVESTIGATION_REQUIRED reason never reaches the operator through the
+    log. rca-shape.sh writes each typed line to gate-status.txt in the run dir;
+    read it back so a terminal `failed` carries a routable discriminator.
+    Absolute paths are stripped: this string is surfaced to operators and may
+    be pasted into tickets.
+    """
+    try:
+        lines = [
+            ln.strip()
+            for ln in (artifact_dir(row) / "gate-status.txt").read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        ]
+    except OSError:
+        return ""
+    if not lines:
+        return ""
+    return re.sub(r"(?:/[^\s:]+){2,}", "<path>", lines[-1])[:200]
+
+
 def supervise_exact_run(db: Path, run_id: str, timeout_s: int, interval_s: float = 2.0) -> dict:
     deadline = time.time() + timeout_s
     while True:
@@ -1268,7 +1292,11 @@ def supervise_exact_run(db: Path, run_id: str, timeout_s: int, interval_s: float
                 "lane": row["workflow_name"], "gate": gate_name_from_event(event),
             })
         if status in TERMINAL_STATUSES:
-            return {"state": "terminal", "run": row["id"], "status": status, "lane": row["workflow_name"]}
+            terminal = {"state": "terminal", "run": row["id"], "status": status, "lane": row["workflow_name"]}
+            discriminator = gate_discriminator(row)
+            if discriminator:
+                terminal["discriminator"] = discriminator
+            return terminal
         if time.time() >= deadline:
             return {"state": "handoff", "run": row["id"], "status": status, "lane": row["workflow_name"], "reason": "timeout"}
         time.sleep(interval_s)

@@ -1,0 +1,16 @@
+{
+  "experiment": {
+    "disconfirming_observation": "The stored mapping preserves all note-bound columns in one template or multiple Note targets and row-level replay creates and links every expected note.",
+    "prediction": "The customer's stored confirmed mapping retains only the final scalar Note.content source and replay omits earlier non-empty note-bound columns.",
+    "result": "pending"
+  },
+  "incidental_finding": true,
+  "mechanism_valid": true,
+  "occurrence_attributed": false,
+  "occurrence_evidence_sources": [
+    "report"
+  ],
+  "schema_version": 2,
+  "selected_hypothesis_id": "1",
+  "ticket_resolution_claim": "open"
+}

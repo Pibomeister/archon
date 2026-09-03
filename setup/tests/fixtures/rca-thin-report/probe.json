@@ -1,0 +1,1 @@
+{"probes":[],"none_reason":"No bounded SQL can identify or attribute the customer occurrence without an account, import ID, time window, filename, affected contact, or merge suggestion ID; a population scan would not settle the critical unknown."}

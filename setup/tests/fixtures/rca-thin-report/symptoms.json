@@ -1,0 +1,83 @@
+{
+  "schema_version": 2,
+  "ledger_root_hash": "306ca40028fb5f6236b3671730eae661bca325393d40619c4336633af54a19e2",
+  "ledger_revision_hash": "f9292e9693c1a8eebf8840e672a6944a19a8ab550f7fb0109f25ea4cd54efbb9",
+  "revision": 1,
+  "previous_revision_hash": null,
+  "source_symptoms": [
+    {
+      "id": "S1",
+      "claim": "Expected contact notes are missing after a Mesh import.",
+      "source_document": "bug-report.md",
+      "source_field": "report",
+      "source_quote": "Goodword reported 24 notes and 672 actions, but spot checks found expected contact notes missing.",
+      "byte_span": {
+        "start": 875,
+        "end": 972
+      },
+      "source_order": 1,
+      "expected_behavior": "Expected contact notes from non-empty note-bound import values are saved and linked to the contact from the same row.",
+      "actual_behavior": "Spot checks found expected contact notes missing after the import reported 24 notes and 672 actions."
+    },
+    {
+      "id": "S2",
+      "claim": "Duplicate-contact merge attempts repeatedly fail.",
+      "source_document": "bug-report.md",
+      "source_field": "report",
+      "source_quote": "The customer also reports repeated duplicate-merge failures",
+      "byte_span": {
+        "start": 974,
+        "end": 1033
+      },
+      "source_order": 2,
+      "expected_behavior": "A valid confirmed duplicate pair merges once and leaves one surviving contact, while blocked cases return a distinct reason.",
+      "actual_behavior": "The customer reports repeated duplicate-merge failures."
+    },
+    {
+      "id": "S3",
+      "claim": "Product guidance conflicts about whether Sales Navigator extends person discovery.",
+      "source_document": "bug-report.md",
+      "source_field": "report",
+      "source_quote": "conflicting guidance about whether Sales Navigator extends Goodword's person discovery.",
+      "byte_span": {
+        "start": 1038,
+        "end": 1125
+      },
+      "source_order": 3,
+      "expected_behavior": "Onboarding and the AI assistant describe the same Sales Navigator capability and limits.",
+      "actual_behavior": "The customer received conflicting guidance about whether Sales Navigator extends Goodword's person discovery."
+    }
+  ],
+  "effective_symptoms": [
+    {
+      "id": "E1",
+      "source_ids": [
+        "S1"
+      ],
+      "relation": "same-as-source",
+      "claim": "Expected contact notes are missing after a Mesh import.",
+      "expected_behavior": "Expected contact notes from non-empty note-bound import values are saved and linked to the contact from the same row.",
+      "actual_behavior": "Spot checks found expected contact notes missing after the import reported 24 notes and 672 actions."
+    },
+    {
+      "id": "E2",
+      "source_ids": [
+        "S2"
+      ],
+      "relation": "same-as-source",
+      "claim": "Duplicate-contact merge attempts repeatedly fail.",
+      "expected_behavior": "A valid confirmed duplicate pair merges once and leaves one surviving contact, while blocked cases return a distinct reason.",
+      "actual_behavior": "The customer reports repeated duplicate-merge failures."
+    },
+    {
+      "id": "E3",
+      "source_ids": [
+        "S3"
+      ],
+      "relation": "same-as-source",
+      "claim": "Product guidance conflicts about whether Sales Navigator extends person discovery.",
+      "expected_behavior": "Onboarding and the AI assistant describe the same Sales Navigator capability and limits.",
+      "actual_behavior": "The customer received conflicting guidance about whether Sales Navigator extends Goodword's person discovery."
+    }
+  ]
+}

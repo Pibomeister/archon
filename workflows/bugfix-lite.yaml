@@ -576,7 +576,14 @@ nodes:
         "note": "<what killed or confirmed it>"}]
 
     repo.json — {"repo": "api" | "web-app" | "both", "rationale": "<one line>"}
+    Select the repository that OWNS the mechanism this chain actually fixes — the
+    fix site, not the union of every repo a symptom touches. A report whose symptoms
+    span both repos still binds to one repo when a single fixable mechanism is
+    selected; the other repos' symptoms stay accounted for as separate-ticket/
+    unresolved rows and become protected successor lanes.
     "both" is honest and allowed but hard-stops the run (v1 is single-repo).
+    Reserve it for when there is genuinely no single current fix site — never as
+    shorthand for "the report mentions both".
 
     fix-plan.json — {"approach": "<how the fix works, one paragraph>",
       "fix_site": "<repo-relative file:line>",
@@ -674,7 +681,17 @@ nodes:
     contract as the full bugfix parent: every effective E-ID appears exactly once;
     fixed requires occurrence attribution plus cause/diff/RED/counterfactual;
     class-hardening-only cannot close the ticket; by-design requires product
-    authority; product-semantics and unresolved stay open. Keep mechanism_valid and
+    authority; product-semantics and unresolved stay open.
+    `authority` is REQUIRED for by-design and for separate-ticket, and the only
+    admissible values are an explicit receipt you can cite: "report" (the sealed
+    bug report itself authorizes the split or states the intended behavior — a
+    report that says to split independent causes after diagnosis IS report
+    authority; cite it), "human:<one-line receipt>", or
+    "controller:<one-line receipt>". Never infer authority from code or from your
+    own judgement. When no such receipt exists the correct disposition is
+    `unresolved` — which keeps the ticket open and costs nothing — NOT a
+    separate-ticket row with an empty authority, which the deterministic contract
+    rejects and which stops the whole run. Keep mechanism_valid and
     occurrence_attributed separate. Record the ordered phases root-cause-
     When occurrence_attributed is true, proof-assessment.json must include
     occurrence_evidence_sources. Use "report" for a direct report/repro; any named
@@ -835,6 +852,12 @@ nodes:
       case "$OUT" in
         *CROSS_REPO_BUG*)
           echo "RCA_GATE=FAIL CROSS_REPO_BUG (v1 is single-repo: split the bug report per repo or escalate; the RCA artifacts are preserved in this run's dir)" ;;
+        *RCA_INVESTIGATION_REQUIRED*)
+          # Not malformed output and not a crash: the RCA truthfully concluded
+          # the report cannot carry an implementation yet. Keep the typed
+          # reason verbatim so RUNBOOK.md routes it to evidence-gathering
+          # rather than to the generic "untyped stop" path.
+          printf '%s\n' "$OUT" | grep '^RCA_INVESTIGATION_REQUIRED' ;;
         *RCA_SHAPE=FAIL*)
           printf '%s\n' "$OUT" | sed 's/^RCA_SHAPE=FAIL/RCA_GATE=FAIL/' ;;
         *)
