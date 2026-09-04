@@ -899,11 +899,20 @@ nodes:
           materially matches one of its entries is "advisory" by default —
           record it as a waiver again rather than re-fixing or failing on
           it, unless the review states specific new evidence.
-        - "incomplete" is for transient incompletions: session budget ran out, an
-          edit failed on stale anchors, or a fix/test was attempted but not landed.
-          One entry per item, one line of reason. These are retried automatically —
-          the next review round re-surfaces them and the loop will not converge
-          while any exist. Never silently drop a finding from the result file.
+        - "incomplete" is for TRANSIENT incompletions, and transient means a retry
+          could plausibly succeed: session budget ran out, an edit failed on stale
+          anchors, a fix/test was attempted and not landed for a reason the next
+          round can clear. One entry per item, one line of reason. These are retried
+          automatically — the next review round re-surfaces them and the loop will
+          not converge while any exist.
+          If the blocker CANNOT change on a retry, it is a decline and belongs in
+          "advisory" with "Waived:" — an environment or lint gate that fails on
+          pre-existing violations, a landing that first needs work outside this
+          diff's scope, a dependency that does not exist yet. Filing a permanent
+          blocker as incomplete deadlocks the loop: no round can clear it and the
+          loop cannot converge while it stands, so the run burns its whole cap and
+          then demands a human accept residuals for something no round was ever
+          able to fix. Never silently drop a finding from the result file.
         - No commits, no branches. Touch only files findings name.
         Write JSON to round-<N>/fixer-result.json in the artifacts directory:
           {"applied": [...], "failed": [...], "advisory": [...], "incomplete": [...]}
