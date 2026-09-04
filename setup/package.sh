@@ -77,6 +77,8 @@ MANIFEST=(
   setup/resolve-params.sh
   setup/resolve-web-params.sh
   setup/resume.sh
+  setup/chain-env.py
+  setup/gate-approve.sh
   setup/run-repro.sh
   setup/smoke-matrix.py
   setup/selective-genapi-patch.py

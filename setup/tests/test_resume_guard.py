@@ -27,6 +27,7 @@ import os
 import sqlite3
 import subprocess
 import tempfile
+import shutil
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -113,10 +114,12 @@ class BugfixChainEnvOnResumeTest(unittest.TestCase):
     """
 
     def test_resume_restores_chain_state_and_attestation_dir(self):
-        body = (Path(__file__).resolve().parents[1] / "resume.sh").read_text(encoding="utf-8")
-        self.assertIn("ARCHON_BUGFIX_CHAIN_STATE", body)
-        self.assertIn("ARCHON_ATTESTATION_DIR", body)
-        self.assertIn("bugfix-chain.json", body)
+        setup = Path(__file__).resolve().parents[1]
+        self.assertIn("chain-env.py", (setup / "resume.sh").read_text(encoding="utf-8"))
+        helper = (setup / "chain-env.py").read_text(encoding="utf-8")
+        self.assertIn("ARCHON_BUGFIX_CHAIN_STATE", helper)
+        self.assertIn("ARCHON_ATTESTATION_DIR", helper)
+        self.assertIn("bugfix-chain.json", helper)
 
     def test_the_env_is_passed_as_an_array_not_a_split_string(self):
         # An unquoted "$CHAIN_ENV" relies on word-splitting: bash splits it,
@@ -125,10 +128,33 @@ class BugfixChainEnvOnResumeTest(unittest.TestCase):
         self.assertIn('env "${CHAIN_ENV[@]}"', body)
         self.assertNotIn("env $CHAIN_ENV", body)
 
+    def test_approve_gets_the_same_env_from_the_same_helper(self):
+        # post-approval-integrity needs the chain state too, so a bare
+        # `archon workflow approve` -- the documented gate release -- fails one
+        # node after any bugfix gate. Both post-launch controls now read
+        # chain-env.py, so they cannot drift apart.
+        setup = Path(__file__).resolve().parents[1]
+        self.assertTrue((setup / "chain-env.py").is_file())
+        approve = (setup / "gate-approve.sh").read_text(encoding="utf-8")
+        resume = (setup / "resume.sh").read_text(encoding="utf-8")
+        for body in (approve, resume):
+            self.assertIn("chain-env.py", body)
+            self.assertIn('env "${CHAIN_ENV[@]}"', body)
+
+    def test_chain_env_helper_is_silent_for_a_lane_without_a_chain(self):
+        import subprocess, sys, tempfile
+        tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        r = subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1] / "chain-env.py"), str(tmp)],
+                           capture_output=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "")
+
     def test_a_lane_without_a_chain_file_exports_nothing(self):
-        # The feature lanes have no bugfix-chain.json; resume must not break.
-        body = (Path(__file__).resolve().parents[1] / "resume.sh").read_text(encoding="utf-8")
-        self.assertIn('if [ -f "$CHAIN_JSON" ]; then', body)
+        # The feature lanes have no bugfix-chain.json; both controls must still
+        # work. The helper returns silently, so the env array is simply empty.
+        helper = (Path(__file__).resolve().parents[1] / "chain-env.py").read_text(encoding="utf-8")
+        self.assertIn("if not chain_file.is_file():", helper)
+        self.assertIn("return", helper)
 
 
 class ResumeGuardTest(unittest.TestCase):
