@@ -908,7 +908,11 @@ nodes:
       authority is what stops the run, not the split itself.
     Splitting an out-of-scope symptom is expected and correct on a
     multi-symptom report: it becomes a tracked split ticket in the PR body,
-    never a silent scope-out. A fixed disposition is allowed only when this
+    never a silent scope-out. A separate-ticket row needs ALL THREE of
+    `authority` (the citation above), `repo`, and `ticket_stub` (a one-line
+    title for the ticket that gets filed) — a gate names whichever you omit,
+    and ticket_stub is the one most often forgotten because the citation takes
+    the thought. A fixed disposition is allowed only when this
     occurrence is attributed to the selected cause.
 
     `class-hardening-only` is a FIRST-CLASS, SHIPPABLE outcome, not a
@@ -942,6 +946,17 @@ nodes:
         "disconfirming_observation":"<one falsifier>",
         "result":"pending|<observed>"}}
     Keep mechanism proof and incident attribution separate.
+    `incidental_finding` is not decoration: it is the field that decides
+    whether a run with no attributed occurrence ships at all. Set it TRUE
+    exactly when you disposition any symptom `class-hardening-only` -- the
+    mechanism is proven and you are fixing it, while THIS occurrence was never
+    attributed to it. Then classification is CLASS_HARDENING with approval
+    scope ship-hardening-only, and the run can ship the hardening behind an
+    explicit residual acceptance. Leave it false and the same run classifies
+    as NONE with approval scope "none": a proven defect, a written fix plan,
+    and nothing shippable, which is the wrong answer for work you did. It is
+    false when a symptom is `fixed` (the occurrence IS attributed) or when you
+    have proven no mechanism at all.
     selected_hypothesis_id MUST equal the active hypotheses.json `id`
     exactly (for the numeric example above, write 1, never "H1").
     When occurrence_attributed is true, name every supporting source. A

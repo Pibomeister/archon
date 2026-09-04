@@ -412,8 +412,18 @@ def classify(
             # made this disposition unreachable for an unattended run — and
             # since it is the only non-open way to close a symptom the chain
             # does not fix, it made every multi-symptom report unclosable.
-            if item.get("repo") not in {"api", "web-app"} or not item.get("ticket_stub"):
-                raise ContractError(f"separate-ticket requires repo and ticket_stub for {eid}")
+            # Name the field that is actually missing. "requires repo and
+            # ticket_stub" sent a reviser looking at a repo that was already
+            # correct while ticket_stub was the omission.
+            missing = []
+            if item.get("repo") not in {"api", "web-app"}:
+                missing.append("repo (api|web-app)")
+            if not str(item.get("ticket_stub", "")).strip():
+                missing.append("ticket_stub (one-line title for the split ticket)")
+            if missing:
+                raise ContractError(
+                    f"separate-ticket for {eid} is missing {' and '.join(missing)}"
+                )
             if not str(item.get("authority", "")).strip():
                 raise ContractError(
                     f"separate-ticket requires authority for {eid}: cite the evidence that this "

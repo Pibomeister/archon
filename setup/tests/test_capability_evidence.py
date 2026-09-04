@@ -516,6 +516,28 @@ class RetrievalCanChangeTheVerdictTest(unittest.TestCase):
         self.assertEqual(bad.returncode, 1)
         self.assertIn("when either is set", bad.stdout)
 
+    def test_incidental_finding_is_defined_because_it_gates_shipping(self):
+        # Run d2ea8d56 dispositioned E1 class-hardening-only with
+        # occurrence_attributed false and incidental_finding false, so classify()
+        # returned implementation=NONE / approval_scope="none": a proven defect,
+        # a written fix plan, and nothing shippable. The field shipped in the
+        # schema with no definition at all, and it is the ONLY thing separating
+        # CLASS_HARDENING from NONE.
+        rca = node("bugfix", "rca")["prompt"]
+        self.assertIn("decides", rca)
+        self.assertIn("whether a run with no attributed occurrence ships at all", rca)
+        self.assertIn("ship-hardening-only", rca)
+        self.assertIn('approval scope "none"', rca)
+
+    def test_separate_ticket_error_names_the_missing_field(self):
+        # "requires repo and ticket_stub" sent a reviser at a repo that was
+        # already correct while ticket_stub was the omission.
+        contract = (SETUP / "bugfix-contract.py").read_text(encoding="utf-8")
+        self.assertIn("is missing", contract)
+        self.assertIn("ticket_stub (one-line title for the split ticket)", contract)
+        rca = node("bugfix", "rca")["prompt"]
+        self.assertIn("needs ALL THREE", rca)
+
     def test_class_hardening_is_presented_as_shippable(self):
         # Run 0ceb2816 wrote reproduction_status "class-only" AND disposition
         # "fixed" -- over-claiming, rejected as "fixed symptom E1 lacks
