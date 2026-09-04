@@ -104,12 +104,26 @@ nodes:
       found = re.findall(r"\b(defect|api-feature|web-feature|cross-repo-feature|unsupported)\b",
                          section("Classification"))
       classification = found[0] if found else "unstated"
-      probe_gaps = re.findall(r"(?mi)^.*retrievable_by:\s*probe\b.*$", section("Intake gaps"))
+      gaps = section("Intake gaps")
+      probe_gaps = re.findall(r"(?mi)^.*retrievable_by:\s*probe\b.*$", gaps)
+      if not probe_gaps:
+          # Untagged reports are the norm, not the exception, and a gate that only
+          # fires on a tag no report carries is decoration. Run 38d72218 passed this
+          # gate at 14:24Z with prod-db UNAVAILABLE, then spent four hours reaching a
+          # smoke gate whose outcome was already fixed: the customer's import was
+          # never identified, so E1 could only ever be class-hardening-only. A gap is
+          # occurrence-locating when it names the kind of thing a query resolves --
+          # an id, an account, a time, a quantity. "Screenshot is not attached" names
+          # nothing a database can answer and must not block.
+          LOCATING = r"\b(id|ids|account|customer|org|user|email|time|timestamp|date|window|count|counts|number|import|row|rows)\b"
+          probe_gaps = [g for g in re.findall(r"(?m)^\s*[-*]\s+(.*)$", gaps)
+                        if re.search(LOCATING, g, re.I)]
       db = caps.get("prod-db", {})
       if classification == "defect" and probe_gaps and db.get("status") != "AVAILABLE":
           reason = (db.get("reason") or "unknown").split()[0]
           print(f"CAPABILITY_GATE=FAIL capability-required reason={reason} probe_gaps={len(probe_gaps)}")
-          print("The report marks gaps retrievable_by: probe and prod Postgres is unreachable.")
+          print(f"{len(probe_gaps)} intake gap(s) name something only a query can resolve, "
+                "and prod Postgres is unreachable.")
           print("Restore the capability (aws login) and relaunch: as it stands this run can only")
           print("produce an RCA that cannot attribute the reported occurrence.")
           sys.exit(1)
