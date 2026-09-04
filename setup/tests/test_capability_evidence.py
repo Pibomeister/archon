@@ -251,7 +251,7 @@ class OccurrenceEvidenceReachTest(unittest.TestCase):
     def test_probe_run_precedes_the_gate_that_reads_provenance(self):
         for workflow in ("bugfix", "bugfix-codex"):
             self.assertEqual(node(workflow, "probe-run")["depends_on"], ["rca"], workflow)
-            self.assertEqual(node(workflow, "rca-gate")["depends_on"], ["probe-run"], workflow)
+            self.assertEqual(node(workflow, "rca-gate")["depends_on"], ["rca-reassess"], workflow)
 
     def test_probe_run_validates_sql_with_the_same_script_the_gate_uses(self):
         self.assertIn("probe-shape.py", node("bugfix", "probe-run")["bash"])
@@ -265,6 +265,93 @@ class OccurrenceEvidenceReachTest(unittest.TestCase):
                                 capture_output=True, encoding="utf-8")
         self.assertEqual(result.returncode, 1)
         self.assertIn("PROBE_SHAPE=FAIL", result.stdout)
+
+
+class RetrievalCanChangeTheVerdictTest(unittest.TestCase):
+    """The blocker that stopped BOTH ENG-3860 runs, and its two siblings.
+
+    Run 554842f9 and its successor c88d2571 died on the same contract line, and
+    the surrounding shape hid two more dead ends. All three share one cause:
+    evidence retrieved after a decision could not change that decision, and a
+    symptom the chain does not fix could not be closed at all.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def test_separate_ticket_is_closable_with_a_citation(self):
+        # by-design claims INTENT and needs a product receipt an unattended run
+        # cannot get. separate-ticket claims a different MECHANISM, which is an
+        # evidential claim the RCA is entitled to make. Requiring a receipt for
+        # both made separate-ticket unreachable -- and it is the only non-open
+        # way to close a symptom the chain does not fix, so every multi-symptom
+        # report was unclosable.
+        contract = bugfix_contract()
+        ledger = json.loads((FIXTURE / "symptoms.json").read_text(encoding="utf-8"))
+        row = {"symptom_id": "E1", "disposition": "separate-ticket",
+               "repo": "api", "ticket_stub": "Split: different mechanism",
+               "authority": "libs/import/src/mapping.ts:88 -- distinct code path"}
+        result = contract.classify(ledger, {"E1": row}, incidental_mechanism=False)
+        self.assertEqual(result["ticket_disposition"], "DISPOSITION_COMPLETE")
+
+    def test_separate_ticket_still_refuses_a_silent_scope_out(self):
+        # Negative control: the citation requirement itself must survive, or the
+        # fix becomes a licence to drop symptoms.
+        contract = bugfix_contract()
+        ledger = json.loads((FIXTURE / "symptoms.json").read_text(encoding="utf-8"))
+        row = {"symptom_id": "E1", "disposition": "separate-ticket",
+               "repo": "api", "ticket_stub": "Split", "authority": "   "}
+        with self.assertRaises(contract.ContractError) as caught:
+            contract.classify(ledger, {"E1": row}, incidental_mechanism=False)
+        self.assertIn("cite the evidence", str(caught.exception))
+
+    def test_by_design_still_requires_a_product_receipt(self):
+        # The distinction is the whole point: intent is not an evidential claim.
+        contract = bugfix_contract()
+        ledger = json.loads((FIXTURE / "symptoms.json").read_text(encoding="utf-8"))
+        row = {"symptom_id": "E1", "disposition": "by-design", "repo": "api", "authority": ""}
+        with self.assertRaises(contract.ContractError):
+            contract.classify(ledger, {"E1": row}, incidental_mechanism=False)
+
+    def test_reassess_runs_between_the_probe_and_the_gate(self):
+        for workflow in ("bugfix", "bugfix-codex"):
+            self.assertEqual(node(workflow, "rca-reassess")["depends_on"], ["probe-run"], workflow)
+            self.assertEqual(node(workflow, "rca-gate")["depends_on"], ["rca-reassess"], workflow)
+
+    def test_reassess_may_not_touch_the_diagnosis(self):
+        probe = node("bugfix", "probe-run")["bash"]
+        gate = node("bugfix", "rca-gate")["bash"]
+        self.assertIn("reassess-pre.sha256", probe)
+        self.assertIn('reassess-pre.sha256', gate)
+        self.assertIn("RCA_REASSESS=DIRTY", gate)
+        prompt = node("bugfix", "rca-reassess")["prompt"]
+        for frozen in ("rca.md", "causal-chain.json", "hypotheses.json",
+                       "residuals.json", "probe.json", "repo.json"):
+            self.assertIn(frozen, prompt)
+
+    def test_lite_lane_has_neither_probe_nor_reassess_and_its_gate_still_loads(self):
+        doc = yaml.safe_load((ARCHON / "workflows/bugfix-lite.yaml").read_text(encoding="utf-8"))
+        ids = {n["id"] for n in doc["nodes"]}
+        self.assertNotIn("probe-run", ids)
+        self.assertNotIn("rca-reassess", ids)
+        self.assertEqual(node("bugfix-lite", "rca-gate")["depends_on"], ["rca"])
+        # The inherited checkpoint check must be conditional, or lite dies on a
+        # file only probe-run writes.
+        self.assertIn('if [ -f "$AD/probe-results.txt" ]; then',
+                      node("bugfix-lite", "rca-gate")["bash"])
+
+    def test_occurrence_window_from_an_unanswered_probe_is_refused(self):
+        gate = node("bugfix", "rca-gate")["bash"]
+        self.assertIn("occurrence-window.json written for a probe that returned nothing", gate)
+        self.assertIn("--evidence-kind occurrence", gate)
+
+    def test_repo_scope_rejects_a_repo_narrower_than_the_fix(self):
+        # repo names the repository THIS CHAIN CHANGES. Scoping it over the
+        # ticket turns any bug with a cross-repo symptom into CROSS_REPO_BUG.
+        self.assertIn("REPO_SCOPE", (SETUP / "rca-shape.sh").read_text(encoding="utf-8"))
+        rca = node("bugfix", "rca")["prompt"]
+        self.assertIn("repo is the repository THIS CHAIN CHANGES", rca)
 
 
 if __name__ == "__main__":

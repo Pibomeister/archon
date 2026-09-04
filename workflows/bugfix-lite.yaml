@@ -733,6 +733,59 @@ nodes:
   bash: |
     set -euo pipefail
     ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+    AD="$ARTIFACTS_DIR"
+    # rca-reassess may revise the ASSESSMENT after retrieval; the DIAGNOSIS is
+    # not its to touch. probe-run checkpointed the six frozen artifacts.
+    # probe-results.txt exists iff probe-run ran, which is what distinguishes
+    # this lane from bugfix-lite (no prod evidence, no probe-run, no reassess).
+    # Deleting it to escape the check is not an out: evidence-seal requires the
+    # file by name and provenance pins its hash.
+    if [ -f "$AD/probe-results.txt" ]; then
+      test -s "$AD/reassess-pre.sha256" || { echo "RCA_GATE=FAIL no reassess checkpoint"; exit 1; }
+      python3 - "$AD" <<'PY' \
+        || { echo "RCA_GATE=FAIL RCA_REASSESS=DIRTY reassess node modified the frozen diagnosis"; exit 1; }
+    import hashlib, os, sys
+    ad = sys.argv[1]
+    for line in open(os.path.join(ad, "reassess-pre.sha256"), encoding="utf-8"):
+        expected, _, name = line.strip().partition("  ")
+        if not name:
+            raise SystemExit(1)
+        if hashlib.sha256(open(os.path.join(ad, name), "rb").read()).hexdigest() != expected:
+            raise SystemExit(1)
+    PY
+    fi
+    # Promote the probe row to occurrence evidence when reassess identified the
+    # occurrence in it. This adds no authority the run did not already have:
+    # the window has always come from a model artifact (probe-run reads it from
+    # the intake plan), the watermark still binds to the probe output bytes,
+    # and a SKIP/DEGRADED probe is refused outright.
+    if [ -f "$AD/occurrence-window.json" ]; then
+      if head -1 "$AD/probe-results.txt" | grep -qE '^PROBE_RUN=(SKIP|DEGRADED)'; then
+        echo "RCA_GATE=FAIL occurrence-window.json written for a probe that returned nothing"; exit 1
+      fi
+      REPO_FOR_BASELINE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['repo'])" "$AD/repo.json")
+      if [ "$REPO_FOR_BASELINE" != both ]; then
+        python3 "$ROOT/.archon/setup/evidence-provenance.py" record \
+          --artifacts "$AD" --source prod-probes --status complete \
+          --file probe-results.txt --tool psql \
+          --provider "$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['provider'])" "$AD/bugfix-chain.json")" \
+          --query "$(cat "$AD/probe.json")" \
+          --baseline "$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['baseline']['commits'][sys.argv[2]])" "$AD/bugfix-chain.json" "$REPO_FOR_BASELINE")" \
+          --evidence-kind occurrence \
+          --entity-watermark "$(python3 - "$AD/occurrence-window.json" "$AD/probe-results.txt" <<'PY'
+    import hashlib, json, sys
+    doc = json.load(open(sys.argv[1], encoding="utf-8"))
+    subjects = [{"kind": s["kind"], "value": str(s["value"])} for s in doc["subjects"]]
+    version = hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest()
+    print(hashlib.sha256(json.dumps({"subjects": subjects, "version": version},
+                                    sort_keys=True, separators=(",", ":")).encode()).hexdigest())
+    PY
+    )" \
+          --occurrence-window "$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(json.dumps({'start':d['start'],'end':d['end']},sort_keys=True))" "$AD/occurrence-window.json")" \
+          || { echo "RCA_GATE=FAIL occurrence provenance"; exit 1; }
+        echo "RCA_REASSESS=ATTRIBUTED subjects=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))['subjects']))" "$AD/occurrence-window.json")"
+      fi
+    fi
     R="$ARTIFACTS_DIR/rca.md"
     test -s "$R" || { echo "RCA_GATE=FAIL no rca.md"; exit 1; }
     for h in "## Observation" "## Hypotheses" "## Evidence For" "## Evidence Against" "## Best Explanation" "## Critical Unknown" "## Discriminating Probe"; do

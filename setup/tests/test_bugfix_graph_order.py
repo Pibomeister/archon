@@ -15,7 +15,8 @@ class BugfixGraphOrderTest(unittest.TestCase):
   # occurrence attribution backed by an occurrence-kind provenance row, and
   # probe-run is the only node that writes one.
   self.assertEqual(nodes['probe-run']['depends_on'],['rca'])
-  self.assertEqual(nodes['rca-gate']['depends_on'],['probe-run'])
+  self.assertEqual(nodes['rca-reassess']['depends_on'],['probe-run'])
+  self.assertEqual(nodes['rca-gate']['depends_on'],['rca-reassess'])
   self.assertEqual(nodes['evidence-seal']['depends_on'],['rca-gate'])
   self.assertIn('probe-shape.py', nodes['probe-run']['bash'])
   self.assertEqual(nodes['chain-verify']['depends_on'],['evidence-seal'])

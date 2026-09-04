@@ -96,10 +96,36 @@ try:
 except Exception as e:
     fail(f"repo.json missing or malformed: {e}")
 
+if repo not in ("api", "web-app", "both"):
+    fail(f"repo out of enum: {repo}")
+
+# repo names the repository THIS CHAIN CHANGES, not the ticket's surface area.
+# A symptom dispositioned separate-ticket / by-design / product-semantics
+# becomes a split ticket and never widens repo; scoping repo over the whole
+# report turns any bug with a cross-repo symptom into a spurious
+# CROSS_REPO_BUG, stopping a run whose fix was single-repo all along.
+FIX_SHAPED = {"fixed", "class-hardening-only"}
+try:
+    dispositions = load("symptom-dispositions.json")["dispositions"]
+except Exception as e:
+    fail(f"symptom-dispositions.json missing or malformed: {e}")
+fix_shaped = [d for d in dispositions if d.get("disposition") in FIX_SHAPED]
+# repo is contract-required on separate-ticket rows already; require it here too,
+# or a fix-shaped row that simply omits it silently defeats the cross-check below.
+missing_repo = [d.get("symptom_id") for d in fix_shaped if d.get("repo") not in ("api", "web-app")]
+if missing_repo:
+    fail(f"REPO_SCOPE fix-shaped dispositions missing repo: {sorted(missing_repo)}")
+fix_repos = {d["repo"] for d in fix_shaped}
+# Only the unambiguous contradiction is a gate: repo names one repository while
+# the symptoms this chain fixes live in a different one. repo="both" is left to
+# CROSS_REPO_BUG below — a single symptom whose one fix legitimately spans repos
+# cannot express that through per-symptom dispositions, so rejecting "both"
+# mechanically would block a legitimate run. The prompt carries that rule.
+if fix_repos and repo != "both" and fix_repos != {repo}:
+    fail(f"REPO_SCOPE repo={repo} but fix-shaped symptoms are in {sorted(fix_repos)}")
+
 if repo == "both":
     fail("CROSS_REPO_BUG (v1 is single-repo)")
-if repo not in ("api", "web-app"):
-    fail(f"repo out of enum: {repo}")
 
 try:
     ft = load("failing-test.json")

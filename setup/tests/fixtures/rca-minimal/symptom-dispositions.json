@@ -1,1 +1,1 @@
-{"schema_version": 2, "dispositions": [{"symptom_id": "E1", "disposition": "fixed"}]}
+{"schema_version": 2, "dispositions": [{"symptom_id": "E1", "disposition": "fixed", "repo": "api"}]}

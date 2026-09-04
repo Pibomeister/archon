@@ -389,8 +389,20 @@ def classify(
         if value == "by-design" and not item.get("authority"):
             raise ContractError(f"by-design requires product authority for {eid}")
         if value == "separate-ticket":
-            if item.get("repo") not in {"api", "web-app"} or not item.get("ticket_stub") or not item.get("authority"):
-                raise ContractError(f"separate-ticket requires authority, repo, and ticket_stub for {eid}")
+            # authority here is EVIDENCE, not a product receipt. separate-ticket
+            # claims "real defect, different mechanism"; that is an evidential
+            # claim the RCA can make and must cite. Requiring a human receipt
+            # made this disposition unreachable for an unattended run — and
+            # since it is the only non-open way to close a symptom the chain
+            # does not fix, it made every multi-symptom report unclosable.
+            if item.get("repo") not in {"api", "web-app"} or not item.get("ticket_stub"):
+                raise ContractError(f"separate-ticket requires repo and ticket_stub for {eid}")
+            if not str(item.get("authority", "")).strip():
+                raise ContractError(
+                    f"separate-ticket requires authority for {eid}: cite the evidence that this "
+                    "symptom has a different mechanism than the selected cause (file:line or an "
+                    "evidence-file reference), the same citation residuals.json carries for it"
+                )
         values[eid] = value
 
     all_fixed = all(v == "fixed" for v in values.values())
@@ -453,9 +465,19 @@ def validate_smoke_readiness(artifacts_dir: Path, *, allow_open_ticket: bool = F
     classification = load_json(safe_artifact_path(artifacts_dir, "fix-classification.json"))
     open_ids = classification.get("open_effective_ids") or []
     if classification.get("ticket_closure_allowed") is not True and not allow_open_ticket:
+        # Name the actual condition. DISPOSITION_COMPLETE has NO open symptoms —
+        # every one is fixed, by-design, or split to a tracked ticket — so the
+        # old "open symptoms" wording sent operators hunting for something that
+        # open_effective_ids=[] on the same line said did not exist. Blocking is
+        # still right: shipping a partial fix for a multi-symptom report is a
+        # human scope decision.
+        detail = (f"open symptoms {open_ids} must be resolved or accepted" if open_ids
+                  else "no symptom is open, but this ships less than the whole ticket "
+                       "(some symptoms are dispositioned by-design or split to their own tickets), "
+                       "which is a human scope decision")
         raise ContractError(
-            "ticket disposition is not RESOLVED; open symptoms require explicit residual acceptance "
-            f"before smoke approval/ship (ticket={classification.get('ticket_disposition')} "
+            f"ticket disposition is not RESOLVED: {detail}; write accept-residuals.txt to accept and ship "
+            f"(ticket={classification.get('ticket_disposition')} "
             f"implementation={classification.get('implementation_result')} open_effective_ids={open_ids})"
         )
 

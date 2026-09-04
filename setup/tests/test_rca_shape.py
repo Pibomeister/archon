@@ -178,6 +178,26 @@ class RcaShapeTest(unittest.TestCase):
             r.stdout,
         )
 
+    def test_repo_narrower_than_the_fix_is_rejected(self):
+        minimal_artifacts(self.tmp)
+        disp = json.loads((self.tmp / "symptom-dispositions.json").read_text())
+        disp["dispositions"][0]["repo"] = "web-app"
+        write(self.tmp, "symptom-dispositions.json", disp)
+        r = run(self.tmp)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("REPO_SCOPE repo=api but fix-shaped symptoms are in ['web-app']", r.stdout)
+
+    def test_fix_shaped_disposition_without_a_repo_is_rejected(self):
+        # Without this the cross-check is defeatable by omission: repo is only
+        # contract-required on separate-ticket rows.
+        minimal_artifacts(self.tmp)
+        disp = json.loads((self.tmp / "symptom-dispositions.json").read_text())
+        del disp["dispositions"][0]["repo"]
+        write(self.tmp, "symptom-dispositions.json", disp)
+        r = run(self.tmp)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("REPO_SCOPE fix-shaped dispositions missing repo: ['E1']", r.stdout)
+
     def test_writes_repo_txt_on_pass(self):
         # rca-gate (bugfix.yaml:721) writes repo.txt after validation and 9
         # downstream nodes `cat` it; rca-shape.sh must be a true drop-in.

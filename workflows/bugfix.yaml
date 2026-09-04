@@ -705,7 +705,16 @@ nodes:
       satisfy the shape.
 
       repo.json — {"repo": "api" | "web-app" | "both", "rationale": "<one line>"}
-      "both" is honest and allowed but hard-stops the run (v1 is single-repo).
+      repo is the repository THIS CHAIN CHANGES — the repo of the final causal
+      link's fix_site and of fix-plan.json's files. It is NOT the ticket's
+      surface area. A symptom you disposition separate-ticket, by-design, or
+      product-semantics becomes a split ticket in the PR body and does NOT
+      widen repo, however many repos the report as a whole touches: a backend
+      defect with a visible web symptom is repo "api" once the web symptom is
+      dispositioned out. Write "both" only when the ONE fix genuinely has to
+      change files in both repos; that is honest and allowed but hard-stops the
+      run (v1 is single-repo). A gate cross-checks repo against your
+      dispositions and rejects a repo wider than the fix.
 
       fix-plan.json — {"approach": "<how the fix works, one paragraph>",
         "fix_site": "<repo-relative file:line>",
@@ -821,10 +830,25 @@ nodes:
       symptom-dispositions.json —
         {"schema_version":2,"dispositions":[{"symptom_id":"E1",
          "disposition":"fixed|class-hardening-only|by-design|separate-ticket|product-semantics|unresolved",
-         "authority":"<product/human receipt when required>",
+         "authority":"<see below; required for by-design and separate-ticket>",
          "repo":"api|web-app","ticket_stub":"<required for separate-ticket>"}]}
-      Code behavior alone never establishes by-design. A fixed disposition is
-      allowed only when this occurrence is attributed to the selected cause.
+      `repo` is required on every row and names the repository that symptom
+      belongs to. `authority` means two different things and you must not
+      confuse them:
+      - by-design / product-semantics claim the behavior is INTENDED. That is a
+        product decision, so authority is a product or human receipt, and you
+        will usually not have one. Code behavior alone never establishes
+        by-design; when you have no receipt, do not use these dispositions.
+      - separate-ticket claims a REAL DEFECT with a DIFFERENT MECHANISM than
+        your selected cause. That is an evidential claim you are entitled to
+        make, so authority is a CITATION: the file:line or evidence-file
+        reference showing the mechanism differs — the same citation you write
+        for that symptom in residuals.json. Never leave it empty; an empty
+        authority is what stops the run, not the split itself.
+      Splitting an out-of-scope symptom is expected and correct on a
+      multi-symptom report: it becomes a tracked split ticket in the PR body,
+      never a silent scope-out. A fixed disposition is allowed only when this
+      occurrence is attributed to the selected cause.
 
       causal-coverage.json —
         {"schema_version":2,"coverage":[{"symptom_id":"E1",
@@ -944,12 +968,155 @@ nodes:
 
       End with the single line: RCA_DONE
 
-  - id: rca-gate
+  - id: rca-reassess
     depends_on: [probe-run]
+    model: sonnet
+    maxBudgetUsd: 3
+    timeout: 900000
+    prompt: |
+      You are the post-retrieval reassessment node. Ask no questions.
+
+      The RCA had to write its assessment BEFORE the probes it designed could
+      run, so anything the probes were meant to settle was necessarily recorded
+      as unknown. Your only job is to let retrieved evidence change that
+      verdict. You are not re-diagnosing.
+
+      Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
+      Read probe-results.txt FIRST, then evidence-manifest.json and the
+      evidence/ files it marks gathered, evidence-plan.json (its `unknowns`
+      list is what the probes were sent to answer), and the current
+      assessment: debug-phase.json, proof-assessment.json,
+      causal-coverage.json, symptom-dispositions.json, boundary-trace.json,
+      fix-plan.json, failing-test.json, verify.json, files-allowlist.json.
+      For code context use the two main checkouts READ-ONLY at the pinned
+      baseline in bugfix-chain.json; create no branches and modify no
+      repository file.
+
+      FROZEN — a gate byte-compares these and fails the run if any changed:
+        rca.md, causal-chain.json, hypotheses.json, residuals.json,
+        probe.json, repo.json.
+      The diagnosis is not yours to revise. If the probe results CONTRADICT the
+      causal chain, do not edit anything: say so in reassess.md and leave the
+      assessment as it stands — the blind chain-verify and experiment nodes
+      downstream exist to settle that, and a conflict must reach a human.
+
+      If probe-results.txt begins with PROBE_RUN=SKIP or PROBE_RUN=DEGRADED, or
+      the rows do not answer the unknowns, change NOTHING: write reassess.md
+      saying which unknowns remain open and end. An unchanged assessment is the
+      correct output far more often than a changed one.
+
+      Otherwise revise ONLY what the evidence now settles:
+      - debug-phase.json `reproduction_status` — "gather-more" was a statement
+        about missing evidence. If the probe supplied it, this becomes
+        "reproduced" (the occurrence is identified and its preconditions are
+        readable) or "class-only" (the mechanism is proven but this occurrence
+        is not attributable).
+      - proof-assessment.json — `occurrence_attributed`, and when true, list
+        every supporting source in `occurrence_evidence_sources`. `prod-probes`
+        is a valid source name once the probe returned the rows that attribute
+        it. Set `experiment.result` to what the rows actually observed when
+        they settle the stated prediction, and leave it "pending" otherwise.
+      - causal-coverage.json — per-symptom `occurrence_attributed` and
+        `planned_diff`.
+      - symptom-dispositions.json — a symptom may become "fixed" only now that
+        the occurrence is attributed to the selected cause.
+      - boundary-trace.json ownership fields — the RCA hedges these
+        ("candidate: ...", "unverified") precisely when the surface is
+        ambiguous, and runtime evidence is the only thing that resolves them.
+        You may drop a hedge ONLY by quoting the probe row that establishes the
+        owner, in reassess.md, for that specific field. Making the three
+        runtime-owner strings match so the contract passes is the exact
+        antipattern this field exists to catch: with no row to quote, leave
+        every hedge in place, leave reported_surface_status "ambiguous", and
+        leave fix-plan.json empty. An ambiguous surface with no fix plan is a
+        valid, honest run outcome.
+      - boundary-trace.json — replace each "unknown"/"not gathered"
+        `observed_preconditions` entry with the value the probe actually
+        returned, and DELETE from `material_differences` any row the retrieved
+        data resolves: that list holds differences, and `impact` has no
+        "resolved" value, so a resolved row is removed, never relabelled. Set
+        `equivalent` true only when no row remains. When the probe identified
+        the occurrence's real runtime state, `reported_surface_status` becomes
+        "runtime-reproduced" (the enum is explicit|runtime-reproduced|ambiguous).
+      - fix-plan.json, failing-test.json, verify.json, files-allowlist.json —
+        fill these ONLY if the assessment is now implementation-ready. They
+        must obey every rule the RCA prompt states for them, unchanged.
+      Never widen scope beyond what a row you can quote supports. Every field
+      you change must trace to a specific line of probe-results.txt.
+
+      Also write occurrence-window.json when, and only when, the probe rows
+      identify the occurrence:
+        {"start": "<ISO-8601>", "end": "<ISO-8601>",
+         "subjects": [{"kind": "<user_id|import_id|profile_id|...>",
+                       "value": "<id from the probe output>"}],
+         "evidence": "<the probe id and the column you read the timestamp from>"}
+      The window is what the DATA says — the matched row's own timestamps,
+      widened to bracket the occurrence — not the report's guess and not now().
+      Omit the file entirely when nothing was identified.
+
+      Finally write reassess.md: what the probes answered, every field you
+      changed with the row that justifies it, and every unknown still open.
+      End with the single line: RCA_REASSESS_DONE
+
+  - id: rca-gate
+    depends_on: [rca-reassess]
     timeout: 300000
     bash: |
       set -euo pipefail
       ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+      AD="$ARTIFACTS_DIR"
+      # rca-reassess may revise the ASSESSMENT after retrieval; the DIAGNOSIS is
+      # not its to touch. probe-run checkpointed the six frozen artifacts.
+      # probe-results.txt exists iff probe-run ran, which is what distinguishes
+      # this lane from bugfix-lite (no prod evidence, no probe-run, no reassess).
+      # Deleting it to escape the check is not an out: evidence-seal requires the
+      # file by name and provenance pins its hash.
+      if [ -f "$AD/probe-results.txt" ]; then
+        test -s "$AD/reassess-pre.sha256" || { echo "RCA_GATE=FAIL no reassess checkpoint"; exit 1; }
+        python3 - "$AD" <<'PY' \
+          || { echo "RCA_GATE=FAIL RCA_REASSESS=DIRTY reassess node modified the frozen diagnosis"; exit 1; }
+      import hashlib, os, sys
+      ad = sys.argv[1]
+      for line in open(os.path.join(ad, "reassess-pre.sha256"), encoding="utf-8"):
+          expected, _, name = line.strip().partition("  ")
+          if not name:
+              raise SystemExit(1)
+          if hashlib.sha256(open(os.path.join(ad, name), "rb").read()).hexdigest() != expected:
+              raise SystemExit(1)
+      PY
+      fi
+      # Promote the probe row to occurrence evidence when reassess identified the
+      # occurrence in it. This adds no authority the run did not already have:
+      # the window has always come from a model artifact (probe-run reads it from
+      # the intake plan), the watermark still binds to the probe output bytes,
+      # and a SKIP/DEGRADED probe is refused outright.
+      if [ -f "$AD/occurrence-window.json" ]; then
+        if head -1 "$AD/probe-results.txt" | grep -qE '^PROBE_RUN=(SKIP|DEGRADED)'; then
+          echo "RCA_GATE=FAIL occurrence-window.json written for a probe that returned nothing"; exit 1
+        fi
+        REPO_FOR_BASELINE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['repo'])" "$AD/repo.json")
+        if [ "$REPO_FOR_BASELINE" != both ]; then
+          python3 "$ROOT/.archon/setup/evidence-provenance.py" record \
+            --artifacts "$AD" --source prod-probes --status complete \
+            --file probe-results.txt --tool psql \
+            --provider "$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['provider'])" "$AD/bugfix-chain.json")" \
+            --query "$(cat "$AD/probe.json")" \
+            --baseline "$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['baseline']['commits'][sys.argv[2]])" "$AD/bugfix-chain.json" "$REPO_FOR_BASELINE")" \
+            --evidence-kind occurrence \
+            --entity-watermark "$(python3 - "$AD/occurrence-window.json" "$AD/probe-results.txt" <<'PY'
+      import hashlib, json, sys
+      doc = json.load(open(sys.argv[1], encoding="utf-8"))
+      subjects = [{"kind": s["kind"], "value": str(s["value"])} for s in doc["subjects"]]
+      version = hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest()
+      print(hashlib.sha256(json.dumps({"subjects": subjects, "version": version},
+                                      sort_keys=True, separators=(",", ":")).encode()).hexdigest())
+      PY
+      )" \
+            --occurrence-window "$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(json.dumps({'start':d['start'],'end':d['end']},sort_keys=True))" "$AD/occurrence-window.json")" \
+            || { echo "RCA_GATE=FAIL occurrence provenance"; exit 1; }
+          echo "RCA_REASSESS=ATTRIBUTED subjects=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))['subjects']))" "$AD/occurrence-window.json")"
+        fi
+      fi
       R="$ARTIFACTS_DIR/rca.md"
       test -s "$R" || { echo "RCA_GATE=FAIL no rca.md"; exit 1; }
       for h in "## Observation" "## Hypotheses" "## Evidence For" "## Evidence Against" "## Best Explanation" "## Critical Unknown" "## Discriminating Probe"; do
@@ -1230,6 +1397,17 @@ nodes:
       fi
       echo "PROBE_RUN=DONE answered=$OK/$NP"
       tail -30 "$AD/probe-results.txt"
+      # Checkpoint the frozen diagnosis for rca-reassess. Taken here because a
+      # checkpoint has to predate the node it constrains, and this is the last
+      # node before it.
+      python3 - "$AD" > "$AD/reassess-pre.sha256" <<'PY'
+      import hashlib, os, sys
+      ad = sys.argv[1]
+      for name in ("rca.md", "causal-chain.json", "hypotheses.json",
+                   "residuals.json", "probe.json", "repo.json"):
+          digest = hashlib.sha256(open(os.path.join(ad, name), "rb").read()).hexdigest()
+          print(f"{digest}  {name}")
+      PY
 
   - id: evidence-seal
     depends_on: [rca-gate]
