@@ -126,6 +126,10 @@ nodes:
                 "and prod Postgres is unreachable.")
           print("Restore the capability (aws login) and relaunch: as it stands this run can only")
           print("produce an RCA that cannot attribute the reported occurrence.")
+          print("Relaunch IMMEDIATELY after the login. SSO credentials here last about")
+          print("15 minutes, so a session authenticated even 20 minutes before launch is")
+          print("already gone by the time evidence-aws runs. Measured 2026-09-04: a")
+          print("session verified live at 19:07 read as expired to this gate at 19:27.")
           sys.exit(1)
       print(f"CAPABILITY_GATE=PASS classification={classification} "
             f"probe_gaps={len(probe_gaps)} prod_db={(db.get('status') or 'UNKNOWN').lower()}")
