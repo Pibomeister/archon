@@ -10,10 +10,16 @@ then have demanded a human accept-residuals.txt for a failure that was never
 about the code.
 
 A round that left no proof artifact was billed, not spent. These tests pin the
-reclaim, its bound (one per round number, so a node that dies every time still
-walks the counter to the cap), and its placement -- it belongs in round-pre
+reclaim, its bound (one per run), and its placement -- it belongs in round-pre
 ahead of the cap check, and must never touch converge, where N drives the
-verdict."""
+verdict.
+
+Round 3 of the same run then showed that file existence is the wrong proof: the
+review node returned while its personas were still running, leaving a 22KB
+envelope truncated mid-persona and review-summary.json reading {"verdict": ""}.
+Every downstream gate rejects an empty verdict, so that round produced nothing
+-- but a file-existence check scored it spent. The proof is now the verdict
+itself, via the script's optional pattern argument."""
 import re
 import subprocess
 import tempfile
@@ -26,9 +32,14 @@ REVIEW_LANES = ["bugfix", "bugfix-lite", "full-sdlc-api", "full-sdlc-web",
                 "full-sdlc-api-lite"]
 
 
-def run(ad, n, prefix="round-", proof="review-envelope.txt"):
-    r = subprocess.run(["bash", str(SCRIPT), str(ad), str(n), prefix, proof],
-                       capture_output=True, encoding="utf-8")
+VERDICT_PATTERN = r'"verdict"[[:space:]]*:[[:space:]]*"[^"]'
+
+
+def run(ad, n, prefix="round-", proof="review-envelope.txt", pattern=None):
+    cmd = ["bash", str(SCRIPT), str(ad), str(n), prefix, proof]
+    if pattern is not None:
+        cmd.append(pattern)
+    r = subprocess.run(cmd, capture_output=True, encoding="utf-8")
     return r.stdout.strip(), r.stderr, r.returncode
 
 
@@ -142,8 +153,73 @@ class RoundReclaimWiringTest(unittest.TestCase):
         # matches after the call itself is deleted.
         self.assertRegex(
             ov.read_text(),
-            r'N=\$\(bash "\$R" "\$ARTIFACTS_DIR" "\$N" "round-" "review-envelope\.txt"\)')
+            r'N=\$\(bash "\$R" "\$ARTIFACTS_DIR" "\$N" "round-" "review-summary\.json" ')
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProofMustCarryAVerdict(unittest.TestCase):
+    """The pattern argument, and the exact shape run 38d72218 round 3 produced."""
+
+    def setUp(self):
+        self.ad = Path(tempfile.mkdtemp())
+
+    def _summary(self, n, body):
+        d = self.ad / f"round-{n}"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "review-summary.json").write_text(body, encoding="utf-8")
+
+    def test_an_empty_verdict_is_not_proof(self):
+        # Verbatim from round 3: the file is present and non-empty, and the
+        # round still decided nothing.
+        self._summary(3, '{"verdict": "", "residual_count": -1, "degraded": false}')
+        out, err, rc = run(self.ad, 3, proof="review-summary.json", pattern=VERDICT_PATTERN)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "2")
+        self.assertIn("ROUND_RECLAIM=round-3", err)
+
+    def test_a_real_verdict_is_proof(self):
+        self._summary(3, '{"verdict": "Ready with fixes", "residual_count": -1, "degraded": false}')
+        out, err, _ = run(self.ad, 3, proof="review-summary.json", pattern=VERDICT_PATTERN)
+        self.assertEqual(out, "3")
+        self.assertNotIn("ROUND_RECLAIM", err)
+
+    def test_a_not_ready_verdict_is_still_proof(self):
+        # The round is spent by deciding, not by deciding in our favour.
+        self._summary(3, '{"verdict": "Not ready", "residual_count": 4, "degraded": false}')
+        out, _, _ = run(self.ad, 3, proof="review-summary.json", pattern=VERDICT_PATTERN)
+        self.assertEqual(out, "3")
+
+    def test_without_a_pattern_presence_is_still_enough(self):
+        # The argument is optional; callers that pass no pattern keep the old
+        # contract rather than silently getting a stricter one.
+        self._summary(3, '{"verdict": ""}')
+        out, _, _ = run(self.ad, 3, proof="review-summary.json")
+        self.assertEqual(out, "3")
+
+    def test_every_review_lane_proves_the_round_by_its_verdict(self):
+        import yaml
+
+        def walk(nodes):
+            for n in nodes or []:
+                if not isinstance(n, dict):
+                    continue
+                yield n
+                for key in ("loop_group", "body"):
+                    v = n.get(key)
+                    if isinstance(v, dict):
+                        yield from walk(v.get("nodes"))
+                    elif isinstance(v, list):
+                        yield from walk(v)
+
+        for lane in REVIEW_LANES:
+            doc = yaml.safe_load((ARCHON / "workflows" / f"{lane}.yaml").read_text(encoding="utf-8"))
+            pre = [n for n in walk(doc["nodes"])
+                   if n.get("id") == "round-pre" and "round-reclaim.sh" in (n.get("bash") or "")]
+            self.assertTrue(pre, f"{lane}: round-pre does not reclaim")
+            bash = pre[0]["bash"]
+            self.assertIn("review-summary.json", bash,
+                          f"{lane}: reclaim still proves the round by a file name, not a verdict")
+            self.assertIn('"verdict"', bash, f"{lane}: reclaim passes no verdict pattern")

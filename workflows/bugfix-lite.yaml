@@ -1720,7 +1720,7 @@ nodes:
         # full-sdlc-api.yaml: a cap enforced only in converge is walked past by resuming
         # after every group failure). accept-residuals.txt is the human bypass.
         R="/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-reclaim.sh"
-        N=$(bash "$R" "$ARTIFACTS_DIR" "$N" "round-" "review-envelope.txt")
+        N=$(bash "$R" "$ARTIFACTS_DIR" "$N" "round-" "review-summary.json" '"verdict"[[:space:]]*:[[:space:]]*"[^"]')
         CAP=$(cat "$ARTIFACTS_DIR/round-cap.txt" 2>/dev/null || echo 2)
         case "$CAP" in ''|*[!0-9]*) CAP=2 ;; esac
         if [ "$N" -ge "$CAP" ] && [ ! -f "$ARTIFACTS_DIR/accept-residuals.txt" ]; then echo "ROUND_CAP_REACHED round=$N cap=$CAP (pre-round: a resume does not buy another review; write accept-residuals.txt or raise round-cap.txt)"; exit 1; fi
@@ -1794,7 +1794,12 @@ nodes:
         mode:headless aliases mode:agent and the skill returns ONE raw JSON
         object with status and verdict fields). Invoke with the same
         arguments either way and relay the skill's full return VERBATIM
-        (envelope or raw JSON) as part of your output. External/cross-model
+        (envelope or raw JSON) as part of your output.
+        Do not return until every persona the skill dispatched has reported.
+        A relayed envelope that stops mid-fan-out, or that carries an empty
+        verdict, is not a completed review: the round is billed and every
+        downstream gate rejects it. If a persona cannot finish, say which one
+        and why in the envelope and still emit a verdict. External/cross-model
         review is PROHIBITED in this unattended pipeline: never send the
         diff to any external peer, regardless of what the skill's own
         references permit.

@@ -33,10 +33,12 @@ class RoundPreCap(unittest.TestCase):
         (self.ad / "params.json").write_text('{"spec": "/x.md", "slug": "x", "branch": "archon/x", "worktree": "%s"}' % wt)
 
     def run_pre(self, workflow, round_txt, cap=None, accept=False, proven=None, reset=True):
-        # round-pre reclaims a round that left no review-envelope.txt behind: a
-        # review killed by its cost cap or a timeout was BILLED, not spent. A
-        # counter of N therefore only means N rounds happened if their envelopes
-        # exist. Without them these cap fixtures would be exercising the reclaim
+        # round-pre reclaims a round that decided nothing: a review killed by
+        # its cost cap, or one that returned while its personas were still
+        # running, was BILLED and not spent. The proof is a verdict, not a file
+        # name -- run 38d72218 round 3 left a 22KB envelope and {"verdict": ""}.
+        # A counter of N therefore only means N rounds happened if each left a
+        # verdict. Without them these cap fixtures would exercise the reclaim
         # path while claiming to test the cap. `proven` defaults to the whole
         # counter; pass fewer to leave the tail unproven.
         proven = round_txt if proven is None else proven
@@ -47,7 +49,9 @@ class RoundPreCap(unittest.TestCase):
         for k in range(1, proven + 1):
             d = self.ad / f"round-{k}"
             d.mkdir(parents=True, exist_ok=True)
-            (d / "review-envelope.txt").write_text(f"# envelope for round {k}\n", encoding="utf-8")
+            (d / "review-summary.json").write_text(
+                '{"verdict": "Ready to merge", "residual_count": 0, "degraded": false}',
+                encoding="utf-8")
         (self.ad / "round.txt").write_text(f"{round_txt}\n")
         if cap is not None:
             (self.ad / "round-cap.txt").write_text(f"{cap}\n")

@@ -94,5 +94,24 @@ class ReviewSizingTest(unittest.TestCase):
         self.assertGreaterEqual(found[0].get("maxBudgetUsd", 0), 15)
 
 
+class ReviewMustFinishItsFanOut(unittest.TestCase):
+    """Run 38d72218 round 3: the review node returned while its personas were
+    still running (archon logged dag.node_result_with_live_background_tasks).
+    The envelope stopped mid-persona, review-summary.json read {"verdict": ""},
+    and the round was billed for a decision it never made."""
+
+    def test_every_lane_forbids_returning_mid_fan_out(self):
+        for lane in LANES:
+            path = ARCHON / f"workflows/{lane}.yaml"
+            got = [(i, pr) for i, pr, _ in review_prompts(path.read_text())
+                   if "cap the conditional personas" in pr]
+            self.assertTrue(got, f"{lane}: no review prompt found")
+            for nid, pr in got:
+                self.assertIn("Do not return until every persona", pr,
+                              f"{lane}/{nid}: review may return with personas still running")
+                self.assertIn("is not a completed review", pr,
+                              f"{lane}/{nid}: no rule that a truncated fan-out is incomplete")
+
+
 if __name__ == "__main__":
     unittest.main()

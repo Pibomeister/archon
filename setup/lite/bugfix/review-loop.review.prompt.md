@@ -51,7 +51,12 @@ markdown headless envelope, or the newer agent-JSON contract (there
 mode:headless aliases mode:agent and the skill returns ONE raw JSON
 object with status and verdict fields). Invoke with the same
 arguments either way and relay the skill's full return VERBATIM
-(envelope or raw JSON) as part of your output. External/cross-model
+(envelope or raw JSON) as part of your output.
+Do not return until every persona the skill dispatched has reported.
+A relayed envelope that stops mid-fan-out, or that carries an empty
+verdict, is not a completed review: the round is billed and every
+downstream gate rejects it. If a persona cannot finish, say which one
+and why in the envelope and still emit a verdict. External/cross-model
 review is PROHIBITED in this unattended pipeline: never send the
 diff to any external peer, regardless of what the skill's own
 references permit.
