@@ -985,6 +985,20 @@ nodes:
        "input":"<observed input>","output":"<observed output>",
        "evidence":"<artifact/code citation>"}]}
     Trace from the reported UI/API/tool entrypoint to the proposed owner.
+    A difference is MATERIAL only if it is material TO THE SELECTED CHAIN. The
+    list is not an inventory of every way the test environment differs from
+    production; it is the differences that could make the test exercise a
+    different mechanism than the one your chain names. Ask, per row: does my
+    chain's mechanism DEPEND on this detail? If the mechanism is an
+    unconditional code path -- an assignment that overwrites, a branch that
+    always runs, a deletion that always happens -- then the specific rows,
+    ids, values or account behind it are not material and do not belong in
+    the list at all. Watch for the circular case: when the chain's own claim
+    is that evidence is destroyed or never recorded, "the probes could not
+    return that evidence" is the chain being CONFIRMED, not a difference
+    blocking it, and listing it makes the finding unimplementable by its own
+    logic. This is not licence to empty the list: a difference that could
+    change which mechanism runs stays, blocks, and is the point of the field.
     reproduction_equivalence.material_differences carries an `impact` per row and
     a gate refuses an implementation plan while any row is
     "changes-causal-boundary" or `equivalent` is not true. The two values are not

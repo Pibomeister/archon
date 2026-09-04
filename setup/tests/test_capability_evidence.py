@@ -460,6 +460,19 @@ class RetrievalCanChangeTheVerdictTest(unittest.TestCase):
         self.assertIn("`occurrence-logs`", prompt)
         self.assertIn("Do NOT cite `logs`", prompt)
 
+    def test_materiality_is_relative_to_the_selected_chain(self):
+        # Run aa75cd46 diagnosed "finalization deletes staging, eliminating the
+        # durable row-level evidence" and then listed "the probes did not return
+        # the specific contacts/Note ids/resolution state" as a
+        # changes-causal-boundary difference -- which is that chain being
+        # CONFIRMED. A finding about destroyed evidence cannot be required to
+        # reproduce the evidence it proved is destroyed.
+        rca = node("bugfix", "rca")["prompt"]
+        self.assertIn("material TO THE SELECTED CHAIN", rca)
+        self.assertIn("does my", rca)
+        self.assertIn("is the chain being CONFIRMED", rca)
+        self.assertIn("not licence to empty the list", rca)
+
     def test_material_difference_impact_values_are_explained(self):
         # A gate blocks on changes-causal-boundary and the prompt shipped the
         # enum with no statement of what either value means.
