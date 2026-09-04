@@ -84,6 +84,20 @@ CONTINUATION_ARTIFACTS = (
     "chain-verify.json", "chain-assessment.json", "experiment.json",
     "experiment-result.json", "experiment-assessment.json", "proof-recovery.json",
     "rca.md", "failed-fix.json", "failed-patch.diff", "failed-untracked.json",
+    # RETRIEVED EVIDENCE. Everything above is model-authored -- the chains, the
+    # hypotheses, the assessments, the prose. A successor that inherits only
+    # those receives the conclusion that was wrong and none of the data that
+    # proved it wrong, so it re-derives from source code and produces another
+    # code-derived hypothesis. That is not a hypothetical: runs dd962f9d and
+    # 4f3691f4 each died at RCA_GATE=FAIL PROBE_CONFLICT on a DIFFERENT
+    # mechanism, the second one having inherited the first's refuted chain
+    # without the production rows that refuted it.
+    #
+    # These are inputs, not diagnoses, so inheriting them cannot launder a
+    # conclusion: the successor still authors its own chain and its own probes,
+    # and rca-gate still holds the frozen-diagnosis check. probe-run caps
+    # probe-results.txt at 1 MiB, which bounds the bundle.
+    "probe.json", "probe-results.txt", "reassess.md", "occurrence-window.json",
 )
 MAX_RECOVERY_SUCCESSORS = 2
 
