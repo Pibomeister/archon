@@ -474,6 +474,32 @@ class RetrievalCanChangeTheVerdictTest(unittest.TestCase):
         runner = (SETUP / "archon-run.py").read_text(encoding="utf-8")
         self.assertIn('"checked_at"', runner)
 
+    def test_empty_occurrence_columns_mean_not_an_identification_probe(self):
+        # Run e2634be9 reached class-hardening-only correctly and then died
+        # because its census probes wrote [] for the occurrence columns rather
+        # than omitting them. occurrence-window.py already treats [] as absent
+        # (a truthiness check), so the validator was stricter than its own
+        # consumer and rejected the natural way to say not-applicable.
+        import subprocess, tempfile
+        tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        probes = {"probes": [
+            {"id": "ident", "question": "q", "sql": "SELECT id, created_at FROM t LIMIT 10",
+             "occurrence_subject_columns": ["id"], "occurrence_time_columns": ["created_at"]},
+            {"id": "census", "question": "q", "sql": "SELECT COUNT(*) FROM t",
+             "occurrence_subject_columns": [], "occurrence_time_columns": []},
+        ]}
+        (tmp / "probe.json").write_text(json.dumps(probes), encoding="utf-8")
+        ok = subprocess.run([sys.executable, str(SETUP / "probe-shape.py"), str(tmp)],
+                            capture_output=True, encoding="utf-8")
+        self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+        # Negative control: one set without the other is still a contract error.
+        probes["probes"][1]["occurrence_subject_columns"] = ["id"]
+        (tmp / "probe.json").write_text(json.dumps(probes), encoding="utf-8")
+        bad = subprocess.run([sys.executable, str(SETUP / "probe-shape.py"), str(tmp)],
+                             capture_output=True, encoding="utf-8")
+        self.assertEqual(bad.returncode, 1)
+        self.assertIn("when either is set", bad.stdout)
+
     def test_class_hardening_is_presented_as_shippable(self):
         # Run 0ceb2816 wrote reproduction_status "class-only" AND disposition
         # "fixed" -- over-claiming, rejected as "fixed symptom E1 lacks

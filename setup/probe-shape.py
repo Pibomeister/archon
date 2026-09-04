@@ -59,12 +59,18 @@ def main() -> None:
             fail(f"probe {probe['id']}: LIMIT exceeds 100")
         # Optional, and only meaningful together: probe-run reads these columns
         # off the matched row to derive the occurrence window mechanically.
-        declared = [probe.get("occurrence_subject_columns"), probe.get("occurrence_time_columns")]
-        if any(d is not None for d in declared):
+        # null and [] both mean "not an identification probe" -- writing []
+        # is how a model naturally says not-applicable, and occurrence-window.py
+        # already treats it as absent, so rejecting it here made the validator
+        # stricter than its own consumer.
+        declared = [probe.get("occurrence_subject_columns") or [],
+                    probe.get("occurrence_time_columns") or []]
+        if any(declared):
             if not all(isinstance(d, list) and d and all(isinstance(c, str) and c.strip() for c in d)
                        for d in declared):
                 fail(f"probe {probe['id']}: occurrence_subject_columns and "
-                     "occurrence_time_columns must both be non-empty string lists")
+                     "occurrence_time_columns must both be non-empty string lists "
+                     "when either is set (use [] or omit both on a non-identification probe)")
     print(f"PROBE_SHAPE=OK probes={len(probes)}")
 
 
