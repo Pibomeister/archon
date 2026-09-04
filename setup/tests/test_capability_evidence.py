@@ -460,6 +460,17 @@ class RetrievalCanChangeTheVerdictTest(unittest.TestCase):
         self.assertIn("`occurrence-logs`", prompt)
         self.assertIn("Do NOT cite `logs`", prompt)
 
+    def test_boundary_evidence_claims_are_a_closed_set(self):
+        # Run e3db3ae9 cleared every earlier blocker -- equivalent True, fix plan
+        # filled, occurrence attributed -- then failed because reassess cited the
+        # log by ADDING a fourth evidence row, claim "runtime-entrypoint-occurrence".
+        # The list accepts exactly three ownership claims and rejects any other.
+        prompt = node("bugfix", "rca-reassess")["prompt"]
+        self.assertIn("CLOSED set of exactly three", prompt)
+        self.assertIn("Do NOT add a row", prompt)
+        contract = (SETUP / "bugfix-contract.py").read_text(encoding="utf-8")
+        self.assertIn("belongs in surface_selection_basis", contract)
+
     def test_materiality_is_relative_to_the_selected_chain(self):
         # Run aa75cd46 diagnosed "finalization deletes staging, eliminating the
         # durable row-level evidence" and then listed "the probes did not return

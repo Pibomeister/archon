@@ -1127,8 +1127,14 @@ nodes:
       ambiguous reported surface becomes identified: that is a captured runtime
       record, not a guess, so it is legitimate grounds to set
       reported_surface_status "runtime-reproduced", fill runtime_entrypoint from
-      the logged route, and quote that line as surface_selection_basis. Quote
-      the line you relied on. A line whose status is UNAVAILABLE, or zero
+      the logged route, and put the log line verbatim in
+      surface_selection_basis — that free-text field is exactly where a captured
+      reproduction belongs. Do NOT add a row to boundary-trace's `evidence`
+      list: its `claim` values are a CLOSED set of exactly three
+      ("runtime-entrypoint-to-owner", "test-entrypoint-to-owner",
+      "smoke-entrypoint-to-owner"), those rows carry code proof of the
+      entrypoint-to-owner links, and a gate rejects the whole list if any other
+      claim appears or any of the three is missing. A line whose status is UNAVAILABLE, or zero
       matching events, is a real answer that leaves the surface ambiguous. Never
       treat a line about a different user, entity, or window as evidence here.
 

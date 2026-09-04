@@ -261,7 +261,12 @@ def validate_systematic_debugging(artifacts_dir: Path) -> dict[str, Any]:
         or not item.get("quote")
         for item in evidence
     ):
-        raise ContractError("surface_equivalence needs typed file/quote evidence")
+        raise ContractError(
+            "surface_equivalence needs typed file/quote evidence: `evidence` holds exactly the "
+            "three claims runtime-entrypoint-to-owner, test-entrypoint-to-owner and "
+            "smoke-entrypoint-to-owner, each with file and quote, and no others "
+            "(a captured runtime record belongs in surface_selection_basis)"
+        )
     evidence_claims = {item["claim"] for item in evidence}
     required_claims = {
         "runtime-entrypoint-to-owner",
