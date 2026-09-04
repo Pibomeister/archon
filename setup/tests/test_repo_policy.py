@@ -158,6 +158,47 @@ class RepoPolicyTest(unittest.TestCase):
         self.assertIn("unique-profile-fixtures", result.stdout)
 
 
+class TestTierMatchingTest(unittest.TestCase):
+    """existing-test-preferred must compare like with like.
+
+    Run 233ea3ca proposed a kind=unit spec and was told to extend
+    apps/api-e2e/.../commit-import.service.int.spec.ts, because candidates were
+    matched on filename stem across every suffix. That spec is one verify.json
+    is forbidden to list and the api unit runner reports "No tests found" for,
+    so existing-test-preferred and the lane's test contract could not both be
+    satisfied whenever an integration spec shared a production file's name.
+    """
+
+    def _candidates(self, kind, paths):
+        import importlib.util, unittest.mock
+        from pathlib import Path as _P
+        spec = importlib.util.spec_from_file_location(
+            "repo_policy", _P(__file__).resolve().parents[1] / "repo-policy.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with unittest.mock.patch.object(module, "baseline_paths", lambda *a, **k: paths):
+            return module.test_candidates(_P("/repo"), "libs/x/commit-import.service.ts", None, kind)
+
+    def test_unit_kind_never_matches_an_integration_spec(self):
+        paths = ["apps/api-e2e/src/commit-import.service.int.spec.ts",
+                 "libs/x/__tests__/commit-import.service.spec.ts"]
+        self.assertEqual(self._candidates("unit", paths),
+                         ["libs/x/__tests__/commit-import.service.spec.ts"])
+
+    def test_unit_kind_with_only_an_integration_spec_has_no_candidate(self):
+        # The exact shape that blocked the run: nothing in-tier exists, so the
+        # rule must not fire at all rather than point at another tier.
+        paths = ["apps/api-e2e/src/commit-import.service.int.spec.ts"]
+        self.assertEqual(self._candidates("unit", paths), [])
+
+    def test_integration_kind_still_prefers_the_existing_integration_spec(self):
+        # Negative control: the rule must keep working within a tier.
+        paths = ["apps/api-e2e/src/commit-import.service.int.spec.ts",
+                 "libs/x/__tests__/commit-import.service.spec.ts"]
+        self.assertEqual(self._candidates("integration", paths),
+                         ["apps/api-e2e/src/commit-import.service.int.spec.ts"])
+
+
 class WorkflowIntegrationTest(unittest.TestCase):
     def test_policy_contract_uses_existing_nodes_only(self):
         import yaml

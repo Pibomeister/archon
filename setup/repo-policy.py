@@ -143,14 +143,45 @@ def is_test(path: str) -> bool:
     return any(path.endswith(suffix) for suffix in TEST_SUFFIXES)
 
 
-def test_candidates(repo: Path, production: str, commit: str | None) -> list[str]:
+# The tier a spec belongs to, by suffix. rca-shape.sh uses exactly this list to
+# reject non-unit patterns in verify.json, and the api unit runner reports "No
+# tests found" for them, so a unit fix cannot satisfy existing-test-preferred by
+# extending one.
+NON_UNIT_SUFFIXES = (".int.spec.ts", ".e2e.spec.ts", ".ai.spec.ts", ".ext.spec.ts")
+KIND_SUFFIXES = {
+    "unit": (".spec.ts", ".test.ts", ".test.js"),
+    "vitest": (".spec.ts", ".test.ts", ".test.js"),
+    "integration": (".int.spec.ts",),
+    "playwright": (".e2e.spec.ts",),
+}
+
+
+def is_unit_spec(path: str) -> bool:
+    return not any(path.endswith(suffix) for suffix in NON_UNIT_SUFFIXES)
+
+
+def test_candidates(repo: Path, production: str, commit: str | None,
+                    kind: str | None = None) -> list[str]:
+    """Existing specs that could own `production`, IN THE SAME TIER.
+
+    Without the tier filter every suffix sharing the stem is a candidate, so a
+    kind=unit fix gets told to extend `<name>.int.spec.ts` -- a spec verify.json
+    is forbidden to list and the unit runner ignores. That put
+    existing-test-preferred in direct conflict with the lane's test contract
+    whenever an integration spec shares a name with the production file.
+    """
     stem = Path(production).name
     for suffix in (".ts", ".js", ".tsx", ".jsx"):
         if stem.endswith(suffix):
             stem = stem[:-len(suffix)]
             break
+    allowed = KIND_SUFFIXES.get(kind or "", TEST_SUFFIXES)
     names = {stem + suffix for suffix in TEST_SUFFIXES}
-    return sorted(path for path in baseline_paths(repo, commit) if Path(path).name in names)
+    found = [path for path in baseline_paths(repo, commit) if Path(path).name in names]
+    same_tier = [path for path in found if path.endswith(tuple(allowed))]
+    if kind in ("unit", "vitest"):
+        same_tier = [path for path in same_tier if is_unit_spec(path)]
+    return sorted(same_tier)
 
 
 def selected_repo(root: Path, artifacts: Path) -> tuple[str, Path, dict]:
@@ -188,7 +219,9 @@ def validate_plan(root: Path, artifacts: Path) -> None:
             fail(f"TEST_NAMING kind={kind} expected_suffix={expected} proposed={proposed} rule={source}")
     blocking = any(rule.get("id") == "existing-test-preferred" for rule in policy.get("rules", []))
     for production in productions:
-        candidates = test_candidates(repo, production, json.loads((artifacts / "repo-policy.json").read_text())["baseline"].get(name))
+        candidates = test_candidates(repo, production,
+                                     json.loads((artifacts / "repo-policy.json").read_text())["baseline"].get(name),
+                                     failing.get("kind"))
         decision = "extend-existing" if proposed in candidates else "new-file"
         rows.append({"production_file": production, "proposed_test": proposed,
                      "existing_candidates": candidates, "decision": decision})
