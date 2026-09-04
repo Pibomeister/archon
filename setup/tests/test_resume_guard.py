@@ -100,6 +100,37 @@ def utc_ago(**kw):
     return (datetime.now(timezone.utc) - timedelta(**kw)).strftime("%Y-%m-%d %H:%M:%S")
 
 
+class BugfixChainEnvOnResumeTest(unittest.TestCase):
+    """Resume must restore the chain env the LAUNCHER exported.
+
+    Run f53b1b58 converged its planning loop (round 7 ACCEPT, zero P1s) after a
+    documented cap raise + resume, then died at approval-manifest-gate with
+    "APPROVAL_ATTESTATION=REQUIRED no private chain state". archon-run.py sets
+    ARCHON_BUGFIX_CHAIN_STATE / ARCHON_ATTESTATION_DIR via chain_env() at LAUNCH;
+    resume.sh never did, so every documented recovery for this lane -- raise the
+    round cap and resume, fix an artifact and resume -- reached the first
+    attestation node and failed, after re-paying for the whole RCA.
+    """
+
+    def test_resume_restores_chain_state_and_attestation_dir(self):
+        body = (Path(__file__).resolve().parents[1] / "resume.sh").read_text(encoding="utf-8")
+        self.assertIn("ARCHON_BUGFIX_CHAIN_STATE", body)
+        self.assertIn("ARCHON_ATTESTATION_DIR", body)
+        self.assertIn("bugfix-chain.json", body)
+
+    def test_the_env_is_passed_as_an_array_not_a_split_string(self):
+        # An unquoted "$CHAIN_ENV" relies on word-splitting: bash splits it,
+        # zsh passes ONE argument, and the failure is silent.
+        body = (Path(__file__).resolve().parents[1] / "resume.sh").read_text(encoding="utf-8")
+        self.assertIn('env "${CHAIN_ENV[@]}"', body)
+        self.assertNotIn("env $CHAIN_ENV", body)
+
+    def test_a_lane_without_a_chain_file_exports_nothing(self):
+        # The feature lanes have no bugfix-chain.json; resume must not break.
+        body = (Path(__file__).resolve().parents[1] / "resume.sh").read_text(encoding="utf-8")
+        self.assertIn('if [ -f "$CHAIN_JSON" ]; then', body)
+
+
 class ResumeGuardTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

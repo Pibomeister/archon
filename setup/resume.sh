@@ -237,7 +237,50 @@ BEFORE="$QOUT"
 # guard error: archon may already have moved the run. stage=exec says so.
 STAGE=exec
 set +e
-DISABLE_OMC=1 archon workflow resume "$RUN_ID" "$@" </dev/null
+# A bugfix run's attestation nodes need the chain env the LAUNCHER exported
+# (archon-run.py chain_env). Resume never had it, so every documented recovery
+# for this lane -- raise the round cap and resume, fix an artifact and resume --
+# died at the first attestation node with
+# "APPROVAL_ATTESTATION=REQUIRED no private chain state", after paying for the
+# whole RCA again. Reconstruct it from the run's own bugfix-chain.json; a lane
+# with no chain file (the feature lanes) exports nothing and is unaffected.
+CHAIN_ENV=()
+ARTIFACTS_ROOT="${ARCHON_ARTIFACTS_ROOT:-$HOME/.archon/workspaces/_folder/goodword/artifacts/runs}"
+CHAIN_JSON="$ARTIFACTS_ROOT/$RUN_ID/bugfix-chain.json"
+if [ -f "$CHAIN_JSON" ]; then
+  # Array, not a string: an unquoted string relies on word-splitting, which is
+  # bash-only and silently yields ONE argument under zsh.
+  while IFS= read -r line; do
+    [ -n "$line" ] && CHAIN_ENV+=("$line")
+  done < <(python3 - "$CHAIN_JSON" "${ARCHON_CONTROL_DIR:-$HOME/.archon/control/codex-lite}" <<'PY'
+import json, sys
+from pathlib import Path
+chain = json.load(open(sys.argv[1], encoding="utf-8"))
+control = Path(sys.argv[2])
+cid = chain["logical_chain_id"]
+baseline = chain.get("baseline", {})
+gitnexus = baseline.get("gitnexus", {}) or {}
+commits = baseline.get("commits", {}) or {}
+env = {
+    "ARCHON_BUGFIX_CHAIN_ID": cid,
+    "ARCHON_BUGFIX_CHAIN_STATE": str(control / "bugfix-chains" / f"{cid}.json"),
+    "ARCHON_ATTESTATION_DIR": str(control / "attestations"),
+    "ARCHON_GITNEXUS_COMMIT": str(gitnexus.get("commit") or commits.get("api", "")),
+    "ARCHON_API_BASELINE": str(commits.get("api", "")),
+    "ARCHON_WEB_BASELINE": str(commits.get("web-app", "")),
+}
+if gitnexus.get("index_path"):
+    env["ARCHON_GITNEXUS_INDEX"] = str(gitnexus["index_path"])
+for k, v in env.items():
+    if v:
+        print(f"{k}={v}")
+PY
+  )
+  if [ "${#CHAIN_ENV[@]}" -gt 0 ]; then
+    echo "RESUME_CHAIN_ENV=RESTORED vars=${#CHAIN_ENV[@]}"
+  fi
+fi
+env "${CHAIN_ENV[@]}" DISABLE_OMC=1 archon workflow resume "$RUN_ID" "$@" </dev/null
 ARCHON_RC=$?
 set -e
 
