@@ -460,6 +460,28 @@ class RetrievalCanChangeTheVerdictTest(unittest.TestCase):
         self.assertIn("`occurrence-logs`", prompt)
         self.assertIn("Do NOT cite `logs`", prompt)
 
+    def test_a_capability_is_re_checked_at_the_point_of_use(self):
+        # Run 0ceb2816: capabilities.json recorded prod-db=AVAILABLE at preflight
+        # and probe-run needed those credentials ~40 minutes later, by which time
+        # the ~15-minute SSO session had lapsed. The probes silently degraded and
+        # the run produced exactly the unattributable RCA the capability gate
+        # exists to prevent -- the original defect, displaced in time.
+        probe = node("bugfix", "probe-run")["bash"]
+        self.assertIn("PROBE_RUN=FAIL capability-expired", probe)
+        self.assertIn("retrievable_by", probe)
+        self.assertIn("resume.sh", probe)
+        # A stale AVAILABLE must be distinguishable from a live one.
+        runner = (SETUP / "archon-run.py").read_text(encoding="utf-8")
+        self.assertIn('"checked_at"', runner)
+
+    def test_a_local_repro_still_survives_an_expired_session(self):
+        # Negative control on the guard above: with no probe-retrievable gap the
+        # node must still DEGRADE rather than stop, or every local-repro bug dies
+        # on an expired credential it never needed.
+        probe = node("bugfix", "probe-run")["bash"]
+        self.assertIn('PROBE_RUN=DEGRADED sso expired', probe)
+        self.assertIn('if [ "${NEEDS:-0}" -gt 0 ]; then', probe)
+
     def test_boundary_evidence_claims_are_a_closed_set(self):
         # Run e3db3ae9 cleared every earlier blocker -- equivalent True, fix plan
         # filled, occurrence attributed -- then failed because reassess cited the

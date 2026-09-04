@@ -1452,6 +1452,7 @@ nodes:
     # validated here by the same probe-shape.py the gate runs, so nothing
     # unvalidated reaches production.
     AD="$ARTIFACTS_DIR"
+    ROOT_ARCHON=/Users/eduardopicazo/Documents/Workspace/Goodword/.archon
     record_probe() {
       local STATUS="$1" WATERMARK WINDOW PROVIDER KIND QUERY BASELINE REPO
       KIND=$(python3 - "$AD/evidence-plan.json" <<'PY'
@@ -1503,6 +1504,29 @@ nodes:
       exit 0
     fi
     if ! aws sts get-caller-identity >/dev/null 2>&1; then
+      # capability-gate proved prod was reachable at PREFLIGHT. An SSO session
+      # lasts ~15 minutes and this node runs 20-40 minutes later, so that proof
+      # can be stale by now -- and continuing produces exactly the
+      # unattributable RCA the capability gate exists to prevent. Apply the
+      # same predicate at the point of USE: if the report's own gaps are marked
+      # retrievable_by probe, an expired session is a stop, not a warning. A
+      # failed bash node is resumable, so `aws login` then resume.sh recovers
+      # the run without re-spending the RCA.
+      NEEDS=$(python3 - "$AD/evidence-plan.json" <<'PY'
+    import json, sys
+    try:
+        plan = json.load(open(sys.argv[1], encoding="utf-8"))
+    except Exception:
+        print(0); raise SystemExit
+    print(sum(1 for u in plan.get("unknowns") or [] if u.get("retrievable_by") == "probe"))
+    PY
+      )
+      if [ "${NEEDS:-0}" -gt 0 ]; then
+        echo "PROBE_RUN=FAIL capability-expired reason=aws-session-expired probe_gaps=$NEEDS"
+        echo "Prod was reachable at preflight and the session lapsed before this node."
+        echo "Run: aws login   then: bash $ROOT_ARCHON/setup/resume.sh $(basename "$AD" | cut -c1-8)"
+        exit 1
+      fi
       echo "PROBE_RUN=DEGRADED sso expired (probes unanswered; gate packet will say so)" | tee "$AD/probe-results.txt"
       record_probe unavailable || { echo "PROBE_RUN=FAIL provenance"; exit 1; }
       exit 0
