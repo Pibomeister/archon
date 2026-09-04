@@ -156,3 +156,98 @@ class StageMode(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StrayTriage(unittest.TestCase):
+    """--quarantine resolves a stray instead of paging a human, on the one axis
+    that separates the two things agents actually leave behind. Run 38d72218
+    produced both in the SAME directory: commit-import.util.ts, a new file a
+    Blocking repo rule required, and zzz-timing-check.spec.ts, a scratch probe.
+    The first shares a stem with an allowlisted file; the second shares nothing.
+    Those two cases are the fixtures here, under their real names."""
+
+    def setUp(self):
+        self.wt = Path(tempfile.mkdtemp())
+        self.art = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.wt, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, self.art, ignore_errors=True)
+        run = lambda c: subprocess.run(c, cwd=self.wt, shell=True, check=True, capture_output=True)
+        run("git init -q && git config user.email t@t && git config user.name t")
+        for d in ("lib", "lib/__tests__"):
+            (self.wt / d).mkdir(parents=True, exist_ok=True)
+        (self.wt / "lib/commit-import.service.ts").write_text("export const a = 1;\n")
+        (self.wt / "lib/__tests__/commit-import-note-resolution.spec.ts").write_text("it('x', () => {});\n")
+        (self.wt / "lib/other.service.ts").write_text("export const b = 2;\n")
+        run("git add -A && git commit -qm base")
+        self.allow = self.art / "files-allowlist.json"
+        self.allow.write_text(json.dumps([
+            "lib/commit-import.service.ts",
+            "lib/__tests__/commit-import-note-resolution.spec.ts",
+        ]))
+
+    def stage(self):
+        return subprocess.run(
+            ["python3", str(SCRIPT), str(self.allow), str(self.wt), "HEAD", "--stage",
+             "--quarantine", str(self.art), "--exclude", "pnpm-lock.yaml"],
+            capture_output=True, encoding="utf-8")
+
+    def staged(self):
+        out = subprocess.run(["git", "-C", str(self.wt), "diff", "--cached", "--name-only"],
+                             capture_output=True, encoding="utf-8").stdout
+        return sorted(p for p in out.split() if p)
+
+    def test_a_mandated_sibling_is_adopted_and_committed(self):
+        (self.wt / "lib/commit-import.util.ts").write_text("export const c = 3;\n")
+        r = self.stage()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("COMMIT_SCOPE=ADOPTED file=lib/commit-import.util.ts", r.stdout)
+        self.assertIn("lib/commit-import.util.ts", self.staged())
+        self.assertIn("lib/commit-import.util.ts", json.loads(self.allow.read_text()))
+        rec = json.loads((self.art / "allowlist-auto-expansion.json").read_text())
+        self.assertEqual(rec[0]["path"], "lib/commit-import.util.ts")
+        self.assertEqual(rec[0]["sibling_of"], ["lib/commit-import.service.ts"])
+
+    def test_a_scratch_probe_is_quarantined_not_committed_and_not_deleted(self):
+        probe = self.wt / "lib/__tests__/zzz-timing-check.spec.ts"
+        probe.write_text("it('probe', () => {});\n")
+        r = self.stage()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("COMMIT_SCOPE=QUARANTINED file=lib/__tests__/zzz-timing-check.spec.ts", r.stdout)
+        self.assertFalse(probe.exists(), "the stray must leave the worktree")
+        kept = self.art / "strays/lib/__tests__/zzz-timing-check.spec.ts"
+        self.assertTrue(kept.exists(), "quarantine must keep the file, never delete it")
+        self.assertNotIn("lib/__tests__/zzz-timing-check.spec.ts", self.staged())
+        self.assertNotIn("zzz-timing-check", self.allow.read_text())
+
+    def test_a_sibling_in_another_directory_is_not_adopted(self):
+        # The stem alone is not the unit; the directory is half the rule.
+        (self.wt / "lib/__tests__/commit-import.util.ts").write_text("export const d = 4;\n")
+        r = self.stage()
+        self.assertIn("COMMIT_SCOPE=QUARANTINED file=lib/__tests__/commit-import.util.ts", r.stdout)
+
+    def test_an_edit_to_an_unallowlisted_tracked_file_still_stops(self):
+        # Adoption is for NEW files. Editing code someone else owns is a scope
+        # decision and stays a human one.
+        (self.wt / "lib/other.service.ts").write_text("export const b = 99;\n")
+        r = self.stage()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("COMMIT_SCOPE=STRAY file=lib/other.service.ts (modified, not new", r.stdout)
+        self.assertEqual(self.staged(), [], "a refused round must leave the index empty")
+
+    def test_a_blocking_edit_is_not_rescued_by_an_adoptable_file_beside_it(self):
+        # Mixed batch: the human stop wins and nothing is adopted or moved.
+        (self.wt / "lib/commit-import.util.ts").write_text("export const c = 3;\n")
+        (self.wt / "lib/other.service.ts").write_text("export const b = 99;\n")
+        r = self.stage()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertNotIn("ADOPTED", r.stdout)
+        self.assertNotIn("commit-import.util.ts", json.loads(self.allow.read_text()).__str__())
+
+    def test_without_quarantine_the_old_hard_stop_is_unchanged(self):
+        # Negative control on the flag itself: no --quarantine, no triage.
+        (self.wt / "lib/commit-import.util.ts").write_text("export const c = 3;\n")
+        r = subprocess.run(
+            ["python3", str(SCRIPT), str(self.allow), str(self.wt), "HEAD", "--stage"],
+            capture_output=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("COMMIT_SCOPE=STRAY file=lib/commit-import.util.ts", r.stdout)

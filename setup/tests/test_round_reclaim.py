@@ -81,13 +81,40 @@ class RoundReclaimTest(unittest.TestCase):
         self.assertEqual(run(self.ad, 2)[0], "2")
         self.assertEqual(run(self.ad, 2)[0], "2")
 
-    def test_a_second_unproven_round_is_not_reclaimed(self):
-        # The bound is per RUN, not per round number: two unproven rounds mean
-        # something is durably wrong, and buying a third attempt for every
-        # round number would let a persistently dying review spend 2x the cap.
+    def test_two_distinct_unproven_rounds_are_both_reclaimed(self):
+        # The budget is 2 because run 38d72218 needed exactly that: round 2 died
+        # to a cost cap and round 3 returned mid-fan-out -- two unrelated
+        # infrastructure failures, and a budget of 1 meant the run had to be
+        # hand-carried past the second one.
         self._round(2); self._round(3)
         self.assertEqual(run(self.ad, 2)[0], "1")
-        self.assertEqual(run(self.ad, 3)[0], "3")
+        self.assertEqual(run(self.ad, 3)[0], "2")
+
+    def test_a_third_unproven_round_exhausts_the_budget(self):
+        # Three means the failure is the norm, not a flake. Stop and make
+        # someone look instead of buying rounds forever.
+        for n in (2, 3, 4):
+            self._round(n)
+        self.assertEqual(run(self.ad, 2)[0], "1")
+        self.assertEqual(run(self.ad, 3)[0], "2")
+        out, err, _ = run(self.ad, 4)
+        self.assertEqual(out, "4")
+        self.assertIn("ROUND_RECLAIM=EXHAUSTED used=2 budget=2", err)
+
+    def test_the_same_round_number_is_never_reclaimed_twice(self):
+        # A node that dies at the same round every time must walk the counter
+        # up to the cap, not spin on one number until the budget is gone.
+        self._round(2)
+        self.assertEqual(run(self.ad, 2)[0], "1")
+        self.assertEqual(run(self.ad, 2)[0], "2")
+
+    def test_the_budget_is_operator_overridable(self):
+        (self.ad / "round-reclaim-cap.txt").write_text("1\n", encoding="utf-8")
+        self._round(2); self._round(3)
+        self.assertEqual(run(self.ad, 2)[0], "1")
+        out, err, _ = run(self.ad, 3)
+        self.assertEqual(out, "3")
+        self.assertIn("budget=1", err)
 
     def test_zero_and_junk_counters_pass_through_untouched(self):
         self.assertEqual(run(self.ad, 0)[0], "0")

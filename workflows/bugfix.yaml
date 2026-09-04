@@ -3022,7 +3022,7 @@ nodes:
               cd "$WT"
               MSG=$(head -1 "$ARTIFACTS_DIR/commit-msg.txt" 2>/dev/null || true)
               test -n "$MSG" || MSG="fix($REPO): $SLUG"
-              python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --exclude pnpm-lock.yaml || exit 1
+              python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
               if git diff --cached --quiet; then echo "COMMITTED=NO (nothing staged)"; else git commit -m "$MSG"; fi
               test -z "$(git status --porcelain | grep -vE '^\?\? \.env$|^ M pnpm-lock\.yaml$')" || { echo "FIX_CONVERGE=FAIL dirty after commit"; exit 1; }
               echo "GREEN_ACHIEVED attempt=$N sha=$(git rev-parse HEAD)"
@@ -3599,7 +3599,7 @@ nodes:
       # The web bootstrap deliberately leaves pnpm-lock.yaml modified; it is never
       # part of a fix commit, and a tree dirty ONLY by that drift must produce no
       # commit at all rather than an empty one.
-      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --exclude pnpm-lock.yaml || exit 1
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
       COMMITTED=no
       if git diff --cached --quiet; then :; else
         git commit -m "fix(deslop): remove ai slop from $SLUG"
@@ -3798,7 +3798,7 @@ nodes:
             RED=$(cat "$ARTIFACTS_DIR/red-sha.txt")
             TESTF=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1], encoding='utf-8'))['test_file'])" "$ARTIFACTS_DIR/failing-test.json")
             test -z "$(git diff "$RED" -- "$TESTF")" || { echo "REVIEW_SCOPE=FAIL repro test modified before commit (restore it: git checkout $RED -- $TESTF)"; exit 1; }
-            python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --exclude pnpm-lock.yaml || exit 1
+            python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
             if git diff --cached --quiet; then echo "COMMITTED=NO"; else
               git commit -m "fix(review): apply autofix feedback"; echo "COMMITTED=YES sha=$(git rev-parse HEAD)"
             fi
@@ -3865,6 +3865,11 @@ nodes:
               then demands a human accept residuals for something no round was ever
               able to fix. Never silently drop a finding from the result file.
             - No commits, no branches. Touch only files findings name.
+            - Scratch belongs OUTSIDE the worktree. A probe test, a scratch script,
+              a dump you write to check a claim goes under $ARTIFACTS_DIR; anything
+              left in the worktree that no finding names is quarantined there anyway
+              and never reaches the commit, so writing it in the tree only costs you
+              the round's clarity.
             Write JSON to round-<N>/fixer-result.json in the artifacts directory:
               {"applied": [...], "failed": [...], "advisory": [...], "incomplete": [...]}
             each entry {"finding": "<one-line>", "action": "<what/why>"}.
@@ -3879,7 +3884,7 @@ nodes:
             set -euo pipefail
             eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
             cd "$WT"
-            python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --exclude pnpm-lock.yaml || exit 1
+            python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
             if git diff --cached --quiet; then echo "COMMITTED=NO"; else
               git commit -m "fix(review): apply fixer feedback"; echo "COMMITTED=YES sha=$(git rev-parse HEAD)"
             fi

@@ -326,7 +326,7 @@ nodes:
     bash: |
       set -euo pipefail
       cd $(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['worktree'])" "$ARTIFACTS_DIR/params.json")
-      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --exclude pnpm-lock.yaml || exit 1
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
       if git diff --cached --quiet; then
         # Idempotent re-run: a prior run may have already committed the work.
         git rev-parse HEAD >/dev/null && { echo "COMMIT_IMPL=ALREADY sha=$(git rev-parse HEAD)"; exit 0; }
@@ -478,7 +478,7 @@ nodes:
           bash: |
             set -euo pipefail
             cd $(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['worktree'])" "$ARTIFACTS_DIR/params.json")
-            python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --exclude pnpm-lock.yaml || exit 1
+            python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
             if git diff --cached --quiet; then echo "COMMITTED=NO"; else
               git commit -m "fix(review): apply autofix feedback"; echo "COMMITTED=YES sha=$(git rev-parse HEAD)"
             fi
@@ -535,6 +535,11 @@ nodes:
               then demands a human accept residuals for something no round was ever
               able to fix. Never silently drop a finding from the result file.
             - No commits, no branches. Never touch pnpm-lock.yaml.
+            - Scratch belongs OUTSIDE the worktree. A probe test, a scratch script,
+              a dump you write to check a claim goes under $ARTIFACTS_DIR; anything
+              left in the worktree that no finding names is quarantined there anyway
+              and never reaches the commit, so writing it in the tree only costs you
+              the round's clarity.
             Write JSON to round-<N>/fixer-result.json:
               {"applied": [...], "failed": [...], "advisory": [...], "incomplete": [...]}
             Writing the JSON result file is MANDATORY and comes BEFORE your final line —
@@ -547,7 +552,7 @@ nodes:
           bash: |
             set -euo pipefail
             cd $(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['worktree'])" "$ARTIFACTS_DIR/params.json")
-            python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --exclude pnpm-lock.yaml || exit 1
+            python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
             if git diff --cached --quiet; then echo "COMMITTED=NO"; else
               git commit -m "fix(review): apply web feature feedback"; echo "COMMITTED=YES sha=$(git rev-parse HEAD)"
             fi

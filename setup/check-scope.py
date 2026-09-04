@@ -4,6 +4,7 @@ must be in the plan's files-allowlist.json. A breach is a hard human stop —
 legitimate scope growth is a human editing the allowlist and resuming.
 Usage: check-scope.py <files-allowlist.json> <worktree> <base-sha>
                       [--round N] [--exclude <path> ...] [--stage]
+                      [--quarantine <dir>]
 
 --stage makes this a PRE-commit gate for the nodes that used to run
 `git add -A`. That staged whatever an agent happened to leave in the worktree,
@@ -12,8 +13,28 @@ so a scratch probe became a commit and only converge's post-hoc check caught it
 (observed: a round-2 fixer committed __tests__/zzz-timing-check.spec.ts). With
 --stage nothing outside the allowlist is ever staged, and a stray stops the
 round while it is still a deletable file. Pass base-sha HEAD in this mode: the
-committed diff belongs to converge, this call judges the working tree only."""
+committed diff belongs to converge, this call judges the working tree only.
+
+--quarantine makes the gate resolve a stray instead of paging a human, along
+the one axis that actually discriminates the two things agents leave behind.
+Run 38d72218 produced both, in the same directory:
+
+  commit-import.util.ts        a NEW file a Blocking repo rule required, whose
+                               absence from the allowlist was an accident of
+                               the allowlist predating the finding
+  zzz-timing-check.spec.ts     a scratch probe an agent wrote to check a claim
+
+The first shares a stem with an allowlisted production file in its own
+directory (commit-import.service.ts); the second shares nothing with anything.
+So a NEW, UNTRACKED file whose stem matches an allowlisted file in the same
+directory is the same unit and is adopted into the allowlist, recorded in
+allowlist-auto-expansion.json. Any other new file is moved -- never deleted --
+under <dir>/strays/, where a human can retrieve it. A MODIFIED tracked file
+outside the allowlist is neither: it is an edit to code someone else owns, and
+that still stops the round for a human."""
 import json
+import os
+import shutil
 import subprocess
 import sys
 
@@ -21,6 +42,7 @@ args = sys.argv[1:]
 allowlist_path, worktree, base = args[0], args[1], args[2]
 round_no = None
 stage = False
+quarantine = None
 excludes = {".env"}
 i = 3
 while i < len(args):
@@ -33,6 +55,9 @@ while i < len(args):
     elif args[i] == "--stage":
         stage = True
         i += 1
+    elif args[i] == "--quarantine":
+        quarantine = args[i + 1]
+        i += 2
     else:
         sys.exit(f"SCOPE_GUARD=FAIL unknown argument {args[i]}")
 
@@ -63,6 +88,69 @@ for line in git("status", "--porcelain").splitlines():
     changed.add(path.strip())
 
 breaches = sorted(p for p in changed if p not in allowed and p not in excludes)
+
+
+def is_untracked(path):
+    """`??` in porcelain: the file did not exist at HEAD, so nobody owns it."""
+    out = git("status", "--porcelain", "--", path)
+    return any(l.startswith("??") for l in out.splitlines() if l.strip())
+
+
+def stem(path):
+    """foo.service.ts -> foo, foo.util.ts -> foo, foo.spec.ts -> foo."""
+    return os.path.basename(path).split(".", 1)[0]
+
+
+def adoptable(path):
+    """A new file belongs to the unit when an allowlisted file in its own
+    directory shares its stem. Anything looser adopts unrelated work; anything
+    stricter cannot express the sibling a repo rule mandates."""
+    d, st = os.path.dirname(path), stem(path)
+    return any(os.path.dirname(a) == d and stem(a) == st for a in allowed)
+
+
+if breaches and stage and quarantine:
+    adopted, moved, blocked = [], [], []
+    for b in breaches:
+        if not is_untracked(b):
+            blocked.append(b)          # an edit to a file someone else owns
+        elif adoptable(b):
+            adopted.append(b)
+        else:
+            moved.append(b)
+    if blocked:
+        for b in blocked:
+            print(f"COMMIT_SCOPE=STRAY file={b} (modified, not new: outside the allowlist)")
+        print("COMMIT_SCOPE=FAIL nothing staged (a human expands files-allowlist.json — "
+              "the edit is the approval — or reverts the file, then resume)")
+        sys.exit(1)
+    for b in moved:
+        dest = os.path.join(quarantine, "strays", b)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        shutil.move(os.path.join(worktree, b), dest)
+        print(f"COMMIT_SCOPE=QUARANTINED file={b} -> {dest} "
+              "(new file, unrelated to any allowlisted file: kept, not committed)")
+    if adopted:
+        allowed |= set(adopted)
+        with open(allowlist_path, "w", encoding="utf-8") as fh:
+            json.dump(sorted(allowed), fh, indent=1)
+        record = os.path.join(quarantine, "allowlist-auto-expansion.json")
+        prior = []
+        if os.path.exists(record):
+            try:
+                prior = json.load(open(record, encoding="utf-8"))
+            except Exception:
+                prior = []
+        prior.extend({"path": b, "sibling_of": sorted(
+            a for a in allowed if os.path.dirname(a) == os.path.dirname(b)
+            and stem(a) == stem(b) and a != b)} for b in adopted)
+        with open(record, "w", encoding="utf-8") as fh:
+            json.dump(prior, fh, indent=1)
+        for b in adopted:
+            print(f"COMMIT_SCOPE=ADOPTED file={b} "
+                  "(new sibling of an allowlisted file in the same directory)")
+    breaches = []
+
 if breaches:
     if stage:
         for p in breaches:

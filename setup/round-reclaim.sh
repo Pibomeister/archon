@@ -35,12 +35,28 @@ if [ -s "$P" ]; then
   if [ -z "$PATTERN" ] || grep -qE "$PATTERN" "$P"; then echo "$N"; exit 0; fi
 fi
 
-# ONE reclaim per RUN, not per round number. A second unproven round means
-# something is durably wrong, not unlucky, and the run should stop at the cap
-# rather than keep buying attempts: the worst case this adds is exactly one
-# extra review, whatever the cap is.
+# Two bounds, because a reclaim buys a real review and reviews cost money.
+#
+#   per round number -- a node that dies at the same round every time walks the
+#   counter up to the cap instead of spinning there forever;
+#   per run          -- a budget, default 2, overridable via
+#                       round-reclaim-cap.txt.
+#
+# The budget was 1, and run 38d72218 showed why that is too tight: round 2 died
+# to a cost cap and round 3 returned mid-fan-out. Two DISTINCT infrastructure
+# failures, both real, both since fixed -- and the run had to be hand-carried
+# past the second one. A budget of 2 absorbs unrelated infrastructure flakes
+# without ever absorbing a systematic one, since a third means the failure is
+# the norm rather than the exception.
 LEDGER="$AD/round-reclaimed.txt"
-if [ -s "$LEDGER" ]; then echo "$N"; exit 0; fi
+grep -qxF "$PREFIX$N" "$LEDGER" 2>/dev/null && { echo "$N"; exit 0; }
+BUDGET=$(cat "$AD/round-reclaim-cap.txt" 2>/dev/null || echo 2)
+case "$BUDGET" in ''|*[!0-9]*) BUDGET=2 ;; esac
+USED=$( [ -s "$LEDGER" ] && wc -l < "$LEDGER" | tr -d ' ' || echo 0 )
+if [ "$USED" -ge "$BUDGET" ]; then
+  echo "ROUND_RECLAIM=EXHAUSTED used=$USED budget=$BUDGET (this run has already been given $USED rounds back; a further unproven round is the norm, not a flake -- look at why the review keeps dying before raising round-reclaim-cap.txt)" >&2
+  echo "$N"; exit 0
+fi
 printf '%s\n' "$PREFIX$N" >> "$LEDGER"
 echo "ROUND_RECLAIM=$PREFIX$N proof=$PROOF (the round produced no verdict: it was billed, not spent; reclaiming it once)" >&2
 echo "$((N-1))"

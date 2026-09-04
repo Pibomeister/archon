@@ -1593,7 +1593,7 @@ nodes:
     cd "$WT"
     MSG=$(head -1 "$ARTIFACTS_DIR/commit-msg.txt" 2>/dev/null || true)
     test -n "$MSG" || MSG="feat(api): $SLUG"
-    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --exclude pnpm-lock.yaml || exit 1
+    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
     git diff --cached --name-only
     if git diff --cached --quiet; then echo "COMMIT_IMPL=SKIP already committed"; else git commit -m "$MSG"; fi
     test -z "$(git status --porcelain | grep -v '^?? \.env')" || { echo "COMMIT_IMPL=FAIL dirty"; exit 1; }
@@ -1747,7 +1747,7 @@ nodes:
         set -euo pipefail
         eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
         cd "$WT"
-        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --exclude pnpm-lock.yaml || exit 1
+        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
         if git diff --cached --quiet; then echo "COMMITTED=NO"; else
           git commit -m "fix(review): apply autofix feedback"; echo "COMMITTED=YES sha=$(git rev-parse HEAD)"
         fi
@@ -1803,6 +1803,11 @@ nodes:
           then demands a human accept residuals for something no round was ever
           able to fix. Never silently drop a finding from the result file.
         - No commits, no branches. Touch only files findings name.
+        - Scratch belongs OUTSIDE the worktree. A probe test, a scratch script,
+          a dump you write to check a claim goes under $ARTIFACTS_DIR; anything
+          left in the worktree that no finding names is quarantined there anyway
+          and never reaches the commit, so writing it in the tree only costs you
+          the round's clarity.
         Write JSON to round-<N>/fixer-result.json in the artifacts directory:
           {"applied": [...], "failed": [...], "advisory": [...], "incomplete": [...]}
         each entry {"finding": "<one-line>", "action": "<what/why>"}.
@@ -1817,7 +1822,7 @@ nodes:
         set -euo pipefail
         eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
         cd "$WT"
-        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --exclude pnpm-lock.yaml || exit 1
+        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
         if git diff --cached --quiet; then echo "COMMITTED=NO"; else
           git commit -m "fix(review): apply fixer feedback"; echo "COMMITTED=YES sha=$(git rev-parse HEAD)"
         fi
