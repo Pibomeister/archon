@@ -516,6 +516,19 @@ class RetrievalCanChangeTheVerdictTest(unittest.TestCase):
         self.assertEqual(bad.returncode, 1)
         self.assertIn("when either is set", bad.stdout)
 
+    def test_plan_accounts_for_blocking_layout_rules(self):
+        # Run 38d72218 passed RED, GREEN, deslop and the negative control, then
+        # SCOPE_BREACH on commit-import.util.ts: the reviewer filed a Blocking
+        # finding citing business-logic.md:11-12 (a pure helper outside the
+        # @Injectable class must move to a sibling .util.ts), the fixer complied,
+        # and the file was not in the allowlist. repo-policy.json exposes only
+        # the TESTING rules, so the planner never saw the layout rule the
+        # reviewer enforces.
+        rca = node("bugfix", "rca")["prompt"]
+        self.assertIn("BLOCKING LAYOUT RULE", rca)
+        self.assertIn("carries only the repo's TESTING rules", rca)
+        self.assertIn("trips SCOPE_BREACH", rca)
+
     def test_fix_site_must_be_reachable_from_the_declared_test(self):
         # Run f53b1b58 planned fix_site at stage-user-import-handler.ts:701,
         # inside linkSameRowEntitiesToProfile -- a module-private function whose

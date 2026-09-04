@@ -750,6 +750,19 @@ nodes:
       reviewer-requested, documentation, controller, or cleanup placeholders
       "just in case"; a later reviewer finding must name and justify any scope
       change before the allowlist changes.
+
+      BUT include the files a BLOCKING LAYOUT RULE will force. repo-policy.json
+      carries only the repo's TESTING rules; the reviewer also reads the repo's
+      `.claude/rules/*.md`, which carry Blocking rules about where code lives --
+      in api, a non-trivial pure helper declared outside an `@Injectable()`
+      class must be extracted to a sibling `<service>.util.ts`, and types or
+      result shapes exported alongside a service must move to
+      `<service>.types.ts`. Read the rules file for the area you are changing.
+      If your approach adds a pure helper or an exported shape to a service
+      file, the sibling file is not speculative scope -- it is required, the
+      reviewer WILL file it as Blocking, and the fixer complying with it then
+      trips SCOPE_BREACH because the allowlist never contained it. Put it in
+      `files` and the allowlist from the start.
       Follow the pinned repository's test-value policy, not merely its file
       placement rules. Give the production failure one stable hermetic owner
       at the highest practical fidelity. Do not make a mock-interaction or
