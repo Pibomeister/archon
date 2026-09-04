@@ -324,6 +324,7 @@ def assess_capabilities(root: Path, codex_home: Path, registry_path: Path,
 
 
 def write_capabilities(artifacts: Path, caps: dict) -> Path:
+    artifacts.mkdir(parents=True, exist_ok=True)
     path = artifacts / "capabilities.json"
     document = {"schema_version": 1, "capabilities": caps}
     path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
