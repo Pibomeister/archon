@@ -377,13 +377,41 @@ class RetrievalCanChangeTheVerdictTest(unittest.TestCase):
         contract = (SETUP / "bugfix-contract.py").read_text(encoding="utf-8")
         self.assertIn('{"open", "confirmed-by-experiment"}', contract)
 
-    def test_occurrence_window_and_attribution_flag_move_together(self):
-        # Writing the window while leaving occurrence_attributed false claims an
-        # identification the assessment denies -- and rca-gate promotes the probe
-        # row to occurrence evidence off the file alone.
+    def test_an_existing_window_obliges_the_attribution_flag(self):
+        # rca-gate promotes the probe row to occurrence evidence whenever the
+        # window file exists, so an assessment that leaves occurrence_attributed
+        # false alongside it denies an identification the run already recorded.
         prompt = node("bugfix", "rca-reassess")["prompt"]
-        self.assertIn("The file and the flag are one decision", prompt)
-        self.assertIn("If you are not prepared to set the flag, omit", prompt)
+        self.assertIn("the occurrence IS", prompt)
+        self.assertIn("`occurrence_attributed` true", prompt)
+
+    def test_retrieval_stays_in_bash_because_model_nodes_have_no_network(self):
+        # Codex runs model nodes under sandbox_mode="workspace-write", which
+        # denies network. Run a9b2b0fb proved it: a helper invoked from the
+        # rca-reassess prompt returned "Could not connect to the endpoint URL"
+        # for a query that succeeds from a bash node seconds earlier. Every
+        # network call in this lane lives in a bash node, without exception.
+        doc = yaml.safe_load((ARCHON / "workflows/bugfix.yaml").read_text(encoding="utf-8"))
+        for entry in doc["nodes"]:
+            prompt = entry.get("prompt") or ""
+            for forbidden in ("occurrence-logs.py", "aws logs ", "aws sts ", "curl "):
+                self.assertNotIn(forbidden, prompt,
+                                 f"{entry['id']} prompt asks a model node to reach the network")
+        probe = node("bugfix", "probe-run")["bash"]
+        self.assertIn("occurrence-window.py", probe)
+        self.assertIn("occurrence-logs.py", probe)
+
+    def test_the_occurrence_window_is_derived_not_asserted(self):
+        # A model-written window would let a run manufacture attribution
+        # authority: rca-gate promotes the probe row to occurrence evidence off
+        # that file. It now comes off the matched row's own columns.
+        prompt = node("bugfix", "rca-reassess")["prompt"]
+        self.assertIn("You do not write", prompt)
+        body = (SETUP / "occurrence-window.py").read_text(encoding="utf-8")
+        self.assertIn("match-count=", body)
+        rca = node("bugfix", "rca")["prompt"]
+        self.assertIn("occurrence_subject_columns", rca)
+        self.assertIn("occurrence_time_columns", rca)
 
     def test_logs_are_reachable_after_the_occurrence_is_identified(self):
         # evidence-aws queries CloudWatch ONCE, early, from intake-time error
@@ -392,8 +420,8 @@ class RetrievalCanChangeTheVerdictTest(unittest.TestCase):
         # logs about it: the same defect class as recording probe results after
         # the gate that reads them.
         prompt = node("bugfix", "rca-reassess")["prompt"]
-        self.assertIn("occurrence-logs.py", prompt)
-        self.assertIn("Zero matching events is a real answer", prompt)
+        self.assertIn("evidence/occurrence-logs.txt", prompt)
+        self.assertIn("zero\nmatching events, is a real answer", prompt)
         helper = SETUP / "occurrence-logs.py"
         self.assertTrue(helper.is_file())
         self.assertIn("setup/occurrence-logs.py", (SETUP / "package.sh").read_text(encoding="utf-8"))

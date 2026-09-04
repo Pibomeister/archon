@@ -824,7 +824,17 @@ nodes:
     probe.json — read-only SQL the pipeline runs against prod (RO) right
     after this node, so the human sees RESULTS at the gate, not open
     questions: {"probes": [{"id": "<slug>", "question": "<what this
-    settles>", "sql": "<single read-only SELECT/WITH statement>"}]}
+    settles>", "sql": "<single read-only SELECT/WITH statement>",
+    "occurrence_subject_columns": ["<result columns holding the entity ids>"],
+    "occurrence_time_columns": ["<result columns holding the timestamps>"]}]}
+    Set occurrence_subject_columns and occurrence_time_columns on your
+    OCCURRENCE-IDENTIFICATION probe, and SELECT those columns in its SQL.
+    A bash node reads them off the single matched row to derive the
+    occurrence window and to pull that occurrence's production logs, which
+    is how an ambiguous reported surface gets identified. Nothing about the
+    window is asserted by a model, and a probe matching zero or several rows
+    has identified nothing and is treated as such. Omit both fields on
+    discriminating and census probes.
     Write up to 3 probes, in priority order:
     1. An OCCURRENCE-IDENTIFICATION probe, whenever the report describes the
        occurrence but names no entity for it. Read evidence-plan.json's
@@ -1106,38 +1116,22 @@ nodes:
     Never widen scope beyond what a row you can quote supports. Every field
     you change must trace to a specific line of probe-results.txt.
 
-    Also write occurrence-window.json when, and only when, the probe rows
-    identify the occurrence — and in that case you MUST also set
-    proof-assessment.json `occurrence_attributed` true and name `prod-probes`
-    in `occurrence_evidence_sources`. The file and the flag are one decision:
-    writing the window while leaving the flag false claims an identification
-    the assessment then denies. If you are not prepared to set the flag, omit
-    the file. Schema:
-      {"start": "<ISO-8601>", "end": "<ISO-8601>",
-       "subjects": [{"kind": "<user_id|import_id|profile_id|...>",
-                     "value": "<id from the probe output>"}],
-       "evidence": "<the probe id and the column you read the timestamp from>"}
-    The window is what the DATA says — the matched row's own timestamps,
-    widened to bracket the occurrence — not the report's guess and not now().
-    Omit the file entirely when nothing was identified.
+    occurrence-window.json and evidence/occurrence-logs.txt may already exist:
+    probe-run derives the window from the identification probe's single
+    matched row and pulls that occurrence's production logs. You do not write
+    either file. When occurrence-window.json exists, the occurrence IS
+    identified — set proof-assessment.json `occurrence_attributed` true and
+    name `prod-probes` in `occurrence_evidence_sources`.
 
-    When you write occurrence-window.json, immediately run this trusted,
-    bounded, read-only helper and read what it returns BEFORE finalising the
-    assessment:
-      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/occurrence-logs.py --artifacts "$ARTIFACTS_DIR"
-    It fetches production logs for the subjects you just identified, inside
-    the window you just wrote, into evidence/occurrence-logs.txt. This is the
-    one evidence source the earlier nodes could not reach: evidence-aws
-    queried logs before any probe knew which entity the report was about.
-    The logs are where a request line names the ROUTE that served the
-    occurrence, so they are the normal way an ambiguous reported surface
-    becomes identified — that is a captured runtime record, not a guess, and
-    it is legitimate grounds to set reported_surface_status
-    "runtime-reproduced", fill runtime_entrypoint from the logged route, and
-    quote that line as surface_selection_basis. Quote the log line you relied
-    on. Zero matching events is a real answer: leave the surface ambiguous.
-    Never treat a log line about a different user, entity, or window as
-    evidence for this one.
+    Read evidence/occurrence-logs.txt when it exists. A request line there
+    names the ROUTE that served the occurrence, which is the normal way an
+    ambiguous reported surface becomes identified: that is a captured runtime
+    record, not a guess, so it is legitimate grounds to set
+    reported_surface_status "runtime-reproduced", fill runtime_entrypoint from
+    the logged route, and quote that line as surface_selection_basis. Quote
+    the line you relied on. A line whose status is UNAVAILABLE, or zero
+    matching events, is a real answer that leaves the surface ambiguous. Never
+    treat a line about a different user, entity, or window as evidence here.
 
     Finally write reassess.md: what the probes answered, what the logs
     answered, every field you changed with the row or log line that justifies
@@ -1483,6 +1477,14 @@ nodes:
     fi
     echo "PROBE_RUN=DONE answered=$OK/$NP"
     tail -30 "$AD/probe-results.txt"
+    # Derive the occurrence window from the identification probe's own matched
+    # row, then pull that occurrence's production logs. Both live here, in a
+    # bash node, because the Codex sandbox denies model nodes network access:
+    # every network call in this lane is in a bash node, without exception.
+    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/occurrence-window.py --artifacts "$AD" || true
+    if [ -f "$AD/occurrence-window.json" ]; then
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/occurrence-logs.py --artifacts "$AD" || true
+    fi
     # Checkpoint the frozen diagnosis for rca-reassess. Taken here because a
     # checkpoint has to predate the node it constrains, and this is the last
     # node before it.

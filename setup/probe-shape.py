@@ -57,6 +57,14 @@ def main() -> None:
             fail(f"probe {probe['id']}: row-returning query requires LIMIT <= 100")
         if limits and max(limits) > 100:
             fail(f"probe {probe['id']}: LIMIT exceeds 100")
+        # Optional, and only meaningful together: probe-run reads these columns
+        # off the matched row to derive the occurrence window mechanically.
+        declared = [probe.get("occurrence_subject_columns"), probe.get("occurrence_time_columns")]
+        if any(d is not None for d in declared):
+            if not all(isinstance(d, list) and d and all(isinstance(c, str) and c.strip() for c in d)
+                       for d in declared):
+                fail(f"probe {probe['id']}: occurrence_subject_columns and "
+                     "occurrence_time_columns must both be non-empty string lists")
     print(f"PROBE_SHAPE=OK probes={len(probes)}")
 
 
