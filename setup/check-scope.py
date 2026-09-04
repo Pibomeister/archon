@@ -97,7 +97,15 @@ def is_untracked(path):
 
 
 def stem(path):
-    """foo.service.ts -> foo, foo.util.ts -> foo, foo.spec.ts -> foo."""
+    """The name before the first dot: foo.service.ts, foo.util.ts, foo.spec.ts
+    all stem to foo.
+
+    This encodes dot-segmented file naming, and it fails SAFE where that
+    convention does not hold. In Python foo.py stems to foo but test_foo.py
+    stems to test_foo; in Go foo.go and foo_test.go likewise differ. Those
+    files simply do not match, so adoptable() says no and the file is
+    quarantined instead — the conservative outcome. The rule is permissive
+    only where the convention it reads is actually being used."""
     return os.path.basename(path).split(".", 1)[0]
 
 
