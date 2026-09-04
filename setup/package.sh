@@ -70,6 +70,7 @@ MANIFEST=(
   setup/plan-shape.sh
   setup/rca-shape.sh
   setup/probe-shape.py
+  setup/occurrence-logs.py
   setup/assert-ro.sh
   setup/repo-policy.py
   setup/resolve-params.sh

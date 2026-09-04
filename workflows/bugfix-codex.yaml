@@ -1121,8 +1121,27 @@ nodes:
     widened to bracket the occurrence — not the report's guess and not now().
     Omit the file entirely when nothing was identified.
 
-    Finally write reassess.md: what the probes answered, every field you
-    changed with the row that justifies it, and every unknown still open.
+    When you write occurrence-window.json, immediately run this trusted,
+    bounded, read-only helper and read what it returns BEFORE finalising the
+    assessment:
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/occurrence-logs.py --artifacts "$ARTIFACTS_DIR"
+    It fetches production logs for the subjects you just identified, inside
+    the window you just wrote, into evidence/occurrence-logs.txt. This is the
+    one evidence source the earlier nodes could not reach: evidence-aws
+    queried logs before any probe knew which entity the report was about.
+    The logs are where a request line names the ROUTE that served the
+    occurrence, so they are the normal way an ambiguous reported surface
+    becomes identified — that is a captured runtime record, not a guess, and
+    it is legitimate grounds to set reported_surface_status
+    "runtime-reproduced", fill runtime_entrypoint from the logged route, and
+    quote that line as surface_selection_basis. Quote the log line you relied
+    on. Zero matching events is a real answer: leave the surface ambiguous.
+    Never treat a log line about a different user, entity, or window as
+    evidence for this one.
+
+    Finally write reassess.md: what the probes answered, what the logs
+    answered, every field you changed with the row or log line that justifies
+    it, and every unknown still open.
     End with the single line: RCA_REASSESS_DONE
 - id: rca-gate
   depends_on:

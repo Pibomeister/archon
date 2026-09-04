@@ -385,6 +385,29 @@ class RetrievalCanChangeTheVerdictTest(unittest.TestCase):
         self.assertIn("The file and the flag are one decision", prompt)
         self.assertIn("If you are not prepared to set the flag, omit", prompt)
 
+    def test_logs_are_reachable_after_the_occurrence_is_identified(self):
+        # evidence-aws queries CloudWatch ONCE, early, from intake-time error
+        # strings -- before any probe knows which entity the report is about.
+        # So a run could identify an occurrence and still be unable to ask the
+        # logs about it: the same defect class as recording probe results after
+        # the gate that reads them.
+        prompt = node("bugfix", "rca-reassess")["prompt"]
+        self.assertIn("occurrence-logs.py", prompt)
+        self.assertIn("Zero matching events is a real answer", prompt)
+        helper = SETUP / "occurrence-logs.py"
+        self.assertTrue(helper.is_file())
+        self.assertIn("setup/occurrence-logs.py", (SETUP / "package.sh").read_text(encoding="utf-8"))
+
+    def test_occurrence_logs_helper_is_bounded_and_read_only(self):
+        body = (SETUP / "occurrence-logs.py").read_text(encoding="utf-8")
+        self.assertIn("filter-log-events", body)
+        for writer in ("put-log-events", "delete-", "create-"):
+            self.assertNotIn(writer, body)
+        self.assertIn("MAX_SUBJECTS", body)
+        self.assertIn("MAX_EVENTS_PER_SUBJECT", body)
+        self.assertIn("MAX_OUTPUT_BYTES", body)
+        self.assertIn("TIMEOUT_SECONDS", body)
+
     def test_repo_scope_rejects_a_repo_narrower_than_the_fix(self):
         # repo names the repository THIS CHAIN CHANGES. Scoping it over the
         # ticket turns any bug with a cross-repo symptom into CROSS_REPO_BUG.
