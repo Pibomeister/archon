@@ -827,7 +827,15 @@ nodes:
        expected to write, not a blocker. A `fingerprint` identifier — a stated
        quantity such as "1,171 contacts imported, 24 notes" — is a lookup key:
        find the row whose counts match it, and the subject of the ticket is
-       resolved. Priorities 2 and 3 both presuppose you already know whose
+       resolved. Match it against the SUMMARY THE PRODUCT ITSELF RECORDED
+       (the stored summary/metadata column the UI read those numbers from),
+       not against a count you recompute from child rows. A reported number
+       came from what the product displayed; recomputing it drifts from that
+       the moment a row is soft-deleted, edited, or counted under a slightly
+       different definition, and you get zero rows for an occurrence that is
+       sitting right there. If a recomputed match returns nothing, try the
+       recorded-summary shape before concluding the occurrence is not
+       findable — zero rows from the wrong column is not evidence of absence. Priorities 2 and 3 both presuppose you already know whose
        data to look at; this one is how you find out. Absent identifiers are a
        retrieval task, never a reason to conclude the occurrence cannot be
        attributed.

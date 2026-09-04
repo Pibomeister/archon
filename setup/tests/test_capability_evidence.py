@@ -199,6 +199,11 @@ class EvidencePlanRetrievalTest(unittest.TestCase):
     def test_rca_prompt_ranks_occurrence_identification_first(self):
         rca = node("bugfix", "rca")["prompt"]
         self.assertIn("OCCURRENCE-IDENTIFICATION", rca)
+        # Observed live: one run matched user_imports.metadata->summary and found
+        # the occurrence; the next recomputed the same counts from
+        # user_import_actions and got zero rows for a row that was sitting there.
+        self.assertIn("SUMMARY THE PRODUCT ITSELF RECORDED", rca)
+        self.assertIn("zero rows from the wrong column is not evidence of absence", rca)
         self.assertLess(rca.index("OCCURRENCE-IDENTIFICATION"), rca.index("Discriminating Probe from rca.md"))
 
     def test_linear_skill_emits_gap_and_retrievability_pairs(self):
