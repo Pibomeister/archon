@@ -557,6 +557,17 @@ class RetrievalCanChangeTheVerdictTest(unittest.TestCase):
         contract = (SETUP / "bugfix-contract.py").read_text(encoding="utf-8")
         self.assertIn("belongs in surface_selection_basis", contract)
 
+    def test_ambiguous_surface_error_names_both_exits(self):
+        # Run f459f074 wrote a fix plan alongside reported_surface_status
+        # "ambiguous" -- an internal contradiction the contract correctly
+        # refuses. The message read as a shape complaint; the real choice is
+        # evidential, and one of its two exits (get the runtime record) is
+        # exactly what an expired AWS session takes away.
+        contract = (SETUP / "bugfix-contract.py").read_text(encoding="utf-8")
+        self.assertIn("captured runtime record", contract)
+        self.assertIn("leave fix-plan.json empty", contract)
+        self.assertIn("Never pick an entrypoint to make the plan pass", contract)
+
     def test_materiality_is_relative_to_the_selected_chain(self):
         # Run aa75cd46 diagnosed "finalization deletes staging, eliminating the
         # durable row-level evidence" and then listed "the probes did not return

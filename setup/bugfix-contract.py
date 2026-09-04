@@ -293,7 +293,19 @@ def validate_systematic_debugging(artifacts_dir: Path) -> dict[str, Any]:
     if fix_plan.get("approach"):
         runtime_owner = surface["runtime_owner"].strip()
         if surface["reported_surface_status"] == "ambiguous":
-            raise ContractError("implementation-ready plan requires an identified surface and test/smoke runtime equivalence")
+            # Name both exits, because "requires an identified surface" reads as
+            # a shape complaint and the real choice is evidential: either get the
+            # runtime record that identifies the entrypoint, or admit the plan is
+            # not implementable yet. Guessing the surface is the one thing this
+            # check exists to stop.
+            raise ContractError(
+                "implementation-ready plan requires an identified surface: reported_surface_status "
+                "is 'ambiguous' while fix-plan.json carries an approach. Either identify the "
+                "entrypoint from a captured runtime record (production logs name the route that "
+                "served the occurrence; an expired AWS session is the usual reason there are none) "
+                "and set 'runtime-reproduced', or leave fix-plan.json empty and let the run end as "
+                "open investigation. Never pick an entrypoint to make the plan pass"
+            )
         if surface["test_runtime_owner"].strip() != runtime_owner:
             raise ContractError("surface_equivalence test runtime owner mismatch")
         if surface["smoke_runtime_owner"].strip() != runtime_owner:
