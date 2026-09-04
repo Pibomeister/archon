@@ -467,12 +467,34 @@ class RetrievalCanChangeTheVerdictTest(unittest.TestCase):
         # the run produced exactly the unattributable RCA the capability gate
         # exists to prevent -- the original defect, displaced in time.
         probe = node("bugfix", "probe-run")["bash"]
-        self.assertIn("PROBE_RUN=FAIL capability-expired", probe)
+        self.assertIn("capability-expired", probe)
         self.assertIn("retrievable_by", probe)
         self.assertIn("resume.sh", probe)
         # A stale AVAILABLE must be distinguishable from a live one.
         runner = (SETUP / "archon-run.py").read_text(encoding="utf-8")
         self.assertIn('"checked_at"', runner)
+
+    def test_class_hardening_is_presented_as_shippable(self):
+        # Run 0ceb2816 wrote reproduction_status "class-only" AND disposition
+        # "fixed" -- over-claiming, rejected as "fixed symptom E1 lacks
+        # occurrence attribution". The honest class-hardening-only disposition
+        # ships with residual acceptance, and nothing told the RCA that, so it
+        # reached for `fixed` to look complete and killed the run instead.
+        rca = node("bugfix", "rca")["prompt"]
+        self.assertIn("FIRST-CLASS, SHIPPABLE outcome", rca)
+        self.assertIn("Do not reach for `fixed` to make the run look complete", rca)
+        reassess = node("bugfix", "rca-reassess")["prompt"]
+        self.assertIn("class-hardening-only\" is the correct and shippable", reassess)
+
+    def test_an_expired_session_degrades_rather_than_killing_the_run(self):
+        # I first made this a hard stop. That was wrong: an unattributable
+        # occurrence still leaves an honest class-hardening outcome this lane
+        # ships, so killing the run throws away a paid-for RCA to avoid a claim
+        # the contract already refuses on its own.
+        probe = node("bugfix", "probe-run")["bash"]
+        self.assertIn("PROBE_RUN=DEGRADED capability-expired", probe)
+        self.assertNotIn("PROBE_RUN=FAIL capability-expired", probe)
+        self.assertIn("can only reach class-hardening", probe)
 
     def test_a_local_repro_still_survives_an_expired_session(self):
         # Negative control on the guard above: with no probe-retrievable gap the

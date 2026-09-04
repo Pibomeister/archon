@@ -911,6 +911,18 @@ nodes:
     never a silent scope-out. A fixed disposition is allowed only when this
     occurrence is attributed to the selected cause.
 
+    `class-hardening-only` is a FIRST-CLASS, SHIPPABLE outcome, not a
+    consolation prize: it means the mechanism is proven and fixed while THIS
+    occurrence was never attributed, and the lane ships exactly that with an
+    explicit residual acceptance at the smoke gate. Use it whenever the
+    evidence proves the defect class but not the reported instance — a
+    degraded probe, an unreachable source, a report with no queryable handle.
+    Do not reach for `fixed` to make the run look complete: with
+    debug-phase.json `reproduction_status` of "class-only" a `fixed`
+    disposition is a contradiction, a gate rejects it with "fixed symptom
+    <id> lacks occurrence attribution", and the honest
+    `class-hardening-only` would have shipped.
+
     causal-coverage.json —
       {"schema_version":2,"coverage":[{"symptom_id":"E1",
        "cause_id":"H1","occurrence_attributed":true|false,
@@ -1122,7 +1134,10 @@ nodes:
     - causal-coverage.json — per-symptom `occurrence_attributed` and
       `planned_diff`.
     - symptom-dispositions.json — a symptom may become "fixed" only now that
-      the occurrence is attributed to the selected cause.
+      the occurrence is attributed to the selected cause. When the probes did
+      NOT attribute it, "class-hardening-only" is the correct and shippable
+      disposition for a proven mechanism; a `fixed` disposition alongside
+      reproduction_status "class-only" is a contradiction a gate rejects.
     - boundary-trace.json ownership fields — the RCA hedges these
       ("candidate: ...", "unverified") precisely when the surface is
       ambiguous, and runtime evidence is the only thing that resolves them.
@@ -1522,10 +1537,15 @@ nodes:
     PY
       )
       if [ "${NEEDS:-0}" -gt 0 ]; then
-        echo "PROBE_RUN=FAIL capability-expired reason=aws-session-expired probe_gaps=$NEEDS"
-        echo "Prod was reachable at preflight and the session lapsed before this node."
-        echo "Run: aws login   then: bash $ROOT_ARCHON/setup/resume.sh $(basename "$AD" | cut -c1-8)"
-        exit 1
+        # Loud, because prod WAS reachable at preflight and the ~15-minute
+        # session lapsed before this node. Not a stop, though: an unattributable
+        # occurrence still leaves an honest class-hardening outcome, which this
+        # lane ships with explicit residual acceptance. Killing the run here
+        # would throw away a paid-for RCA to avoid a claim the contract already
+        # refuses on its own.
+        echo "PROBE_RUN=DEGRADED capability-expired reason=aws-session-expired probe_gaps=$NEEDS"
+        echo "This run can only reach class-hardening: the occurrence cannot be attributed."
+        echo "For attribution instead: aws login, then bash $ROOT_ARCHON/setup/resume.sh <run-id>."
       fi
       echo "PROBE_RUN=DEGRADED sso expired (probes unanswered; gate packet will say so)" | tee "$AD/probe-results.txt"
       record_probe unavailable || { echo "PROBE_RUN=FAIL provenance"; exit 1; }
