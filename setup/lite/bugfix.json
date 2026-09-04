@@ -105,6 +105,12 @@
     ],
     "post-approval-integrity": [
       "rca-approval"
+    ],
+    "intake": [
+      "preflight"
+    ],
+    "rca-gate": [
+      "rca"
     ]
   },
   "loops": {},

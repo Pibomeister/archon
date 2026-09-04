@@ -10,7 +10,14 @@ class BugfixGraphOrderTest(unittest.TestCase):
   w=yaml.safe_load((ARCHON/'workflows/bugfix.yaml').read_text())
   nodes={n['id']:n for n in w['nodes']}
   self.assertEqual(nodes['experiment-design']['depends_on'],['chain-gate'])
-  self.assertEqual(nodes['evidence-seal']['depends_on'],['probe-run'])
+  # Retrieved evidence must be recordable BEFORE the gate that reads it:
+  # rca-gate runs validate_systematic_debugging, which only accepts an
+  # occurrence attribution backed by an occurrence-kind provenance row, and
+  # probe-run is the only node that writes one.
+  self.assertEqual(nodes['probe-run']['depends_on'],['rca'])
+  self.assertEqual(nodes['rca-gate']['depends_on'],['probe-run'])
+  self.assertEqual(nodes['evidence-seal']['depends_on'],['rca-gate'])
+  self.assertIn('probe-shape.py', nodes['probe-run']['bash'])
   self.assertEqual(nodes['chain-verify']['depends_on'],['evidence-seal'])
   self.assertIn('evidence-provenance.py" verify', nodes['proof-manifest-gate']['bash'])
   self.assertEqual(nodes['experiment-run']['depends_on'],['experiment-design'])

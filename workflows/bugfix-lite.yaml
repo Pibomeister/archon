@@ -72,11 +72,11 @@ nodes:
     mkdir -p "$ARTIFACTS_DIR/evidence"
     # Soft prerequisites: warn, never fail — a local-only repro must run with
     # zero external evidence sources.
-    aws sts get-caller-identity >/dev/null 2>&1 || echo "PREFLIGHT_WARN aws session expired - aws evidence will degrade (run: aws login to enable it)"
-    test -n "${SENTRY_AUTH_TOKEN-}" || echo "PREFLIGHT_WARN SENTRY_AUTH_TOKEN unset - sentry evidence skipped"
-    test -n "${LINEAR_API_KEY-}" || echo "PREFLIGHT_WARN LINEAR_API_KEY unset - linear evidence skipped"
+    # One probe per evidence source, written to capabilities.json and warned
+    # about here. Discovery only: capability-gate decides whether a missing
+    # source stops THIS report, because only it knows what the report needs.
+    python3 "$ROOT/.archon/setup/archon-run.py" capabilities --artifacts "$ARTIFACTS_DIR"
     command -v docker-compose >/dev/null 2>&1 || echo "PREFLIGHT_WARN legacy docker-compose missing - integration-kind repro unavailable"
-    command -v psql >/dev/null 2>&1 || echo "PREFLIGHT_WARN psql missing - prod DB evidence skipped"
     echo "PREFLIGHT=PASS"
 - id: intake
   depends_on:
@@ -106,7 +106,7 @@ nodes:
     report. Say so above the block in one line.
 
     2) evidence-plan.json — what the evidence nodes should gather:
-      {"identifiers": [{"kind": "user_id|profile_id|contact_id|email|other",
+      {"identifiers": [{"kind": "user_id|profile_id|contact_id|email|fingerprint|other",
                         "value": "<string>",
                         "resolution": "given|ambiguous"}],
        "time_window": {"start": "<ISO-8601>", "end": "<ISO-8601>"} or null,
@@ -124,6 +124,9 @@ nodes:
     command, and write null when the section is absent or has no fenced
     command. The routing gate refuses a report without them; that is the
     intended outcome for a report that needs prod evidence to reproduce.
+    kind "fingerprint" is a stated QUANTITY no id accompanies ("1,171 contacts
+    imported, 24 notes"): write the whole tuple as the value. A stated quantity is
+    "given" — the reporter observed it.
     NEVER guess a user id: an identifier stated in the report is "given";
     anything you inferred, resolved from context, or that matches multiple
     users is "ambiguous" and evidence nodes will not query with it.
@@ -432,7 +435,9 @@ nodes:
             gstat = "skipped"
     status["gitnexus"] = gstat
     status["changecontext"] = "gathered" if os.path.isfile(os.path.join(ad, "change-context.json")) else "unavailable"
+    status["capabilities"] = "gathered" if os.path.isfile(os.path.join(ad, "capabilities.json")) else "unavailable"
     files = {
+        "capabilities": "capabilities.json",
         "db": "evidence/db-anchor.txt",
         "logs": "evidence/logs-1.json",
         "sentry": "evidence/sentry-issues.json",
@@ -455,7 +460,7 @@ nodes:
         }
     json.dump(manifest, open(os.path.join(ad, "evidence-manifest.json"), "w", encoding="utf-8"), indent=2)
     g = sum(1 for v in manifest["sources"].values() if v["status"] == "gathered")
-    print(f"EVIDENCE_GATE=PASS gathered={g}/6")
+    print(f"EVIDENCE_GATE=PASS gathered={g}/{len(manifest['sources'])}")
     PY
     python3 - "$ARTIFACTS_DIR" <<'PY'
     import json, os, subprocess, sys

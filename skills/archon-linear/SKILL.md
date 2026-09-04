@@ -63,7 +63,15 @@ The Markdown must contain:
 - attachment identity/source plus extracted material visual or textual evidence;
 - `## Intake gaps` listing missing repro, observed output, repository, timestamps,
   identifiers, exact user-visible surface/entrypoint, or evidence (write `None`
-  only when truly complete);
+  only when truly complete). Write one bullet per gap in the form
+  `- <gap> — retrievable_by: probe|report-author|unretrievable`. `probe` means a
+  query against prod Postgres, CloudWatch, or the code graph could resolve it;
+  `report-author` means only a human can supply it; `unretrievable` means no
+  source holds it. This section is a retrieval work queue, not a blocker list: a
+  gap marked `probe` is work a downstream node is expected to do, and marking
+  everything `report-author` to be safe stops runs that could have answered
+  themselves. Downstream, `capability-gate` refuses to start a `defect` run that
+  carries a `probe` gap while prod Postgres is unreachable;
 - `## Classification` with exactly one of `defect`, `api-feature`,
   `web-feature`, `cross-repo-feature`, or `unsupported`, plus concise evidence.
 

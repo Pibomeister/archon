@@ -115,15 +115,53 @@ nodes:
     mkdir -p "$ARTIFACTS_DIR/evidence"
     # Soft prerequisites: warn, never fail — a local-only repro must run with
     # zero external evidence sources.
-    aws sts get-caller-identity >/dev/null 2>&1 || echo "PREFLIGHT_WARN aws session expired - aws evidence will degrade (run: aws login to enable it)"
-    test -n "${SENTRY_AUTH_TOKEN-}" || echo "PREFLIGHT_WARN SENTRY_AUTH_TOKEN unset - sentry evidence skipped"
-    test -n "${LINEAR_API_KEY-}" || echo "PREFLIGHT_WARN LINEAR_API_KEY unset - linear evidence skipped"
+    # One probe per evidence source, written to capabilities.json and warned
+    # about here. Discovery only: capability-gate decides whether a missing
+    # source stops THIS report, because only it knows what the report needs.
+    python3 "$ROOT/.archon/setup/archon-run.py" capabilities --artifacts "$ARTIFACTS_DIR"
     command -v docker-compose >/dev/null 2>&1 || echo "PREFLIGHT_WARN legacy docker-compose missing - integration-kind repro unavailable"
-    command -v psql >/dev/null 2>&1 || echo "PREFLIGHT_WARN psql missing - prod DB evidence skipped"
     echo "PREFLIGHT=PASS"
-- id: intake
+- id: capability-gate
   depends_on:
   - preflight
+  timeout: 120000
+  bash: |
+    set -euo pipefail
+    python3 - "$ARTIFACTS_DIR" <<'PY'
+    import json, os, re, sys
+    ad = sys.argv[1]
+    caps_path = os.path.join(ad, "capabilities.json")
+    if not os.path.isfile(caps_path):
+        print("CAPABILITY_GATE=FAIL no capabilities.json (preflight discovery did not run)")
+        sys.exit(1)
+    caps = json.load(open(caps_path, encoding="utf-8"))["capabilities"]
+    report = open(os.path.join(ad, "bug-report.md"), encoding="utf-8").read()
+
+    def section(name):
+        m = re.search(rf"(?mis)^##\s+{name}\s*$(.*?)(?=^##\s|\Z)", report)
+        return m.group(1) if m else ""
+
+    # An archon-linear snapshot states both headings; a hand-written report
+    # states neither, and then nothing is required — a local repro must still
+    # run with zero external evidence.
+    found = re.findall(r"\b(defect|api-feature|web-feature|cross-repo-feature|unsupported)\b",
+                       section("Classification"))
+    classification = found[0] if found else "unstated"
+    probe_gaps = re.findall(r"(?mi)^.*retrievable_by:\s*probe\b.*$", section("Intake gaps"))
+    db = caps.get("prod-db", {})
+    if classification == "defect" and probe_gaps and db.get("status") != "AVAILABLE":
+        reason = (db.get("reason") or "unknown").split()[0]
+        print(f"CAPABILITY_GATE=FAIL capability-required reason={reason} probe_gaps={len(probe_gaps)}")
+        print("The report marks gaps retrievable_by: probe and prod Postgres is unreachable.")
+        print("Restore the capability (aws login) and relaunch: as it stands this run can only")
+        print("produce an RCA that cannot attribute the reported occurrence.")
+        sys.exit(1)
+    print(f"CAPABILITY_GATE=PASS classification={classification} "
+          f"probe_gaps={len(probe_gaps)} prod_db={(db.get('status') or 'UNKNOWN').lower()}")
+    PY
+- id: intake
+  depends_on:
+  - capability-gate
   timeout: 900000
   prompt: |
     You are the bug-intake node in an unattended pipeline. Ask no questions.
@@ -148,7 +186,7 @@ nodes:
     report. Say so above the block in one line.
 
     2) evidence-plan.json — what the evidence nodes should gather:
-      {"identifiers": [{"kind": "user_id|profile_id|contact_id|email|other",
+      {"identifiers": [{"kind": "user_id|profile_id|contact_id|email|fingerprint|other",
                         "value": "<string>",
                         "resolution": "given|ambiguous"}],
        "time_window": {"start": "<ISO-8601>", "end": "<ISO-8601>"} or null,
@@ -156,12 +194,34 @@ nodes:
        "sentry_refs": ["<issue id or short-id from the report>"],
        "linear_refs": ["<ENG-#### ids from the report>"],
        "repo_hint": "api" | "web-app" | "unknown",
-       "local_repro_steps": "<steps if the report gives any>" or null}
+       "local_repro_steps": "<steps if the report gives any>" or null,
+       "unknowns": [{"gap": "<what the report does not state>",
+                     "retrievable_by": "probe" | "report-author" | "unretrievable",
+                     "query_hint": "<one line naming the table/log/metric that would settle it, or null>"}]}
     NEVER guess a user id: an identifier stated in the report is "given";
     anything you inferred, resolved from context, or that matches multiple
     users is "ambiguous" and evidence nodes will not query with it.
+
+    kind "fingerprint" is for a QUANTITY the report states that no single id
+    accompanies — "1,171 contacts imported, 24 notes, 672 actions", a row
+    count, a total, a duration. Write the whole distinguishing tuple as the
+    value ("contacts=1171,notes=24,actions=672"). A stated quantity is
+    "given", not "ambiguous": the reporter observed it. It is often the only
+    thing precise enough to locate the occurrence, and downstream probes are
+    expected to use it as the lookup key.
+
+    unknowns is the retrieval work queue, and it is what separates a missing
+    fact from a blocked run. One entry per thing the report does not state
+    that a downstream node would need. "probe" means a query against prod
+    Postgres, CloudWatch, or the code graph could resolve it — say which in
+    query_hint. "report-author" means only a human can supply it.
+    "unretrievable" means no source holds it. An empty list is correct only
+    for a report that states everything.
     Empty arrays and null are correct answers for a thin report — state
-    absence, never pad. Convert relative dates ("yesterday") to absolute
+    absence, never pad. That rule governs FACTS: it never licenses declining
+    to look. A fact you do not have is an unknowns entry, not an omission,
+    and a gap marked retrievable_by "probe" is a task for a later node, never
+    a reason to stop. Convert relative dates ("yesterday") to absolute
     using the date command. repo_hint is your best single guess from the
     report's surface (routes, component names, stack frames); "unknown" is
     allowed and common.
@@ -211,6 +271,11 @@ nodes:
         assert ident.get("kind") and str(ident.get("value", "")).strip(), "identifier missing kind/value"
     tw = p.get("time_window")
     assert tw is None or (isinstance(tw, dict) and tw.get("start") and tw.get("end")), "time_window malformed"
+    unknowns = p.get("unknowns")
+    assert isinstance(unknowns, list), "unknowns must be a list"
+    for u in unknowns:
+        assert str(u.get("gap", "")).strip(), "unknown missing gap"
+        assert u.get("retrievable_by") in ("probe", "report-author", "unretrievable"), "retrievable_by out of enum"
     PY
     if [ -n "${ARCHON_BUGFIX_CONTINUATION_SEED:-}" ]; then
       python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/archon-run.py \
@@ -224,7 +289,7 @@ nodes:
     echo "INTAKE_GATE=PASS"
 - id: kb-recon
   depends_on:
-  - preflight
+  - capability-gate
   timeout: 900000
   prompt: |
     You are the knowledge-base scout for a BUG investigation. Your job is the
@@ -314,6 +379,11 @@ nodes:
     print(f"export PGSSLMODE=require")
     PY
     )"
+        # Two independent assertions that this is the READ REPLICA, before
+        # any statement is sent. Degrades this source only: CloudWatch below
+        # is separate and must still be collected.
+        RO=ok
+        bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/assert-ro.sh || RO=refused
         python3 - "$EP" > "$EV/db-anchor.sql" <<'PY'
     import json, sys
     plan = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -326,8 +396,16 @@ nodes:
             print(f"SELECT id, email, created_at, updated_at FROM users WHERE id = {v};")
         elif k == "email":
             print(f"SELECT id, email, created_at, updated_at FROM users WHERE email = '{v}';")
+        else:
+            # A given identifier this template cannot dereference (a
+            # fingerprint's query shape is domain-specific). Record it
+            # rather than dropping it: the RCA's occurrence-identification
+            # probe is what resolves it.
+            print(f"-- deferred-to-probe kind={k} value={v}")
     PY
-        if [ -s "$EV/db-anchor.sql" ]; then
+        if [ "$RO" = refused ]; then
+          DB=unavailable
+        elif grep -qv '^--' "$EV/db-anchor.sql"; then
           DB=unavailable
           psql -X -v ON_ERROR_STOP=0 -f "$EV/db-anchor.sql" > "$EV/db-anchor.txt" 2>&1 && DB=gathered
         fi
@@ -525,7 +603,9 @@ nodes:
             gstat = "skipped"
     status["gitnexus"] = gstat
     status["changecontext"] = "gathered" if os.path.isfile(os.path.join(ad, "change-context.json")) else "unavailable"
+    status["capabilities"] = "gathered" if os.path.isfile(os.path.join(ad, "capabilities.json")) else "unavailable"
     files = {
+        "capabilities": "capabilities.json",
         "db": "evidence/db-anchor.txt",
         "logs": "evidence/logs-1.json",
         "sentry": "evidence/sentry-issues.json",
@@ -548,7 +628,7 @@ nodes:
         }
     json.dump(manifest, open(os.path.join(ad, "evidence-manifest.json"), "w", encoding="utf-8"), indent=2)
     g = sum(1 for v in manifest["sources"].values() if v["status"] == "gathered")
-    print(f"EVIDENCE_GATE=PASS gathered={g}/6")
+    print(f"EVIDENCE_GATE=PASS gathered={g}/{len(manifest['sources'])}")
     PY
     python3 - "$ARTIFACTS_DIR" <<'PY'
     import json, os, subprocess, sys
@@ -732,11 +812,27 @@ nodes:
     questions: {"probes": [{"id": "<slug>", "question": "<what this
     settles>", "sql": "<single read-only SELECT/WITH statement>"}]}
     Write up to 3 probes, in priority order:
-    1. The Discriminating Probe from rca.md — turn your Critical Unknown
+    1. An OCCURRENCE-IDENTIFICATION probe, whenever the report describes the
+       occurrence but names no entity for it. Read evidence-plan.json's
+       `unknowns`: every gap marked retrievable_by "probe" is a query you are
+       expected to write, not a blocker. A `fingerprint` identifier — a stated
+       quantity such as "1,171 contacts imported, 24 notes" — is a lookup key:
+       find the row whose counts match it, and the subject of the ticket is
+       resolved. Priorities 2 and 3 both presuppose you already know whose
+       data to look at; this one is how you find out. Absent identifiers are a
+       retrieval task, never a reason to conclude the occurrence cannot be
+       attributed.
+    2. The Discriminating Probe from rca.md — turn your Critical Unknown
        into a query whenever the DB can settle it.
-    2. A blast-radius census — count how many rows/users/events are
+    3. A blast-radius census — count how many rows/users/events are
        affected by this defect class (never extrapolate from the reported
        instance; measure the population).
+    These probes run BEFORE the gate that reads this file, so `prod-probes`
+    is a citable occurrence source: name it in occurrence_evidence_sources
+    when your identification probe is what attributes the occurrence. The
+    gate rejects the citation if the probe did not in fact return complete
+    occurrence evidence, so claim it only when the query is designed to
+    resolve the subject.
     SELECT/WITH statements only, no writes, no DDL — a gate rejects
     anything else. Every row-returning probe must end with LIMIT 100 or less;
     omit raw payload/blob columns and prefer bounded aggregates. If no cheap
@@ -887,7 +983,7 @@ nodes:
     End with the single line: RCA_DONE
 - id: rca-gate
   depends_on:
-  - rca
+  - probe-run
   timeout: 300000
   bash: |
     set -euo pipefail
@@ -1038,13 +1134,20 @@ nodes:
     done
 - id: probe-run
   depends_on:
-  - rca-gate
+  - rca
   timeout: 600000
   bash: |
     set -uo pipefail
     # Runs the RCA's read-only probes against prod RO so the gate packet
     # shows RESULTS, not open questions. Best-effort: expired SSO or a
     # query error degrades with a typed line; the run continues.
+    #
+    # This runs BEFORE rca-gate on purpose. rca-gate is where
+    # validate_systematic_debugging reads evidence-provenance.json for an
+    # `occurrence`-kind row, and only this node emits one — behind the gate,
+    # retrieved evidence could never authorise an attribution. probe.json is
+    # validated here by the same probe-shape.py the gate runs, so nothing
+    # unvalidated reaches production.
     AD="$ARTIFACTS_DIR"
     record_probe() {
       local STATUS="$1" WATERMARK WINDOW PROVIDER KIND QUERY BASELINE REPO
@@ -1056,7 +1159,14 @@ nodes:
     PY
       )
       PROVIDER=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["provider"])' "$AD/bugfix-chain.json")
-      REPO=$(cat "$AD/repo.txt")
+      REPO=$(python3 - "$AD/repo.json" <<'PY'
+    import json, sys
+    repo = json.load(open(sys.argv[1], encoding="utf-8"))["repo"]
+    if repo not in ("api", "web-app"):
+        raise SystemExit(f"repo out of enum: {repo}")
+    print(repo)
+    PY
+      )
       BASELINE=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["baseline"]["commits"][sys.argv[2]])' "$AD/bugfix-chain.json" "$REPO")
       QUERY=$(cat "$AD/probe.json")
       EXTRA=(--evidence-kind class)
@@ -1075,6 +1185,12 @@ nodes:
         --artifacts "$AD" --source prod-probes --status "$STATUS" \
         --file probe-results.txt --provider "$PROVIDER" --tool psql \
         --query "$QUERY" --baseline "$BASELINE" "${EXTRA[@]}"
+    }
+    PROBE_SHAPE_OUT=$(python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/probe-shape.py "$AD" 2>&1) || {
+      printf '%s\n' "$PROBE_SHAPE_OUT" | tee "$AD/probe-results.txt"
+      echo "PROBE_RUN=DEGRADED probe.json rejected by probe-shape.py; no query was run"
+      record_probe unavailable || { echo "PROBE_RUN=FAIL provenance"; exit 1; }
+      exit 0
     }
     NP=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1], encoding='utf-8')).get('probes',[])))" "$AD/probe.json")
     if [ "$NP" = 0 ]; then
@@ -1110,6 +1226,11 @@ nodes:
     print(f"export PGOPTIONS={shlex.quote('-c statement_timeout=120000')}")
     PY
     )"
+    if ! bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/assert-ro.sh; then
+      echo "PROBE_RUN=DEGRADED read-replica assertion failed; no probe was run" | tee "$AD/probe-results.txt"
+      record_probe unavailable || { echo "PROBE_RUN=FAIL provenance"; exit 1; }
+      exit 0
+    fi
     : > "$AD/probe-results.txt"
     PROBE_TMP="$AD/.probe-result.tmp"
     trap 'rm -f "$PROBE_TMP"' EXIT
@@ -1149,7 +1270,7 @@ nodes:
     tail -30 "$AD/probe-results.txt"
 - id: evidence-seal
   depends_on:
-  - probe-run
+  - rca-gate
   timeout: 120000
   bash: |
     set -euo pipefail

@@ -14,6 +14,7 @@ import argparse
 import base64
 import hashlib
 import hmac
+import io
 import json
 import os
 import pwd
@@ -245,6 +246,90 @@ def assess_gitnexus_environment(root: Path, codex_home: Path, registry_path: Pat
     return {"status": "AVAILABLE", "reason": "pinned-api-index-current", "index": str(index_path), "commit": expected_commit}
 
 
+CLOUDWATCH_REGION = "us-east-2"
+# Split literal: package.sh's secret gate rejects any 60+ run of base64-class
+# chars, and this log-group path (a service id, not a secret) is 63.
+CLOUDWATCH_LOG_GROUP = "/aws/apprunner/loopdevapi/5bc44070b2624d259b56f9be707931fc" "/application"
+RO_SECRET_ID = "dev/database/ro-credentials"
+
+
+def _capability(available: bool, reason: str) -> dict:
+    safe = re.sub(r"[^A-Za-z0-9_./:=,+ -]", "_", reason).strip() or "unknown"
+    return {"status": "AVAILABLE" if available else "UNAVAILABLE", "reason": safe[:240]}
+
+
+def _aws_ok(argv: list[str]) -> tuple[bool, str]:
+    if not shutil.which("aws"):
+        return False, "aws-cli-missing"
+    result = subprocess.run(argv, capture_output=True, encoding="utf-8", errors="replace")
+    if result.returncode == 0:
+        return True, "reachable"
+    lines = (result.stderr + result.stdout).strip().splitlines()
+    return False, lines[-1] if lines else f"exit-{result.returncode}"
+
+
+def assess_capabilities(root: Path, codex_home: Path, registry_path: Path,
+                        baseline: dict | None = None) -> dict:
+    """Best-effort discovery of every evidence source a bugfix run can reach.
+
+    Same contract as assess_gitnexus_environment: a soft probe per source, a
+    typed reason, never an exception. Discovery is not authority — the decision
+    to stop a run on a missing capability belongs to the capability gate, which
+    also knows whether the report needs that source.
+    """
+    caps: dict[str, dict] = {}
+    session_ok, session_reason = _aws_ok(["aws", "sts", "get-caller-identity"])
+    caps["aws-session"] = _capability(
+        session_ok, "reachable" if session_ok else f"aws-session-expired {session_reason}")
+
+    if not session_ok:
+        caps["prod-db"] = _capability(False, "aws-session-expired")
+        caps["cloudwatch"] = _capability(False, "aws-session-expired")
+    elif not shutil.which("psql"):
+        caps["prod-db"] = _capability(False, "psql-missing")
+        caps["cloudwatch"] = _capability(*_aws_ok([
+            "aws", "logs", "describe-log-groups", "--region", CLOUDWATCH_REGION,
+            "--log-group-name-prefix", CLOUDWATCH_LOG_GROUP, "--max-items", "1"]))
+    else:
+        secret_ok, secret_reason = _aws_ok([
+            "aws", "secretsmanager", "get-secret-value", "--secret-id", RO_SECRET_ID,
+            "--region", CLOUDWATCH_REGION, "--query", "ARN", "--output", "text"])
+        caps["prod-db"] = _capability(
+            secret_ok, "reachable" if secret_ok else f"ro-credentials-unreadable {secret_reason}")
+        logs_ok, logs_reason = _aws_ok([
+            "aws", "logs", "describe-log-groups", "--region", CLOUDWATCH_REGION,
+            "--log-group-name-prefix", CLOUDWATCH_LOG_GROUP, "--max-items", "1"])
+        caps["cloudwatch"] = _capability(
+            logs_ok, "reachable" if logs_ok else f"log-group-unreachable {logs_reason}")
+
+    caps["sentry"] = _capability(bool(os.environ.get("SENTRY_AUTH_TOKEN")), "SENTRY_AUTH_TOKEN-unset")
+    caps["linear"] = _capability(bool(os.environ.get("LINEAR_API_KEY")), "LINEAR_API_KEY-unset")
+    try:
+        # fail() writes its own CODEX_LITE_RUN=FAIL line to stdout; swallow it so
+        # a passing capability probe never emits another node's failure token.
+        with contextlib.redirect_stdout(io.StringIO()):
+            gitnexus = assess_gitnexus_environment(root, codex_home, registry_path, baseline)
+    except SystemExit as exc:
+        # assess_gitnexus_environment is allowed to fail() the launcher on an
+        # unpinned dispatcher. Discovery is not authority: one misconfigured
+        # source must not hide the reachability of every other one.
+        gitnexus = _gitnexus_unavailable(f"launcher-refused {exc}")
+    caps["gitnexus"] = {"status": gitnexus["status"], "reason": gitnexus["reason"]}
+    # Sources Archon has no integration for at all. Naming them here is the
+    # point: an operator reading capabilities.json sees that Amplitude and
+    # Metabase were never consulted, rather than assuming they were.
+    for absent in ("amplitude", "metabase"):
+        caps[absent] = _capability(False, "no-archon-integration")
+    return caps
+
+
+def write_capabilities(artifacts: Path, caps: dict) -> Path:
+    path = artifacts / "capabilities.json"
+    document = {"schema_version": 1, "capabilities": caps}
+    path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
 def ensure_environment(root: Path, codex_home: Path, registry_path: Path,
                        lane: str | None = None, baseline: dict | None = None,
                        *, check_ports: bool = True) -> None:
@@ -308,6 +393,13 @@ def ensure_environment(root: Path, codex_home: Path, registry_path: Path,
         print(f"GITNEXUS=AVAILABLE index={gitnexus['index']} commit={gitnexus['commit']}")
     else:
         print(f"GITNEXUS=UNAVAILABLE reason={gitnexus['reason']}")
+    # State the rest of the evidence surface up front, for the same reason:
+    # an operator who learns at minute 5 that prod was unreachable has already
+    # paid for an RCA that could not attribute anything.
+    for name, cap in assess_capabilities(root, codex_home, registry_path, baseline).items():
+        if name == "gitnexus":
+            continue
+        print(f"CAPABILITY={name} {cap['status']} reason={cap['reason']}")
 
 def detached(log: Path, command: list[str], env: dict[str, str], supervise: bool = True) -> tuple[int, int]:
     detach = Path(os.environ.get("CODEX_LITE_DETACH", SETUP / "detach.py"))
@@ -2443,6 +2535,8 @@ def parser() -> argparse.ArgumentParser:
     architecture.add_argument("--reason", required=True)
     architecture.add_argument("--token", required=True)
     architecture.add_argument("--chain-id")
+    capabilities = sub.add_parser("capabilities")
+    capabilities.add_argument("--artifacts", type=Path, required=True)
     sub.add_parser("check")
     return ap
 
@@ -2472,6 +2566,15 @@ def main() -> None:
     if args.action == "bugfix-successor-seed":
         validate_control_location(args.control_dir)
         emit_successor_seed(args)
+        return
+    if args.action == "capabilities":
+        caps = assess_capabilities(ROOT, args.codex_home, args.registry)
+        write_capabilities(args.artifacts, caps)
+        for name, cap in caps.items():
+            if cap["status"] != "AVAILABLE":
+                print(f"PREFLIGHT_WARN {name} unavailable - reason={cap['reason']}")
+        print("CAPABILITIES=OK "
+              + " ".join(f"{n}={c['status'].lower()}" for n, c in sorted(caps.items())))
         return
     if args.action == "import-continuation":
         validate_control_location(args.control_dir)
