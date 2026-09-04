@@ -324,6 +324,22 @@ class RetrievalCanChangeTheVerdictTest(unittest.TestCase):
             self.assertEqual(node(workflow, "rca-reassess")["depends_on"], ["probe-run"], workflow)
             self.assertEqual(node(workflow, "rca-gate")["depends_on"], ["rca-reassess"], workflow)
 
+    def test_the_checkpoint_precedes_every_exit_in_probe_run(self):
+        # Run dc099da8 passed RCA_SHAPE=OK and still died on
+        # "RCA_GATE=FAIL no reassess checkpoint": probe-run has eleven exit
+        # points and the checkpoint was written at the END, so only the success
+        # path produced one. Every degraded run -- expired session, no probes,
+        # refused reader -- then failed the gate on a file it never wrote.
+        import re
+        body = node("bugfix", "probe-run")["bash"]
+        lines = body.splitlines()
+        checkpoint = [i for i, l in enumerate(lines) if "reassess-pre.sha256" in l]
+        exits = [i for i, l in enumerate(lines) if re.search(r"\bexit [01]\b", l)]
+        self.assertTrue(checkpoint, "probe-run writes no checkpoint")
+        self.assertTrue(exits, "probe-run has no exits -- test assumption broken")
+        self.assertLess(max(checkpoint), min(exits),
+                        "the checkpoint must precede every exit it protects")
+
     def test_reassess_may_not_touch_the_diagnosis(self):
         probe = node("bugfix", "probe-run")["bash"]
         gate = node("bugfix", "rca-gate")["bash"]

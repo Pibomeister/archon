@@ -1432,6 +1432,20 @@ nodes:
       # unvalidated reaches production.
       AD="$ARTIFACTS_DIR"
       ROOT_ARCHON=/Users/eduardopicazo/Documents/Workspace/Goodword/.archon
+      # Checkpoint the frozen diagnosis for rca-reassess BEFORE any early exit.
+      # This node has eleven exit points -- probe-shape reject, no probes, an
+      # expired session, missing credentials, a refused reader -- and taking the
+      # checkpoint at the END meant only the success path produced one, so
+      # rca-gate failed every degraded run with 'no reassess checkpoint'. The six
+      # files exist by now: rca is this node's dependency.
+      python3 - "$AD" > "$AD/reassess-pre.sha256" <<'PY'
+      import hashlib, os, sys
+      ad = sys.argv[1]
+      for name in ("rca.md", "causal-chain.json", "hypotheses.json",
+                   "residuals.json", "probe.json", "repo.json"):
+          digest = hashlib.sha256(open(os.path.join(ad, name), "rb").read()).hexdigest()
+          print(f"{digest}  {name}")
+      PY
       record_probe() {
         local STATUS="$1" WATERMARK WINDOW PROVIDER KIND QUERY BASELINE REPO
         KIND=$(python3 - "$AD/evidence-plan.json" <<'PY'
@@ -1587,17 +1601,6 @@ nodes:
       if [ -f "$AD/occurrence-window.json" ]; then
         python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/occurrence-logs.py --artifacts "$AD" || true
       fi
-      # Checkpoint the frozen diagnosis for rca-reassess. Taken here because a
-      # checkpoint has to predate the node it constrains, and this is the last
-      # node before it.
-      python3 - "$AD" > "$AD/reassess-pre.sha256" <<'PY'
-      import hashlib, os, sys
-      ad = sys.argv[1]
-      for name in ("rca.md", "causal-chain.json", "hypotheses.json",
-                   "residuals.json", "probe.json", "repo.json"):
-          digest = hashlib.sha256(open(os.path.join(ad, name), "rb").read()).hexdigest()
-          print(f"{digest}  {name}")
-      PY
 
   - id: evidence-seal
     depends_on: [rca-gate]
