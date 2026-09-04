@@ -352,6 +352,8 @@ nodes:
             # Hand-editable counter: reject junk before it is incremented or used as a path.
             case "$N" in '') N=0 ;; *[!0-9]*) echo "ROUND_PRE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
             # Durable cap, checked BEFORE the round is spent (same doctrine as the api/bugfix lanes).
+            R="/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-reclaim.sh"
+            N=$(bash "$R" "$ARTIFACTS_DIR" "$N" "round-" "review-envelope.txt")
             CAP=$(cat "$ARTIFACTS_DIR/round-cap.txt" 2>/dev/null || echo 4)
             case "$CAP" in ''|*[!0-9]*) CAP=4 ;; esac
             if [ "$N" -ge "$CAP" ] && [ ! -f "$ARTIFACTS_DIR/accept-residuals.txt" ]; then echo "ROUND_CAP_REACHED round=$N cap=$CAP (pre-round: a resume does not buy another review; write accept-residuals.txt or raise round-cap.txt)"; exit 1; fi
@@ -380,10 +382,15 @@ nodes:
             BEFORE you invoke the skill:
             - Measure the diff first: in the worktree, run
               git diff --stat "$(cat <that directory>/bootstrap-head.txt)"..HEAD
-              Under roughly 150 changed lines, cap the conditional personas at
-              3 beyond the always-on set, and record the decision (diff size,
-              cap applied or not, personas chosen) in the envelope's Coverage
-              section so the choice is observable.
+              Size the review on PRODUCTION churn: count changed lines EXCLUDING
+              test/spec files, generated files, and lockfiles — the same basis
+              ce-code-review's own catalog sizes a review on. Test volume is proof
+              of the change, not production risk surface, so counting it inflates
+              the persona fan-out exactly where the tests are most thorough.
+              Under roughly 150 production lines, cap the conditional personas at
+              3 beyond the always-on set, and record the decision (production
+              lines, total lines, cap applied or not, personas chosen) in the
+              envelope's Coverage section so the choice is observable.
             - Task one reviewer lens with exactly this: "extract the
               assumptions this diff encodes — in-diff comments are the primary
               source — and verify each against out-of-diff code; report

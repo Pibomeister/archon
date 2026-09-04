@@ -32,7 +32,22 @@ class RoundPreCap(unittest.TestCase):
         subprocess.run("git init -q && git config user.email t@t && git config user.name t && echo a > a && git add . && git commit -qm base", cwd=wt, shell=True, check=True, capture_output=True)
         (self.ad / "params.json").write_text('{"spec": "/x.md", "slug": "x", "branch": "archon/x", "worktree": "%s"}' % wt)
 
-    def run_pre(self, workflow, round_txt, cap=None, accept=False):
+    def run_pre(self, workflow, round_txt, cap=None, accept=False, proven=None, reset=True):
+        # round-pre reclaims a round that left no review-envelope.txt behind: a
+        # review killed by its cost cap or a timeout was BILLED, not spent. A
+        # counter of N therefore only means N rounds happened if their envelopes
+        # exist. Without them these cap fixtures would be exercising the reclaim
+        # path while claiming to test the cap. `proven` defaults to the whole
+        # counter; pass fewer to leave the tail unproven.
+        proven = round_txt if proven is None else proven
+        if reset:
+            for d in self.ad.glob("round-*"):
+                shutil.rmtree(d, ignore_errors=True)
+            (self.ad / "round-reclaimed.txt").unlink(missing_ok=True)
+        for k in range(1, proven + 1):
+            d = self.ad / f"round-{k}"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "review-envelope.txt").write_text(f"# envelope for round {k}\n", encoding="utf-8")
         (self.ad / "round.txt").write_text(f"{round_txt}\n")
         if cap is not None:
             (self.ad / "round-cap.txt").write_text(f"{cap}\n")
@@ -59,6 +74,21 @@ class RoundPreCap(unittest.TestCase):
             self.assertEqual(r.returncode, 1, wf + r.stdout)
             self.assertIn(f"ROUND_CAP_REACHED round={default} cap={default}", r.stdout)
             self.assertEqual((self.ad / "round.txt").read_text().strip(), str(default), "round.txt must not be incremented")
+            self.assertNotIn("ROUND_RECLAIM", r.stderr, wf + ": proven rounds must never be reclaimed")
+
+    def test_unproven_last_round_is_reclaimed_once_then_the_cap_stops(self):
+        # A round whose review died before writing an envelope is given back
+        # exactly once per run. The second unproven round means something is
+        # durably wrong, not unlucky, so the cap holds and the human gate is
+        # reached with the run's rounds actually spent on reviews.
+        for wf, default in LANES.items():
+            r = self.run_pre(wf, default, proven=default - 1)
+            self.assertEqual(r.returncode, 0, wf + r.stdout + r.stderr)
+            self.assertIn(f"ROUND_RECLAIM=round-{default}", r.stderr, wf)
+            self.assertIn(f"ROUND={default}", r.stdout, wf)
+            r = self.run_pre(wf, default, proven=default - 1, reset=False)
+            self.assertEqual(r.returncode, 1, wf + r.stdout + r.stderr)
+            self.assertIn(f"ROUND_CAP_REACHED round={default} cap={default}", r.stdout, wf)
 
     def test_explicit_cap_file_wins(self):
         for wf in LANES:

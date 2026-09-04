@@ -3643,6 +3643,8 @@ nodes:
             # Durable cap, checked BEFORE the round is spent (same doctrine as plan-round-pre,
             # full-sdlc-api.yaml: a cap enforced only in converge is walked past by resuming
             # after every group failure). accept-residuals.txt is the human bypass.
+            R="/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-reclaim.sh"
+            N=$(bash "$R" "$ARTIFACTS_DIR" "$N" "round-" "review-envelope.txt")
             CAP=$(cat "$ARTIFACTS_DIR/round-cap.txt" 2>/dev/null || echo 2)
             case "$CAP" in ''|*[!0-9]*) CAP=2 ;; esac
             if [ "$N" -ge "$CAP" ] && [ ! -f "$ARTIFACTS_DIR/accept-residuals.txt" ]; then echo "ROUND_CAP_REACHED round=$N cap=$CAP (pre-round: a resume does not buy another review; write accept-residuals.txt or raise round-cap.txt)"; exit 1; fi
@@ -3658,7 +3660,13 @@ nodes:
         - id: review
           depends_on: [round-pre]
           model: sonnet
-          maxBudgetUsd: 10
+          # Measured: a full always-on + conditional fan-out on a ~230-line diff
+          # costs about $10 (run 38d72218 round 1 finished just under it; round 2
+          # hit it at 630s). A cap AT the typical cost fails ~half its rounds, and
+          # a review that dies mid-fan-out writes no envelope, so the round is
+          # billed and lost. Headroom over the measurement, not a blank cheque:
+          # the persona cap above is what actually bounds the fan-out.
+          maxBudgetUsd: 20
           timeout: 1800000
           skills: [ce-code-review]
           prompt: |
@@ -3679,10 +3687,18 @@ nodes:
             BEFORE you invoke the skill:
             - Measure the diff first: in the worktree, run
               git diff --stat "$(cat <that directory>/bootstrap-head.txt)"..HEAD
-              Under roughly 150 changed lines, cap the conditional personas at
-              3 beyond the always-on set, and record the decision (diff size,
-              cap applied or not, personas chosen) in the envelope's Coverage
-              section so the choice is observable.
+              Size the review on PRODUCTION churn: count changed lines
+              EXCLUDING test/spec files, generated files, and lockfiles. That
+              is the same basis ce-code-review's own catalog uses to size a
+              review ("excluding test files, generated files, and lockfiles"),
+              and in this lane it is load-bearing: the repro test is the proof
+              artifact and is routinely larger than the fix it proves, so a
+              total-line threshold disables the cap on nearly every bugfix.
+              Under roughly 150 production lines, cap the conditional personas
+              at 3 beyond the always-on set, and record the decision
+              (production lines, total lines, cap applied or not, personas
+              chosen) in the envelope's Coverage section so the choice is
+              observable.
             - Task one reviewer lens with exactly this: "verify the fix targets
               the root cause named in rca.md's Best Explanation — not the
               symptom site — and verify the test would catch a regression of

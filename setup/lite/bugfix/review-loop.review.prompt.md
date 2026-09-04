@@ -15,10 +15,16 @@ Persona selection happens in this session, so three instructions
 BEFORE you invoke the skill:
 - Measure the diff first: in the worktree, run
   git diff --stat "$(cat <that directory>/bootstrap-head.txt)"..HEAD
-  Under roughly 150 changed lines, cap the conditional personas at
-  3 beyond the always-on set, and record the decision (diff size,
-  cap applied or not, personas chosen) in the envelope's Coverage
-  section so the choice is observable.
+  Size the review on PRODUCTION churn: count changed lines EXCLUDING
+  test/spec files, generated files, and lockfiles — the same basis
+  ce-code-review's own catalog sizes a review on. In this lane it is
+  load-bearing: the repro test is the proof artifact and is routinely
+  larger than the fix it proves, so a total-line threshold disables
+  the cap on nearly every bugfix.
+  Under roughly 150 production lines, cap the conditional personas at
+  3 beyond the always-on set, and record the decision (production
+  lines, total lines, cap applied or not, personas chosen) in the
+  envelope's Coverage section so the choice is observable.
 - Task one reviewer lens with exactly this: "verify the fix targets
   the root cause named in rca.md's Best Explanation — not the
   symptom site — and verify the test would catch a regression of

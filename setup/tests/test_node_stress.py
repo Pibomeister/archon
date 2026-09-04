@@ -1236,6 +1236,16 @@ def round_pre_fixture(seeds=C_ORDER, counter=None):
             # (same doctrine as plan-round-pre); this fixture is about the
             # counter/listing mechanics, so keep it under the cap explicitly.
             (art / "round-cap.txt").write_text(f"{counter + 2}\n", encoding="utf-8")
+            # round-pre also reclaims a round that left no envelope behind (a
+            # review killed by its cost cap or a timeout was billed, not
+            # spent). A counter of N therefore only means N rounds happened if
+            # their envelopes exist; without them this fixture would silently
+            # be testing the reclaim path instead of the counter mechanics.
+            for k in range(1, counter + 1):
+                d = art / f"round-{k}"
+                d.mkdir(parents=True, exist_ok=True)
+                (d / "review-envelope.txt").write_text(
+                    f"# envelope for round {k}\n", encoding="utf-8")
         ce = tmp / "ce-review-root"
         ce.mkdir()
         for name in seeds:
