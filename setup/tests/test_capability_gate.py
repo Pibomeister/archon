@@ -130,6 +130,28 @@ class CapabilityGate(unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("probe_gaps=1", r.stdout)
 
+    def test_a_report_with_a_reproduction_is_never_blocked(self):
+        # The plan's own constraint: a local-only repro must run with zero
+        # external evidence. Without this the gate becomes the thing that stops
+        # locally reproducible bug fixes whenever AWS happens to be down --
+        # worse than the decoration it replaced.
+        self.write(REAL_REPORT + """
+## Repro
+
+bun run test -- commit-import-note-resolution
+""")
+        r = self.run_gate()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("probe_gaps=0", r.stdout)
+
+    def test_an_empty_repro_heading_does_not_exempt(self):
+        # Negative control: the heading alone is not a reproduction, or every
+        # report could opt out of the gate by writing four characters.
+        self.write(REAL_REPORT + "\n## Repro\n\n")
+        r = self.run_gate()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("capability-required", r.stdout)
+
     def test_a_missing_capabilities_file_is_a_typed_stop(self):
         (self.ad / "bug-report.md").write_text(REAL_REPORT, encoding="utf-8")
         r = self.run_gate()

@@ -161,6 +161,14 @@ nodes:
         LOCATING = r"\b(id|ids|account|customer|org|user|email|time|timestamp|date|window|count|counts|number|import|row|rows)\b"
         probe_gaps = [g for g in re.findall(r"(?m)^\s*[-*]\s+(.*)$", gaps)
                       if re.search(LOCATING, g, re.I)]
+    # A report carrying a reproduction the reporter already ran does not need
+    # production evidence to attribute anything -- the occurrence is in front of
+    # you. Blocking those would make the gate the thing that stops local bug
+    # fixes whenever AWS happens to be down, which is worse than the decoration
+    # it replaced. The lite lane already treats "## Repro" as the contract for
+    # "the reporter reproduced this"; the same block means the same thing here.
+    if section("Repro").strip():
+        probe_gaps = []
     db = caps.get("prod-db", {})
     if classification == "defect" and probe_gaps and db.get("status") != "AVAILABLE":
         reason = (db.get("reason") or "unknown").split()[0]
