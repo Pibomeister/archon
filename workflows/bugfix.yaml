@@ -729,6 +729,23 @@ nodes:
           "approach": "<one paragraph>", "files": ["<paths>"],
           "pros": "<one line>", "risks": "<one line>"}]}
       The fix targets the infection point from the chain, not the symptom.
+
+      THE FIX SITE MUST BE REACHABLE FROM THE TEST YOU DECLARE. The RED node may
+      touch ONLY the test file -- red-gate rejects it as a scope breach
+      otherwise -- so it cannot add an export to reach your fix site. Before you
+      settle fix_site, check how the enclosing symbol is reachable:
+      `grep -n "^export" <file>` and find which exported symbol calls it.
+        - Exported, or trivially driven by an exported caller -> kind "unit" is
+          fine and the test imports it directly.
+        - Module-private and reachable only through a heavy entrypoint (a Lambda
+          `handler`, an HTTP controller) -> a unit test CANNOT call it. Either
+          pick a fix site inside a symbol the test can already reach, or declare
+          kind "integration" and drive that entrypoint, saying so in
+          integration_note.
+      Getting this wrong is expensive and silent: the plan passes every gate,
+      the run pays for bind-repo, bootstrap and the RED node, and only then does
+      red-gate report "error-not-failure" from a TypeError that the function is
+      not a function.
       `files` is the exact intended implementation scope. Never add speculative
       reviewer-requested, documentation, controller, or cleanup placeholders
       "just in case"; a later reviewer finding must name and justify any scope
@@ -2780,7 +2797,7 @@ nodes:
       test "$RC" != 0 || { echo "RED_GATE=FAIL test passed - does not reproduce the bug"; exit 1; }
       test "$RC" != 97 || { echo "RED_GATE=FAIL repro harness error (see red-out.txt)"; exit 1; }
       grep -Eq 'Cannot find module|Test suite failed to run|SyntaxError' "$ARTIFACTS_DIR/red-out.txt" \
-        && { echo "RED_GATE=FAIL error-not-failure (the suite errored instead of the test failing; see red-out.txt)"; exit 1; }
+        && { echo "RED_GATE=FAIL error-not-failure (the suite errored instead of the test failing; see red-out.txt). A TypeError that the target 'is not a function' means the fix site is module-private: the RED node may only touch the test file, so it cannot export it. Re-plan with a fix site the declared test kind can reach, or an integration test through the exported entrypoint"; exit 1; }
       grep -qF "$SIG" "$ARTIFACTS_DIR/red-out.txt" \
         || { echo "RED_GATE=FAIL predicted signature not found (chain wrong -> engineer; over-specific signature -> human edits failing-test.json, the edit is the approval, then resume)"; exit 1; }
       echo "RED_GATE=PASS rc=$RC signature matched"

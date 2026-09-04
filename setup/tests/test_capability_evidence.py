@@ -516,6 +516,20 @@ class RetrievalCanChangeTheVerdictTest(unittest.TestCase):
         self.assertEqual(bad.returncode, 1)
         self.assertIn("when either is set", bad.stdout)
 
+    def test_fix_site_must_be_reachable_from_the_declared_test(self):
+        # Run f53b1b58 planned fix_site at stage-user-import-handler.ts:701,
+        # inside linkSameRowEntitiesToProfile -- a module-private function whose
+        # only exported caller is the Lambda handler. The kind=unit RED test
+        # could not import it, and RED may only touch the test file so it could
+        # not add the export. The plan passed every gate; the failure surfaced
+        # only after bind-repo, bootstrap and red-test were paid for.
+        rca = node("bugfix", "rca")["prompt"]
+        self.assertIn("REACHABLE FROM THE TEST YOU DECLARE", rca)
+        self.assertIn("Module-private and reachable only through a heavy entrypoint", rca)
+        gate = node("bugfix", "red-gate")["bash"]
+        self.assertIn("is not a function", gate)
+        self.assertIn("may only touch the test file", gate)
+
     def test_split_out_symptoms_still_need_a_coverage_row(self):
         # Run b7797562 wrote coverage for E1 only and failed with
         # coverage_missing=['E2','E3'] -- the two symptoms it had split to their
