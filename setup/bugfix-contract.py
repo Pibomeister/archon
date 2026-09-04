@@ -608,10 +608,18 @@ def validate_causal_coverage(
 
     expected = set(shape["effective_ids"])
     if set(dispositions) != expected or set(coverage) != expected:
+        # Say how to comply. The rows that go missing are almost always the
+        # ones split to their own ticket -- they feel "not covered by this
+        # chain", but the bijection is over EVERY effective symptom, and a
+        # split-out symptom's row is what records that it is not covered.
         raise ContractError(
             "effective coverage mismatch "
             f"dispositions_missing={sorted(expected-set(dispositions))} "
             f"coverage_missing={sorted(expected-set(coverage))}"
+            " -- every effective symptom needs BOTH a disposition and a"
+            " causal-coverage row, including ones dispositioned separate-ticket"
+            " or by-design; theirs records the absence of coverage"
+            ' (planned_diff [], red_test "", occurrence_attributed false)'
         )
     for eid in shape["effective_ids"]:
         disposition = dispositions[eid].get("disposition")

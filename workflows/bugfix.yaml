@@ -889,7 +889,13 @@ nodes:
       <id> lacks occurrence attribution", and the honest
       `class-hardening-only` would have shipped.
 
-      causal-coverage.json —
+      causal-coverage.json — ONE ROW PER EFFECTIVE SYMPTOM, including every
+      symptom you dispositioned separate-ticket or by-design. Those rows are not
+      optional and not implied: a split-out symptom's row is how the run records
+      that this chain does NOT cover it, written as planned_diff [], red_test "",
+      occurrence_attributed false. Omitting them is the most common way this
+      gate fails, because a symptom you moved to its own ticket stops feeling
+      like part of the chain.
         {"schema_version":2,"coverage":[{"symptom_id":"E1",
          "cause_id":"H1","occurrence_attributed":true|false,
          "planned_diff":["<repo-relative path>"],

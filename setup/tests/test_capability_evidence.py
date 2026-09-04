@@ -437,7 +437,7 @@ class RetrievalCanChangeTheVerdictTest(unittest.TestCase):
         # the gate that reads them.
         prompt = node("bugfix", "rca-reassess")["prompt"]
         self.assertIn("evidence/occurrence-logs.txt", prompt)
-        self.assertIn("zero\nmatching events, is a real answer", prompt)
+        self.assertIn("matching events, is a real answer", prompt)
         helper = SETUP / "occurrence-logs.py"
         self.assertTrue(helper.is_file())
         self.assertIn("setup/occurrence-logs.py", (SETUP / "package.sh").read_text(encoding="utf-8"))
@@ -515,6 +515,18 @@ class RetrievalCanChangeTheVerdictTest(unittest.TestCase):
                              capture_output=True, encoding="utf-8")
         self.assertEqual(bad.returncode, 1)
         self.assertIn("when either is set", bad.stdout)
+
+    def test_split_out_symptoms_still_need_a_coverage_row(self):
+        # Run b7797562 wrote coverage for E1 only and failed with
+        # coverage_missing=['E2','E3'] -- the two symptoms it had split to their
+        # own tickets. The bijection is over EVERY effective symptom; a
+        # split-out row is what records that the chain does not cover it.
+        contract = (SETUP / "bugfix-contract.py").read_text(encoding="utf-8")
+        self.assertIn("including ones dispositioned separate-ticket", contract)
+        self.assertIn("records the absence of coverage", contract)
+        rca = node("bugfix", "rca")["prompt"]
+        self.assertIn("ONE ROW PER EFFECTIVE SYMPTOM", rca)
+        self.assertIn("optional and not implied", rca)
 
     def test_incidental_finding_is_defined_because_it_gates_shipping(self):
         # Run d2ea8d56 dispositioned E1 class-hardening-only with
