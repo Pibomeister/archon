@@ -889,6 +889,9 @@ def deslop_commit_fixture(dirty=True):
         jdump(art / "params.json", params(tmp, wt))
         (art / "red-sha.txt").write_text(base + "\n", encoding="utf-8")
         jdump(art / "failing-test.json", failing_test_json())
+        # deslop-commit stages through check-scope.py --stage rather than
+        # `git add -A`, so the allowlist is part of this node's real input.
+        jdump(art / "files-allowlist.json", ["src/foo.ts", "src/__tests__/foo.spec.ts"])
         return dict(GIT_FIXED_DATE)
     return build
 

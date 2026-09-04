@@ -3073,8 +3073,7 @@ nodes:
           cd "$WT"
           MSG=$(head -1 "$ARTIFACTS_DIR/commit-msg.txt" 2>/dev/null || true)
           test -n "$MSG" || MSG="fix($REPO): $SLUG"
-          git add -A
-          git restore --staged pnpm-lock.yaml 2>/dev/null || true
+          python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --exclude pnpm-lock.yaml || exit 1
           if git diff --cached --quiet; then echo "COMMITTED=NO (nothing staged)"; else git commit -m "$MSG"; fi
           test -z "$(git status --porcelain | grep -vE '^\?\? \.env$|^ M pnpm-lock\.yaml$')" || { echo "FIX_CONVERGE=FAIL dirty after commit"; exit 1; }
           echo "GREEN_ACHIEVED attempt=$N sha=$(git rev-parse HEAD)"
@@ -3642,13 +3641,12 @@ nodes:
     TESTF=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1], encoding='utf-8'))['test_file'])" "$ARTIFACTS_DIR/failing-test.json")
     cd "$WT"
     # Repro-untouched guard BEFORE anything is staged: a modified repro test
-    # must never land as a commit at all, so this runs ahead of git add -A.
+    # must never land as a commit at all, so this runs ahead of staging.
     test -z "$(git diff "$RED" -- "$TESTF")" || { echo "DESLOP=FAIL repro test modified"; exit 1; }
-    git add -A
     # The web bootstrap deliberately leaves pnpm-lock.yaml modified; it is never
     # part of a fix commit, and a tree dirty ONLY by that drift must produce no
     # commit at all rather than an empty one.
-    git restore --staged pnpm-lock.yaml 2>/dev/null || true
+    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --exclude pnpm-lock.yaml || exit 1
     COMMITTED=no
     if git diff --cached --quiet; then :; else
       git commit -m "fix(deslop): remove ai slop from $SLUG"
@@ -3826,8 +3824,7 @@ nodes:
         RED=$(cat "$ARTIFACTS_DIR/red-sha.txt")
         TESTF=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1], encoding='utf-8'))['test_file'])" "$ARTIFACTS_DIR/failing-test.json")
         test -z "$(git diff "$RED" -- "$TESTF")" || { echo "REVIEW_SCOPE=FAIL repro test modified before commit (restore it: git checkout $RED -- $TESTF)"; exit 1; }
-        git add -A
-        git restore --staged pnpm-lock.yaml 2>/dev/null || true
+        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --exclude pnpm-lock.yaml || exit 1
         if git diff --cached --quiet; then echo "COMMITTED=NO"; else
           git commit -m "fix(review): apply autofix feedback"; echo "COMMITTED=YES sha=$(git rev-parse HEAD)"
         fi
@@ -3897,8 +3894,7 @@ nodes:
         set -euo pipefail
         eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
         cd "$WT"
-        git add -A
-        git restore --staged pnpm-lock.yaml 2>/dev/null || true
+        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --exclude pnpm-lock.yaml || exit 1
         if git diff --cached --quiet; then echo "COMMITTED=NO"; else
           git commit -m "fix(review): apply fixer feedback"; echo "COMMITTED=YES sha=$(git rev-parse HEAD)"
         fi
