@@ -526,6 +526,28 @@ nodes:
       RC=$?
       case "$RC" in 0) LINEAR=gathered ;; 3) LINEAR=skipped ;; *) LINEAR=unavailable ;; esac
     fi
+    # "skipped" must mean "nothing to fetch", never "needed and unreachable".
+    # The intake extracts linear_refs precisely because those tickets are
+    # relevant, so recording an unset key as `skipped` retires the run's own
+    # question silently. ENG-3860 named four related tickets -- one of them,
+    # ENG-2091, already Done for the same symptom family -- and every run
+    # logged `linear=skipped` and re-derived the prior art from source code.
+    UNREAD=$(python3 - "$EP" <<'PY'
+    import json, sys
+    try:
+        refs = json.load(open(sys.argv[1], encoding="utf-8")).get("linear_refs") or []
+    except Exception:
+        refs = []
+    print(",".join(str(r) for r in refs if str(r).strip()))
+    PY
+    )
+    if [ "$LINEAR" = skipped ] && [ -n "$UNREAD" ]; then
+      LINEAR=unavailable
+      echo "EVIDENCE_CHEAP=DEGRADED prior-art-unread refs=$UNREAD reason=LINEAR_API_KEY-unset"
+      echo "Those tickets were named by this report or its intake and none was read."
+      echo "A related ticket already closed for the same symptom is prior art the RCA"
+      echo "cannot see; export LINEAR_API_KEY and relaunch to use it."
+    fi
     echo "linear=$LINEAR" >> "$EV/cheap.status"
     # --- Recent history at the immutable chain baseline. Never re-read a
     # floating remote ref after the chain starts.
