@@ -71,6 +71,22 @@ def build(artifacts: Path) -> None:
     candidates.sort(key=lambda row: (row["score"], row.get("merged_at") or row.get("updated_at") or ""), reverse=True)
     payload = {"schema_version": 1, "report_terms": sorted(report_terms), "candidates": candidates[:15]}
     (artifacts / "change-context.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    # Seed the assessment with one blank row per candidate. Asking a model to
+    # emit "exactly one row for every candidate" makes coverage a copying task,
+    # and copying fifteen ids is a task that silently loses one: run da65d1b3's
+    # RCA returned 14 of 15 and the run died at rca-gate with
+    # `missing=['web-app#1203']` -- a dropped row, not a judgement. Filling in a
+    # row that is already present cannot drop it, and a row left blank fails
+    # validate by NAME, which says what to go finish.
+    #
+    # Never overwrite: on a resume this must not wipe work the RCA already did.
+    seed = artifacts / "change-context-assessment.json"
+    if not seed.exists():
+        seed.write_text(json.dumps({"schema_version": 1, "assessments": [
+            {"id": row["id"], "decision": "", "evidence": "", "reason": ""}
+            for row in payload["candidates"]
+        ]}, indent=2) + "\n", encoding="utf-8")
     print(f"CHANGE_CONTEXT=OK candidates={len(payload['candidates'])}")
 
 
@@ -88,7 +104,9 @@ def validate(artifacts: Path) -> None:
         fail(f"candidate coverage mismatch missing={sorted(expected-actual)} extra={sorted(actual-expected)}")
     for row in rows:
         if row.get("decision") not in DECISIONS or not str(row.get("evidence", "")).strip() or not str(row.get("reason", "")).strip():
-            fail(f"invalid assessment for {row.get('id')}")
+            blank = not str(row.get("decision", "")).strip()
+            fail(f"{'unfilled' if blank else 'invalid'} assessment for {row.get('id')}"
+                 + (" (the row was seeded for you; fill decision/evidence/reason)" if blank else ""))
     print(f"CHANGE_CONTEXT_ASSESSMENT=PASS candidates={len(expected)}")
 
 

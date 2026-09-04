@@ -658,12 +658,16 @@ nodes:
       The manifest tells you exactly which evidence exists; reason only from
       sources marked gathered, and say plainly which sources you lacked.
 
-      PRIOR-WORK CONTRACT: write change-context-assessment.json with exactly one
-      row for every change-context.json candidate:
-        {"schema_version":1,"assessments":[
+      PRIOR-WORK CONTRACT: change-context-assessment.json ALREADY EXISTS in the
+      artifacts directory, seeded with one blank row per change-context.json
+      candidate. EDIT it in place: fill each row's decision, evidence and
+      reason. Never add a row, never remove one, never rewrite the file from
+      scratch -- the ids are the gate's contract and reproducing them by hand is
+      how a candidate gets silently dropped. Each row becomes:
           {"id":"api#123","decision":"solves|partial|unrelated|superseded",
            "evidence":"<exact PR/path/current-code evidence>",
-           "reason":"<why this prior change does or does not close the ticket>"}]}
+           "reason":"<why this prior change does or does not close the ticket>"}
+      A row you leave blank fails the gate by name, so finish every one.
       Inspect current pinned code before saying `solves`; a merged PR title alone
       is never closure evidence. Explicitly state remaining gaps after recent
       related work in RCA Evidence For/Against.
