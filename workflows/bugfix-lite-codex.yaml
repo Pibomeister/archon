@@ -818,6 +818,30 @@ nodes:
     )" \
           --occurrence-window "$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(json.dumps({'start':d['start'],'end':d['end']},sort_keys=True))" "$AD/occurrence-window.json")" \
           || { echo "RCA_GATE=FAIL occurrence provenance"; exit 1; }
+        # The occurrence logs are their own source. `logs` already names the
+        # EARLY evidence-aws CloudWatch fetch, which ran before any probe knew
+        # the entity and is class evidence; citing it for an occurrence picks
+        # up the wrong row. Same window and watermark as the probe row.
+        if [ -s "$AD/evidence/occurrence-logs.txt" ]; then
+          python3 "$ROOT/.archon/setup/evidence-provenance.py" record \
+            --artifacts "$AD" --source occurrence-logs --status complete \
+            --file evidence/occurrence-logs.txt --tool aws-logs \
+            --provider "$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['provider'])" "$AD/bugfix-chain.json")" \
+            --query "$(cat "$AD/occurrence-window.json")" \
+            --baseline "$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['baseline']['commits'][sys.argv[2]])" "$AD/bugfix-chain.json" "$REPO_FOR_BASELINE")" \
+            --evidence-kind occurrence \
+            --entity-watermark "$(python3 - "$AD/occurrence-window.json" "$AD/evidence/occurrence-logs.txt" <<'PY'
+    import hashlib, json, sys
+    doc = json.load(open(sys.argv[1], encoding="utf-8"))
+    subjects = [{"kind": s["kind"], "value": str(s["value"])} for s in doc["subjects"]]
+    version = hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest()
+    print(hashlib.sha256(json.dumps({"subjects": subjects, "version": version},
+                                    sort_keys=True, separators=(",", ":")).encode()).hexdigest())
+    PY
+    )" \
+            --occurrence-window "$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(json.dumps({'start':d['start'],'end':d['end']},sort_keys=True))" "$AD/occurrence-window.json")" \
+            || { echo "RCA_GATE=FAIL occurrence-logs provenance"; exit 1; }
+        fi
         echo "RCA_REASSESS=ATTRIBUTED subjects=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))['subjects']))" "$AD/occurrence-window.json")"
       fi
     fi

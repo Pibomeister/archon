@@ -448,6 +448,26 @@ class RetrievalCanChangeTheVerdictTest(unittest.TestCase):
         self.assertIn("MAX_OUTPUT_BYTES", body)
         self.assertIn("TIMEOUT_SECONDS", body)
 
+    def test_occurrence_logs_have_their_own_provenance_source(self):
+        # `logs` names the early evidence-aws fetch, which ran before any probe
+        # knew the entity and is class evidence. Run 61a7fd35 cited it for an
+        # occurrence and was rejected: "occurrence evidence source is
+        # incomplete, stale, or invalidated: logs".
+        gate = node("bugfix", "rca-gate")["bash"]
+        self.assertIn("--source occurrence-logs", gate)
+        self.assertIn("evidence/occurrence-logs.txt", gate)
+        prompt = node("bugfix", "rca-reassess")["prompt"]
+        self.assertIn("`occurrence-logs`", prompt)
+        self.assertIn("Do NOT cite `logs`", prompt)
+
+    def test_material_difference_impact_values_are_explained(self):
+        # A gate blocks on changes-causal-boundary and the prompt shipped the
+        # enum with no statement of what either value means.
+        rca = node("bugfix", "rca")["prompt"]
+        self.assertIn("changes-causal-boundary — the difference could make", rca)
+        self.assertIn("covered-by-secondary-proof — the difference is real but", rca)
+        self.assertIn("never relabel a row to clear the gate", rca)
+
     def test_repo_scope_rejects_a_repo_narrower_than_the_fix(self):
         # repo names the repository THIS CHAIN CHANGES. Scoping it over the
         # ticket turns any bug with a cross-repo symptom into CROSS_REPO_BUG.

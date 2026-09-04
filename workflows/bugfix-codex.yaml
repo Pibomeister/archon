@@ -985,6 +985,23 @@ nodes:
        "input":"<observed input>","output":"<observed output>",
        "evidence":"<artifact/code citation>"}]}
     Trace from the reported UI/API/tool entrypoint to the proposed owner.
+    reproduction_equivalence.material_differences carries an `impact` per row and
+    a gate refuses an implementation plan while any row is
+    "changes-causal-boundary" or `equivalent` is not true. The two values are not
+    interchangeable:
+      changes-causal-boundary — the difference could make the RED test exercise a
+        DIFFERENT mechanism than the one that produced the occurrence. A different
+        code path, flag, tenant, permission, planner or cache state belongs here,
+        and it correctly blocks implementation.
+      covered-by-secondary-proof — the difference is real but other evidence in
+        THIS run independently establishes that the mechanism produced the
+        observed outcome, so the test not reproducing that detail cannot change
+        the causal conclusion. A retrieved production artifact showing the very
+        outcome the mechanism predicts is exactly that; so is an input you could
+        not recover whose specific values the mechanism does not depend on.
+    Name the secondary proof in the row's `observed` field when you use it, and
+    never relabel a row to clear the gate: if the difference could change which
+    mechanism runs, it is changes-causal-boundary and the plan stays empty.
     The three *_runtime_owner fields are compared with EXACT STRING EQUALITY
     by a gate, so each must be the SAME single implementation identifier,
     written byte-identically in all three: one `Class.method` or `function`
@@ -1123,7 +1140,11 @@ nodes:
     identified — set proof-assessment.json `occurrence_attributed` true and
     name `prod-probes` in `occurrence_evidence_sources`.
 
-    Read evidence/occurrence-logs.txt when it exists. A request line there
+    Read evidence/occurrence-logs.txt when it exists. Its provenance source
+    name is `occurrence-logs` — cite exactly that in
+    occurrence_evidence_sources. Do NOT cite `logs`: that name belongs to the
+    early evidence-aws CloudWatch fetch, which ran before any probe knew which
+    entity the report was about, and is class evidence a gate will reject. A request line there
     names the ROUTE that served the occurrence, which is the normal way an
     ambiguous reported surface becomes identified: that is a captured runtime
     record, not a guess, so it is legitimate grounds to set
@@ -1194,6 +1215,30 @@ nodes:
     )" \
           --occurrence-window "$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(json.dumps({'start':d['start'],'end':d['end']},sort_keys=True))" "$AD/occurrence-window.json")" \
           || { echo "RCA_GATE=FAIL occurrence provenance"; exit 1; }
+        # The occurrence logs are their own source. `logs` already names the
+        # EARLY evidence-aws CloudWatch fetch, which ran before any probe knew
+        # the entity and is class evidence; citing it for an occurrence picks
+        # up the wrong row. Same window and watermark as the probe row.
+        if [ -s "$AD/evidence/occurrence-logs.txt" ]; then
+          python3 "$ROOT/.archon/setup/evidence-provenance.py" record \
+            --artifacts "$AD" --source occurrence-logs --status complete \
+            --file evidence/occurrence-logs.txt --tool aws-logs \
+            --provider "$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['provider'])" "$AD/bugfix-chain.json")" \
+            --query "$(cat "$AD/occurrence-window.json")" \
+            --baseline "$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['baseline']['commits'][sys.argv[2]])" "$AD/bugfix-chain.json" "$REPO_FOR_BASELINE")" \
+            --evidence-kind occurrence \
+            --entity-watermark "$(python3 - "$AD/occurrence-window.json" "$AD/evidence/occurrence-logs.txt" <<'PY'
+    import hashlib, json, sys
+    doc = json.load(open(sys.argv[1], encoding="utf-8"))
+    subjects = [{"kind": s["kind"], "value": str(s["value"])} for s in doc["subjects"]]
+    version = hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest()
+    print(hashlib.sha256(json.dumps({"subjects": subjects, "version": version},
+                                    sort_keys=True, separators=(",", ":")).encode()).hexdigest())
+    PY
+    )" \
+            --occurrence-window "$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(json.dumps({'start':d['start'],'end':d['end']},sort_keys=True))" "$AD/occurrence-window.json")" \
+            || { echo "RCA_GATE=FAIL occurrence-logs provenance"; exit 1; }
+        fi
         echo "RCA_REASSESS=ATTRIBUTED subjects=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))['subjects']))" "$AD/occurrence-window.json")"
       fi
     fi
