@@ -1154,6 +1154,20 @@ nodes:
     matching events, is a real answer that leaves the surface ambiguous. Never
     treat a line about a different user, entity, or window as evidence here.
 
+    Also write reassess-assessment.json — your verdict on what retrieval did
+    to the DIAGNOSIS, which is separate from what it did to the assessment:
+      {"schema_version": 1,
+       "verdict": "agree" | "conflict" | "cannot_determine",
+       "note": "<one line>",
+       "evidence": ["<probe-results.txt:N or occurrence-logs line>", ...]}
+    "conflict" means a row or log line CONTRADICTS the causal chain — the
+    chain predicts something the data says did not happen. Say it plainly and
+    cite the rows; a gate turns it into a typed stop so a human sees a
+    contradicted diagnosis rather than a vague missing-evidence message. Do
+    not soften a conflict into cannot_determine, and do not record agree
+    merely because you changed nothing: a run whose probes answered nothing is
+    cannot_determine.
+
     Finally write reassess.md: what the probes answered, what the logs
     answered, every field you changed with the row or log line that justifies
     it, and every unknown still open.
@@ -1240,6 +1254,21 @@ nodes:
             || { echo "RCA_GATE=FAIL occurrence-logs provenance"; exit 1; }
         fi
         echo "RCA_REASSESS=ATTRIBUTED subjects=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))['subjects']))" "$AD/occurrence-window.json")"
+      fi
+    fi
+    # A probe that contradicts the chain is a designed human stop, not a
+    # missing-evidence message. Without this it degraded into
+    # RCA_INVESTIGATION_REQUIRED reason=surface-ambiguous, pointing the
+    # operator at the wrong problem entirely.
+    if [ -f "$AD/reassess-assessment.json" ]; then
+      V=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1], encoding='utf-8')).get('verdict',''))" "$AD/reassess-assessment.json" 2>/dev/null || echo "")
+      if [ "$V" = conflict ]; then
+        N=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1], encoding='utf-8')).get('note',''))" "$AD/reassess-assessment.json" 2>/dev/null || echo "")
+        echo "RCA_GATE=FAIL PROBE_CONFLICT retrieved evidence contradicts the causal chain: $N"
+        echo "The diagnosis is contradicted by production data, not merely unproven. Read"
+        echo "reassess.md and probe-results.txt, then continue from a guarded successor so"
+        echo "the chain is re-derived against these rows; never edit the frozen diagnosis."
+        exit 1
       fi
     fi
     R="$ARTIFACTS_DIR/rca.md"

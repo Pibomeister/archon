@@ -810,6 +810,21 @@ nodes:
         echo "RCA_REASSESS=ATTRIBUTED subjects=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))['subjects']))" "$AD/occurrence-window.json")"
       fi
     fi
+    # A probe that contradicts the chain is a designed human stop, not a
+    # missing-evidence message. Without this it degraded into
+    # RCA_INVESTIGATION_REQUIRED reason=surface-ambiguous, pointing the
+    # operator at the wrong problem entirely.
+    if [ -f "$AD/reassess-assessment.json" ]; then
+      V=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1], encoding='utf-8')).get('verdict',''))" "$AD/reassess-assessment.json" 2>/dev/null || echo "")
+      if [ "$V" = conflict ]; then
+        N=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1], encoding='utf-8')).get('note',''))" "$AD/reassess-assessment.json" 2>/dev/null || echo "")
+        echo "RCA_GATE=FAIL PROBE_CONFLICT retrieved evidence contradicts the causal chain: $N"
+        echo "The diagnosis is contradicted by production data, not merely unproven. Read"
+        echo "reassess.md and probe-results.txt, then continue from a guarded successor so"
+        echo "the chain is re-derived against these rows; never edit the frozen diagnosis."
+        exit 1
+      fi
+    fi
     R="$ARTIFACTS_DIR/rca.md"
     test -s "$R" || { echo "RCA_GATE=FAIL no rca.md"; exit 1; }
     for h in "## Observation" "## Hypotheses" "## Evidence For" "## Evidence Against" "## Best Explanation" "## Critical Unknown" "## Discriminating Probe"; do

@@ -468,6 +468,20 @@ class RetrievalCanChangeTheVerdictTest(unittest.TestCase):
         self.assertIn("covered-by-secondary-proof — the difference is real but", rca)
         self.assertIn("never relabel a row to clear the gate", rca)
 
+    def test_a_probe_contradicting_the_chain_is_a_typed_stop(self):
+        # Run 0f012f8a: the probes identified the occurrence AND disconfirmed the
+        # chain (import 17592 had 47 notes, all linked; the census class it was
+        # assigned to has zero overlap with it). reassess correctly refused to
+        # attribute -- and the run then reported
+        # "RCA_INVESTIGATION_REQUIRED reason=surface-ambiguous", pointing the
+        # operator at a surface problem instead of a contradicted diagnosis.
+        gate = node("bugfix", "rca-gate")["bash"]
+        self.assertIn("PROBE_CONFLICT", gate)
+        self.assertIn("reassess-assessment.json", gate)
+        prompt = node("bugfix", "rca-reassess")["prompt"]
+        self.assertIn("reassess-assessment.json", prompt)
+        self.assertIn("not soften a conflict into cannot_determine", prompt)
+
     def test_repo_scope_rejects_a_repo_narrower_than_the_fix(self):
         # repo names the repository THIS CHAIN CHANGES. Scoping it over the
         # ticket turns any bug with a cross-repo symptom into CROSS_REPO_BUG.
