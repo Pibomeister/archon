@@ -4553,6 +4553,7 @@ nodes:
 - id: smoke-teardown
   depends_on:
   - smoke-approval
+  always_run: true
   timeout: 300000
   bash: |
     set -uo pipefail
@@ -4560,8 +4561,12 @@ nodes:
     AD="$ARTIFACTS_DIR"; SM="$AD/smoke-stack"
     REPO=$(cat "$AD/repo.txt")
     eval "$(bash "$ROOT/.archon/setup/params-env.sh" "$AD/params.json")"
+    # Readiness governs SHIPPING, never cleanup. Gating teardown on it meant a
+    # run whose ticket was not RESOLVED refused to release its own ports --
+    # exactly the runs that end without approval, and so exactly the runs
+    # that strand them. Report it and carry on.
     python3 "$ROOT/.archon/setup/bugfix-contract.py" validate-smoke-readiness --artifacts "$AD" \
-      || { echo "SMOKE_TEARDOWN=FAIL smoke readiness"; exit 1; }
+      || echo "SMOKE_TEARDOWN=NOTE ticket not shippable; tearing the stack down anyway"
     port_pids() { # $1 = port
       local out=""
       if command -v lsof >/dev/null 2>&1; then
@@ -4600,6 +4605,7 @@ nodes:
     else
       rm -rf "$WT/tests/smoke-matrix"
     fi
+    test -s "$AD/smoke-matrix.json" || echo '{"rows": []}' > "$AD/smoke-matrix.json"
     python3 - "$AD/smoke-matrix.json" > "$AD/smoke-matrix-result.txt" <<'PY'
     import json, sys
     m = json.load(open(sys.argv[1], encoding="utf-8"))
