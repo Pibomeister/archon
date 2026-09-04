@@ -426,6 +426,18 @@ class RetrievalCanChangeTheVerdictTest(unittest.TestCase):
         self.assertTrue(helper.is_file())
         self.assertIn("setup/occurrence-logs.py", (SETUP / "package.sh").read_text(encoding="utf-8"))
 
+    def test_occurrence_logs_does_not_re_pad_an_already_padded_window(self):
+        # occurrence-window.py brackets the occurrence; padding again widened the
+        # window by five more minutes each side, and with oldest-first ordering
+        # the per-query cap was spent on earlier polling traffic before reaching
+        # the request that started the occurrence. Measured against production:
+        # padded-once/max40 finds the entrypoint, double-padded/max40 finds none.
+        body = (SETUP / "occurrence-logs.py").read_text(encoding="utf-8")
+        self.assertNotIn("PAD_MS", body)
+        self.assertIn("MAX_REQUEST_EVENTS", body)
+        # The request slice is what names the route, so it gets its own headroom.
+        self.assertIn('"Controller"', body)
+
     def test_occurrence_logs_helper_is_bounded_and_read_only(self):
         body = (SETUP / "occurrence-logs.py").read_text(encoding="utf-8")
         self.assertIn("filter-log-events", body)

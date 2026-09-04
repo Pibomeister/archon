@@ -24,8 +24,11 @@ REGION = "us-east-2"
 LOG_GROUP = "/aws/apprunner/loopdevapi/5bc44070b2624d259b56f9be707931fc" "/application"
 MAX_SUBJECTS = 3
 MAX_EVENTS_PER_SUBJECT = 40
-MAX_OUTPUT_BYTES = 256 * 1024
-PAD_MS = 5 * 60 * 1000
+# The request slice competes with polling traffic on a busy account, and the
+# entrypoint we need is usually the FIRST request in the window, so it needs
+# headroom the raw slice does not.
+MAX_REQUEST_EVENTS = 150
+MAX_OUTPUT_BYTES = 512 * 1024
 TIMEOUT_SECONDS = 90
 
 
@@ -43,8 +46,14 @@ def main() -> None:
 
     try:
         doc = json.loads((args.artifacts / "occurrence-window.json").read_text(encoding="utf-8"))
-        start = iso_ms(doc["start"]) - PAD_MS
-        end = iso_ms(doc["end"]) + PAD_MS
+        # occurrence-window.py already brackets the occurrence. Padding again
+        # here widened the window by another five minutes each side and, with a
+        # per-query event cap and oldest-first ordering, the cap was spent on
+        # earlier polling traffic before reaching the request that started the
+        # occurrence -- measured: padded-once/max40 finds the entrypoint,
+        # double-padded/max40 finds nothing at all.
+        start = iso_ms(doc["start"])
+        end = iso_ms(doc["end"])
         subjects = [str(s["value"]).strip() for s in doc["subjects"] if str(s.get("value", "")).strip()]
     except Exception as exc:
         print(f"OCCURRENCE_LOGS=UNAVAILABLE reason=window-unreadable {exc}")
@@ -53,30 +62,44 @@ def main() -> None:
         print("OCCURRENCE_LOGS=SKIPPED reason=no-subjects")
         raise SystemExit(0)
 
-    chunks: list[str] = []
-    gathered = 0
-    for subject in subjects[:MAX_SUBJECTS]:
+    def fetch(label: str, pattern: str, cap: int = MAX_EVENTS_PER_SUBJECT) -> str | None:
         argv = [
             "aws", "logs", "filter-log-events", "--region", REGION,
             "--log-group-name", LOG_GROUP,
             "--start-time", str(start), "--end-time", str(end),
-            "--filter-pattern", f'"{subject}"',
-            "--max-items", str(MAX_EVENTS_PER_SUBJECT),
+            "--filter-pattern", pattern,
+            "--max-items", str(cap),
             "--query", "events[*].[timestamp,message]", "--output", "text",
         ]
         try:
             result = subprocess.run(argv, capture_output=True, encoding="utf-8",
                                     errors="replace", timeout=TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
-            chunks.append(f"== subject {subject}: TIMEOUT after {TIMEOUT_SECONDS}s")
-            continue
+            chunks.append(f"== {label}: TIMEOUT after {TIMEOUT_SECONDS}s")
+            return None
         if result.returncode != 0:
             tail = (result.stderr or "").strip().splitlines()[-1:] or ["unknown"]
-            chunks.append(f"== subject {subject}: UNAVAILABLE {tail[0]}")
-            continue
-        gathered += 1
+            chunks.append(f"== {label}: UNAVAILABLE {tail[0]}")
+            return None
         body = result.stdout.strip() or "(zero matching events -- absence is evidence too)"
-        chunks.append(f"== subject {subject}\n{body}")
+        chunks.append(f"== {label}\n{body}")
+        return body
+
+    chunks: list[str] = []
+    gathered = 0
+    for subject in subjects[:MAX_SUBJECTS]:
+        # Two slices, because they answer different questions. The raw match
+        # shows what happened to the entity; the REQUEST slice shows which route
+        # served it, and that is what identifies a user-facing surface. On a
+        # busy account the raw slice is mostly polling traffic and the request
+        # lines never make the cap -- exactly how eight runs failed to name an
+        # entrypoint that was sitting in the logs. Note the ids inside route
+        # URLs are hashed (HashIdInterceptor), so a numeric id will never match
+        # a URL: the subject term has to match the logged userId= prefix.
+        if fetch(f"subject {subject}", f'"{subject}"') is not None:
+            gathered += 1
+        fetch(f"subject {subject} / request lines", f'"{subject}" "Controller"',
+              cap=MAX_REQUEST_EVENTS)
 
     text = "\n\n".join(chunks)
     if len(text.encode()) > MAX_OUTPUT_BYTES:
