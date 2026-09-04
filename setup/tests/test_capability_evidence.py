@@ -351,6 +351,40 @@ class RetrievalCanChangeTheVerdictTest(unittest.TestCase):
         self.assertIn("occurrence-window.json written for a probe that returned nothing", gate)
         self.assertIn("--evidence-kind occurrence", gate)
 
+    def test_runtime_owner_fields_state_their_equality_contract(self):
+        # bugfix-contract compares the three *_runtime_owner fields with `!=`,
+        # but the prompt described the field only as "<implementation that
+        # actually serves it>". Five runs running, every one wrote a call path
+        # in one field and a bare symbol in another -- a guaranteed mismatch
+        # that reads as "the test does not reach the runtime" when it is only
+        # formatting.
+        rca = node("bugfix", "rca")["prompt"]
+        self.assertIn("EXACT STRING EQUALITY", rca)
+        self.assertIn("byte-identically in all three", rca)
+        self.assertIn("never make the strings match to get past the gate", rca)
+        contract = (SETUP / "bugfix-contract.py").read_text(encoding="utf-8")
+        self.assertIn('surface["test_runtime_owner"].strip() != runtime_owner', contract)
+        self.assertIn('surface["smoke_runtime_owner"].strip() != runtime_owner', contract)
+
+    def test_prompt_and_contract_agree_on_what_active_means(self):
+        # bugfix-contract counts BOTH open and confirmed-by-experiment as active
+        # and requires exactly one; the prompt said "keep exactly one hypothesis
+        # open". Run 5e9c7682 obeyed the prompt (one confirmed, one open) and
+        # died on "exactly one active hypothesis is required".
+        rca = node("bugfix", "rca")["prompt"]
+        self.assertIn("BOTH \"open\" and", rca)
+        self.assertIn("confirmed-by-experiment\" as active", rca)
+        contract = (SETUP / "bugfix-contract.py").read_text(encoding="utf-8")
+        self.assertIn('{"open", "confirmed-by-experiment"}', contract)
+
+    def test_occurrence_window_and_attribution_flag_move_together(self):
+        # Writing the window while leaving occurrence_attributed false claims an
+        # identification the assessment denies -- and rca-gate promotes the probe
+        # row to occurrence evidence off the file alone.
+        prompt = node("bugfix", "rca-reassess")["prompt"]
+        self.assertIn("The file and the flag are one decision", prompt)
+        self.assertIn("If you are not prepared to set the flag, omit", prompt)
+
     def test_repo_scope_rejects_a_repo_narrower_than_the_fix(self):
         # repo names the repository THIS CHAIN CHANGES. Scoping it over the
         # ticket turns any bug with a cross-repo symptom into CROSS_REPO_BUG.

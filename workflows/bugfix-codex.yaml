@@ -738,9 +738,14 @@ nodes:
       [{"id": 1, "hypothesis": "<one sentence>",
         "status": "open|queued|killed-by-evidence|confirmed-by-experiment",
         "note": "<what killed or confirmed it>"}]
-    Keep exactly one hypothesis open for the next experiment. Other
-    still-plausible hypotheses are queued, never falsely killed merely to
-    satisfy the shape.
+    Exactly one hypothesis may be ACTIVE, and a gate counts BOTH "open" and
+    "confirmed-by-experiment" as active. So if you mark one
+    confirmed-by-experiment, every other hypothesis must be "queued" or
+    "killed-by-evidence" — leaving a confirmed one AND an open one is two
+    active hypotheses and the run stops with "exactly one active hypothesis
+    is required". proof-assessment.json's selected_hypothesis_id must be that
+    one active id. Other still-plausible hypotheses are queued, never falsely
+    killed merely to satisfy the shape.
 
     repo.json — {"repo": "api" | "web-app" | "both", "rationale": "<one line>"}
     repo is the repository THIS CHAIN CHANGES — the repo of the final causal
@@ -950,11 +955,11 @@ nodes:
          "reported_surface_status":"explicit|runtime-reproduced|ambiguous",
          "surface_selection_basis":"<report quote or captured reproduction that selects this surface>",
          "runtime_entrypoint":"<route/controller/tool/UI action>",
-         "runtime_owner":"<implementation that actually serves it>",
+         "runtime_owner":"<ONE implementation identifier - see below>",
          "test_entrypoint":"<path exercised by failing-test.json>",
-         "test_runtime_owner":"<implementation reached by the RED test>",
+         "test_runtime_owner":"<ONE implementation identifier - see below>",
          "smoke_entrypoint":"<live path the smoke matrix must exercise>",
-         "smoke_runtime_owner":"<implementation reached by smoke>",
+         "smoke_runtime_owner":"<ONE implementation identifier - see below>",
          "test_matches_runtime":true|false,
          "smoke_matches_runtime":true|false,
          "reproduction_equivalence": {
@@ -970,6 +975,19 @@ nodes:
        "input":"<observed input>","output":"<observed output>",
        "evidence":"<artifact/code citation>"}]}
     Trace from the reported UI/API/tool entrypoint to the proposed owner.
+    The three *_runtime_owner fields are compared with EXACT STRING EQUALITY
+    by a gate, so each must be the SAME single implementation identifier,
+    written byte-identically in all three: one `Class.method` or `function`
+    that owns the behavior. Never write a call path, an arrow chain, a hedge
+    or a sentence there - "Candidate A -> B -> C" and "unproven" can never
+    equal the bare symbol you put in test_runtime_owner, and the plan is then
+    rejected for a mismatch that is only about formatting. The call path and
+    any hedging belong in the matching *_entrypoint field and in
+    surface_selection_basis.
+    When the three genuinely differ, that is the real finding this contract
+    exists to surface: the RED test does not reach the code that serves the
+    reported surface. Say so, set the booleans false and leave the fix plan
+    empty - never make the strings match to get past the gate.
     If the report could name multiple product entrypoints, mark it ambiguous
     and stop before implementation until one is reproduced; never choose the
     surface with the easiest existing fixture.
@@ -1089,7 +1107,12 @@ nodes:
     you change must trace to a specific line of probe-results.txt.
 
     Also write occurrence-window.json when, and only when, the probe rows
-    identify the occurrence:
+    identify the occurrence — and in that case you MUST also set
+    proof-assessment.json `occurrence_attributed` true and name `prod-probes`
+    in `occurrence_evidence_sources`. The file and the flag are one decision:
+    writing the window while leaving the flag false claims an identification
+    the assessment then denies. If you are not prepared to set the flag, omit
+    the file. Schema:
       {"start": "<ISO-8601>", "end": "<ISO-8601>",
        "subjects": [{"kind": "<user_id|import_id|profile_id|...>",
                      "value": "<id from the probe output>"}],
