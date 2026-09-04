@@ -218,18 +218,25 @@ def validate_plan(root: Path, artifacts: Path) -> None:
             source = next(rule["source"] for rule in policy["rules"] if rule["id"] == "test-file-naming")
             fail(f"TEST_NAMING kind={kind} expected_suffix={expected} proposed={proposed} rule={source}")
     blocking = any(rule.get("id") == "existing-test-preferred" for rule in policy.get("rules", []))
+    baseline_commit = json.loads((artifacts / "repo-policy.json").read_text())["baseline"].get(name)
+    every_candidate: list[str] = []
     for production in productions:
-        candidates = test_candidates(repo, production,
-                                     json.loads((artifacts / "repo-policy.json").read_text())["baseline"].get(name),
-                                     failing.get("kind"))
+        candidates = test_candidates(repo, production, baseline_commit, failing.get("kind"))
+        every_candidate.extend(candidates)
         decision = "extend-existing" if proposed in candidates else "new-file"
         rows.append({"production_file": production, "proposed_test": proposed,
                      "existing_candidates": candidates, "decision": decision})
-        if blocking and candidates and proposed not in candidates:
-            source = next(rule["source"] for rule in policy["rules"] if rule["id"] == "existing-test-preferred")
-            write_json(artifacts / "test-placement.json", {"schema_version": 1, "repo": name, "rows": rows})
-            fail(f"TEST_PLACEMENT existing_spec={candidates[0]} proposed={proposed} rule={source}")
     write_json(artifacts / "test-placement.json", {"schema_version": 1, "repo": name, "rows": rows})
+    # The rule asks "did you create a NEW scenario-specific spec when an existing
+    # one owns this behavior?" -- so the proposed test must be an existing spec
+    # for SOME production file, not for every one of them. Requiring it per-file
+    # made any multi-file fix unsatisfiable: touch two files that each own a
+    # spec and no single test can be a candidate for both. Run 60528f7b proposed
+    # ai.service.spec.ts, which was recorded extend-existing for ai.service.ts,
+    # and was rejected because csv-file-type.strategy.ts has its own spec too.
+    if blocking and every_candidate and proposed not in every_candidate:
+        source = next(rule["source"] for rule in policy["rules"] if rule["id"] == "existing-test-preferred")
+        fail(f"TEST_PLACEMENT existing_spec={every_candidate[0]} proposed={proposed} rule={source}")
     print(f"REPO_POLICY=PASS repo={name} test={proposed} production_files={len(productions)}")
 
 

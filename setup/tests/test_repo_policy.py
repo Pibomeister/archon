@@ -199,6 +199,60 @@ class TestTierMatchingTest(unittest.TestCase):
                          ["apps/api-e2e/src/commit-import.service.int.spec.ts"])
 
 
+class MultiFileTestPlacementTest(unittest.TestCase):
+    """existing-test-preferred asks SOME, not EVERY.
+
+    Run 60528f7b proposed ai.service.spec.ts -- recorded extend-existing for
+    ai.service.ts -- and was rejected because csv-file-type.strategy.ts, also in
+    the fix plan, owns its own spec. Requiring the proposed test to be a
+    candidate for every production file makes any multi-file fix unsatisfiable
+    whenever two touched files each have a spec.
+    """
+
+    def _validate(self, files, proposed, specs):
+        import importlib.util, json, shutil, subprocess, tempfile, unittest.mock
+        from pathlib import Path as _P
+        spec = importlib.util.spec_from_file_location(
+            "repo_policy2", _P(__file__).resolve().parents[1] / "repo-policy.py")
+        module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+        tmp = _P(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        (tmp / "fix-plan.json").write_text(json.dumps({"files": files}), encoding="utf-8")
+        (tmp / "failing-test.json").write_text(
+            json.dumps({"test_file": proposed, "kind": "unit"}), encoding="utf-8")
+        (tmp / "repo.json").write_text(json.dumps({"repo": "api"}), encoding="utf-8")
+        (tmp / "repo-policy.json").write_text(json.dumps({
+            "schema_version": 1, "baseline": {"api": "deadbeef"},
+            "repositories": {"api": {"root": "/repo", "rules": [
+                {"id": "existing-test-preferred", "source": "rules/testing.md:44"}]}}}),
+            encoding="utf-8")
+        calls = {}
+        def fake_fail(msg):
+            calls["msg"] = msg
+            raise SystemExit(1)
+        with unittest.mock.patch.object(module, "baseline_paths", lambda *a, **k: specs), \
+             unittest.mock.patch.object(module, "fail", fake_fail):
+            try:
+                module.validate_plan(_P("/root"), tmp)
+                return None
+            except SystemExit:
+                return calls.get("msg", "")
+
+    def test_existing_spec_for_one_touched_file_is_enough(self):
+        result = self._validate(
+            files=["libs/a/ai.service.ts", "libs/b/csv.strategy.ts"],
+            proposed="libs/a/__tests__/ai.service.spec.ts",
+            specs=["libs/a/__tests__/ai.service.spec.ts", "libs/b/__tests__/csv.strategy.spec.ts"])
+        self.assertIsNone(result, result)
+
+    def test_a_brand_new_scenario_spec_is_still_refused(self):
+        result = self._validate(
+            files=["libs/a/ai.service.ts", "libs/b/csv.strategy.ts"],
+            proposed="libs/a/__tests__/brand-new.spec.ts",
+            specs=["libs/a/__tests__/ai.service.spec.ts", "libs/b/__tests__/csv.strategy.spec.ts"])
+        self.assertIsNotNone(result)
+        self.assertIn("TEST_PLACEMENT", result)
+
+
 class WorkflowIntegrationTest(unittest.TestCase):
     def test_policy_contract_uses_existing_nodes_only(self):
         import yaml
