@@ -96,6 +96,36 @@ class ProbeAlternateShape(unittest.TestCase):
                 r = self.run_shape()
                 self.assertEqual(r.returncode, 0, key + ": " + r.stdout + r.stderr)
 
+    def test_an_already_attributed_subject_needs_no_alternate(self):
+        # The requirement tracks "is the subject still unknown?", not merely
+        # "does the ticket state a quantity?". A successor inherits
+        # occurrence-window.json from the run that attributed the row, so it
+        # already knows which subject it means. Observed: run f3ed630d, the
+        # third on one chain, was blocked by this rule while holding the
+        # identified import in its own continuation bundle.
+        probe = {k: v for k, v in IDENT.items() if k != "sql_alternate"}
+        for where in (".", "continuation"):
+            with self.subTest(where=where):
+                self.setUp()
+                self.write([probe], key="fingerprint")
+                d = self.ad / where
+                d.mkdir(parents=True, exist_ok=True)
+                (d / "occurrence-window.json").write_text(
+                    json.dumps({"subjects": [{"kind": "id", "value": "17592"}],
+                                "start": "2026-08-31T20:00:00Z", "end": "2026-08-31T21:00:00Z"}),
+                    encoding="utf-8")
+                r = self.run_shape()
+                self.assertEqual(r.returncode, 0, where + ": " + r.stdout + r.stderr)
+
+    def test_an_unattributed_fingerprint_still_requires_one(self):
+        # Negative control for the line above: without an occurrence window the
+        # subject is unknown and the alternate is still the point.
+        probe = {k: v for k, v in IDENT.items() if k != "sql_alternate"}
+        self.write([probe], key="fingerprint")
+        r = self.run_shape()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("requires sql_alternate", r.stdout + r.stderr)
+
     def test_a_missing_evidence_plan_never_blocks(self):
         # This is a refinement, not a safety gate. A lane or project without an
         # evidence plan must not be stopped by it.

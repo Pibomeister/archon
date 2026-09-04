@@ -51,6 +51,15 @@ def main() -> None:
     except Exception:
         derived_key = False  # a refinement, not a safety gate: never fail on its absence
 
+    # ...and only while the subject is still UNKNOWN. The alternate exists to
+    # find the occurrence; once it is found, a second way of looking for it is
+    # ceremony. A successor run inherits occurrence-window.json from the run
+    # that attributed the subject, so it already knows which row it is talking
+    # about even though the ticket still states a quantity.
+    if derived_key and any((args.artifacts / d / "occurrence-window.json").is_file()
+                           for d in (".", "continuation")):
+        derived_key = False
+
     probes = document.get("probes")
     if not (isinstance(probes, list) and len(probes) <= 3):
         fail("probe.json probes must be a list of at most 3")
