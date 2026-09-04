@@ -1390,21 +1390,43 @@ nodes:
         # cite against it. Git history is an evidence tier too: "<repo>@<sha>"
         # cites a commit (message + diff). Still fail-closed: the pinned baseline or the
         # sha must actually carry the quote.
-        def from_git(ref):
+        def git_specs(ref):
+            """(repo, git-spec) candidates for a chain citation.
+
+            The prompt asks for REPO-RELATIVE paths ("libs/x/y.ts"), so a
+            resolver that only accepted "api/libs/x/y.ts" rejected citations
+            that followed the instruction literally -- reporting a file as
+            missing while it sat in the pinned baseline. Bare paths are now
+            tried against the run's own repository first, then the other.
+            """
             gm = re.fullmatch(r"(api|web-app)@([0-9a-f]{7,40})", ref)
-            parts = [gm.group(1), gm.group(2)] if gm else ref.split("/", 1)
-            if len(parts) != 2 or parts[0] not in ("api", "web-app"):
-                return None
-            baseline = load("bugfix-chain.json")["baseline"]["commits"][parts[0]]
-            spec = parts[1] if gm else f"{baseline}:{parts[1]}"
-            show = subprocess.run(["git", "-C", os.path.join(root, parts[0]), "show", spec],
-                                  capture_output=True, encoding="utf-8", errors="replace")
-            if show.returncode != 0:
-                return None
-            out = os.path.join(ad, "cite-cache", ref)
-            os.makedirs(os.path.dirname(out), exist_ok=True)
-            open(out, "w", encoding="utf-8").write(show.stdout)
-            return out
+            if gm:
+                return [(gm.group(1), gm.group(2), gm.group(2))]
+            commits = load("bugfix-chain.json")["baseline"]["commits"]
+            head, _, rest = ref.partition("/")
+            if head in ("api", "web-app") and rest:
+                return [(head, f"{commits[head]}:{rest}", rest)]
+            try:
+                own = load("repo.json")["repo"]
+            except Exception:
+                own = "api"
+            order = [own] + [r for r in ("api", "web-app") if r != own]
+            return [(r, f"{commits[r]}:{ref}", ref) for r in order if r in commits]
+
+        def from_git(ref):
+            # Cache under cite-cache/<repo>/<path-in-repo>, which is byte-identical
+            # to the previous layout for an "api/..."-prefixed ref and gives a bare
+            # repo-relative ref the same shape instead of doubling the repo segment.
+            for repo_name, spec, rel in git_specs(ref):
+                show = subprocess.run(["git", "-C", os.path.join(root, repo_name), "show", spec],
+                                      capture_output=True, encoding="utf-8", errors="replace")
+                if show.returncode != 0:
+                    continue
+                out = os.path.join(ad, "cite-cache", repo_name, rel)
+                os.makedirs(os.path.dirname(out), exist_ok=True)
+                open(out, "w", encoding="utf-8").write(show.stdout)
+                return out
+            return None
         if path is None or not cited(q, path):
             alt = from_git(ref)
             if alt is not None and (path is None or cited(q, alt)):

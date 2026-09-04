@@ -557,6 +557,19 @@ class RetrievalCanChangeTheVerdictTest(unittest.TestCase):
         contract = (SETUP / "bugfix-contract.py").read_text(encoding="utf-8")
         self.assertIn("belongs in surface_selection_basis", contract)
 
+    def test_chain_citations_accept_the_repo_relative_paths_the_prompt_asks_for(self):
+        # The RCA prompt says "Cite repo-relative paths as they exist at that
+        # SHA". The resolver split the ref on the first "/" and required the head
+        # to be a repo name, so a citation that followed the instruction
+        # literally ("libs/data-access/.../note.repo.ts") was reported missing
+        # while sitting in the pinned baseline. Run c8882a7f died on exactly that.
+        gate = node("bugfix", "rca-gate")["bash"]
+        self.assertIn("def git_specs(ref)", gate)
+        self.assertIn("REPO-RELATIVE", gate)
+        # The prefixed and <repo>@<sha> forms must keep working.
+        self.assertIn('head in ("api", "web-app")', gate)
+        self.assertIn('r"(api|web-app)@([0-9a-f]{7,40})"', gate)
+
     def test_reported_surface_status_is_about_the_surface_not_the_route(self):
         # Runs f459f074 and dc099da8 marked a report that explicitly names one
         # product surface ("imported 1,171 contacts from Mesh using a custom
