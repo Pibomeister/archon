@@ -889,6 +889,14 @@ nodes:
     "occurrence_time_columns": ["<result columns holding the timestamps>"]}]}
     Set occurrence_subject_columns and occurrence_time_columns on your
     OCCURRENCE-IDENTIFICATION probe, and SELECT those columns in its SQL.
+    That probe MUST also carry `sql_alternate`: the same subject measured a
+    different way. If `sql` matches the summary the product recorded, make
+    `sql_alternate` recompute the counts from child rows, or the reverse.
+    They are different measurements and they disagree the moment a row is
+    soft-deleted or counted under a slightly different definition, so one of
+    them missing the occurrence says nothing about whether it exists. It
+    costs nothing to write and probe-run spends it only when `sql` returns
+    no rows.
     A bash node reads them off the single matched row to derive the
     occurrence window and to pull that occurrence's production logs, which
     is how an ambiguous reported surface gets identified. Nothing about the
@@ -1734,6 +1742,25 @@ nodes:
       Q=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1], encoding='utf-8'))['probes'][int(sys.argv[2])]['sql'])" "$AD/probe.json" "$I")
       RC=0
       psql -X -v ON_ERROR_STOP=1 -c "$Q" > "$PROBE_TMP" 2>&1 || RC=$?
+      # Zero rows from an identification probe is a suspect QUERY SHAPE, not
+      # evidence the occurrence does not exist. A stated fingerprint can be
+      # matched against the summary the product recorded or by recomputing
+      # counts from child rows, and those disagree; run 57309e15 recomputed,
+      # matched nothing, and shipped class-hardening for an import that run
+      # da65d1b3 had found in one query. probe-shape.py requires the second
+      # shape; this is the only place it is ever spent.
+      ALT=$(python3 -c "import json,sys;p=json.load(open(sys.argv[1], encoding='utf-8'))['probes'][int(sys.argv[2])];print(p.get('sql_alternate') or '')" "$AD/probe.json" "$I")
+      if [ "$RC" = 0 ] && [ -n "$ALT" ] && grep -qE '^\(0 rows\)$' "$PROBE_TMP"; then
+        echo "PROBE_IDENT=ZERO_ROWS the primary shape matched nothing; spending the alternate" >> "$AD/probe-results.txt"
+        cat "$PROBE_TMP" >> "$AD/probe-results.txt"
+        echo "sql_alternate: $ALT" >> "$AD/probe-results.txt"
+        psql -X -v ON_ERROR_STOP=1 -c "$ALT" > "$PROBE_TMP" 2>&1 || RC=$?
+        if grep -qE '^\(0 rows\)$' "$PROBE_TMP"; then
+          echo "PROBE_IDENT=UNMATCHED both shapes returned no rows" >> "$AD/probe-results.txt"
+        else
+          echo "PROBE_IDENT=MATCHED_BY_ALTERNATE the primary shape was the wrong measurement" >> "$AD/probe-results.txt"
+        fi
+      fi
       PROBE_BYTES=$(wc -c < "$PROBE_TMP" | tr -d ' ')
       if [ "$PROBE_BYTES" -gt 262144 ]; then
         head -c 262144 "$PROBE_TMP" >> "$AD/probe-results.txt"

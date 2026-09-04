@@ -499,7 +499,13 @@ class RetrievalCanChangeTheVerdictTest(unittest.TestCase):
         import subprocess, tempfile
         tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         probes = {"probes": [
+            # An identification probe now also carries sql_alternate (a second,
+            # differently-shaped query for the same subject). That is not what
+            # this test is about -- it is about [] meaning "not identification"
+            # on the census row -- so the field is supplied to keep the fixture
+            # contract-valid.
             {"id": "ident", "question": "q", "sql": "SELECT id, created_at FROM t LIMIT 10",
+             "sql_alternate": "SELECT t.id, t.created_at FROM t JOIN c ON c.t_id = t.id LIMIT 10",
              "occurrence_subject_columns": ["id"], "occurrence_time_columns": ["created_at"]},
             {"id": "census", "question": "q", "sql": "SELECT COUNT(*) FROM t",
              "occurrence_subject_columns": [], "occurrence_time_columns": []},

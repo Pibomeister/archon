@@ -71,6 +71,33 @@ def main() -> None:
                 fail(f"probe {probe['id']}: occurrence_subject_columns and "
                      "occurrence_time_columns must both be non-empty string lists "
                      "when either is set (use [] or omit both on a non-identification probe)")
+            # An identification probe carries a SECOND, differently-shaped
+            # query. A stated fingerprint can be matched two ways -- against
+            # the summary the product recorded, or by recomputing the counts
+            # from child rows -- and they are different measurements that
+            # disagree the moment a row is soft-deleted or counted under a
+            # slightly different definition. Two runs of this ticket proved it
+            # decides everything: da65d1b3 read metadata->'summary' and found
+            # the import instantly; 57309e15 recomputed from
+            # user_import_actions, matched zero rows, and shipped
+            # class-hardening for an occurrence sitting right there. Writing
+            # the second shape costs nothing at authoring time, and probe-run
+            # only spends it when the first returns no rows.
+            alt = str(probe.get("sql_alternate") or "").strip().rstrip(";")
+            if not alt:
+                fail(f"probe {probe['id']}: an identification probe requires sql_alternate, "
+                     "a differently-shaped query for the same subject (recorded summary vs "
+                     "recomputed counts); probe-run spends it only if sql returns no rows")
+            if " ".join(alt.split()).lower() == " ".join(sql.split()).lower():
+                fail(f"probe {probe['id']}: sql_alternate is the same query as sql; "
+                     "it must measure the subject a different way to be worth running")
+            if not re.match(r"(?is)^(select|with)\b", alt):
+                fail(f"probe {probe['id']}: sql_alternate must start with SELECT/WITH")
+            if WRITE_KEYWORDS.search(alt) or ";" in alt:
+                fail(f"probe {probe['id']}: sql_alternate write/DDL or multiple statements")
+            alt_limits = [int(x) for x in re.findall(r"(?i)\blimit\s+(\d+)\b", alt)]
+            if alt_limits and max(alt_limits) > 100:
+                fail(f"probe {probe['id']}: sql_alternate LIMIT exceeds 100")
     print(f"PROBE_SHAPE=OK probes={len(probes)}")
 
 
