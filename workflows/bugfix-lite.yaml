@@ -1749,6 +1749,19 @@ nodes:
         artifacts directory plays the plan's role.
 
         Resolve the artifacts directory by running: echo "$ARTIFACTS_DIR"
+        The repro test named by failing-test.json is frozen at red-sha.txt. This lane
+        enforces that mechanically -- commit-fixes and converge both hard-fail with
+        REVIEW_SCOPE=FAIL if the file moved -- so no safe_auto/gated_auto fix may
+        target it. Report such findings as manual for a new RED run and leave the
+        repro bytes untouched in this review session.
+        A finding whose only site is that frozen file cannot be acted on in this run,
+        so it must not hold the verdict at "Not ready" on its own. No round can clear
+        it, and converge stops a loop that says not-ready while nothing changed -- the
+        run would die on a finding it was never allowed to fix. Record it as a
+        residual naming the follow-up RED run and let the verdict reflect what THIS
+        round could change. A claim that the repro itself is WRONG is different and
+        still blocks: route it as a dispute of the approved RCA, not as a style
+        residual.
         Read repo-policy.json and test-placement.json there before review. Treat every
         blocking repository rule as a blocking finding with its exact cited source.
         Verify that a new test file is permitted when a baseline test for the same
