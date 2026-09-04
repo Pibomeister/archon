@@ -997,6 +997,29 @@ nodes:
        "input":"<observed input>","output":"<observed output>",
        "evidence":"<artifact/code citation>"}]}
     Trace from the reported UI/API/tool entrypoint to the proposed owner.
+    reported_surface_status describes the REPORTED SURFACE -- where the user
+    observed the behavior -- and NOT how precisely you can name the route. The
+    route is runtime_entrypoint, and uncertainty about it is already carried by
+    the ownership hedges and the two equivalence booleans. Read the enum this
+    way:
+      explicit — the report itself names the product surface ("the Mesh custom
+        mapping import", "the duplicate-merge dialog"). Not knowing which client
+        or route reached that one surface does NOT make it ambiguous, provided
+        every candidate resolves to the SAME runtime owner -- which is exactly
+        what identical runtime_owner / test_runtime_owner / smoke_runtime_owner
+        with both booleans true asserts. Put the unknown route in
+        runtime_entrypoint and say in surface_selection_basis that the clients
+        converge.
+      runtime-reproduced — the report was vague about the surface and a captured
+        runtime record (a production log line naming the route) pins it.
+      ambiguous — the report could mean SEVERAL DIFFERENT product surfaces whose
+        owners DIFFER, so choosing one would change which mechanism you test.
+        That is the case this field exists to stop: a fix that tests one search
+        service while the reported action dispatches to another. It blocks
+        implementation, and rightly.
+    Marking a single named surface ambiguous because you cannot name its exact
+    client blocks a plan the evidence supports; marking divergent surfaces
+    explicit ships a fix for the wrong path. Neither is a formatting choice.
     A difference is MATERIAL only if it is material TO THE SELECTED CHAIN. The
     list is not an inventory of every way the test environment differs from
     production; it is the differences that could make the test exercise a

@@ -557,6 +557,20 @@ class RetrievalCanChangeTheVerdictTest(unittest.TestCase):
         contract = (SETUP / "bugfix-contract.py").read_text(encoding="utf-8")
         self.assertIn("belongs in surface_selection_basis", contract)
 
+    def test_reported_surface_status_is_about_the_surface_not_the_route(self):
+        # Runs f459f074 and dc099da8 marked a report that explicitly names one
+        # product surface ("imported 1,171 contacts from Mesh using a custom
+        # mapping") as ambiguous, because the exact CLIENT was unknown -- while
+        # simultaneously asserting all three runtime owners identical with both
+        # booleans true, i.e. every candidate client converges on one owner.
+        # The field is about the surface; the route is runtime_entrypoint.
+        rca = node("bugfix", "rca")["prompt"]
+        self.assertIn("describes the REPORTED SURFACE", rca)
+        self.assertIn("does NOT make it ambiguous", rca)
+        # The guard the field exists for must survive verbatim.
+        self.assertIn("owners DIFFER", rca)
+        self.assertIn("marking divergent surfaces", rca)
+
     def test_ambiguous_surface_error_names_both_exits(self):
         # Run f459f074 wrote a fix plan alongside reported_surface_status
         # "ambiguous" -- an internal contradiction the contract correctly
