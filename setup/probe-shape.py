@@ -36,6 +36,21 @@ def main() -> None:
     except Exception as exc:
         fail(f"probe.json missing or malformed: {exc}")
 
+    # Is the ticket's lookup key a QUANTITY the product reported, or a stable
+    # identifier? That decides whether a second query shape is worth demanding.
+    # A quantity is a measurement, and two ways of measuring it disagree the
+    # moment a row is soft-deleted or counted under a slightly different
+    # definition -- so one shape returning nothing says nothing about whether
+    # the subject exists. An id, an email, a trace id is not a measurement:
+    # there is exactly one sensible lookup, and demanding a second gets
+    # satisfied with a junk query that measures nothing.
+    try:
+        plan = json.loads((args.artifacts / "evidence-plan.json").read_text(encoding="utf-8"))
+        derived_key = any(i.get("kind") == "fingerprint" and i.get("resolution") == "given"
+                          for i in plan.get("identifiers") or [])
+    except Exception:
+        derived_key = False  # a refinement, not a safety gate: never fail on its absence
+
     probes = document.get("probes")
     if not (isinstance(probes, list) and len(probes) <= 3):
         fail("probe.json probes must be a list of at most 3")
@@ -71,23 +86,24 @@ def main() -> None:
                 fail(f"probe {probe['id']}: occurrence_subject_columns and "
                      "occurrence_time_columns must both be non-empty string lists "
                      "when either is set (use [] or omit both on a non-identification probe)")
-            # An identification probe carries a SECOND, differently-shaped
-            # query. A stated fingerprint can be matched two ways -- against
-            # the summary the product recorded, or by recomputing the counts
-            # from child rows -- and they are different measurements that
-            # disagree the moment a row is soft-deleted or counted under a
-            # slightly different definition. Two runs of this ticket proved it
-            # decides everything: da65d1b3 read metadata->'summary' and found
-            # the import instantly; 57309e15 recomputed from
-            # user_import_actions, matched zero rows, and shipped
-            # class-hardening for an occurrence sitting right there. Writing
-            # the second shape costs nothing at authoring time, and probe-run
-            # only spends it when the first returns no rows.
+            # sql_alternate is OPTIONAL in general and REQUIRED only when the
+            # lookup key is a derived quantity (see derived_key above). It is
+            # always validated when present.
+            #
+            # Illustration. Two runs of one ticket, minutes apart against the
+            # same database, split on exactly this: one matched a reported
+            # "1,171 rows / 24 notes / 672 actions" against the summary the
+            # product had recorded and found the row at once; the other
+            # recomputed those counts by aggregating child rows, matched
+            # nothing, and concluded the occurrence was unattributable.
             alt = str(probe.get("sql_alternate") or "").strip().rstrip(";")
+            if not alt and derived_key:
+                fail(f"probe {probe['id']}: this ticket's lookup key is a reported quantity, "
+                     "not a stable id, so the identification probe requires sql_alternate -- "
+                     "the same subject measured the other way. probe-run spends it only if "
+                     "sql returns no rows.")
             if not alt:
-                fail(f"probe {probe['id']}: an identification probe requires sql_alternate, "
-                     "a differently-shaped query for the same subject (recorded summary vs "
-                     "recomputed counts); probe-run spends it only if sql returns no rows")
+                continue
             if " ".join(alt.split()).lower() == " ".join(sql.split()).lower():
                 fail(f"probe {probe['id']}: sql_alternate is the same query as sql; "
                      "it must measure the subject a different way to be worth running")

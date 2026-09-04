@@ -889,14 +889,16 @@ nodes:
     "occurrence_time_columns": ["<result columns holding the timestamps>"]}]}
     Set occurrence_subject_columns and occurrence_time_columns on your
     OCCURRENCE-IDENTIFICATION probe, and SELECT those columns in its SQL.
-    That probe MUST also carry `sql_alternate`: the same subject measured a
-    different way. If `sql` matches the summary the product recorded, make
-    `sql_alternate` recompute the counts from child rows, or the reverse.
-    They are different measurements and they disagree the moment a row is
-    soft-deleted or counted under a slightly different definition, so one of
-    them missing the occurrence says nothing about whether it exists. It
-    costs nothing to write and probe-run spends it only when `sql` returns
-    no rows.
+    When the ticket's lookup key is a QUANTITY the product reported rather
+    than a stable identifier — a `fingerprint` in evidence-plan.json — that
+    probe must also carry `sql_alternate`: the same subject measured the
+    other way. A reported quantity is a measurement, and two ways of
+    measuring it disagree the moment a row is soft-deleted or counted under
+    a slightly different definition, so one shape returning nothing says
+    nothing about whether the subject exists. probe-run spends the alternate
+    only when `sql` returns no rows. When the key is an id, an email or a
+    trace id there is one sensible lookup and no alternate is wanted:
+    inventing a second query to fill the field measures nothing.
     A bash node reads them off the single matched row to derive the
     occurrence window and to pull that occurrence's production logs, which
     is how an ambiguous reported surface gets identified. Nothing about the

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""An identification probe carries a second, differently-shaped query.
+"""A second query shape is required only when the lookup key is a MEASUREMENT.
 
 A stated fingerprint can be matched two ways: against the summary the product
 recorded, or by recomputing the counts from child rows. They are different
@@ -13,9 +13,14 @@ user_imports id=17592 immediately, attributed the occurrence and flipped its
 symptom to `fixed`. 57309e15 recomputed from user_import_actions, matched zero
 rows, and shipped class-hardening for an import that was sitting right there.
 The prompt already preferred the recorded-summary shape; the RCA had the rule
-and did not follow it, so the rule is now mechanical: probe-shape.py refuses an
-identification probe without `sql_alternate`, and probe-run spends it exactly
-when the primary returns no rows."""
+and did not follow it, so the rule is now mechanical.
+
+It is deliberately NOT mechanical everywhere. The requirement fires only when
+evidence-plan.json carries a `fingerprint` identifier — a quantity the product
+reported. When the ticket names an id, an email or a trace id there is exactly
+one sensible lookup, and demanding a second query would be satisfied by an
+invented one that passes a textual-difference check while measuring nothing.
+The field stays optional-but-validated in that case."""
 import json
 import shutil
 import subprocess
@@ -57,8 +62,11 @@ class ProbeAlternateShape(unittest.TestCase):
         self.ad = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.ad, ignore_errors=True)
 
-    def write(self, probes):
+    def write(self, probes, key="fingerprint"):
         (self.ad / "probe.json").write_text(json.dumps({"probes": probes}), encoding="utf-8")
+        (self.ad / "evidence-plan.json").write_text(json.dumps({"identifiers": [
+            {"kind": key, "value": "contacts=1171,notes=24", "resolution": "given"}]}),
+            encoding="utf-8")
 
     def run_shape(self):
         return subprocess.run([sys.executable, str(SHAPE), str(self.ad)],
@@ -69,12 +77,40 @@ class ProbeAlternateShape(unittest.TestCase):
         r = self.run_shape()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
-    def test_an_identification_probe_without_an_alternate_is_refused(self):
+    def test_a_fingerprint_key_requires_an_alternate(self):
         probe = {k: v for k, v in IDENT.items() if k != "sql_alternate"}
-        self.write([probe])
+        self.write([probe], key="fingerprint")
         r = self.run_shape()
         self.assertEqual(r.returncode, 1)
         self.assertIn("requires sql_alternate", r.stdout + r.stderr)
+        self.assertIn("reported quantity", r.stdout + r.stderr)
+
+    def test_a_stable_id_key_needs_no_alternate(self):
+        # The generalization that matters: most projects' tickets name an id,
+        # an email or a trace id. There is one sensible lookup for those, and a
+        # forced second query would be invented rather than measured.
+        probe = {k: v for k, v in IDENT.items() if k != "sql_alternate"}
+        for key in ("user_id", "email", "other"):
+            with self.subTest(key=key):
+                self.write([probe], key=key)
+                r = self.run_shape()
+                self.assertEqual(r.returncode, 0, key + ": " + r.stdout + r.stderr)
+
+    def test_a_missing_evidence_plan_never_blocks(self):
+        # This is a refinement, not a safety gate. A lane or project without an
+        # evidence plan must not be stopped by it.
+        probe = {k: v for k, v in IDENT.items() if k != "sql_alternate"}
+        (self.ad / "probe.json").write_text(json.dumps({"probes": [probe]}), encoding="utf-8")
+        r = self.run_shape()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_an_alternate_is_validated_even_when_not_required(self):
+        # Optional does not mean unchecked: a supplied alternate still runs
+        # against production and is held to the same read-only rules.
+        self.write([dict(IDENT, sql_alternate="DELETE FROM t")], key="user_id")
+        r = self.run_shape()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("must start with SELECT/WITH", r.stdout + r.stderr)
 
     def test_an_alternate_identical_to_the_primary_is_refused(self):
         # Satisfying the field by copying the query buys nothing: the point is
