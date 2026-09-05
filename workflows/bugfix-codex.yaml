@@ -138,7 +138,7 @@ nodes:
     report = open(os.path.join(ad, "bug-report.md"), encoding="utf-8").read()
 
     def section(name):
-        m = re.search(rf"(?mis)^##\s+{name}\s*$(.*?)(?=^##\s|\Z)", report)
+        m = re.search(rf"(?mis)^#{{2,4}}\s+{name}\s*$(.*?)(?=^#{{2,4}}\s|\Z)", report)
         return m.group(1) if m else ""
 
     # An archon-linear snapshot states both headings; a hand-written report
@@ -167,7 +167,12 @@ nodes:
     # fixes whenever AWS happens to be down, which is worse than the decoration
     # it replaced. The lite lane already treats "## Repro" as the contract for
     # "the reporter reproduced this"; the same block means the same thing here.
-    if section("Repro").strip():
+    # Heading styles differ by reporter and by tool. Archon's lite lane asks for
+    # "## Repro"; real Linear bug reports use "### Steps to Reproduce", and the
+    # gate matched only the first -- so the exemption could never fire on an
+    # actual ticket, which is the population it exists for. Match either, at any
+    # heading level.
+    if section("Repro").strip() or section(r"Steps\s+to\s+Reproduce").strip():
         probe_gaps = []
     db = caps.get("prod-db", {})
     if classification == "defect" and probe_gaps and db.get("status") != "AVAILABLE":

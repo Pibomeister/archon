@@ -144,6 +144,28 @@ bun run test -- commit-import-note-resolution
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertIn("probe_gaps=0", r.stdout)
 
+    def test_the_heading_real_tickets_use_also_exempts(self):
+        # Archon's lite lane asks for "## Repro". Every Linear bug report in
+        # this workspace writes "### Steps to Reproduce" instead, so matching
+        # only the first meant the exemption could never fire on the population
+        # it exists for. Verbatim shape from ENG-3483.
+        self.write(REAL_REPORT + """
+### Steps to Reproduce
+
+Open AI Chat, view the ranked results, and load more results in the same chat.
+""")
+        r = self.run_gate()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("probe_gaps=0", r.stdout)
+
+    def test_classification_is_still_read_under_a_deeper_heading(self):
+        # Loosening the section matcher must not break the sections it already
+        # read: a report whose Classification sits under ### still classifies.
+        self.write(REAL_REPORT.replace("## Classification", "### Classification"))
+        r = self.run_gate()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("capability-required", r.stdout)
+
     def test_an_empty_repro_heading_does_not_exempt(self):
         # Negative control: the heading alone is not a reproduction, or every
         # report could opt out of the gate by writing four characters.
