@@ -108,6 +108,7 @@ MANIFEST=(
   # wholesale, so a fix can land in four lanes and miss the fifth; the lock
   # records what the lanes share today and packaging diffs it (LANE_DOCTRINE).
   setup/lane-doctrine.py
+  setup/critic-converging.py
   setup/lane-doctrine.lock.json
   setup/codex-usage.py
   setup/codex-watchdog.sh

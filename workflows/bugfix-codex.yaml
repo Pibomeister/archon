@@ -1917,6 +1917,10 @@ nodes:
         # stops the run instead, because resetting a counter to 0 on garbage is
         # itself a way to run forever.
         case "$CAP" in ''|*[!0-9]*) CAP=3 ;; esac
+        # rca-converge grants one extra round to a loop whose blocking findings are
+        # falling. Without honouring it here the pre-check would refuse the very
+        # round converge just bought, and the extension would be inert.
+        [ -s "$ARTIFACTS_DIR/rca-round-extended.txt" ] && CAP=$((CAP+1))
         case "$N" in
           '') N=0 ;;
           *[!0-9]*) echo "RCA_ROUND_PRE=FAIL rca-round.txt is not an integer: [$N]"; exit 1 ;;
@@ -2413,6 +2417,21 @@ nodes:
         # token would only appear on the next resume.
         CAP=$(cat "$AD/rca-round-cap.txt" 2>/dev/null || echo 3)
         case "$CAP" in ''|*[!0-9]*) CAP=3 ;; esac
+        # A cap stops CHURN -- a critic and a reviser trading the same objection
+        # forever. It should not stop a loop that is closing findings. Two full RCA
+        # runs on one ticket ended here with the blocking count falling every round
+        # (6 findings/2 blocking, then 5/2, then 2/1): one revision from ACCEPT,
+        # spent by a counter. A strictly falling blocking count earns exactly one
+        # extra round, once per run. It cannot manufacture an ACCEPT: converge still
+        # requires BLOCKING=0 for that, and a P0 is still never waivable.
+        EXT="$AD/rca-round-extended.txt"
+        if [ "$N" -ge "$CAP" ] && [ ! -s "$EXT" ]; then
+          if [ "$(python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/critic-converging.py "$AD" "$N" rca-round-)" = yes ]; then
+            printf '%s\n' "$N" > "$EXT"
+            CAP=$((CAP+1))
+            echo "RCA_PLAN_ROUND_EXTENDED round=$N cap=$CAP (blocking findings fell from the previous round; one extra round, once per run)"
+          fi
+        fi
         if [ "$N" -ge "$CAP" ]; then
           # Accept by hand (RUNBOOK §12): rca-plan-accept.txt is a HUMAN act, the
           # mirror of accept-residuals.txt in the review loop. It waives the critic's
