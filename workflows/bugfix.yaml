@@ -276,6 +276,28 @@ nodes:
         || { echo "INTAKE_GATE=FAIL symptom ledger"; exit 1; }
       python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/bugfix-contract.py bind-chain-ledger "$ARTIFACTS_DIR" \
         || { echo "INTAKE_GATE=FAIL symptom ledger chain binding"; exit 1; }
+      # Closure reachability, stated at minute one instead of hour four. Only
+      # ticket_disposition=RESOLVED lets a run close its ticket, and RESOLVED needs
+      # EVERY effective symptom `fixed`. A multi-track report splits its other
+      # tracks to their own tickets -- correctly -- and separate-ticket is not
+      # fixed, so closure is unreachable and the smoke gate will ask a human to
+      # accept residuals. That is by design and this is NOT a gate: multi-track
+      # reports are legitimate work. It is a notice, because the alternative is
+      # learning it after the RCA, the fix, the review and the smoke matrix have
+      # all been paid for.
+      python3 - "$ARTIFACTS_DIR/symptoms.json" <<'PY'
+      import json, sys
+      led = json.load(open(sys.argv[1], encoding="utf-8"))
+      n = len(led.get("effective_symptoms") or [])
+      if n <= 1:
+          print(f"CLOSURE_REACHABLE=YES effective_symptoms={n} "
+                "(this run can close the ticket if its symptom ends `fixed`)")
+      else:
+          print(f"CLOSURE_REACHABLE=NO effective_symptoms={n} "
+                "(RESOLVED needs every symptom `fixed`; any track split to its own "
+                "ticket makes closure unreachable, so the smoke gate will require a "
+                "human residual acceptance -- expected for a multi-track report)")
+      PY
       echo "INTAKE_GATE=PASS"
 
   - id: kb-recon
@@ -2745,6 +2767,15 @@ nodes:
       set -euo pipefail
       ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
       RID="$(basename "$ARTIFACTS_DIR")"
+      # Both variables are set by archon-run.py when IT runs the workflow, so they
+      # are absent on any pass driven by the CLI -- which is exactly what this gate
+      # packet's DECIDE box tells the operator to run. `archon workflow approve`
+      # recorded the approval and then died here with "no chain state", naming a
+      # file that exists and is readable. They are paths, not credentials: derive
+      # them from this run's own chain id when absent. The guard is
+      # controller-attest --verify below, which checks the seal MAC against the
+      # chain secret -- a wrongly located file fails it.
+      eval "$(bash "$ROOT/.archon/setup/chain-paths.sh" "$ARTIFACTS_DIR")" || { echo "POST_APPROVAL=FAIL cannot locate chain state"; exit 1; }
       test -n "${ARCHON_BUGFIX_CHAIN_STATE-}" || { echo "POST_APPROVAL=FAIL no chain state"; exit 1; }
       test -n "${ARCHON_ATTESTATION_DIR-}" || { echo "POST_APPROVAL=FAIL no attestation dir"; exit 1; }
       python3 "$ROOT/.archon/setup/bugfix-contract.py" validate-current-manifest --artifacts "$ARTIFACTS_DIR" --kind proof
@@ -4602,8 +4633,10 @@ nodes:
       if [ -n "$OPENER" ] && "$OPENER" "$H" >/dev/null 2>&1; then OPENED=yes; fi
       if [ "$OPENED" = yes ]; then
         echo "MATRIX_RENDER_GATE=PASS packet=file://$H (opened in browser; app live at http://localhost:3124)"
+        echo "Leave ports 3124/4124 UP until this gate is decided: the matrix's judgment rows are walked against that live app, and smoke-teardown releases them for you after approval."
       else
         echo "MATRIX_RENDER_GATE=PASS packet=file://$H (no browser opener - open that path yourself; app live at http://localhost:3124)"
+        echo "Leave ports 3124/4124 UP until this gate is decided: the matrix's judgment rows are walked against that live app, and smoke-teardown releases them for you after approval."
       fi
 
   - id: smoke-approval
