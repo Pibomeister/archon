@@ -109,6 +109,7 @@ MANIFEST=(
   # records what the lanes share today and packaging diffs it (LANE_DOCTRINE).
   setup/lane-doctrine.py
   setup/critic-converging.py
+  setup/reproduction-attribution.py
   setup/lane-doctrine.lock.json
   setup/codex-usage.py
   setup/codex-watchdog.sh
