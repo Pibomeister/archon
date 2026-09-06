@@ -1,0 +1,254 @@
+name: portable-single-repo-feature
+description: 'Versioned portable single-Git-repository feature lane: frozen context, plan/critique, engine-bound human approval, bounded native provider loop, real verification, draft PR evidence and run-local knowledge proposal. Requires factory-qualified provider permits; no merge or deploy.'
+provider: codex
+interactive: true
+worktree:
+  enabled: false
+inputs:
+  binding:
+    required: true
+    description: Absolute path to the immutable bridge-owned archon.machine-binding.v1 JSON.
+returns: report
+nodes:
+- id: preflight
+  script: project
+  runtime: uv
+  timeout: 1200000
+  with:
+    action: preflight
+    binding: $INPUTS.binding
+- id: plan
+  command: plan
+  timeout: 1200000
+  retry:
+    max_attempts: 1
+  output_format:
+    type: object
+    properties:
+      goal:
+        type: string
+      files:
+        type: array
+        items:
+          type: string
+      approach:
+        type: string
+      testScenarios:
+        type: array
+        items:
+          type: string
+    required:
+    - goal
+    - files
+    - approach
+    - testScenarios
+    additionalProperties: false
+  depends_on:
+  - preflight
+- id: critique
+  command: critique
+  timeout: 1200000
+  retry:
+    max_attempts: 1
+  output_format:
+    type: object
+    properties:
+      approved:
+        type: boolean
+      findings:
+        type: array
+        items:
+          type: string
+    required:
+    - approved
+    - findings
+    additionalProperties: false
+  depends_on:
+  - plan
+  with:
+    plan: $plan.output
+- id: seal-plan
+  script: project
+  runtime: uv
+  timeout: 1200000
+  with:
+    action: seal-plan
+    binding: $INPUTS.binding
+    plan: $plan.output
+    critique: $critique.output
+  depends_on:
+  - critique
+- id: plan-approval
+  depends_on:
+  - seal-plan
+  approval:
+    message: Review the run-local plan.json, brief.md and Git-pinned knowledge packet. Approving authorizes only the sealed plan scope, bounded implementation/verification and a draft PR if the machine binding permits publication. Reject ends this attempt. The factory must submit the exact run/occurrence/evidence-bound decision through the qualified engine; models never approve this gate.
+- id: bind-approval
+  script: project
+  runtime: uv
+  timeout: 1200000
+  with:
+    action: bind-approval
+    binding: $INPUTS.binding
+  depends_on:
+  - plan-approval
+- id: implementation-loop
+  depends_on:
+  - bind-approval
+  loop_group:
+    max_iterations: 2
+    fresh_context: true
+    until_bash: '[ $converge.output.ready = true ]'
+    nodes:
+    - id: round-start
+      script: project
+      runtime: uv
+      timeout: 1200000
+      with:
+        action: begin-round
+        binding: $INPUTS.binding
+    - id: implement
+      command: implement
+      timeout: 1200000
+      retry:
+        max_attempts: 1
+      output_format:
+        type: object
+        properties:
+          summary:
+            type: string
+          changes:
+            type: array
+            items:
+              type: string
+          testNotes:
+            type: array
+            items:
+              type: string
+        required:
+        - summary
+        - changes
+        - testNotes
+        additionalProperties: false
+      depends_on:
+      - round-start
+    - id: verify
+      script: project
+      runtime: uv
+      timeout: 1200000
+      with:
+        action: verify
+        binding: $INPUTS.binding
+      depends_on:
+      - implement
+    - id: review
+      command: review
+      timeout: 1200000
+      retry:
+        max_attempts: 1
+      output_format:
+        type: object
+        properties:
+          status:
+            type: string
+            enum:
+            - complete
+            - degraded
+            - failed
+          verdict:
+            type: string
+            enum:
+            - Ready to merge
+            - Ready with fixes
+            - Not ready
+          findings:
+            type: array
+            items:
+              type: string
+          summary:
+            type: string
+        required:
+        - status
+        - verdict
+        - findings
+        - summary
+        additionalProperties: false
+      depends_on:
+      - verify
+    - id: converge
+      script: project
+      runtime: uv
+      timeout: 1200000
+      with:
+        action: converge
+        binding: $INPUTS.binding
+        review: $review.output
+      depends_on:
+      - review
+- id: pr-body
+  command: pr-body
+  timeout: 1200000
+  retry:
+    max_attempts: 1
+  output_format:
+    type: object
+    properties:
+      title:
+        type: string
+      body:
+        type: string
+    required:
+    - title
+    - body
+    additionalProperties: false
+  depends_on:
+  - implementation-loop
+- id: ship
+  script: project
+  runtime: uv
+  timeout: 1200000
+  with:
+    action: ship
+    binding: $INPUTS.binding
+    pr: $pr-body.output
+  depends_on:
+  - pr-body
+- id: kb-capture
+  command: capture-knowledge
+  timeout: 1200000
+  retry:
+    max_attempts: 1
+  output_format:
+    type: object
+    properties:
+      summary:
+        type: string
+      promotionCandidates:
+        type: array
+        items:
+          type: string
+    required:
+    - summary
+    - promotionCandidates
+    additionalProperties: false
+  depends_on:
+  - ship
+- id: capture-knowledge
+  script: project
+  runtime: uv
+  timeout: 1200000
+  with:
+    action: capture-knowledge
+    binding: $INPUTS.binding
+    proposal: $kb-capture.output
+  depends_on:
+  - kb-capture
+- id: report
+  script: project
+  runtime: uv
+  timeout: 1200000
+  with:
+    action: report
+    binding: $INPUTS.binding
+  depends_on:
+  - capture-knowledge

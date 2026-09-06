@@ -39,6 +39,22 @@ HEAD="$(resolve_bin head)" || { echo "PACKAGE=FAIL cannot resolve a head binary 
 # backfill.yaml is deliberately held back until its own clean trial passes —
 # do not add it here without that evidence.
 MANIFEST=(
+  # Portable lane: captured workflow resources and explicit project profile.
+  docs/portable-single-repo.md
+  profiles/fluxkeep-next.v1.json
+  profiles/project-profile.v1.schema.json
+  profiles/machine-binding.v1.schema.json
+  profiles/machine-binding.example.json
+  workflows/portable/single-repo-feature/commands/capture-knowledge.md
+  workflows/portable/single-repo-feature/commands/critique.md
+  workflows/portable/single-repo-feature/commands/implement.md
+  workflows/portable/single-repo-feature/commands/plan.md
+  workflows/portable/single-repo-feature/commands/pr-body.md
+  workflows/portable/single-repo-feature/commands/review.md
+  workflows/portable/single-repo-feature/feature.yaml
+  workflows/portable/single-repo-feature/scripts/project.py
+  workflows/portable/single-repo-feature/scripts/repo_policy.py
+  workflows/portable/single-repo-feature/scripts/review_envelope.py
   config.yaml
   RUNBOOK.md
   workflows/babysit.yaml

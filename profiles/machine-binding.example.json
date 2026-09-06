@@ -1,0 +1,19 @@
+{
+  "bindingVersion": "archon.machine-binding.v1",
+  "projectId": "project:fluxkeep",
+  "machineId": "machine:m4-max-personal",
+  "repositoryRoot": "/configured/worktrees/fluxkeep/attempt-1",
+  "allowedWorktreeRoot": "/configured/worktrees/fluxkeep",
+  "branch": "factory/fluxkeep/attempt-1",
+  "baseCommit": "299ff3f89d3478af286115af5ef6b275e64aecea",
+  "profilePath": "/configured/immutable-ready/fluxkeep-next.v1.json",
+  "profileSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "briefPath": "/configured/immutable-ready/brief.md",
+  "briefSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "knowledgeRoot": "/configured/knowledge/fluxkeep",
+  "knowledgeCommit": "0000000000000000000000000000000000000000",
+  "engineCommand": [
+    "/configured/qualified-engine/archon"
+  ],
+  "allowPublish": false
+}

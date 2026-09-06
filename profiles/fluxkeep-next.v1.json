@@ -1,0 +1,97 @@
+{
+  "profileVersion": "archon.project-profile.v1",
+  "projectId": "project:fluxkeep",
+  "repository": {
+    "remote": "https://github.com/Pibomeister/fluxkeep.git",
+    "defaultBranch": "main",
+    "stack": "nextjs-workspace",
+    "packageManager": "pnpm@10.21.0"
+  },
+  "verification": [
+    {
+      "id": "typecheck",
+      "argv": [
+        "pnpm",
+        "run",
+        "typecheck"
+      ],
+      "timeoutSeconds": 600
+    },
+    {
+      "id": "typecheck-test",
+      "argv": [
+        "pnpm",
+        "run",
+        "typecheck:test"
+      ],
+      "timeoutSeconds": 600
+    },
+    {
+      "id": "lint",
+      "argv": [
+        "pnpm",
+        "run",
+        "lint"
+      ],
+      "timeoutSeconds": 600
+    },
+    {
+      "id": "format",
+      "argv": [
+        "pnpm",
+        "run",
+        "format:check"
+      ],
+      "timeoutSeconds": 600
+    },
+    {
+      "id": "document-detail-test",
+      "argv": [
+        "pnpm",
+        "exec",
+        "jest",
+        "--watchman=false",
+        "--runInBand",
+        "--runTestsByPath",
+        "test/src/app/(admin)/documents/components/document-detail.test.tsx"
+      ],
+      "timeoutSeconds": 600
+    }
+  ],
+  "scope": {
+    "allowedPaths": [
+      "src/app/(admin)/documents/components/document-detail.tsx",
+      "test/src/app/(admin)/documents/components/document-detail.test.tsx"
+    ],
+    "forbiddenPaths": [
+      ".env",
+      ".env.*",
+      "**/.env*",
+      "prisma/**",
+      "**/migrations/**",
+      "**/billing/**",
+      "**/extraction/**",
+      "apps/**",
+      "packages/**",
+      "package.json",
+      "pnpm-lock.yaml"
+    ]
+  },
+  "knowledge": {
+    "paths": [
+      "README.md",
+      "glossary.md",
+      "wiki/decisions",
+      "wiki/patterns"
+    ],
+    "maxBytes": 2097152
+  },
+  "recovery": {
+    "maxRounds": 2
+  },
+  "delivery": {
+    "draftOnly": true,
+    "autoMerge": false,
+    "autoDeploy": false
+  }
+}
