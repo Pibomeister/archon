@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "workflows/portable/single-repo-feature/scripts/project.py"
@@ -61,6 +62,11 @@ class PortableProjectTest(unittest.TestCase):
         }
         self.binding_path = self.root / "binding.json"
         self.save_binding()
+        # These tests can themselves run inside an Archon verification node.
+        # Bind each unit fixture to its own context, not that parent workflow.
+        inputs = patch.dict(os.environ, {"INPUTS_BINDING": str(self.binding_path)})
+        inputs.start()
+        self.addCleanup(inputs.stop)
 
     def git(self, repo, *args):
         return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, check=True).stdout.strip()
