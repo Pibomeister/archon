@@ -63,7 +63,7 @@ def facts(profile, root):
         result["bash"] = tool("bash", ["--version"], "GNU bash,")
         # Dependencies must already be prepared. Offline resolution prevents a
         # verification phase from adding network-selected dependencies.
-        command = [result["uv"]["path"], "run", "--offline", "--no-project", "--python", "3.13.9", "--with", "pyyaml==6.0.3", "python", "-c", "import json,platform,sys,yaml; print(json.dumps({'version':platform.python_version(),'path':sys.executable,'pyyaml':yaml.__version__}))"]
+        command = [result["uv"]["path"], "run", "--offline", "--no-project", "--python", "3.13.9", "--with", "pyyaml==6.0.3", "python", "-c", "import json,platform,sys,yaml; print(json.dumps({'version':platform.python_version(),'path':sys._base_executable,'pyyaml':yaml.__version__}))"]
         process = subprocess.run(command, cwd=root, check=True, capture_output=True, text=True, timeout=120)
         python = json.loads(process.stdout)
         if python["version"] != "3.13.9" or python["pyyaml"] != "6.0.3":

@@ -66,6 +66,10 @@ class SourceRecipeEngineTest(engine_fixtures.PortableEngineTest):
         env = {key: value for key, value in fixture.env.items() if not any(word in key.upper() for word in ("TOKEN", "API_KEY", "SECRET", "PASSWORD", "COOKIE"))}
         env.update(HOME=str(fixture.root / "private-home"), CODEX_HOME=str(fixture.root / "private-codex"), CLAUDE_CONFIG_DIR=str(fixture.root / "private-claude"), HERMES_HOME=str(fixture.root / "private-hermes"), PATH=str(Path(UV_BINARY).parent) + os.pathsep + os.environ["PATH"], UV_CACHE_DIR=str(UV_CACHE), UV_PYTHON_INSTALL_DIR=str(PYTHON_INSTALL), UV_PYTHON="3.13.9", ARCHON_TEST_PG_URL="")
         Path(env["HOME"]).mkdir()
+        # Upstream tests set their own temporary HOME to exercise default skill
+        # discovery. A fixed CLAUDE_CONFIG_DIR overrides those fixtures. The
+        # private HOME already isolates all default provider credentials.
+        env.pop("CLAUDE_CONFIG_DIR", None)
         fixture.env = env
         if recipe == "engine":
             install = self.run_owned([shutil.which("bun"), "install", "--frozen-lockfile"], target, {**env, "HUSKY": "0"}, 300)
@@ -105,6 +109,9 @@ class SourceRecipeEngineTest(engine_fixtures.PortableEngineTest):
         self.assertEqual(decision.returncode, 0, decision.stdout + decision.stderr)
         resumed = self.cli(fixture, "resume", run_id)
         self.assertNotEqual(resumed.returncode, 0)
+        if "Draft publication not authorized" not in resumed.stdout + resumed.stderr:
+            for log in sorted((artifacts / "verification").glob("*.log")):
+                print(log.name + "\n" + log.read_text()[-18000:])
         self.assertIn("Draft publication not authorized", resumed.stdout + resumed.stderr)
         verification = json.loads((artifacts / "verification.json").read_text())
         self.assertTrue(verification["passed"])

@@ -27,14 +27,20 @@ class PortableEngineTest(unittest.TestCase):
         fixture = fixtures.PortableProjectTest()
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
-        prefix = [shutil.which("bun"), str(Path(ENGINE) / "packages/cli/src/cli.ts")]
+        # CLI title generation is auxiliary provider work outside the workflow
+        # graph. Stub that seam too; keep the qualified engine files untouched.
+        preload = fixture.root / "non-model-title.ts"
+        title_module = str(Path(ENGINE) / "packages/core/src/services/title-generator.ts")
+        preload.write_text("import { mock } from 'bun:test';\nmock.module(" + json.dumps(title_module) + ", () => ({ generateAndSetTitle: async () => {} }));\n")
+        prefix = [shutil.which("bun"), "--preload", str(preload), str(Path(ENGINE) / "packages/cli/src/cli.ts")]
         fixture.binding["engineCommand"] = prefix
         fixture.save_binding()
         fixture.engine = prefix
         fixture.authoring = fixture.root / "authoring"
         # A fixture is not a child coding-agent task. Do not lend it this test
         # runner's Codex task identity or let observer state enter its worktree.
-        fixture.env = {key: value for key, value in os.environ.items() if key not in ("CODEX_THREAD_ID", "CODEX_SESSION_ID")}
+        fixture.env = {key: value for key, value in os.environ.items() if key not in ("CODEX_THREAD_ID", "CODEX_SESSION_ID") and not any(word in key.upper() for word in ("TOKEN", "API_KEY", "SECRET", "PASSWORD", "COOKIE"))}
+        fixture.env.update(CODEX_HOME=str(fixture.root / "private-codex"), CLAUDE_CONFIG_DIR=str(fixture.root / "private-claude"), HERMES_HOME=str(fixture.root / "private-hermes"))
         fixture.env.update(ARCHON_HOME=str(fixture.root / "archon-home"), DATABASE_URL="", DO_NOT_TRACK="1", UV_OFFLINE="1", DISABLE_OMC="1", OMX_ROOT=str(fixture.root / "observer"), OMX_STATE_ROOT=str(fixture.root / "observer"))
         fixture.pack = fixture.authoring / ".archon/workflows/portable/single-repo-feature"
         shutil.copytree(PACK, fixture.pack, ignore=shutil.ignore_patterns("__pycache__"))
