@@ -1,0 +1,55 @@
+{
+  "profileVersion": "archon.project-profile.v2",
+  "projectId": "project:archon-engine",
+  "sourceRecipe": "archon-engine-bun.v1",
+  "repository": {
+    "remote": "https://github.com/Pibomeister/archon-engine.git",
+    "defaultBranch": "dev",
+    "stack": "bun-typescript-workspace"
+  },
+  "verification": [
+    {
+      "id": "validate",
+      "argv": [
+        "bun",
+        "run",
+        "validate"
+      ],
+      "timeoutSeconds": 1200
+    }
+  ],
+  "scope": {
+    "allowedPaths": [
+      "packages/**",
+      "scripts/**",
+      "README.md",
+      "AGENTS.md"
+    ],
+    "forbiddenPaths": [
+      ".env*",
+      "**/.env*",
+      "**/node_modules/**",
+      "**/*-home/**",
+      "**/auth.json",
+      ".git/**",
+      "package.json",
+      "bun.lock"
+    ]
+  },
+  "knowledge": {
+    "paths": [
+      "README.md",
+      "AGENTS.md"
+    ],
+    "maxBytes": 1048576
+  },
+  "recovery": {
+    "maxRounds": 2
+  },
+  "delivery": {
+    "draftOnly": true,
+    "autoMerge": false,
+    "autoDeploy": false,
+    "baseBranch": "fix/exact-run-command-receipts"
+  }
+}

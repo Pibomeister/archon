@@ -21,6 +21,7 @@ import tempfile
 # Imported helper bytecode must not mutate the engine's frozen source capture.
 sys.dont_write_bytecode = True
 
+import source_recipes
 import repo_policy
 from review_envelope import ENUM as REVIEW_VERDICTS
 
@@ -98,22 +99,33 @@ def object_fields(value, fields, label):
 
 
 def validate_profile(profile: dict) -> None:
-    object_fields(profile, ("profileVersion", "projectId", "repository", "verification", "scope", "knowledge", "recovery", "delivery"), "project profile")
-    object_fields(profile["repository"], ("remote", "defaultBranch", "stack", "packageManager"), "repository")
+    if not isinstance(profile, dict):
+        raise ValueError("Invalid project profile fields")
+    version = profile.get("profileVersion")
+    if version not in (PROFILE_VERSION, source_recipes.VERSION):
+        raise ValueError("Unsupported project profile version")
+    v2 = version == source_recipes.VERSION
+    fields = ("profileVersion", "projectId", "repository", "verification", "scope", "knowledge", "recovery", "delivery")
+    object_fields(profile, fields + (("sourceRecipe",) if v2 else ()), "project profile")
+    object_fields(profile["repository"], ("remote", "defaultBranch", "stack") + (() if v2 else ("packageManager",)), "repository")
+    if v2 and profile["sourceRecipe"] not in source_recipes.RECIPES:
+        raise ValueError("Unknown source recipe")
     object_fields(profile["scope"], ("allowedPaths", "forbiddenPaths"), "scope")
     object_fields(profile["knowledge"], ("paths", "maxBytes"), "knowledge")
     object_fields(profile["recovery"], ("maxRounds",), "recovery")
-    object_fields(profile["delivery"], ("draftOnly", "autoMerge", "autoDeploy"), "delivery")
+    object_fields(profile["delivery"], ("draftOnly", "autoMerge", "autoDeploy") + (("baseBranch",) if v2 else ()), "delivery")
     if not isinstance(profile["projectId"], str) or not profile["projectId"]:
         raise ValueError("Profile requires project identity")
-    if profile.get("profileVersion") != PROFILE_VERSION:
-        raise ValueError("Unsupported project profile version")
     repository = profile["repository"]
     if any(not isinstance(value, str) or not value for value in repository.values()):
         raise ValueError("Repository fields must be nonempty text")
     remote_identity(repository["remote"])
-    if not repository.get("defaultBranch") or not repository.get("packageManager"):
+    if not repository.get("defaultBranch") or (not v2 and not repository.get("packageManager")):
         raise ValueError("Profile must declare branch and package manager")
+    if v2:
+        branch = profile["delivery"]["baseBranch"]
+        if not isinstance(branch, str) or not branch or branch.startswith("-") or subprocess.run(["git", "check-ref-format", "--branch", branch], capture_output=True).returncode:
+            raise ValueError("Invalid explicit PR base branch")
     checks = profile["verification"]
     if not isinstance(checks, list):
         raise ValueError("Verification must be a command array")
@@ -176,19 +188,28 @@ def binding_and_profile(path: Path):
     allowed = Path(binding["allowedWorktreeRoot"]).resolve()
     if root.is_symlink() or root.resolve() == allowed or allowed not in root.resolve().parents:
         raise ValueError("Repository is outside the allowed worktree root")
-    if not (root / ".git").is_file():
+    if not (root / ".git").is_file() or (root / ".git").is_symlink():
         raise ValueError("Portable execution requires a linked worktree, never a manual checkout")
+    git_dir = Path(git_text(root, "rev-parse", "--absolute-git-dir")).resolve()
+    common_dir = Path(git_text(root, "rev-parse", "--git-common-dir"))
+    common_dir = (root / common_dir).resolve() if not common_dir.is_absolute() else common_dir.resolve()
+    registered = git(root, "worktree", "list", "--porcelain", "-z").split(b"\0")
+    if git_dir == common_dir or b"worktree " + str(root.resolve()).encode() not in registered or regular(git_dir / "gitdir").read_text().strip() != str((root / ".git").resolve()):
+        raise ValueError("Expected an actual registered linked worktree")
     if Path(git_text(root, "rev-parse", "--show-toplevel")).resolve() != root.resolve():
         raise ValueError("Repository root does not match actual Git root")
-    if git_text(root, "branch", "--show-current") != binding["branch"] or binding["branch"] == profile["repository"]["defaultBranch"]:
+    if git_text(root, "branch", "--show-current") != binding["branch"] or binding["branch"] in (profile["repository"]["defaultBranch"], profile["delivery"].get("baseBranch")):
         raise ValueError("Unexpected or protected branch")
     if remote_identity(git_text(root, "remote", "get-url", "origin")) != remote_identity(profile["repository"]["remote"]):
         raise ValueError("Repository remote mismatch")
     if git_text(root, "rev-parse", binding["baseCommit"] + "^{commit}") != binding["baseCommit"]:
         raise ValueError("Frozen base commit unavailable")
-    package = json.loads(regular(root / "package.json").read_text())
-    if package.get("packageManager") != profile["repository"]["packageManager"]:
-        raise ValueError("Package-manager profile drift")
+    if profile["profileVersion"] == source_recipes.VERSION:
+        source_recipes.check_metadata(profile, root)
+    else:
+        package = json.loads(regular(root / "package.json").read_text())
+        if package.get("packageManager") != profile["repository"]["packageManager"]:
+            raise ValueError("Package-manager profile drift")
     return binding, profile, root
 
 
@@ -199,8 +220,8 @@ def capture(binding_path: Path, artifacts: Path) -> dict:
     if not (artifacts / "run-context.json").exists() and git(root, "status", "--porcelain"):
         raise ValueError("New run requires a clean isolated worktree")
     artifacts.mkdir(parents=True, exist_ok=True)
-    toolchain = {}
-    if any(check["argv"][0] == "pnpm" for check in profile["verification"]):
+    toolchain = source_recipes.facts(profile, root) if profile["profileVersion"] == source_recipes.VERSION else {}
+    if profile["profileVersion"] == PROFILE_VERSION and any(check["argv"][0] == "pnpm" for check in profile["verification"]):
         actual = subprocess.run(["pnpm", "--version"], cwd=root, check=True, capture_output=True, text=True, timeout=60).stdout.strip()
         expected = profile["repository"]["packageManager"].removeprefix("pnpm@")
         if actual != expected:
@@ -258,9 +279,11 @@ def load_context(artifacts: Path) -> dict:
     source_binding = Path(os.environ.get("INPUTS_BINDING", context["bindingPath"]))
     if str(source_binding.resolve()) != context["bindingPath"] or file_digest(source_binding) != context["bindingSha256"]:
         raise ValueError("binding snapshot drift")
-    binding, profile, _ = binding_and_profile(source_binding)
+    binding, profile, root = binding_and_profile(source_binding)
     if profile != context["profile"] or binding != context["binding"]:
         raise ValueError("binding snapshot drift")
+    if profile["profileVersion"] == source_recipes.VERSION and source_recipes.facts(profile, root) != context["toolchain"]:
+        raise ValueError("Qualified source-recipe toolchain drift")
     for name, expected in context["knowledgeFiles"].items():
         if file_digest(artifacts / "knowledge" / relative(name)) != expected:
             raise ValueError("knowledge snapshot drift")
@@ -427,7 +450,7 @@ def verify(artifacts: Path) -> dict:
         log.parent.mkdir(parents=True, exist_ok=True)
         with log.open("wb") as output:
             try:
-                completed = subprocess.run(check["argv"], cwd=root, stdout=output, stderr=subprocess.STDOUT, timeout=check["timeoutSeconds"])
+                completed = subprocess.run(source_recipes.verification_argv(context["profile"], context["toolchain"], check["argv"]), cwd=root, stdout=output, stderr=subprocess.STDOUT, timeout=check["timeoutSeconds"])
                 code = completed.returncode
             except subprocess.TimeoutExpired:
                 code = 124
@@ -503,7 +526,7 @@ def ship(artifacts: Path, pr: dict) -> dict:
             raise ValueError("Existing PR does not match this draft head")
         url = matches[0]["url"]
     else:
-        created = subprocess.run(["gh", "pr", "create", "--repo", github_repo, "--draft", "--base", context["profile"]["repository"]["defaultBranch"], "--head", binding["branch"], "--title", pr["title"], "--body-file", str(body_file)], cwd=root, check=True, capture_output=True, text=True)
+        created = subprocess.run(["gh", "pr", "create", "--repo", github_repo, "--draft", "--base", context["profile"]["delivery"].get("baseBranch", context["profile"]["repository"]["defaultBranch"]), "--head", binding["branch"], "--title", pr["title"], "--body-file", str(body_file)], cwd=root, check=True, capture_output=True, text=True)
         url = created.stdout.strip()
     if not re.fullmatch(r"https://github\.com/" + re.escape(github_repo) + r"/pull/[0-9]+", url, re.I):
         raise ValueError("Unexpected PR evidence URL")

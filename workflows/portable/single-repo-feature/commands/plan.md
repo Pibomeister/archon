@@ -16,3 +16,5 @@ you cannot replace its commands. Respect project policy and documented decisions
 
 Do not edit the repository, create a branch/commit, launch another workflow, approve
 a gate, or invoke external services. Return JSON only, without writing plan files.
+
+For profile v2, use its explicit source recipe and repository facts. A Bun engine workspace or Python/shell workflow pack does not imply Next or a packageManager field. Do not invent missing metadata.

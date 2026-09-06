@@ -13,3 +13,5 @@ failed; verdict is Ready to merge, Ready with fixes, or Not ready; findings are
 concrete strings. Only a complete Ready to merge review with no findings can pass
 the mechanical gate. Ready with fixes requires another bounded implementation and
 verification round. No automatic merge or deployment follows this verdict.
+
+For profile v2, use its explicit source recipe and repository facts. A Bun engine workspace or Python/shell workflow pack does not imply Next or a packageManager field. Do not invent missing metadata.

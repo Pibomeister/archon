@@ -43,6 +43,9 @@ MANIFEST=(
   docs/portable-single-repo.md
   profiles/fluxkeep-next.v1.json
   profiles/project-profile.v1.schema.json
+  profiles/project-profile.v2.schema.json
+  profiles/archon-engine.v2.json
+  profiles/goodword-archon.v2.json
   profiles/machine-binding.v1.schema.json
   profiles/machine-binding.example.json
   workflows/portable/single-repo-feature/commands/capture-knowledge.md
@@ -53,6 +56,7 @@ MANIFEST=(
   workflows/portable/single-repo-feature/commands/review.md
   workflows/portable/single-repo-feature/feature.yaml
   workflows/portable/single-repo-feature/scripts/project.py
+  workflows/portable/single-repo-feature/scripts/source_recipes.py
   workflows/portable/single-repo-feature/scripts/repo_policy.py
   workflows/portable/single-repo-feature/scripts/review_envelope.py
   config.yaml

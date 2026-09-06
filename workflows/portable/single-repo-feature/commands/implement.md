@@ -16,3 +16,5 @@ requested work already satisfies the plan, report that accurately.
 Use the package manager and scripts in the captured profile. The mechanical
 verification node will execute them again and records real exit codes. Return a
 structured summary; do not claim a test succeeded without its actual output.
+
+For profile v2, use its explicit source recipe and repository facts. A Bun engine workspace or Python/shell workflow pack does not imply Next or a packageManager field. Do not invent missing metadata.

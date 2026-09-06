@@ -137,3 +137,36 @@ then success. They never contact a provider or publish a GitHub PR.
 These results qualify the portable contracts and mechanical integration. They do
 not qualify real model quality, actual Fluxkeep Jest execution, full SDLC delivery,
 provider allowances, deployment, or mobile acceptance. Those remain Stage 4 work.
+
+
+## Source recipes (profile v2)
+
+`profiles/project-profile.v2.schema.json` adds an explicit `sourceRecipe` and a
+separate `delivery.baseBranch`. Its repository object has no `packageManager`
+field. V1 Next profiles retain their existing metadata checks and behavior.
+
+- `archon-engine.v2.json`: actual Archon v0.10.1 Bun workspace, Bun1.3.14,
+  frozen bun.lock, full upstream validation. Future implementation PRs target the
+  qualified fork's existing `fix/exact-run-command-receipts` branch. A port to
+  current coleam00/Archon dev remains separate work.
+- `goodword-archon.v2.json`: actual Python/shell workflow pack, with no Node
+  manifest requirement. Verification uses uv0.12.10, Python3.13.9, PyYAML6.0.3
+  and shell syntax checks. PRs target GoodwordTeam/archon main explicitly.
+
+Prepare dependencies and pinned tools before dispatch. The Python recipe resolves
+its prepared environment offline; the helper does not download dependencies as a
+side effect of verification. Tool executable paths, versions and byte digests are
+captured in the original context and checked again before critical actions.
+Verification executes the captured tool paths. Changed tools require a new run and
+reviewed context. The factory bootstrap's private uv/cache/Python paths can provide
+this environment without changing globally installed tools.
+
+All profiles require a registered linked Git worktree: a copied `.git` pointer to
+a normal checkout is rejected. The native workflow graph, bounded recovery,
+original-evidence approval and post-hook publication guard are shared. No profile
+adds model calls, automatic merge, deployment or direct knowledge-base writes.
+
+The source-recipe qualification suite uses actual linked worktrees and actual
+Bun/Python checks. Every agent judgment is replaced explicitly in the fixture;
+publication remains disabled. These results qualify mechanical source support,
+not provider allowances or model delivery quality.

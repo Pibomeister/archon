@@ -1,0 +1,75 @@
+{
+  "profileVersion": "archon.project-profile.v2",
+  "projectId": "project:goodword-archon",
+  "sourceRecipe": "goodword-workflows-python.v1",
+  "repository": {
+    "remote": "https://github.com/GoodwordTeam/archon.git",
+    "defaultBranch": "main",
+    "stack": "python-shell-workflow-pack"
+  },
+  "verification": [
+    {
+      "id": "portable-and-policy-tests",
+      "argv": [
+        "uv",
+        "run",
+        "--offline",
+        "--no-project",
+        "--python",
+        "3.13.9",
+        "--with",
+        "pyyaml==6.0.3",
+        "python",
+        "-m",
+        "unittest",
+        "setup.tests.test_portable_project",
+        "setup.tests.test_repo_policy",
+        "setup.tests.test_parse_review_envelope",
+        "setup.tests.test_source_recipes"
+      ],
+      "timeoutSeconds": 1200
+    },
+    {
+      "id": "package-shell-syntax",
+      "argv": [
+        "bash",
+        "-n",
+        "setup/package.sh"
+      ],
+      "timeoutSeconds": 60
+    }
+  ],
+  "scope": {
+    "allowedPaths": [
+      "workflows/**",
+      "setup/**",
+      "profiles/**",
+      "docs/**",
+      "RUNBOOK.md"
+    ],
+    "forbiddenPaths": [
+      ".env*",
+      "**/.env*",
+      "**/node_modules/**",
+      "**/*-home/**",
+      "**/auth.json",
+      ".git/**"
+    ]
+  },
+  "knowledge": {
+    "paths": [
+      "RUNBOOK.md",
+      "docs/portable-single-repo.md"
+    ],
+    "maxBytes": 1048576
+  },
+  "recovery": {
+    "maxRounds": 2
+  },
+  "delivery": {
+    "draftOnly": true,
+    "autoMerge": false,
+    "autoDeploy": false,
+    "baseBranch": "main"
+  }
+}
