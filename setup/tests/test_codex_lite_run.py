@@ -135,6 +135,46 @@ class CodexLiteRun(unittest.TestCase):
             "--config sandbox_workspace_write.network_access=false",
         )
 
+    def test_private_wrapper_forwards_gitnexus_pin_into_the_mcp_server_env(self):
+        real = self.root / "real-codex.sh"
+        real.write_text('#!/bin/bash\nprintf "%s\\n" "$*"\n', encoding="utf-8")
+        real.chmod(0o755)
+        for repo in ("api", "web-app"):
+            (self.root / repo / ".git").mkdir(parents=True, exist_ok=True)
+        index = self.root / "gitnexus-index"
+        chain_state = self.root / "chain.json"
+        env = dict(os.environ, CODEX_REAL_BIN=str(real), CODEX_WORKSPACE_ROOT=str(self.root),
+                   CODEX_ARTIFACTS_BASE=str(self.root / "artifacts/runs"),
+                   ARCHON_GITNEXUS_INDEX=str(index), ARCHON_GITNEXUS_COMMIT="c" * 40,
+                   ARCHON_BUGFIX_CHAIN_ID="d" * 32, ARCHON_BUGFIX_CHAIN_STATE=str(chain_state))
+        result = subprocess.run(
+            [str(clr.WORKSPACE_WRAPPER), "exec"],
+            capture_output=True, encoding="utf-8", env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for key, value in (("ARCHON_GITNEXUS_INDEX", str(index)),
+                           ("ARCHON_GITNEXUS_COMMIT", "c" * 40),
+                           ("ARCHON_BUGFIX_CHAIN_ID", "d" * 32),
+                           ("ARCHON_BUGFIX_CHAIN_STATE", str(chain_state))):
+            self.assertIn(f'--config mcp_servers.gitnexus.env.{key}="{value}"', result.stdout)
+
+    def test_private_wrapper_omits_gitnexus_mcp_env_without_a_pin(self):
+        real = self.root / "real-codex.sh"
+        real.write_text('#!/bin/bash\nprintf "%s\\n" "$*"\n', encoding="utf-8")
+        real.chmod(0o755)
+        for repo in ("api", "web-app"):
+            (self.root / repo / ".git").mkdir(parents=True, exist_ok=True)
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith(("ARCHON_GITNEXUS_", "ARCHON_BUGFIX_CHAIN_"))}
+        env.update(CODEX_REAL_BIN=str(real), CODEX_WORKSPACE_ROOT=str(self.root),
+                   CODEX_ARTIFACTS_BASE=str(self.root / "artifacts/runs"))
+        result = subprocess.run(
+            [str(clr.WORKSPACE_WRAPPER), "exec"],
+            capture_output=True, encoding="utf-8", env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("mcp_servers.gitnexus.env", result.stdout)
+
     def test_private_wrapper_adds_only_the_prompt_bound_run_artifacts(self):
         real = self.root / "real-codex.sh"
         real.write_text('#!/bin/bash\nprintf "%s\\n" "$*"\ncat >/dev/null\n', encoding="utf-8")
