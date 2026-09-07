@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -23,12 +24,15 @@ sys.dont_write_bytecode = True
 
 import source_recipes
 import repo_policy
+import repair_publication
 from review_envelope import ENUM as REVIEW_VERDICTS
 
 PROFILE_VERSION = "archon.project-profile.v1"
 BINDING_VERSION = "archon.machine-binding.v1"
 SHA = re.compile(r"^[a-f0-9]{40}$")
 DIGEST = re.compile(r"^[a-f0-9]{64}$")
+FACTORY_DIGEST = re.compile(r"^sha256:[a-f0-9]{64}$")
+IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9._:-]{1,127}$")
 
 
 def encoded(value) -> bytes:
@@ -62,6 +66,13 @@ def write(path: Path, value, immutable=False) -> None:
         output.write(content)
         temporary = Path(output.name)
     os.replace(temporary, path)
+
+
+def remove_artifact(path: Path) -> None:
+    if path.exists():
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"Refusing unsafe artifact removal: {path}")
+        path.unlink()
 
 
 def git(root: Path, *args: str) -> bytes:
@@ -98,6 +109,66 @@ def object_fields(value, fields, label):
         raise ValueError(f"Invalid {label} fields")
 
 
+def validate_factory_execution(value: dict) -> dict:
+    required = ("factoryJobId", "logicalChainId", "readySnapshotId", "readyDigest", "commandId", "launchId", "attemptId", "runtimeBundleId")
+    fields = required + (("launchKey",) if isinstance(value, dict) and "launchKey" in value else ())
+    object_fields(value, fields, "factory execution identity")
+    for name in ("factoryJobId", "logicalChainId", "readySnapshotId", "commandId", "launchId", "attemptId", "runtimeBundleId"):
+        if not isinstance(value[name], str) or not IDENTIFIER.fullmatch(value[name]):
+            raise ValueError(f"Invalid factory execution identity field: {name}")
+    if "launchKey" in value and (not isinstance(value["launchKey"], str) or not IDENTIFIER.fullmatch(value["launchKey"])):
+        raise ValueError("Invalid factory execution identity field: launchKey")
+    if not isinstance(value["readyDigest"], str) or not FACTORY_DIGEST.fullmatch(value["readyDigest"]):
+        raise ValueError("Invalid factory execution identity field: readyDigest")
+    return dict(value)
+
+
+def factory_execution_from_env(artifacts: Path) -> dict | None:
+    existing_context = artifacts / "run-context.json"
+    existing = None
+    if existing_context.exists():
+        existing = json.loads(regular(existing_context).read_text()).get("factoryExecution")
+    path = os.environ.get("INPUTS_FACTORY_EXECUTION")
+    supplied = None
+    if path:
+        supplied = validate_factory_execution(json.loads(regular(Path(path)).read_text()))
+    if existing is not None:
+        existing = validate_factory_execution(existing)
+        if supplied is not None and supplied != existing:
+            raise ValueError("factory execution identity drift")
+        return existing
+    return supplied
+
+
+def github_repository(value: str) -> dict:
+    origin = remote_identity(value)
+    if not origin.startswith("github.com/"):
+        raise ValueError("Expected GitHub repository identity")
+    parts = origin.removeprefix("github.com/").split("/")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise ValueError("Expected GitHub owner/repository identity")
+    return {"provider": "github", "owner": parts[0], "name": parts[1]}
+
+
+def merge_review_manifest(context: dict, github_repo: str, url: str, head: str) -> dict | None:
+    execution = context.get("factoryExecution")
+    if execution is None:
+        return None
+    execution = validate_factory_execution(execution)
+    if not SHA.fullmatch(head):
+        raise ValueError("Merge review manifest requires a full head SHA")
+    match = re.fullmatch(r"https://github\.com/" + re.escape(github_repo) + r"/pull/([0-9]+)", url, re.I)
+    if not match:
+        raise ValueError("Merge review manifest requires exact PR URL evidence")
+    return {
+        "kind": "factory-merge-review.v1",
+        "repository": github_repository("https://github.com/" + github_repo),
+        "pullRequestNumber": int(match.group(1)),
+        "headSha": head,
+        "execution": execution,
+    }
+
+
 def validate_profile(profile: dict) -> None:
     if not isinstance(profile, dict):
         raise ValueError("Invalid project profile fields")
@@ -106,7 +177,12 @@ def validate_profile(profile: dict) -> None:
         raise ValueError("Unsupported project profile version")
     v2 = version == source_recipes.VERSION
     fields = ("profileVersion", "projectId", "repository", "verification", "scope", "knowledge", "recovery", "delivery")
-    object_fields(profile, fields + (("sourceRecipe",) if v2 else ()), "project profile")
+    expected_fields = fields
+    if v2:
+        expected_fields += ("sourceRecipe",)
+    if "noChangeClosure" in profile:
+        expected_fields += ("noChangeClosure",)
+    object_fields(profile, expected_fields, "project profile")
     object_fields(profile["repository"], ("remote", "defaultBranch", "stack") + (() if v2 else ("packageManager",)), "repository")
     if v2 and profile["sourceRecipe"] not in source_recipes.RECIPES:
         raise ValueError("Unknown source recipe")
@@ -114,6 +190,8 @@ def validate_profile(profile: dict) -> None:
     object_fields(profile["knowledge"], ("paths", "maxBytes"), "knowledge")
     object_fields(profile["recovery"], ("maxRounds",), "recovery")
     object_fields(profile["delivery"], ("draftOnly", "autoMerge", "autoDeploy") + (("baseBranch",) if v2 else ()), "delivery")
+    if "noChangeClosure" in profile:
+        object_fields(profile["noChangeClosure"], ("enabled", "verifierIds"), "no-change closure")
     if not isinstance(profile["projectId"], str) or not profile["projectId"]:
         raise ValueError("Profile requires project identity")
     repository = profile["repository"]
@@ -140,6 +218,20 @@ def validate_profile(profile: dict) -> None:
             raise ValueError("Verification must use explicit argv")
         if type(check["timeoutSeconds"]) is not int or not 1 <= check["timeoutSeconds"] <= 1200:
             raise ValueError("Verification timeout must be bounded")
+    if v2:
+        no_change = profile.get("noChangeClosure", {"enabled": False, "verifierIds": []})
+        verifier_ids = no_change.get("verifierIds", [])
+        declared_ids = {check["id"] for check in checks}
+        if type(no_change["enabled"]) is not bool:
+            raise ValueError("No-change closure must be explicitly enabled or disabled")
+        if no_change["enabled"] and not verifier_ids:
+            raise ValueError("No-change closure requires pinned verification command ids")
+        if (
+            not isinstance(verifier_ids, list)
+            or len(set(verifier_ids)) != len(verifier_ids)
+            or any(not isinstance(item, str) or item not in declared_ids for item in verifier_ids)
+        ):
+            raise ValueError("No-change closure requires pinned verification command ids")
     if not isinstance(profile["knowledge"]["paths"], list) or not profile["knowledge"]["paths"]:
         raise ValueError("Profile requires explicit knowledge paths")
     if not isinstance(profile["scope"]["allowedPaths"], list) or not profile["scope"]["allowedPaths"] or not isinstance(profile["scope"]["forbiddenPaths"], list):
@@ -215,6 +307,9 @@ def binding_and_profile(path: Path):
 
 def capture(binding_path: Path, artifacts: Path) -> dict:
     binding, profile, root = binding_and_profile(binding_path)
+    repair = repair_publication.from_environment(binding, profile)
+    if repair is not None:
+        repair_publication.assert_remote_head(root, repair)
     if git_text(root, "rev-parse", "HEAD") != binding["baseCommit"]:
         raise ValueError("Repository HEAD does not match frozen base commit")
     if not (artifacts / "run-context.json").exists() and git(root, "status", "--porcelain"):
@@ -266,6 +361,11 @@ def capture(binding_path: Path, artifacts: Path) -> dict:
     policy = {"documents": documents, "rules": rules}
     write(artifacts / "policy-context.json", policy, immutable=True)
     context = {"bindingPath": str(binding_path.resolve()), "bindingSha256": file_digest(binding_path), "binding": binding, "profile": profile, "toolchain": toolchain, "knowledgeFiles": knowledge, "policyDigest": digest(encoded(policy))}
+    if repair is not None:
+        context["repairPublication"] = repair
+    factory_execution = factory_execution_from_env(artifacts)
+    if factory_execution is not None:
+        context["factoryExecution"] = factory_execution
     write(artifacts / "run-context.json", context, immutable=True)
     write(artifacts / "context-seal.json", {"sha256": digest(encoded(context))}, immutable=True)
     return {"contextDigest": digest(encoded(context)), "contextPath": str(artifacts / "run-context.json"), "repositoryRoot": str(root)}
@@ -340,28 +440,36 @@ def approval_input_names(context: dict) -> list[str]:
     return sorted(names)
 
 
-def prepare_approval_evidence(artifacts: Path, context: dict) -> None:
+def replace_approval_evidence(artifacts: Path, names: list[str]) -> None:
     namespace = artifacts / "approval-evidence"
     if namespace.is_symlink():
         raise ValueError("Refusing symlink approval evidence directory")
-    namespace.mkdir(exist_ok=True)
-    names = approval_input_names(context)
     if len(names) > 256:
         raise ValueError("Approval evidence exceeds the engine manifest file limit")
-    for name in names:
-        source = regular(artifacts / relative(name))
-        if not review_evidence_path(name) or artifacts.resolve() not in source.resolve().parents:
-            raise ValueError("Approval source is outside the permitted evidence scope")
-        target = namespace / name
-        if namespace.resolve() not in target.resolve().parents or target.is_symlink():
-            raise ValueError("Approval evidence path escapes its namespace")
-        content = source.read_bytes()
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists() and regular(target).read_bytes() != content:
-            raise ValueError("approval evidence snapshot drift")
-        target.write_bytes(content)
-    # Publishing the manifest last makes incomplete producer writes fail closed.
-    write(namespace / "manifest.json", {"version": 1, "files": names}, immutable=True)
+    temporary = Path(tempfile.mkdtemp(prefix="approval-evidence-", dir=artifacts))
+    try:
+        for name in sorted(names):
+            source = regular(artifacts / relative(name))
+            if not review_evidence_path(name) or artifacts.resolve() not in source.resolve().parents:
+                raise ValueError("Approval source is outside the permitted evidence scope")
+            target = temporary / name
+            if temporary.resolve() not in target.resolve().parents or target.is_symlink():
+                raise ValueError("Approval evidence path escapes its namespace")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source.read_bytes())
+        write(temporary / "manifest.json", {"version": 1, "files": sorted(names)}, immutable=True)
+        if namespace.exists():
+            if not namespace.is_dir() or namespace.is_symlink():
+                raise ValueError("Refusing unsafe approval evidence replacement")
+            shutil.rmtree(namespace)
+        os.replace(temporary, namespace)
+    except Exception:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+
+
+def prepare_approval_evidence(artifacts: Path, context: dict) -> None:
+    replace_approval_evidence(artifacts, approval_input_names(context))
 
 
 def plan_for(artifacts: Path) -> dict:
@@ -371,35 +479,66 @@ def plan_for(artifacts: Path) -> dict:
     return json.loads(plan)
 
 
-def verify_approval(artifacts: Path) -> dict:
-    context = load_context(artifacts)
+def engine_query(context: dict, *args: str) -> dict:
     command = context["binding"].get("engineCommand")
+    if not isinstance(command, list) or not command or any(not isinstance(arg, str) or not arg for arg in command):
+        raise ValueError("Actual qualified engineCommand is required")
+    response = subprocess.run([*command, "workflow", *args, "--json"], check=True, capture_output=True, text=True, timeout=60)
+    return json.loads(response.stdout)
+
+
+def verify_current_gate_approval(artifacts: Path, gate_id: str, names: list[str], proof_name: str) -> dict:
+    context = load_context(artifacts)
     run_id = os.environ.get("WORKFLOW_ID")
-    if not run_id or not isinstance(command, list) or not command or any(not isinstance(arg, str) or not arg for arg in command):
-        raise ValueError("Actual engine run identity and qualified engineCommand are required")
-    def query(*args):
-        response = subprocess.run([*command, "workflow", *args, "--json"], check=True, capture_output=True, text=True, timeout=60)
-        return json.loads(response.stdout)
-    result = query("get", run_id)
+    if not run_id:
+        raise ValueError("Actual engine run identity is required")
+    result = engine_query(context, "get", run_id)
     run = result.get("run", result)
     approval = run.get("metadata", {}).get("approval", {})
-    if run.get("id") != run_id or run.get("status") != "running" or approval.get("nodeId") != "plan-approval" or approval.get("resolved") != "approved":
-        raise ValueError("Engine has not approved this run's plan gate")
-    sealed = query("gate-evidence", run_id, approval["occurrenceId"])
+    if run.get("id") != run_id or run.get("status") != "running" or approval.get("nodeId") != gate_id or approval.get("resolved") != "approved":
+        raise ValueError(f"Engine has not approved this run's {gate_id} gate")
+    sealed = engine_query(context, "gate-evidence", run_id, approval["occurrenceId"])
     if sealed.get("evidenceDigest") != approval.get("evidenceDigest") or sealed.get("runId") != run_id:
         raise ValueError("Engine approval evidence binding mismatch")
     if sealed["evidence"].get("artifactPolicy") != "approval-evidence.v1":
         raise ValueError("Engine does not expose the qualified safe evidence policy")
     originals = sealed["evidence"]["artifacts"]
-    names = approval_input_names(context)
-    if sorted(originals) != names:
+    if sorted(originals) != sorted(names):
         raise ValueError("Engine evidence differs from the deterministic producer allowlist")
-    for name in names:
+    file_hashes = {}
+    for name in sorted(names):
         original = base64.b64decode(originals[name], validate=True)
         if regular(artifacts / name).read_bytes() != original:
             raise ValueError(f"Engine-approved original evidence drift: {name}")
-    proof = {"runId": run_id, "occurrenceId": approval["occurrenceId"], "evidenceDigest": approval["evidenceDigest"]}
-    write(artifacts / "approval-binding.json", proof, immutable=True)
+        file_hashes[name] = digest(original)
+    proof = {
+        "runId": run_id,
+        "nodeId": gate_id,
+        "occurrenceId": approval["occurrenceId"],
+        "evidenceDigest": approval["evidenceDigest"],
+        "files": file_hashes,
+    }
+    write(artifacts / proof_name, proof, immutable=True)
+    return proof
+
+
+def verify_approval(artifacts: Path) -> dict:
+    return verify_current_gate_approval(artifacts, "plan-approval", approval_input_names(load_context(artifacts)), "approval-binding.json")
+
+
+def verify_stored_plan_approval(artifacts: Path) -> dict:
+    proof = json.loads(regular(artifacts / "approval-binding.json").read_text())
+    if proof.get("nodeId") not in (None, "plan-approval"):
+        raise ValueError("Stored approval binding is not for the plan gate")
+    files = proof.get("files")
+    if not isinstance(files, dict):
+        context = load_context(artifacts)
+        files = {name: file_digest(artifacts / name) for name in approval_input_names(context)}
+    for name, expected in files.items():
+        if not isinstance(name, str) or not isinstance(expected, str) or not DIGEST.fullmatch(expected):
+            raise ValueError("Stored approval binding has invalid file digests")
+        if file_digest(artifacts / name) != expected:
+            raise ValueError(f"Engine-approved original evidence drift: {name}")
     return proof
 
 
@@ -422,8 +561,47 @@ def work_product(context: dict, plan: dict) -> dict:
     return {"files": records, "sha256": digest(encoded(records))}
 
 
+def verification_record(context: dict, artifacts: Path, name: str, round_no: int | None = None) -> dict:
+    plan = plan_for(artifacts)
+    root = Path(context["binding"]["repositoryRoot"])
+    if git_text(root, "rev-parse", "HEAD") != context["binding"]["baseCommit"]:
+        raise ValueError("Implementation committed before the mechanical publication step")
+    before = work_product(context, plan)
+    results = []
+    for check in context["profile"]["verification"]:
+        prefix = f"round-{round_no}-" if round_no is not None else f"{name}-"
+        log = artifacts / "verification" / f"{prefix}{check['id']}.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("wb") as output:
+            try:
+                completed = subprocess.run(source_recipes.verification_argv(context["profile"], context["toolchain"], check["argv"]), cwd=root, stdout=output, stderr=subprocess.STDOUT, timeout=check["timeoutSeconds"])
+                code = completed.returncode
+            except subprocess.TimeoutExpired:
+                code = 124
+        results.append({"id": check["id"], "argv": check["argv"], "exitCode": code, "logPath": str(log)})
+    after = work_product(context, plan)
+    if before != after:
+        raise ValueError("Verification commands modified the reviewed work product")
+    result = {"passed": all(item["exitCode"] == 0 for item in results), "commands": results, "workProduct": after}
+    if round_no is not None:
+        result["round"] = round_no
+    write(artifacts / name, result)
+    return result
+
+
+def baseline_verify(artifacts: Path) -> dict:
+    return verification_record(load_context(artifacts), artifacts, "baseline-verification.json")
+
+
 def begin_round(artifacts: Path) -> dict:
     context = load_context(artifacts)
+    repair = context.get("repairPublication")
+    if repair != repair_publication.from_environment(context["binding"], context["profile"]):
+        raise ValueError("Frozen repair publication context drift")
+    if repair is not None:
+        repair_publication.assert_current_authority(repair)
+        repair_publication.assert_remote_head(Path(context["binding"]["repositoryRoot"]), repair)
+        repair_publication.assert_scope(Path(context["binding"]["repositoryRoot"]), repair)
     plan_for(artifacts)
     state_file = artifacts / "recovery-state.json"
     state = json.loads(regular(state_file).read_text()) if state_file.exists() else {"round": 0}
@@ -438,29 +616,118 @@ def begin_round(artifacts: Path) -> dict:
 
 def verify(artifacts: Path) -> dict:
     context = load_context(artifacts)
-    plan = plan_for(artifacts)
-    root = Path(context["binding"]["repositoryRoot"])
-    if git_text(root, "rev-parse", "HEAD") != context["binding"]["baseCommit"]:
-        raise ValueError("Implementation committed before the mechanical publication step")
-    before = work_product(context, plan)
     round_no = json.loads(regular(artifacts / "recovery-state.json").read_text())["round"]
-    results = []
-    for check in context["profile"]["verification"]:
-        log = artifacts / "verification" / f"round-{round_no}-{check['id']}.log"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        with log.open("wb") as output:
-            try:
-                completed = subprocess.run(source_recipes.verification_argv(context["profile"], context["toolchain"], check["argv"]), cwd=root, stdout=output, stderr=subprocess.STDOUT, timeout=check["timeoutSeconds"])
-                code = completed.returncode
-            except subprocess.TimeoutExpired:
-                code = 124
-        results.append({"id": check["id"], "argv": check["argv"], "exitCode": code, "logPath": str(log)})
-    after = work_product(context, plan)
-    if before != after:
-        raise ValueError("Verification commands modified the reviewed work product")
-    result = {"round": round_no, "passed": all(item["exitCode"] == 0 for item in results), "commands": results, "workProduct": after}
-    write(artifacts / "verification.json", result)
+    return verification_record(context, artifacts, "verification.json", round_no)
+
+
+def record_no_change_claim(artifacts: Path, implementation: dict) -> dict:
+    context = load_context(artifacts)
+    plan = plan_for(artifacts)
+    category = implementation.get("category")
+    if category is None:
+        remove_artifact(artifacts / "no-change-claim.json")
+        remove_artifact(artifacts / "no-change-closure-intent.json")
+        result = {"recorded": False, "reason": "implementation did not declare an outcome category"}
+        write(artifacts / "no-change-claim-status.json", result)
+        return result
+    if category not in ("changes-produced", "already-satisfied", "blocked", "inconclusive"):
+        raise ValueError("Implementation outcome category is invalid")
+    if category != "already-satisfied":
+        remove_artifact(artifacts / "no-change-claim.json")
+        remove_artifact(artifacts / "no-change-closure-intent.json")
+        result = {"recorded": False, "category": category}
+        write(artifacts / "no-change-claim-status.json", result)
+        return result
+    product = work_product(context, plan)
+    if product["files"]:
+        raise ValueError("already-satisfied claim cannot accompany changed work product")
+    round_file = artifacts / "recovery-state.json"
+    round_no = json.loads(regular(round_file).read_text())["round"] if round_file.exists() else None
+    claim = {
+        "schemaVersion": 1,
+        "source": "agent",
+        "category": "already-satisfied",
+        "summary": implementation.get("summary", ""),
+        "workProduct": product,
+        "round": round_no,
+    }
+    write(artifacts / "no-change-claim.json", claim)
+    result = {"recorded": True, "category": "already-satisfied"}
+    write(artifacts / "no-change-claim-status.json", result)
     return result
+
+
+def passed_ids(record: dict) -> set[str]:
+    if record.get("passed") is not True:
+        return set()
+    commands = record.get("commands")
+    if not isinstance(commands, list):
+        return set()
+    return {
+        item["id"]
+        for item in commands
+        if isinstance(item, dict)
+        and isinstance(item.get("id"), str)
+        and item.get("exitCode") == 0
+    }
+
+
+def verified_empty_work_product(record: dict, label: str) -> dict:
+    product = record.get("workProduct")
+    if not isinstance(product, dict):
+        raise ValueError(f"{label} verification is missing work product proof")
+    if not isinstance(product.get("sha256"), str) or not DIGEST.fullmatch(product["sha256"]):
+        raise ValueError(f"{label} verification has invalid work product digest")
+    if not isinstance(product.get("files"), list):
+        raise ValueError(f"{label} verification has invalid work product file list")
+    if product["files"]:
+        raise ValueError("no-change closure cannot carry a changed work product")
+    return product
+
+
+def no_change_closure(artifacts: Path) -> dict:
+    context = load_context(artifacts)
+    profile = context["profile"]
+    policy = profile.get("noChangeClosure", {"enabled": False, "verifierIds": []})
+    if policy.get("enabled") is not True:
+        result = {"eligible": False, "reason": "disabled"}
+        write(artifacts / "no-change-closure-status.json", result)
+        return result
+    verifier_ids = policy.get("verifierIds", [])
+    if not isinstance(verifier_ids, list) or not verifier_ids:
+        raise ValueError("no-change closure has no pinned verifier ids")
+    verifier_set = set(verifier_ids)
+    if not (artifacts / "no-change-claim.json").exists():
+        result = {"eligible": False, "reason": "missing already-satisfied claim"}
+        write(artifacts / "no-change-closure-status.json", result)
+        return result
+    claim = json.loads(regular(artifacts / "no-change-claim.json").read_text())
+    if claim.get("category") != "already-satisfied" or claim.get("source") != "agent":
+        raise ValueError("claim is not an agent already-satisfied no-change claim")
+    baseline = json.loads(regular(artifacts / "baseline-verification.json").read_text())
+    final = json.loads(regular(artifacts / "verification.json").read_text())
+    baseline_product = verified_empty_work_product(baseline, "baseline")
+    final_product = verified_empty_work_product(final, "final")
+    if claim.get("workProduct") != baseline_product:
+        raise ValueError("claim work product does not match trusted baseline proof")
+    if "round" in final and claim.get("round") != final.get("round"):
+        raise ValueError("no-change claim is stale for the final verification round")
+    if not verifier_set <= passed_ids(baseline):
+        raise ValueError("baseline verification did not pass every pinned verifier")
+    if not verifier_set <= passed_ids(final):
+        raise ValueError("final verification did not pass every pinned verifier")
+    if baseline_product != final_product:
+        raise ValueError("work product changed between baseline and final verification")
+    intent = {
+        "schemaVersion": 1,
+        "lifecycleResult": "fulfilled-no-change",
+        "claim": claim,
+        "verifierIds": verifier_ids,
+        "workProduct": final_product,
+    }
+    write(artifacts / "no-change-closure-intent.json", intent)
+    write(artifacts / "no-change-closure-status.json", {"eligible": True, "lifecycleResult": "fulfilled-no-change"})
+    return intent
 
 
 def converge(artifacts: Path, review: dict) -> dict:
@@ -477,6 +744,31 @@ def converge(artifacts: Path, review: dict) -> dict:
 
 def ship(artifacts: Path, pr: dict) -> dict:
     context = load_context(artifacts)
+    repair = context.get("repairPublication")
+    if repair != repair_publication.from_environment(context["binding"], context["profile"]):
+        raise ValueError("Frozen repair publication context drift")
+    if repair is not None:
+        repair_publication.assert_current_authority(repair)
+        repair_publication.assert_remote_head(Path(context["binding"]["repositoryRoot"]), repair)
+        repair_publication.assert_scope(Path(context["binding"]["repositoryRoot"]), repair)
+    if (artifacts / "no-change-closure-intent.json").exists():
+        intent = no_change_closure(artifacts)
+        if intent.get("lifecycleResult") != "fulfilled-no-change":
+            raise ValueError(f"No-change closure intent is no longer valid: {intent.get('reason', 'invalid')}")
+        if intent.get("workProduct") != work_product(context, plan_for(artifacts)):
+            raise ValueError("No-change closure intent no longer matches current work product")
+        review = json.loads(regular(artifacts / "review.json").read_text())
+        if review.get("ready") is not True or review.get("verification", {}).get("workProduct") != intent.get("workProduct"):
+            raise ValueError("No-change closure requires final reviewed verification proof")
+        result = {
+            "ready": True,
+            "draft": False,
+            "status": "fulfilled-no-change",
+            "lifecycleResult": "fulfilled-no-change",
+            "workProduct": intent.get("workProduct"),
+        }
+        write(artifacts / "pr-evidence.json", result)
+        return result
     binding = context["binding"]
     review = json.loads(regular(artifacts / "review.json").read_text())
     product = work_product(context, plan_for(artifacts))
@@ -493,6 +785,8 @@ def ship(artifacts: Path, pr: dict) -> dict:
     if not origin.startswith("github.com/"):
         raise ValueError("Draft publication requires an explicit GitHub repository")
     github_repo = origin.removeprefix("github.com/")
+    if repair is not None:
+        repair_publication.inspect_managed_pr(root, repair, repair["executionBaseRevision"])
     body_file = artifacts / "pr-body.md"
     if body_file.is_symlink():
         raise ValueError("Refusing symlink PR body artifact")
@@ -518,22 +812,74 @@ def ship(artifacts: Path, pr: dict) -> dict:
             raise ValueError("Post-commit-hook work product changed; re-review required before push")
         head = git_text(root, "rev-parse", "HEAD")
         write(receipt_file, {"head": head, "workProduct": product}, immutable=True)
-    git(root, "push", "origin", f"HEAD:refs/heads/{binding['branch']}")
-    listed = subprocess.run(["gh", "pr", "list", "--repo", github_repo, "--head", binding["branch"], "--state", "open", "--json", "url,headRefOid,isDraft"], cwd=root, check=True, capture_output=True, text=True)
-    matches = json.loads(listed.stdout)
-    if matches:
-        if len(matches) != 1 or matches[0]["headRefOid"] != head or matches[0]["isDraft"] is not True:
-            raise ValueError("Existing PR does not match this draft head")
-        url = matches[0]["url"]
+    if repair is not None:
+        repair_publication.publish(root, repair, head)
+        existing_pr = repair_publication.inspect_managed_pr(root, repair, head)
+        url, draft = existing_pr["url"], existing_pr["draft"]
     else:
-        created = subprocess.run(["gh", "pr", "create", "--repo", github_repo, "--draft", "--base", context["profile"]["delivery"].get("baseBranch", context["profile"]["repository"]["defaultBranch"]), "--head", binding["branch"], "--title", pr["title"], "--body-file", str(body_file)], cwd=root, check=True, capture_output=True, text=True)
-        url = created.stdout.strip()
+        git(root, "push", "origin", f"HEAD:refs/heads/{binding['branch']}")
+        listed = subprocess.run(["gh", "pr", "list", "--repo", github_repo, "--head", binding["branch"], "--state", "open", "--json", "url,headRefOid,isDraft"], cwd=root, check=True, capture_output=True, text=True)
+        matches = json.loads(listed.stdout)
+        if matches:
+            if len(matches) != 1 or matches[0]["headRefOid"] != head or matches[0]["isDraft"] is not True:
+                raise ValueError("Existing PR does not match this draft head")
+            url = matches[0]["url"]
+        else:
+            created = subprocess.run(["gh", "pr", "create", "--repo", github_repo, "--draft", "--base", context["profile"]["delivery"].get("baseBranch", context["profile"]["repository"]["defaultBranch"]), "--head", binding["branch"], "--title", pr["title"], "--body-file", str(body_file)], cwd=root, check=True, capture_output=True, text=True)
+            url = created.stdout.strip()
+        draft = True
     if not re.fullmatch(r"https://github\.com/" + re.escape(github_repo) + r"/pull/[0-9]+", url, re.I):
         raise ValueError("Unexpected PR evidence URL")
-    result = {"ready": True, "draft": True, "url": url, "head": head, "baseCommit": binding["baseCommit"], "workProduct": product}
+    result = {"ready": True, "draft": draft, "url": url, "head": head, "baseCommit": binding["baseCommit"], "workProduct": product}
+    manifest = merge_review_manifest(context, github_repo, url, head)
+    if manifest is not None:
+        write(artifacts / "merge-review-manifest.json", manifest, immutable=True)
+        result["mergeReviewManifest"] = manifest
+        result["mergeReviewManifestPath"] = str(artifacts / "merge-review-manifest.json")
     write(artifacts / "pr-evidence.json", result)
     return result
 
+
+
+def merge_review_names() -> list[str]:
+    return ["merge-review-manifest.json", "pr-evidence.json"]
+
+
+def merge_review_route(artifacts: Path) -> dict:
+    evidence = json.loads(regular(artifacts / "pr-evidence.json").read_text())
+    required = bool(evidence.get("ready") is True and evidence.get("mergeReviewManifestPath"))
+    if required:
+        manifest_path = Path(evidence["mergeReviewManifestPath"])
+        if manifest_path.resolve() != (artifacts / "merge-review-manifest.json").resolve():
+            raise ValueError("Managed PR merge review manifest path drift")
+        manifest = json.loads(regular(manifest_path).read_text())
+        if manifest != evidence.get("mergeReviewManifest") or manifest.get("kind") != "factory-merge-review.v1":
+            raise ValueError("Managed PR merge review manifest mismatch")
+    result = {"required": required, "status": evidence.get("status", "ready" if required else "not-required")}
+    write(artifacts / "merge-review-route.json", result)
+    return result
+
+
+def prepare_merge_review(artifacts: Path) -> dict:
+    route = merge_review_route(artifacts)
+    if route.get("required") is not True:
+        raise ValueError("Merge review is not required for this run")
+    replace_approval_evidence(artifacts, merge_review_names())
+    manifest = json.loads(regular(artifacts / "merge-review-manifest.json").read_text())
+    result = {"prepared": True, "manifest": manifest, "files": merge_review_names()}
+    write(artifacts / "merge-review-evidence.json", result)
+    return result
+
+
+def bind_merge_review(artifacts: Path) -> dict:
+    route = json.loads(regular(artifacts / "merge-review-route.json").read_text())
+    if route.get("required") is not True:
+        raise ValueError("Merge review binding requires a managed PR route")
+    proof = verify_current_gate_approval(artifacts, "merge-review", merge_review_names(), "merge-review-approval-binding.json")
+    manifest = json.loads(regular(artifacts / "merge-review-manifest.json").read_text())
+    proof["manifest"] = manifest
+    write(artifacts / "merge-review-approval-proof.json", proof, immutable=True)
+    return proof
 
 def capture_knowledge(artifacts: Path, proposed: dict) -> dict:
     load_context(artifacts)
@@ -555,17 +901,29 @@ def main() -> None:
     elif action == "bind-approval":
         result = verify_approval(artifacts)
     else:
-        verify_approval(artifacts)
-        if action == "begin-round":
+        verify_stored_plan_approval(artifacts)
+        if action == "baseline-verify":
+            result = baseline_verify(artifacts)
+        elif action == "begin-round":
             result = begin_round(artifacts)
+        elif action == "record-no-change-claim":
+            result = record_no_change_claim(artifacts, json.loads(os.environ["INPUTS_IMPLEMENTATION"]))
         elif action == "verify":
             result = verify(artifacts)
         elif action == "converge":
             result = converge(artifacts, json.loads(os.environ["INPUTS_REVIEW"]))
+        elif action == "no-change-closure":
+            result = no_change_closure(artifacts)
         elif action == "ship":
             result = ship(artifacts, json.loads(os.environ["INPUTS_PR"]))
             if not result["ready"]:
                 raise ValueError("Draft publication not authorized; run-local PR intent recorded")
+        elif action == "merge-review-route":
+            result = merge_review_route(artifacts)
+        elif action == "prepare-merge-review":
+            result = prepare_merge_review(artifacts)
+        elif action == "bind-merge-review":
+            result = bind_merge_review(artifacts)
         elif action == "capture-knowledge":
             result = capture_knowledge(artifacts, json.loads(os.environ["INPUTS_PROPOSAL"]))
         elif action == "report":

@@ -71,5 +71,11 @@
     "autoMerge": false,
     "autoDeploy": false,
     "baseBranch": "main"
+  },
+  "noChangeClosure": {
+    "enabled": false,
+    "verifierIds": [
+      "portable-and-policy-tests"
+    ]
   }
 }

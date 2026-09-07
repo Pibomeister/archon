@@ -56,6 +56,7 @@ MANIFEST=(
   workflows/portable/single-repo-feature/commands/review.md
   workflows/portable/single-repo-feature/feature.yaml
   workflows/portable/single-repo-feature/scripts/project.py
+  workflows/portable/single-repo-feature/scripts/repair_publication.py
   workflows/portable/single-repo-feature/scripts/source_recipes.py
   workflows/portable/single-repo-feature/scripts/repo_policy.py
   workflows/portable/single-repo-feature/scripts/review_envelope.py
@@ -81,6 +82,7 @@ MANIFEST=(
   setup/gist-README.md
   setup/install.sh
   setup/negcontrol.sh
+  setup/no-change-closure.py
   setup/package.sh
   setup/params-env.sh
   setup/parse-critique.py

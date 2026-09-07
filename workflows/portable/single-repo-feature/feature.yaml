@@ -92,9 +92,18 @@ nodes:
     binding: $INPUTS.binding
   depends_on:
   - plan-approval
-- id: implementation-loop
+- id: baseline-verify
+  script: project
+  runtime: uv
+  timeout: 1200000
+  with:
+    action: baseline-verify
+    binding: $INPUTS.binding
   depends_on:
   - bind-approval
+- id: implementation-loop
+  depends_on:
+  - baseline-verify
   loop_group:
     max_iterations: 2
     fresh_context: true
@@ -125,6 +134,13 @@ nodes:
             type: array
             items:
               type: string
+          category:
+            type: string
+            enum:
+            - changes-produced
+            - already-satisfied
+            - blocked
+            - inconclusive
         required:
         - summary
         - changes
@@ -132,6 +148,16 @@ nodes:
         additionalProperties: false
       depends_on:
       - round-start
+    - id: record-no-change-claim
+      script: project
+      runtime: uv
+      timeout: 1200000
+      with:
+        action: record-no-change-claim
+        binding: $INPUTS.binding
+        implementation: $implement.output
+      depends_on:
+      - implement
     - id: verify
       script: project
       runtime: uv
@@ -140,7 +166,7 @@ nodes:
         action: verify
         binding: $INPUTS.binding
       depends_on:
-      - implement
+      - record-no-change-claim
     - id: review
       command: review
       timeout: 1200000
@@ -185,6 +211,15 @@ nodes:
         review: $review.output
       depends_on:
       - review
+- id: no-change-closure
+  script: project
+  runtime: uv
+  timeout: 1200000
+  with:
+    action: no-change-closure
+    binding: $INPUTS.binding
+  depends_on:
+  - implementation-loop
 - id: pr-body
   command: pr-body
   timeout: 1200000
@@ -202,7 +237,7 @@ nodes:
     - body
     additionalProperties: false
   depends_on:
-  - implementation-loop
+  - no-change-closure
 - id: ship
   script: project
   runtime: uv
@@ -213,6 +248,43 @@ nodes:
     pr: $pr-body.output
   depends_on:
   - pr-body
+- id: merge-review-route
+  script: project
+  runtime: uv
+  timeout: 1200000
+  with:
+    action: merge-review-route
+    binding: $INPUTS.binding
+  depends_on:
+  - ship
+- id: prepare-merge-review
+  script: project
+  runtime: uv
+  timeout: 1200000
+  with:
+    action: prepare-merge-review
+    binding: $INPUTS.binding
+  depends_on:
+  - merge-review-route
+  when: "$merge-review-route.output.required == true"
+- id: merge-review
+  depends_on:
+  - merge-review-route
+  - prepare-merge-review
+  when: "$merge-review-route.output.required == true"
+  approval:
+    message: Review this run's draft PR evidence before merge authorization. The exact PR/head manifest and PR evidence have been staged into the engine's sealed approval-evidence packet from <this run's ARTIFACTS_DIR>/merge-review-manifest.json and <this run's ARTIFACTS_DIR>/pr-evidence.json. Approving this gate authorizes only the Control API to consider merging that exact GitHub PR head after it revalidates the accepted engine occurrence, evidence digest, factory command, runtime binding, and repository state. It does not authorize deployment, a changed PR head, a different PR, or any model-supplied approval.
+- id: bind-merge-review
+  script: project
+  runtime: uv
+  timeout: 1200000
+  with:
+    action: bind-merge-review
+    binding: $INPUTS.binding
+  depends_on:
+  - merge-review-route
+  - merge-review
+  when: "$merge-review-route.output.required == true"
 - id: kb-capture
   command: capture-knowledge
   timeout: 1200000
@@ -232,7 +304,9 @@ nodes:
     - promotionCandidates
     additionalProperties: false
   depends_on:
-  - ship
+  - merge-review-route
+  - bind-merge-review
+  trigger_rule: all_done
 - id: capture-knowledge
   script: project
   runtime: uv
