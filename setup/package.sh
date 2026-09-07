@@ -79,9 +79,15 @@ MANIFEST=(
   setup/repo-policy.py
   setup/resolve-params.sh
   setup/resolve-web-params.sh
+  # Concurrency: per-run smoke ports and the host mutex for the shared e2e
+  # stack. Both are called from resolve-params.sh / the lane bodies, so a
+  # missing one fails at run time on the operator's machine, not here.
+  setup/port-alloc.sh
+  setup/e2e-mutex.sh
   setup/resume.sh
   setup/chain-env.py
   setup/gate-approve.sh
+  setup/run-artifacts.sh
   setup/run-repro.sh
   setup/smoke-matrix.py
   setup/selective-genapi-patch.py

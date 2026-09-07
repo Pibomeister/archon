@@ -13,10 +13,10 @@
 set -euo pipefail
 RUN_ID="${1:?usage: gate-approve.sh <run-id> [archon args...]}"; shift || true
 HERE="$(cd "$(dirname "$0")" && pwd)"
-ARTIFACTS_ROOT="${ARCHON_ARTIFACTS_ROOT:-$HOME/.archon/workspaces/_folder/goodword/artifacts/runs}"
-AD=""
-for d in "$ARTIFACTS_ROOT/$RUN_ID"*; do [ -d "$d" ] && AD="$d" && break; done
-[ -n "$AD" ] || { echo "GATE_APPROVE=FAIL no artifacts dir for $RUN_ID"; exit 1; }
+# The artifacts root moved when the root became a repo project (RUNBOOK 5a);
+# one helper resolves it from the run's own output_root so this cannot rot again.
+AD="$(bash "$HERE/run-artifacts.sh" "$RUN_ID")" \
+  || { echo "GATE_APPROVE=FAIL no artifacts dir for $RUN_ID"; exit 1; }
 CHAIN_ENV=()
 while IFS= read -r line; do
   [ -n "$line" ] && CHAIN_ENV+=("$line")

@@ -77,8 +77,20 @@ class CodexLiteRun(unittest.TestCase):
         os.environ["ARCHON_BIN"] = "/fake/archon"
         self.addCleanup(lambda: os.environ.__setitem__("ARCHON_BIN", old) if old is not None else os.environ.pop("ARCHON_BIN", None))
         cmd = clr.command_for("run", "bugfix-lite-codex\0/tmp/spec.md")
-        self.assertEqual(cmd, ["/fake/archon", "workflow", "run", "bugfix-lite-codex", "/tmp/spec.md"])
+        # archon-run.py detaches the launcher itself, so it must never ask the
+        # CLI to detach as well -- that was this test's original point and it
+        # still holds.
         self.assertNotIn("--detach", cmd)
+        # --branch is what gives the run its own working_path, and the path is
+        # the ONLY thing archon locks on: without it every lane serializes and a
+        # second launch self-cancels with "Workflow already active on this path"
+        # (RUNBOOK 5a). The branch is derived from the spec slug, so two tickets
+        # never collide and a relaunch of one ticket deliberately reuses its own.
+        self.assertEqual(cmd, ["/fake/archon", "workflow", "run", "bugfix-lite-codex",
+                               "--branch", "bugfix-lite-codex-spec", "/tmp/spec.md"])
+        self.assertEqual(cmd[-1], "/tmp/spec.md",
+                         "the spec must stay the trailing positional: the CLI stores it as "
+                         "user_message, and archon-run.py's post-launch guard compares it")
 
     def test_private_wrapper_forces_workspace_write_on_codex_exec(self):
         real = self.root / "real-codex.sh"
@@ -314,7 +326,20 @@ import json, os, sqlite3, sys, time
 db = os.environ["ARCHON_DB"]
 action = sys.argv[2]
 if action == "run":
-    lane, spec = sys.argv[3:5]
+    # Flags may sit between the lane and the message (archon-run.py passes
+    # --branch, which is what gives each run its own path lock). Parse the way
+    # the real CLI does -- positionals, flags skipped -- or the shim mistakes
+    # "--branch" for the spec and the lane/spec guard fails for a fake reason.
+    rest = sys.argv[3:]
+    positional = []
+    i = 0
+    while i < len(rest):
+        if rest[i] == "--branch":
+            i += 2
+            continue
+        positional.append(rest[i])
+        i += 1
+    lane, spec = positional[0], positional[1]
     run_id = "a" * 32
     con = sqlite3.connect(db)
     con.execute("INSERT INTO remote_agent_workflow_runs VALUES (?,?,?,?,?,?)",

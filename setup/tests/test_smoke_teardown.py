@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""A run must release lane-global ports even when it ends badly.
+"""A run must release what it holds even when it ends badly.
 
-Ports 3124/4124 belong to the bugfix lane, not to one run. smoke-teardown
-depended on smoke-approval with no always_run, so a run that failed upstream of
-the gate never released them and every later run of the lane died at
-`PREFLIGHT=FAIL port 3124 busy`. That is what happened after run 38d72218's
-matrix render gate failed: the next launch could not start at all.
+smoke-teardown depended on smoke-approval with no always_run, so a run that
+failed upstream of the gate never released its servers. Under the lane-global
+ports of the time that meant every later run of the lane died at
+`PREFLIGHT=FAIL port 3124 busy` -- what happened after run 38d72218's matrix
+render gate failed: the next launch could not start at all. Ports are per-run
+now (RUNBOOK 5a), so the stranded resource is the machine-global e2e mutex
+instead, and every lane needs it, not just this one.
 
 The node also opened by running validate-smoke-readiness and exiting 1 on
 failure. Readiness governs shipping. Gating cleanup on it meant that a run whose
@@ -49,7 +51,7 @@ class SmokeTeardown(unittest.TestCase):
     def test_teardown_runs_even_when_the_run_never_reached_the_gate(self):
         for lane in LANES:
             self.assertIs(teardown(lane).get("always_run"), True,
-                          f"{lane}: a failed run strands ports 3124/4124")
+                          f"{lane}: a failed run strands its servers and the e2e mutex")
 
     def test_readiness_never_blocks_cleanup(self):
         for lane in LANES:
@@ -69,14 +71,33 @@ class SmokeTeardown(unittest.TestCase):
             self.assertIn('test -s "$AD/smoke-matrix.json" ||', bash,
                           f"{lane}: teardown reads a matrix it may not have")
 
-    def test_the_ports_it_sweeps_are_the_lane_s_own(self):
-        # Negative control on blast radius: teardown must never reach for the
-        # 4123/3123 pair the feature lane owns, nor the shared e2e mutex.
+    def test_the_ports_it_sweeps_are_this_run_s_own(self):
+        # Blast radius: the sweep must be driven by THIS run's allocation, never
+        # by a port literal -- a literal reaches whoever is listening, including
+        # a concurrent run's server.
         for lane in LANES:
             bash = teardown(lane)["bash"]
-            self.assertIn("for P in 3124 4124", bash, f"{lane}: lane ports changed")
-            for foreign in ("4123", "3123", "54322", "8001"):
+            self.assertIn('for P in "$WEBPORT" "$APIPORT"', bash,
+                          f"{lane}: teardown no longer sweeps its own allocation")
+            self.assertIn("params-env.sh", bash, f"{lane}: ports are never resolved")
+            for foreign in ("4123", "3123", "4124", "3124", "54322", "8001"):
+                self.assertNotIn(f"for P in {foreign}", bash, f"{lane}: literal sweep of {foreign}")
                 self.assertNotIn(f"kill {foreign}", bash, f"{lane}: touches {foreign}")
+
+    def test_it_releases_the_shared_e2e_mutex(self):
+        # The compose stack is left up on purpose; the LOCK is not. A run that
+        # keeps it blocks every later run of every lane at its smoke stack.
+        for lane in LANES:
+            bash = teardown(lane)["bash"]
+            self.assertRegex(bash, r'e2e-mutex\.sh"?\s+release',
+                             f"{lane}: teardown strands the e2e mutex")
+
+    def test_negative_control_a_literal_sweep_would_be_caught(self):
+        bash = teardown("bugfix")["bash"]
+        mutated = bash.replace('for P in "$WEBPORT" "$APIPORT"', "for P in 3124 4124")
+        self.assertNotEqual(bash, mutated, "mutation anchor no longer matches the shipped node")
+        self.assertNotIn('for P in "$WEBPORT" "$APIPORT"', mutated)
+        self.assertIn("for P in 3124", mutated)
 
 
 if __name__ == "__main__":

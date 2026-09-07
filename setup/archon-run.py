@@ -147,9 +147,24 @@ def pinned_gitnexus_runner(index_path: Path) -> Path:
     return runner
 
 
-def _gitnexus_unavailable(reason: str) -> dict:
+def _gitnexus_unavailable(reason: str, index_commit: str | None = None,
+                          expected_commit: str | None = None) -> dict:
+    """`index_commit` is the sha the ON-DISK index was built from.
+
+    It used to exist only inside the prose `reason`, which no node can compare.
+    The index is a shared, unversioned resource -- it can be re-analyzed while
+    another lane is mid-run (observed 2026-09-07, index moved 2fc1bd49 ->
+    55657c79 while a run was in `rca`) -- so a run that reports GATHERED needs a
+    machine-readable record of WHICH index it read. The probe already has the
+    value in hand; emitting it costs nothing.
+    """
     safe = re.sub(r"[^A-Za-z0-9_./:=,+ -]", "_", reason).strip() or "unknown"
-    return {"status": "UNAVAILABLE", "reason": safe[:240]}
+    out = {"status": "UNAVAILABLE", "reason": safe[:240]}
+    if index_commit:
+        out["index_commit"] = str(index_commit)
+    if expected_commit:
+        out["expected_commit"] = str(expected_commit)
+    return out
 
 
 
@@ -242,11 +257,13 @@ def assess_gitnexus_environment(root: Path, codex_home: Path, registry_path: Pat
     )
     if worktree.returncode != 0 or worktree.stdout.strip() != expected_commit:
         return _gitnexus_unavailable(
-            f"worktree-stale actual={worktree.stdout.strip()} expected-{expected_label}={expected_commit}"
+            f"worktree-stale actual={worktree.stdout.strip()} expected-{expected_label}={expected_commit}",
+            index_commit=worktree.stdout.strip() or None, expected_commit=expected_commit,
         )
     if api_entry.get("lastCommit") != expected_commit:
         return _gitnexus_unavailable(
-            f"index-stale actual={api_entry.get('lastCommit')} expected-{expected_label}={expected_commit}"
+            f"index-stale actual={api_entry.get('lastCommit')} expected-{expected_label}={expected_commit}",
+            index_commit=api_entry.get("lastCommit"), expected_commit=expected_commit,
         )
     analyzer_runner, runner_error = optional_pinned_gitnexus_runner(index_path)
     if analyzer_runner is None:
@@ -256,8 +273,15 @@ def assess_gitnexus_environment(root: Path, codex_home: Path, registry_path: Pat
         cwd=index_path, capture_output=True, encoding="utf-8",
     )
     if index_status.returncode != 0 or "Status: ✅ up-to-date" not in index_status.stdout:
-        return _gitnexus_unavailable("analyzer-runtime-stale")
-    return {"status": "AVAILABLE", "reason": "pinned-api-index-current", "index": str(index_path), "commit": expected_commit}
+        return _gitnexus_unavailable("analyzer-runtime-stale",
+                                     index_commit=api_entry.get("lastCommit"),
+                                     expected_commit=expected_commit)
+    # `index_commit` is the same value as `commit` on this path (the checks above
+    # prove they are equal); it is emitted under BOTH keys so a consumer can read
+    # one field name regardless of whether the capability came back available.
+    return {"status": "AVAILABLE", "reason": "pinned-api-index-current",
+            "index": str(index_path), "commit": expected_commit,
+            "index_commit": expected_commit, "expected_commit": expected_commit}
 
 
 CLOUDWATCH_REGION = "us-east-2"
@@ -328,7 +352,16 @@ def assess_capabilities(root: Path, codex_home: Path, registry_path: Path,
         # unpinned dispatcher. Discovery is not authority: one misconfigured
         # source must not hide the reachability of every other one.
         gitnexus = _gitnexus_unavailable(f"launcher-refused {exc}")
+    # Carry the index provenance through. The projection used to keep only
+    # status/reason, which threw away the one fact a downstream node needs: the
+    # gitnexus index is a shared, unversioned resource that can be re-analyzed
+    # mid-run (observed 2026-09-07: it moved 2fc1bd49 -> 55657c79 while a run was
+    # in `rca`). A run that reports GATHERED must be able to say WHICH index it
+    # read, mechanically, rather than in model prose.
     caps["gitnexus"] = {"status": gitnexus["status"], "reason": gitnexus["reason"]}
+    for extra in ("index_commit", "expected_commit"):
+        if gitnexus.get(extra):
+            caps["gitnexus"][extra] = gitnexus[extra]
     # Sources Archon has no integration for at all. Naming them here is the
     # point: an operator reading capabilities.json sees that Amplitude and
     # Metabase were never consulted, rather than assuming they were.
@@ -457,11 +490,30 @@ def wait_for_run_id(log: Path, pid: int, timeout_s: int = 60) -> str:
     fail(f"timed out waiting for workflowRunId in {log}")
 
 
+def run_branch(lane: str, spec: str) -> str:
+    """The --branch a launch gets, and therefore its lock key.
+
+    archon locks a run on its `working_path` and nothing else. Without --branch
+    every run of every lane shares the project root, so a second launch is
+    created and immediately self-cancelled with "Workflow already active on this
+    path" -- a paused run holds it too. With --branch each run lands on
+    ~/.archon/workspaces/_local/<project>/worktrees/archon/task-<branch>, and the
+    locks are disjoint by construction. See RUNBOOK 5a.
+
+    Derived from the lane plus the spec's slug -- the same slug resolve-params.sh
+    computes -- so it is deterministic (two launches of the same spec on the same
+    lane deliberately collide, which is the adopt-if-exists behaviour the rest of
+    the layer already assumes) and unique across concurrent tickets.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", Path(spec).stem.lower()).strip("-")[:48]
+    return f"{lane}-{slug}" if slug else lane
+
+
 def command_for(action: str, target: str, reason: str | None = None) -> list[str]:
     archon = os.environ.get("ARCHON_BIN", "archon")
     if action == "run":
         lane, spec = target.split("\0", 1)
-        return [archon, "workflow", "run", lane, spec]
+        return [archon, "workflow", "run", lane, "--branch", run_branch(lane, spec), spec]
     if action == "resume":
         return ["bash", str(SETUP / "resume.sh"), target]
     if action == "approve":

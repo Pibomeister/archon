@@ -148,6 +148,36 @@ class CapabilityDiscoveryTest(unittest.TestCase):
             self.assertIn("assert-ro.sh", node("bugfix", node_id)["bash"], node_id)
 
 
+class GitnexusIndexProvenance(unittest.TestCase):
+    """capabilities.json must record WHICH gitnexus index the run read.
+
+    The index is a shared, unversioned resource. On 2026-09-07 it was re-analyzed
+    mid-session -- `lastCommit` moved 2fc1bd49 -> 55657c79 while a run was in
+    `rca` -- and nothing in any lane recorded which version a node had read
+    except model prose in `imm-rca.md`. The probe already computes both shas;
+    the assembler used to project only status/reason and throw them away.
+    """
+
+    SRC = (Path(__file__).resolve().parents[1] / "archon-run.py").read_text(encoding="utf-8")
+
+    def test_the_unavailable_path_carries_both_shas(self):
+        self.assertIn("index_commit=worktree.stdout.strip() or None", self.SRC)
+        self.assertIn('index_commit=api_entry.get("lastCommit")', self.SRC)
+
+    def test_the_available_path_carries_both_shas(self):
+        self.assertRegex(self.SRC, r'"index_commit": expected_commit')
+        self.assertRegex(self.SRC, r'"expected_commit": expected_commit')
+
+    def test_the_assembler_does_not_drop_them(self):
+        # The defect was here, not in the probe: the projection kept two keys.
+        self.assertIn('for extra in ("index_commit", "expected_commit"):', self.SRC)
+
+    def test_negative_control_the_old_projection_would_be_caught(self):
+        mutated = self.SRC.replace('for extra in ("index_commit", "expected_commit"):', "for extra in ():", 1)
+        self.assertNotEqual(self.SRC, mutated, "mutation anchor no longer matches the shipped source")
+        self.assertNotIn('for extra in ("index_commit", "expected_commit"):', mutated)
+
+
 class EvidencePlanRetrievalTest(unittest.TestCase):
     """Defect B: the plan must be able to express a search, not just a lookup."""
 
@@ -208,7 +238,14 @@ class EvidencePlanRetrievalTest(unittest.TestCase):
 
     def test_linear_skill_emits_gap_and_retrievability_pairs(self):
         skill = (ARCHON / "skills/archon-linear/SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("retrievable_by: probe|report-author|unretrievable", skill)
+        # The bucket was split on 2026-09-07: `probe` covered prod Postgres,
+        # CloudWatch AND the code graph, but capability-gate reads a probe tag as
+        # "needs the external capability" and demanded an AWS session for
+        # code-answerable gaps. ENG-3549 was blocked that way on "exact
+        # user-visible surface". Bare `probe` stays valid and means `probe-prod`,
+        # so older snapshots keep working.
+        self.assertIn("retrievable_by: probe-prod|probe-code|report-author|unretrievable", skill)
+        self.assertIn("Bare `probe` is still accepted", skill)
         self.assertIn("retrieval work queue", skill)
 
 

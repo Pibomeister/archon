@@ -130,6 +130,73 @@ class CapabilityGate(unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("probe_gaps=1", r.stdout)
 
+    def test_a_probe_code_gap_never_needs_an_aws_session(self):
+        # The code graph and the repository answer these; prod Postgres cannot.
+        # Measured 2026-09-07: ENG-3549 died here on an expired AWS session for
+        # "exact user-visible surface", a gap its own Linear triage comment had
+        # already answered from code (nightly-reminder-generation-handler.ts:423,
+        # reminder.controller.ts:687). A full relaunch plus an `aws login` bought
+        # nothing.
+        self.write("""## Intake gaps
+
+- Exact user-visible surface: the reminders list in web-app vs goodword-mcp — retrievable_by: probe-code
+
+## Classification
+
+`defect`
+""")
+        r = self.run_gate()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("probe_gaps=0", r.stdout)
+
+    def test_a_probe_prod_gap_still_stops_the_run(self):
+        # The other half of the split: naming a timestamp or an id IS what the
+        # gate exists for. ENG-3842 was blocked on exactly this and was right.
+        self.write("""## Intake gaps
+
+- No timestamps beyond the report time, so the send cannot be located in logs — retrievable_by: probe-prod
+
+## Classification
+
+`defect`
+""")
+        r = self.run_gate()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("probe_gaps=1", r.stdout)
+
+    def test_a_probe_code_gap_does_not_fall_through_to_the_untagged_heuristic(self):
+        # NEGATIVE CONTROL for the fallback guard, and the bug the first attempt
+        # at this change shipped: with the guard keyed on an empty result rather
+        # than on the absence of tags, a fully-tagged probe-code report fell
+        # through to LOCATING, whose `user` matches "user-visible surface" -- so
+        # the gate blocked anyway and the fix looked like it worked in review.
+        self.write("""## Intake gaps
+
+- Whether the signed-in user's own row is returned — retrievable_by: probe-code
+- No repository stated; the symptom is user-visible — retrievable_by: probe-code
+
+## Classification
+
+`defect`
+""")
+        r = self.run_gate()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("probe_gaps=0", r.stdout)
+
+    def test_one_probe_prod_gap_among_probe_code_gaps_still_blocks(self):
+        self.write("""## Intake gaps
+
+- Exact user-visible surface — retrievable_by: probe-code
+- Affected account id and send timestamp unknown — retrievable_by: probe-prod
+
+## Classification
+
+`defect`
+""")
+        r = self.run_gate()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("probe_gaps=1", r.stdout)
+
     def test_a_report_with_a_reproduction_is_never_blocked(self):
         # The plan's own constraint: a local-only repro must run with zero
         # external evidence. Without this the gate becomes the thing that stops

@@ -73,10 +73,28 @@ class CounterReaders(unittest.TestCase):
                     out = p.stdout + p.stderr
                     self.assertEqual(p.returncode, 1, out)
                     self.assertIn(f"{token}=FAIL {cf} is not an integer: [{bad}]", out)
-                    self.assertEqual(listing, sorted([cf, shadow]),
-                                     "reader must not create artifacts from a junk counter")
+                    # The load-bearing property: nothing written to a path BUILT
+                    # FROM the counter. That is the 2026-08-29 defect verbatim --
+                    # `round.txt = 1/../round-1` made converge tee its log into the
+                    # PREVIOUS round's directory and read that round's verdict.
                     self.assertEqual(shadow_listing, [],
                                      f"reader wrote into {shadow}/ built from a junk counter")
+                    # Every gate now tees its typed line to a FIXED path derived from
+                    # the node id (RUNBOOK 5a: a failed gate's reason is otherwise
+                    # recoverable nowhere, because archon persists the node's script
+                    # and not its stdout). That file is the one permitted new artifact
+                    # here, and permitting it must not weaken the check above: assert
+                    # the name is the literal node id and carries no counter-derived
+                    # component, so a future body that interpolates the counter into
+                    # its log path still fails this test.
+                    extras = set(listing) - {cf, shadow}
+                    self.assertLessEqual(
+                        extras, {f"node-{node}.out"},
+                        "reader created an artifact that is neither the counter, the "
+                        f"shadow dir, nor its own fixed node log: {sorted(extras)}")
+                    for name in extras:
+                        self.assertNotIn(bad.strip("/. "), name,
+                                         f"artifact name {name!r} was built from the junk counter")
 
     def test_empty_counter_is_a_stop_except_in_report(self):
         for workflow, node, cf, token, shadow, outs in SITES:

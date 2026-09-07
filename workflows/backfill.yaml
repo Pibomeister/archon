@@ -6,6 +6,7 @@ nodes:
     timeout: 300000
     bash: |
       set -euo pipefail
+      if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-preflight.out") 2> >(tee -a "$ARTIFACTS_DIR/node-preflight.out" >&2); fi
       ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
       # Billing guard: runs MUST bill the Claude subscription (OAuth /login), never the API.
       for v in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_PROFILE; do
@@ -99,6 +100,7 @@ nodes:
     timeout: 300000
     bash: |
       set -euo pipefail
+      if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-intake-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-intake-gate.out" >&2); fi
       ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
       P="$ARTIFACTS_DIR/backfill-plan.json"
       test -s "$P" || { echo "INTAKE_GATE=FAIL no backfill-plan.json"; exit 1; }
@@ -210,6 +212,7 @@ nodes:
     timeout: 900000
     bash: |
       set -euo pipefail
+      if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-census.out") 2> >(tee -a "$ARTIFACTS_DIR/node-census.out" >&2); fi
       ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
       AD="$ARTIFACTS_DIR"
       # Census runs on RO credentials only - same recipe as the bugfix lane's
@@ -240,6 +243,7 @@ nodes:
     timeout: 600000
     bash: |
       set -euo pipefail
+      if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-sample.out") 2> >(tee -a "$ARTIFACTS_DIR/node-sample.out" >&2); fi
       ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
       AD="$ARTIFACTS_DIR"
       aws sts get-caller-identity >/dev/null 2>&1 || { echo "SAMPLE=FAIL sso expired - run: aws login, then resume"; exit 1; }
@@ -300,6 +304,7 @@ nodes:
     timeout: 120000
     bash: |
       set -euo pipefail
+      if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-sample-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-sample-gate.out" >&2); fi
       python3 - "$ARTIFACTS_DIR/sample-audit.json" <<'PY'
       import json, sys
       a = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -318,6 +323,7 @@ nodes:
     timeout: 1800000
     bash: |
       set -euo pipefail
+      if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-dry-run.out") 2> >(tee -a "$ARTIFACTS_DIR/node-dry-run.out" >&2); fi
       ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
       AD="$ARTIFACTS_DIR"
       eval "$(bash "$ROOT/.archon/setup/params-env.sh" "$AD/params.json")"
@@ -384,6 +390,7 @@ nodes:
     timeout: 300000
     bash: |
       set -euo pipefail
+      if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-arm.out") 2> >(tee -a "$ARTIFACTS_DIR/node-arm.out" >&2); fi
       ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
       AD="$ARTIFACTS_DIR"
       eval "$(bash "$ROOT/.archon/setup/params-env.sh" "$AD/params.json")"
@@ -572,6 +579,7 @@ nodes:
     timeout: 120000
     bash: |
       set -euo pipefail
+      if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-render-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-render-gate.out" >&2); fi
       AD="$ARTIFACTS_DIR"
       H="$AD/backfill-review.html"
       test -s "$H" || { echo "RENDER_GATE=FAIL no backfill-review.html"; exit 1; }
@@ -604,6 +612,7 @@ nodes:
     timeout: 1800000
     bash: |
       set -euo pipefail
+      if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-snapshot.out") 2> >(tee -a "$ARTIFACTS_DIR/node-snapshot.out" >&2); fi
       ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
       AD="$ARTIFACTS_DIR"
       eval "$(bash "$ROOT/.archon/setup/params-env.sh" "$AD/params.json")"
@@ -689,6 +698,7 @@ nodes:
     timeout: 3600000
     bash: |
       set -euo pipefail
+      if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-apply.out") 2> >(tee -a "$ARTIFACTS_DIR/node-apply.out" >&2); fi
       ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
       AD="$ARTIFACTS_DIR"
       # Re-pin the approved command: hash must match the arm-time sha AND
@@ -744,6 +754,7 @@ nodes:
     timeout: 900000
     bash: |
       set -euo pipefail
+      if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-reconcile.out") 2> >(tee -a "$ARTIFACTS_DIR/node-reconcile.out" >&2); fi
       ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
       AD="$ARTIFACTS_DIR"
       # Back to READ-ONLY credentials: reconciliation must not be able to
@@ -862,6 +873,7 @@ nodes:
     timeout: 120000
     bash: |
       set -euo pipefail
+      if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-kb-capture-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-kb-capture-gate.out" >&2); fi
       KB=/Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb
       git -C "$KB" status --porcelain | sort > "$ARTIFACTS_DIR/kb-post-capture.txt"
       NEW=$(comm -13 "$ARTIFACTS_DIR/kb-pre-porcelain.txt" "$ARTIFACTS_DIR/kb-post-capture.txt" || true)

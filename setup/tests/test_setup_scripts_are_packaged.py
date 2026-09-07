@@ -31,6 +31,13 @@ def referenced():
         if p.is_file():
             for name in set(REF.findall(p.read_text(errors="replace"))):
                 out.setdefault(name, []).append(p.name)
+    # A setup script calling another setup script is the same drift with the
+    # same symptom, and scanning only the workflows could not see it:
+    # port-alloc.sh is reached exclusively from resolve-params.sh.
+    for p in sorted((ARCHON / "setup").glob("*.sh")):
+        for name in set(REF.findall(p.read_text(errors="replace"))):
+            if name != p.name:
+                out.setdefault(name, []).append(p.name)
     return out
 
 
@@ -50,6 +57,11 @@ class SetupScriptsArePackagedTest(unittest.TestCase):
 
     def test_round_reclaim_is_shipped(self):
         self.assertIn("round-reclaim.sh", manifest_entries())
+
+    def test_setup_to_setup_references_are_seen(self):
+        # Negative control for the setup/*.sh scan above.
+        self.assertIn("port-alloc.sh", referenced())
+        self.assertIn("resolve-params.sh", referenced()["port-alloc.sh"])
 
 
 if __name__ == "__main__":

@@ -245,16 +245,22 @@ set +e
 # whole RCA again. Reconstruct it from the run's own bugfix-chain.json; a lane
 # with no chain file (the feature lanes) exports nothing and is unaffected.
 CHAIN_ENV=()
-ARTIFACTS_ROOT="${ARCHON_ARTIFACTS_ROOT:-$HOME/.archon/workspaces/_folder/goodword/artifacts/runs}"
+# Resolved from the run's own output_root: the artifacts root moved when the
+# Goodword root became a repo project (RUNBOOK 5a), and this lookup failing is
+# silent -- it restores zero chain vars and the run then dies at its first
+# attestation node, after paying for the whole RCA again.
+RUN_AD="$(bash "$(dirname "$0")/run-artifacts.sh" "$RUN_ID" 2>/dev/null || true)"
 # One source for the launcher env, shared with gate-approve.sh so the two
 # post-launch controls cannot drift. Array, not a split string: word-splitting
 # is bash-only and silently yields ONE argument under zsh.
 while IFS= read -r line; do
   [ -n "$line" ] && CHAIN_ENV+=("$line")
-done < <(python3 "$(dirname "$0")/chain-env.py" "$ARTIFACTS_ROOT/$RUN_ID" \
+done < <(test -n "$RUN_AD" && python3 "$(dirname "$0")/chain-env.py" "$RUN_AD" \
            --control-dir "${ARCHON_CONTROL_DIR:-$HOME/.archon/control/codex-lite}" 2>/dev/null || true)
 if [ "${#CHAIN_ENV[@]}" -gt 0 ]; then
   echo "RESUME_CHAIN_ENV=RESTORED vars=${#CHAIN_ENV[@]}"
+elif [ -z "$RUN_AD" ]; then
+  echo "RESUME_CHAIN_ENV=NONE reason=no-artifacts-dir run=$(short "$RUN_ID") (a bugfix resume will fail at its first attestation node)"
 fi
 env "${CHAIN_ENV[@]}" DISABLE_OMC=1 archon workflow resume "$RUN_ID" "$@" </dev/null
 ARCHON_RC=$?

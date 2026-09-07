@@ -358,20 +358,60 @@ def validate_systematic_debugging(artifacts_dir: Path) -> dict[str, Any]:
                 continue
             candidates = [row for row in rows if row.get("source") == source]
             valid = False
+            kind_only = False
+            # Why each candidate was rejected. One generic sentence for five
+            # different conditions cost about ten tool calls to diagnose on run
+            # 3d4bfb77 (2026-09-07), and pointed at evidence COLLECTION when the
+            # actual defect was a FLAG: prod-probes was complete, unexpired and
+            # attribution-valid, and the only failing property was
+            # evidence_kind=class. Those are fixed very differently -- one means
+            # re-run the probes, the other means the proof over-claimed -- so
+            # the message has to say which.
+            why = []
             for row in candidates:
                 try:
                     expires = dt.datetime.fromisoformat(str(row.get("expires_at", "")).replace("Z", "+00:00"))
                 except ValueError:
+                    why.append(f"expires_at={row.get('expires_at')!r} (unparseable)")
                     continue
-                if (row.get("status") == "complete"
-                        and row.get("completeness") == "complete"
-                        and row.get("evidence_kind") == "occurrence"
-                        and row.get("occurrence_attribution_valid") is True
-                        and expires > now):
+                failed = [
+                    f"{name}={value!r}"
+                    for name, value, ok in (
+                        ("status", row.get("status"), row.get("status") == "complete"),
+                        ("completeness", row.get("completeness"), row.get("completeness") == "complete"),
+                        ("evidence_kind", row.get("evidence_kind"), row.get("evidence_kind") == "occurrence"),
+                        ("occurrence_attribution_valid", row.get("occurrence_attribution_valid"),
+                         row.get("occurrence_attribution_valid") is True),
+                        ("expires_at", row.get("expires_at"), expires > now),
+                    )
+                    if not ok
+                ]
+                if not failed:
                     valid = True
                     break
+                why.append(", ".join(failed))
+                # A row that fails ONLY on evidence_kind is a different animal:
+                # the evidence was collected fine and is in date, and the proof
+                # claimed an occurrence it cannot support. A row that ALSO fails
+                # on status/completeness/expiry really is incomplete or stale,
+                # and must keep saying so -- routing that to the proof message
+                # would tell the operator to edit a flag when they need to
+                # re-collect. Only the sole-failure case is a contradiction.
+                if failed == [f"evidence_kind={row.get('evidence_kind')!r}"]:
+                    kind_only = True
             if not valid:
-                raise ContractError(f"occurrence evidence source is incomplete, stale, or invalidated: {source}")
+                detail = "; ".join(why) if why else "no provenance row for this source"
+                if kind_only:
+                    raise ContractError(
+                        f"PROOF_SELF_CONTRADICTED occurrence_attributed=true cites {source}, "
+                        f"but its evidence is class-level, not occurrence-level [{detail}]. "
+                        "The probes are fine; the proof over-claimed. If another cited source carries "
+                        f"the attribution, drop '{source}' from occurrence_evidence_sources; if none "
+                        "does, set occurrence_attributed=false and accept class-hardening-only. "
+                        "Then resume -- but EDIT FIRST: this gate is bash and the AI node that wrote "
+                        "the flag never re-runs, so a plain resume re-fails identically.")
+                raise ContractError(
+                    f"occurrence evidence source is incomplete, stale, or invalidated: {source} [{detail}]")
     return {"reproduction_status": status, "active_hypothesis_id": active[0].get("id")}
 
 

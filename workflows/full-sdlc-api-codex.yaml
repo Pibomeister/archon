@@ -35,6 +35,7 @@ nodes:
   timeout: 300000
   bash: |
     set -euo pipefail
+    if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-preflight.out") 2> >(tee -a "$ARTIFACTS_DIR/node-preflight.out" >&2); fi
     SK=/Users/eduardopicazo/Documents/Workspace/Goodword/.claude/skills
     test -f "$SK/ce-code-review/SKILL.md" || { echo "PREFLIGHT=FAIL staged ce-code-review missing"; exit 1; }
     test -f "$SK/ce-doc-review/SKILL.md"  || { echo "PREFLIGHT=FAIL staged ce-doc-review missing"; exit 1; }
@@ -95,12 +96,20 @@ nodes:
       [ -n "$out" ] && printf '%s\n' "$out"
       return 0
     }
+    # Tool presence only. The port itself is ALLOCATED below, not asserted
+    # free: port-alloc.sh walks past an occupied slot, which is what lets a
+    # second run of this lane start while the first is still up.
     port_pids 4123 >/dev/null || { echo "PREFLIGHT=FAIL no port-inspection tool (need lsof, ss, or fuser)"; exit 1; }
-    test -z "$(port_pids 4123)" || { echo "PREFLIGHT=FAIL port 4123 busy"; exit 1; }
     test -d /Users/eduardopicazo/Documents/Workspace/Goodword/api/.git || { echo "PREFLIGHT=FAIL api repo missing"; exit 1; }
     # Run identity: message = absolute spec path (empty = hard fail). Single derivation point.
+    # 4123 is this lane's port BASE and the only place that literal still
+    # appears -- derive-lite.py's port map is a plain string substitution, so
+    # one literal site per lane is what keeps the lite twin derivable.
     bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/resolve-params.sh \
-      /Users/eduardopicazo/Documents/Workspace/Goodword "${ARGUMENTS-}" "$ARTIFACTS_DIR"
+      /Users/eduardopicazo/Documents/Workspace/Goodword "${ARGUMENTS-}" "$ARTIFACTS_DIR" 4123
+    eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+    test -n "$APIPORT" || { echo "PREFLIGHT=FAIL params.json carries no smoke port"; exit 1; }
+    echo "PREFLIGHT_PORTS api=$APIPORT (per-run, from base 4123)"
     test -d /Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb/wiki || { echo "PREFLIGHT=FAIL knowledge base missing"; exit 1; }
     git -C /Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb status --porcelain | sort > "$ARTIFACTS_DIR/kb-pre-porcelain.txt"
     echo "PREFLIGHT=PASS"
@@ -148,6 +157,7 @@ nodes:
   timeout: 120000
   bash: |
     set -euo pipefail
+    if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-kb-recon-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-kb-recon-gate.out" >&2); fi
     K="$ARTIFACTS_DIR/kb-context.md"
     test -s "$K" || { echo "KB_GATE=FAIL no kb-context.md"; exit 1; }
     for m in TERMS DECISIONS DATA-MODEL BIG-PICTURE FOOTGUNS SOURCES; do
@@ -161,7 +171,12 @@ nodes:
     test "$OK" = 1 || { echo "KB_GATE=FAIL no verifiable source path"; exit 1; }
     # The scout is read-only: the KB tree must be exactly as preflight saw it.
     git -C /Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb status --porcelain | sort > "$ARTIFACTS_DIR/kb-now.txt"
-    cmp -s "$ARTIFACTS_DIR/kb-pre-porcelain.txt" "$ARTIFACTS_DIR/kb-now.txt" || { echo "KB_GATE=FAIL scout modified the knowledge base"; exit 1; }
+    # The knowledge base is HOST-GLOBAL: a concurrent lane's kb-capture drops
+    # an untracked file into wiki/change-history/ and a raw cmp would blame
+    # this run's read-only scout for it. Everything else is compared strictly.
+    grep -v '^?? wiki/change-history/' "$ARTIFACTS_DIR/kb-pre-porcelain.txt" | sort > "$ARTIFACTS_DIR/kb-pre-scoped.txt"
+    grep -v '^?? wiki/change-history/' "$ARTIFACTS_DIR/kb-now.txt" | sort > "$ARTIFACTS_DIR/kb-now-scoped.txt"
+    cmp -s "$ARTIFACTS_DIR/kb-pre-scoped.txt" "$ARTIFACTS_DIR/kb-now-scoped.txt" || { echo "KB_GATE=FAIL scout modified the knowledge base"; exit 1; }
     echo "KB_RECON_GATE=PASS"
 - id: bootstrap
   depends_on:
@@ -169,6 +184,7 @@ nodes:
   timeout: 900000
   bash: |
     set -euo pipefail
+    if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-bootstrap.out") 2> >(tee -a "$ARTIFACTS_DIR/node-bootstrap.out" >&2); fi
     API=/Users/eduardopicazo/Documents/Workspace/Goodword/api
     eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
     git -C "$API" fetch origin main
@@ -273,6 +289,7 @@ nodes:
   timeout: 120000
   bash: |
     set -euo pipefail
+    if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-plan-snapshot.out") 2> >(tee -a "$ARTIFACTS_DIR/node-plan-snapshot.out" >&2); fi
     # Shape, contract and premise-citation checks live in setup/plan-shape.sh so
     # plan-converge can re-run exactly the same checks on an ACCEPT round. A
     # second inline copy of the cited() helper would be two contracts drifting
@@ -301,6 +318,7 @@ nodes:
       timeout: 120000
       bash: |
         set -euo pipefail
+        if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-plan-round-pre.out") 2> >(tee -a "$ARTIFACTS_DIR/node-plan-round-pre.out" >&2); fi
         # The cap is checked BEFORE a round is spent. A body node's non-zero exit
         # fails the whole group, and `archon workflow resume` re-enters the group
         # with a fresh iteration, so a cap enforced only in plan-converge could be
@@ -485,6 +503,7 @@ nodes:
       timeout: 120000
       bash: |
         set -euo pipefail
+        if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-plan-critic-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-plan-critic-gate.out" >&2); fi
         N=$(cat "$ARTIFACTS_DIR/plan-round.txt" 2>/dev/null) || { echo "CRITIC_GATE=FAIL no plan-round.txt"; exit 1; }
         case "$N" in ''|*[!0-9]*) echo "CRITIC_GATE=FAIL plan-round.txt is not an integer: [$N]"; exit 1 ;; esac
         RD="$ARTIFACTS_DIR/plan-round-$N"
@@ -724,6 +743,7 @@ nodes:
   timeout: 120000
   bash: |
     set -euo pipefail
+    if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-plan-post-snapshot.out") 2> >(tee -a "$ARTIFACTS_DIR/node-plan-post-snapshot.out" >&2); fi
     test -s "$ARTIFACTS_DIR/plan.md" || { echo "PLAN_POST_SNAPSHOT=FAIL no plan.md"; exit 1; }
     # The critic loop's output is the pre-image for doc-review, so docreview.diff
     # attributes only ce-doc-review's edits and not the critic rounds' revisions.
@@ -778,6 +798,7 @@ nodes:
   timeout: 120000
   bash: |
     set -euo pipefail
+    if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-premise-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-premise-gate.out" >&2); fi
     Q="$ARTIFACTS_DIR/premises-questions.json"
     V="$ARTIFACTS_DIR/premise-verify.json"
     NQ=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))))" "$Q")
@@ -817,6 +838,7 @@ nodes:
   timeout: 120000
   bash: |
     set -uo pipefail
+    if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-docreview-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-docreview-gate.out" >&2); fi
     OUT=$docreview.output
     printf '%s\n' "$OUT" > "$ARTIFACTS_DIR/docreview-envelope.txt"
     printf '%s' "$OUT" | grep -q 'Review complete' || { echo "DOCREVIEW_GATE=FAIL no terminal signal"; exit 1; }
@@ -931,6 +953,7 @@ nodes:
   timeout: 120000
   bash: |
     set -euo pipefail
+    if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-plan-render-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-plan-render-gate.out" >&2); fi
     H="$ARTIFACTS_DIR/plan-review.html"
     test -s "$H" || { echo "RENDER_GATE=FAIL no plan-review.html"; exit 1; }
     for m in GIST KB MAP PLAN REVIEW CRITIC DECIDE; do
@@ -1054,6 +1077,7 @@ nodes:
   timeout: 1200000
   bash: |
     set -euo pipefail
+    if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-gate-tests.out") 2> >(tee -a "$ARTIFACTS_DIR/node-gate-tests.out" >&2); fi
     eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
     cd "$WT"
     rm -rf .omc   # runtime-state leakage guard: any .omc here is session contamination, never work product
@@ -1184,6 +1208,7 @@ nodes:
       timeout: 1200000
       bash: |
         set -euo pipefail
+        if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-deslop-recheck.out") 2> >(tee -a "$ARTIFACTS_DIR/node-deslop-recheck.out" >&2); fi
         eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
         cd "$WT"
         # The writer ran a full agent session against this worktree; any .omc
@@ -1366,6 +1391,7 @@ nodes:
       timeout: 300000
       bash: |
         set -euo pipefail
+        if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-deslop-review-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-deslop-review-gate.out" >&2); fi
         eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
         cd "$WT"
         N=$(cat "$ARTIFACTS_DIR/deslop-round.txt" 2>/dev/null || echo "")
@@ -1562,6 +1588,7 @@ nodes:
   timeout: 120000
   bash: |
     set -euo pipefail
+    if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-reader-audit-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-reader-audit-gate.out" >&2); fi
     D="$ARTIFACTS_DIR/reader-audit.json"
     R="$ARTIFACTS_DIR/reader-audit-result.json"
     NC=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))['columns']))" "$D")
@@ -1589,6 +1616,7 @@ nodes:
   timeout: 300000
   bash: |
     set -euo pipefail
+    if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-commit-impl.out") 2> >(tee -a "$ARTIFACTS_DIR/node-commit-impl.out" >&2); fi
     eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
     cd "$WT"
     MSG=$(head -1 "$ARTIFACTS_DIR/commit-msg.txt" 2>/dev/null || true)
@@ -1609,6 +1637,7 @@ nodes:
       timeout: 120000
       bash: |
         set -euo pipefail
+        if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-round-pre.out") 2> >(tee -a "$ARTIFACTS_DIR/node-round-pre.out" >&2); fi
         C="$ARTIFACTS_DIR/round.txt"
         N=$(cat "$C" 2>/dev/null || echo 0)
         # Hand-editable counter: reject junk before it is incremented or used as a path.
@@ -1690,6 +1719,7 @@ nodes:
       timeout: 300000
       bash: |
         set -uo pipefail
+        if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-review-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-review-gate.out" >&2); fi
         N=$(cat "$ARTIFACTS_DIR/round.txt"); RD="$ARTIFACTS_DIR/round-$N"
         case "$N" in ''|*[!0-9]*) echo "REVIEW_GATE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
         OUT=$review.output
@@ -1897,6 +1927,7 @@ nodes:
   timeout: 600000
   bash: |
     set -euo pipefail
+    if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-exit-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-exit-gate.out" >&2); fi
     eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
     cd "$WT"
     N=$(cat "$ARTIFACTS_DIR/round.txt"); RD="$ARTIFACTS_DIR/round-$N"
@@ -1940,6 +1971,7 @@ nodes:
   timeout: 1200000
   bash: |
     set -uo pipefail
+    if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-smoke.out") 2> >(tee -a "$ARTIFACTS_DIR/node-smoke.out" >&2); fi
     eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
     cd "$WT"
     # port_pids: lsof -> ss -> fuser (lsof is often absent on Linux). rc 1 only
@@ -1958,26 +1990,26 @@ nodes:
       [ -n "$out" ] && printf '%s\n' "$out"
       return 0
     }
-    PORT=4123 bun start > "$ARTIFACTS_DIR/api-boot.log" 2>&1 &
+    PORT="$APIPORT" bun start > "$ARTIFACTS_DIR/api-boot.log" 2>&1 &
     SRV=$!
     # bun start spawns children that outlive the parent: sweep the PORT on exit, not just $SRV.
-    trap 'kill "$SRV" 2>/dev/null; sleep 1; P=$(port_pids 4123); test -n "$P" && kill $P 2>/dev/null; true' EXIT
+    trap 'kill "$SRV" 2>/dev/null; sleep 1; P=$(port_pids "$APIPORT"); test -n "$P" && kill $P 2>/dev/null; true' EXIT
     # Boot liveness: /api-docs-json 200 also proves swagger builds with the new DTOs.
     CODE=000
     for i in $(seq 1 60); do
       sleep 3
-      CODE=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:4123/api-docs-json || echo 000)
+      CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$APIPORT/api-docs-json" || echo 000)
       test "$CODE" = "200" && break
     done
     test "$CODE" = "200" || { echo "SMOKE=FAIL api-docs-json code=$CODE (boot log in artifacts)"; exit 1; }
-    CTRL=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:4123/info || echo 000)
+    CTRL=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$APIPORT/info" || echo 000)
     test "$CTRL" = "401" || { echo "SMOKE=FAIL negative control /info code=$CTRL"; exit 1; }
     RESULT="SMOKE=PASS api-docs-json=200 guarded-control=401"
     # Optional feature probe: only when the plan declared an unauthenticated GET.
     if [ -s "$ARTIFACTS_DIR/smoke-probe.json" ]; then
       PPATH=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['path'])" "$ARTIFACTS_DIR/smoke-probe.json")
       PEXP=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('expect','200'))" "$ARTIFACTS_DIR/smoke-probe.json")
-      PCODE=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:4123$PPATH" || echo 000)
+      PCODE=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$APIPORT$PPATH" || echo 000)
       test "$PCODE" = "$PEXP" || { echo "SMOKE=FAIL probe $PPATH code=$PCODE expected=$PEXP"; exit 1; }
       RESULT="$RESULT probe:$PPATH=$PCODE"
     fi
@@ -2104,14 +2136,25 @@ nodes:
   timeout: 120000
   bash: |
     set -euo pipefail
+    if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-kb-capture-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-kb-capture-gate.out" >&2); fi
     KB=/Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb
     git -C "$KB" status --porcelain | sort > "$ARTIFACTS_DIR/kb-post-capture.txt"
     NEW=$(comm -13 "$ARTIFACTS_DIR/kb-pre-porcelain.txt" "$ARTIFACTS_DIR/kb-post-capture.txt" || true)
-    COUNT=$(printf '%s\n' "$NEW" | grep -c "^?? wiki/change-history/" || true)
-    TOTAL=$(printf '%s\n' "$NEW" | grep -c . || true)
-    test "$COUNT" = "1" || { echo "KB_CAPTURE_GATE=FAIL expected exactly one new capture file, delta: [$NEW]"; exit 1; }
-    test "$TOTAL" = "$COUNT" || { echo "KB_CAPTURE_GATE=FAIL KB changes outside change-history: [$NEW]"; exit 1; }
-    F="$KB/$(printf '%s\n' "$NEW" | sed -n 's/^?? //p')"
+    OTHER=$(printf '%s\n' "$NEW" | grep -v "^?? wiki/change-history/" | grep -c . || true)
+    test "$OTHER" = "0" || { echo "KB_CAPTURE_GATE=FAIL KB changes outside change-history: [$NEW]"; exit 1; }
+    # Counting new files was host-global: a concurrent lane's capture landing
+    # in this window made it 2 and failed a run that had done nothing wrong.
+    # Identify THIS run's file instead -- the capture prompt already requires
+    # the artifacts-dir basename as the run id in the frontmatter.
+    RID="$(basename "$ARTIFACTS_DIR")"
+    F=""
+    for rel in $(printf '%s\n' "$NEW" | sed -n 's/^?? //p'); do
+      if grep -q "$RID" "$KB/$rel" 2>/dev/null; then
+        test -z "$F" || { echo "KB_CAPTURE_GATE=FAIL more than one new file claims run id $RID: [$NEW]"; exit 1; }
+        F="$KB/$rel"
+      fi
+    done
+    test -n "$F" || { echo "KB_CAPTURE_GATE=FAIL no new change-history file carries this run id ($RID), delta: [$NEW]"; exit 1; }
     grep -q "status: captured" "$F" || { echo "KB_CAPTURE_GATE=FAIL missing frontmatter"; exit 1; }
     grep -qi "Promotion candidates" "$F" || { echo "KB_CAPTURE_GATE=FAIL missing promotion candidates"; exit 1; }
     echo "KB_CAPTURE_GATE=PASS file=$F"
@@ -2123,6 +2166,7 @@ nodes:
   timeout: 120000
   bash: |
     set -uo pipefail
+    if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-report.out") 2> >(tee -a "$ARTIFACTS_DIR/node-report.out" >&2); fi
     echo "=== FULL-SDLC-API REPORT ==="
     echo "ARTIFACTS_DIR=$ARTIFACTS_DIR"
     cat "$ARTIFACTS_DIR/worktrees.json" 2>/dev/null || echo "no worktrees.json"

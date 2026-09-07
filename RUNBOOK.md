@@ -233,6 +233,10 @@ archon workflow resume <run-id>
 - **`plan-loop`, `rca-plan-loop`, and `deslop-verify` are `loop_group`s too** (§3a/§3b, §12) and follow the same rule: a resume re-enters with a fresh iteration and re-runs every body AI node, even ones that "succeeded" in the failed iteration (a `DESLOP_REVIEW=FAIL` on the review-gate still re-runs `deslop-recheck` from scratch on resume, for example). Their durable counters are `plan-round.txt`, `rca-round.txt`, `deslop-round.txt`, and `deslop-dirty.txt` (the DIRTY-verdict counter, distinct from `deslop-round.txt`'s iteration count) in the run's artifacts.
 - Node outputs may not survive a resume — every consumer has a disk-artifact fallback (envelope files). If you're debugging, trust the files in `$ARTIFACTS_DIR`, not remembered node output.
 
+**A failed bash GATE whose cause lives in an artifact an AI node wrote is not fixed by resuming.** Only the gate re-executes (§4: completed AI nodes never re-run), so it re-reads the same bytes and returns the same verdict. Hand-edit the named artifact first, then `resume.sh`. Both of 2026-09-07's `rca-gate` failures were in this class, and §12's row for one of them used to say "Resume re-runs the RCA", which is false.
+
+**A failed bash gate's typed line is NOT recoverable from `archon.db`.** `node_failed.data` stores the node's SCRIPT, not its stdout, so `archon workflow get` echoes source and truncates. Recover the discriminator by re-running the gate's helper against a **copy** of the artifacts dir: `cp -R "$(bash .archon/setup/run-artifacts.sh <run>)" /tmp/x && bash .archon/setup/rca-shape.sh /tmp/x`. Never against the live dir — these helpers write files the gate then reads.
+
 **`archon workflow resume <run-id>` can resume a DIFFERENT run (archon 0.8.0, observed 2026-08-29).** With two
 `bugfix` runs on the same path — `ab6ea8aa` (failed at its round cap) and `607fa834` (a different bug report, failed 16 s
 earlier) — `resume ab6ea8aa…` printed "Resuming workflow: bugfix" and then executed `607fa834`'s next loop iteration:
@@ -242,42 +246,165 @@ failed/paused, then calls the executor with `{resume: true}` and NO id; the exec
 `findResumableRun(workflow_name, working_path)` = `status IN ('failed','paused') OR (running AND last_activity_at older than 1 day)
 ORDER BY started_at DESC LIMIT 1` — the NEWEST resumable run of that lane on that path. Not fixed in 0.9.0. **Always resume through `bash .archon/setup/resume.sh <run-id-or-prefix> [archon args]`, never through `archon workflow resume` directly.** The CLI validates the run id you name and then discards it: it calls the executor with `{resume:true}` and no id, and the executor re-selects the run by `workflow_name` and `working_path`, taking the newest resumable one (`ORDER BY started_at DESC LIMIT 1`, where resumable means `failed`, `paused`, or `running` with no activity for a day). If a later run of the same lane failed after the one you meant to resume, that later run is what executes — on 2026-08-29 `archon workflow resume ab6ea8aa` executed `607fa834`, a different bug report in the same lane. The wrapper computes the CLI's selection itself and refuses when it differs from the run you named (`RESUME=REFUSED would_resume=<8> named=<8> reason=newer-resumable-run-of-lane`, printing the exact `archon workflow abandon <other-run>` that clears the way, or `reason=started-at-tie` when the CLI's pick would be undefined); after a permitted resume it re-reads `archon.db` and prints `RESUME=OK run=<8>` only if the run you named — and only that run — advanced (`RESUME=WRONG_RUN named=<8> moved=<8>` otherwise). It accepts an id prefix, refuses an ambiguous one, sets `DISABLE_OMC=1` and `</dev/null` for you (gates are decided with `archon workflow approve`, never stdin), and honors `ARCHON_DB`. Every exit prints exactly one `RESUME=` line, guaranteed by an EXIT trap: `RESUME=OK run=<8> archon_rc=0` when the named run resumed and the workflow finished clean; `RESUME=RAN run=<8> archon_rc=<n>` when the guard held and the named run executed but the workflow ended non-zero; `RESUME=REFUSED …` when the guard blocked and archon never ran; `RESUME=NOT_EXECUTED named=<8> archon_rc=<n>` when archon failed before touching any run; `RESUME=WRONG_RUN named=<8> moved=<8>,<8>` when a different run of the lane moved; `RESUME=ERROR stage=<resolve|select|pre|exec|post> reason=<…>` when the guard itself could not complete (`stage=exec` means archon was already running — check the run before abandoning anything) — exit 90 (91 if archon returned 90), and a post-archon error still reports `archon_rc=<n>`. Any verdict may carry `appeared=<8>,<8>`: rows that showed up in the lane during the resume; the CLI cannot create a run while resuming, so those belong to another operator and never change the verdict. Tests: `setup/tests/test_resume_guard.py` (synthetic DB + archon shim, negative-controlled per guard).
 
-## 5a. Concurrency: why runs serialize today, and what actually unlocks them
+## 5a. Concurrency: running N lanes at once
 
-Measured 2026-08-30 with `lock-probe` (zero-spend, holds its node 45 s):
+Runs no longer serialize. This is the operating procedure; the measurements that
+got us here are at the bottom.
 
-- **The lock is `working_path`, nothing else.** `getActiveWorkflowRunByPath` keys on the run's `working_path`; a
-  second launch of ANY lane whose run would share that path is created and immediately self-cancelled
-  (`Workflow already active on this path`). Paused runs hold it too (§12).
-- **The Goodword root is a "folder" project, so every run shares one `working_path`** — that is OUR architecture
-  serializing the lanes, not an archon invariant. A symlinked second directory does NOT help: the CLI realpaths
-  the cwd (probe run `hold3` keyed to the real path and self-cancelled).
-- **Worktree isolation is the sanctioned unlock.** In a scratch git project with an `origin` remote, two
-  `archon workflow run lock-probe --branch <b> --detach` launches ran CONCURRENTLY, each with
-  `working_path = ~/.archon/workspaces/_local/<proj>/worktrees/archon/task-<b>` — disjoint locks by construction.
-  `--branch` requires the project itself to be a git repo with a remote ("Cannot determine git remote"), which the
-  Goodword root is not.
-- **A side benefit:** with one run per `working_path`, the §4 resume-wrong-run defect cannot trigger — the CLI's
-  `findResumableRun(lane, path)` has at most one candidate.
+### The rule
 
-To make "nothing blocks anything" true here, two changes are needed, in order:
+**Every run needs its own `working_path`, and `--branch` is how you get one.**
 
-1. **Give each run its own `working_path`.** Options: (a) make the Goodword root a git repo (a shell: `.gitignore`
-   everything, one empty commit, a local bare `origin`) so `--branch` works — node bodies already use absolute
-   hardcoded paths, so the archon worktree is only a lock key and artifacts anchor, but this flips the project
-   kind and DEFAULT worktree behavior for every existing launch recipe, so it needs a supervised trial run first;
-   or (b) an upstream fix making the lock opt-out or keyed per run. Decision owner: Patrick/Edy.
-2. **Parameterize the smoke ports.** The lanes hardcode 4123 (sdlc) / 4124+3124 (bugfix), so even with disjoint
-   locks, two runs of the SAME lane collide at `preflight`/`smoke-stack`. Ports must derive from the run id (or an
-   allocator file) before same-lane concurrency is real. Until both land, treat one-run-per-lane as the operating
-   assumption and §12's path-lock rules as the law.
+```
+DISABLE_OMC=1 archon workflow run bugfix --branch eng-3059 --detach "/abs/path/to/report.md"
+DISABLE_OMC=1 archon workflow run bugfix --branch eng-3842 --detach "/abs/path/to/other-report.md"
+DISABLE_OMC=1 archon workflow run full-sdlc-api-lite --branch eng-3549 --detach "/abs/path/to/spec.md"
+```
+
+Each lands on `~/.archon/workspaces/_local/Goodword/worktrees/archon/task-<branch>`,
+which is the lock key. Drop `--branch` and you are back to one shared path and the
+old `Workflow already active on this path` self-cancel.
+
+`archon workflow runs` showing three distinct `working_path`s is the proof that
+three runs are genuinely in flight. Anything else is one run and two corpses.
+
+**The branch name is yours to pick and it must be unique per run.** Two launches
+with the same `--branch` share a worktree and therefore share the lock.
+
+### Why the Goodword root can do this at all
+
+The root is a **git shell**: `.gitignore` containing `*`, one empty commit, and a
+bare `origin` under `~/.archon/shells/`. Nothing is ever tracked in it. It exists
+because `--branch` refuses on a non-repo project ("Cannot determine git remote")
+and on a folder project ("Worktree options require a git-repo project").
+
+Node bodies use absolute hardcoded paths for every repo, so **the archon worktree
+is only a lock key and an artifacts anchor** — never the tree the work happens in.
+The api/web-app worktrees the lanes actually build in are still cut under
+`api/.worktrees/` and `web-app/.worktrees/` as before.
+
+`install.sh` step 5 creates the shell and registers through
+`register-probe --branch`, asserting the run landed in a worktree. **Rollback is
+one command:** `rm -rf <root>/.git`, then re-register. If a machine registered the
+root as a folder project first, the stored `kind` is sticky and archon refuses
+`--branch`; flip it:
+
+```
+sqlite3 ~/.archon/archon.db "update remote_agent_codebases set kind='repo', default_branch='main' where default_cwd='<root>'"
+```
+
+### What is isolated per run, and what is not
+
+| Resource | Isolation | Mechanism |
+|---|---|---|
+| Path lock | per run | `--branch` worktree |
+| Artifacts dir | per run | archon, keyed on run id |
+| Smoke ports | per run | `setup/port-alloc.sh`, recorded in `params.json` |
+| api/web worktrees | per run | slug-derived, incl. `bugfix-smoke-<slug>` |
+| ce-code-review run dir | **shared** | `head_sha` prefix match only — see below |
+| e2e docker stack | **shared, serialized** | `setup/e2e-mutex.sh` — a typed stop, not a queue |
+| goodword-kb | **shared, scoped gates** | gates match this run's own file |
+
+**Ports.** No lane hardcodes a bind port any more. Preflight passes the lane's
+BASES to `resolve-params.sh`, which calls `port-alloc.sh` and writes `api_port` /
+`web_port` into `params.json`; `params-env.sh` exports them as `$APIPORT` /
+`$WEBPORT`. The formula is `base + 10*k` with `k` derived from the run slug and
+walked forward past an occupied slot. Bases: **4123** full-sdlc-api, **4124/3124**
+bugfix, **4125** full-sdlc-api-lite, **4126/3126** bugfix-lite, **4127/3127**
+full-sdlc-web. They are one decade apart on purpose — stride 10 makes cross-lane
+collision impossible by construction rather than by luck about how slugs hash.
+
+`full-sdlc-web` moved off 4123/3123 for that reason: it and `full-sdlc-api` used to
+bind the same 4123, and both smoke checks (`/api-docs-json`=200, `/info`=401) pass
+against *either* server, so a collision could report `SMOKE=PASS` for a build that
+was never started.
+
+Consequence for you: **the live URLs are per run.** The bugfix matrix gate writes
+`$ARTIFACTS_DIR/smoke-urls.txt` and prints the URL on the `MATRIX_RENDER_GATE` line;
+the web lane's UAT node reads the same file. Never walk another run's app by
+assuming 3124.
+
+**Port sweeps are now safe** because they sweep this run's own allocation. Do not
+reintroduce a literal — `setup/tests/test_parallel_safety.py` fails the build if you do.
+
+**The e2e stack is the one thing that still serializes.**
+`api/local-env-compose.e2e.yaml` pins a project name, container names, volumes and
+host ports 54322/8001, and `up -d --wait` attaches to a running stack instead of
+erroring — so a second run's migrations and seed rewrite the first's rows with no
+error at all. `e2e-mutex.sh` turns that into a typed stop
+(`E2E_MUTEX=FAIL ... owner artifacts: <dir>`) at the two sites that boot it:
+`exit-gate`'s search-eval replay and `smoke-stack`. It is deliberately **not** a
+blocking wait — the smoke stack stays up across a human approval gate that can take
+hours, and blocking would hang a run behind a person.
+
+`smoke-teardown` (`always_run`) releases it. A run that dies before teardown strands
+the lock; the failure message names the owner and prints the `rm -rf` that clears it.
+
+*Known ceiling:* an **integration-kind repro** reaches the same shared database
+through `.env.e2e` at red-gate, green-check, exit-gate and negcontrol, and does NOT
+take the mutex — locking it there would serialize most of the lane. Do not run an
+integration-kind bugfix concurrently with anything that boots the e2e stack.
+
+**ce-code-review is still a shared root.** `CE_REVIEW_ROOT` is read-side only: the
+skill hardcodes `/tmp/compound-engineering/ce-code-review/` in its own SKILL.md, so
+setting the variable moves where the gate LOOKS, not where the skill WRITES. The
+only separator between concurrent lanes is the `head_sha` prefix match in
+`review-gate`, which works because two runs on different worktrees have different
+heads — but two lanes reviewing the *same* head sha would still each see the other's
+dir as new. Verified 2026-09-06; not fixed, recorded.
+
+**The knowledge base is shared and the gates now say so.** `kb-recon-gate` compares
+everything outside `wiki/change-history/` strictly and ignores untracked additions
+inside it, because that is exactly where a concurrent lane's `kb-capture` lands.
+`kb-capture-gate` in the full-sdlc lanes identifies THIS run's file by the
+artifacts-dir basename in its frontmatter instead of asserting that exactly one new
+file appeared. bugfix's own capture gate was already run-local
+(`$ARTIFACTS_DIR/kb-capture.md`) and needed nothing.
+
+**Chain state was NOT a hazard and was left alone.** `logical_chain_id` is a fresh
+`secrets.token_hex(16)` per chain and the state lives at
+`bugfix-chains/<chain_id>.json`, so concurrent runs write different files and cannot
+lose each other's updates. The read-modify-write is genuinely unlocked, but the only
+way to race it is two processes driving the SAME chain, which is sequential by
+construction (a chain continues only while its run is paused). Measured 2026-09-06.
+
+### Measurements
+
+2026-08-30, with `lock-probe` (zero-spend, holds its node 45 s):
+
+- **The lock is `working_path`, nothing else.** `getActiveWorkflowRunByPath` keys on
+  it; a second launch of ANY lane whose run would share that path is created and
+  immediately self-cancelled. Paused runs hold it too (§12).
+- A symlinked second directory does NOT help — the CLI realpaths the cwd.
+- Worktree isolation is the sanctioned unlock, proven in a scratch git project.
+
+2026-09-06, on the real root after the shell landed: two `lock-probe` launches with
+`--branch probe-a` / `--branch probe-b` ran concurrently, `working_path`
+`.../worktrees/archon/task-probe-a` and `task-probe-b`, both `completed`. Zero spend.
+
+**A side benefit, with one caveat.** The §4 resume-wrong-run defect is structurally defused:
+`findResumableRun(lane, path)` now selects among the runs of ONE ticket, not every run of the
+lane. Proven 2026-09-07 with three `resume-probe` runs on distinct worktrees — resuming the
+OLDER of two same-lane failures executed exactly that run and left the newer failure untouched,
+which is the case that misfired on 2026-08-29.
+
+The caveat: `archon-run.py` derives the branch from the spec slug, so **relaunching the same
+ticket reuses its worktree** and that path can accumulate several runs (a failed launch plus its
+relaunch). The CLI still takes the newest resumable one, which is almost always what you want —
+but it is not "at most one candidate", and `resume.sh`'s guard is still what refuses when the
+CLI's pick differs from the run you named. Keep using the wrapper.
+
+**Cost note:** archon copies `.archon/` and `.omc/` into each worktree (~36 MB per
+run, measured). Harmless, but it is why a launch is not instant, and why the lanes
+address every setup script by absolute path into the real root rather than through
+the copy beside them.
 
 ## 5. Stalls, orphans, and locks
 
 - **You killed the archon CLI (or it died): the run is orphaned as `running` and the worktree lock persists.** Recover with `archon workflow abandon <run-id>`. **There is no `cancel` verb.**
 - **Worktree-in-use lock** on a new run: an earlier run still owns `api/.worktrees/archon-toy` (or web's). Abandon the stale run, then `cleanup`.
-- **Port sweeps: only ever touch ports the workflow owns (4123 api, 3123 web).** An over-broad sweep during the build killed the operator's own api on 4000. `PREFLIGHT=FAIL port 4123 busy` means find that specific PID (`lsof -ti :4123`, or `ss -ltnp "sport = :4123"` where lsof is absent) and decide — it may be a live run.
-- **`PREFLIGHT=FAIL no port-inspection tool`** means neither `lsof`, `ss`, nor `fuser` exists. That is a hard stop on purpose: without one, the busy-port check would pass having checked nothing and two runs would collide on 4123.
+- **Port sweeps: only ever touch ports the workflow owns.** Since §5a those are per-run, read from `params.json` (`api_port` / `web_port`) or the `PREFLIGHT_PORTS` line — never a lane literal. An over-broad sweep during the build once killed the operator's own api on 4000. To find who holds a port: `lsof -ti :<port>`, or `ss -ltnp "sport = :<port>"` where lsof is absent — it may be a live run.
+- **`PREFLIGHT=FAIL no port-inspection tool`** means neither `lsof`, `ss`, nor `fuser` exists. That is a hard stop on purpose: without one, `port-alloc.sh` cannot tell a free slot from a busy one and two runs would collide on the same port.
 - Kill by PID from `lsof -t`, never `pkill -f <pattern>` — a pattern match is one typo from killing an unrelated process.
 
 ## 6. Environment traps
@@ -290,10 +417,11 @@ To make "nothing blocks anything" true here, two changes are needed, in order:
 - **`gh pr ready` re-triggers the AI-review bots**, so babysit always terminates with a freshly-pending CodeRabbit status. It resolves green minutes later. Merge-ready = CI green + ready flag; the post-flip bot re-run is expected residue.
 - **`Error: Workflow '<name>' not found`.** The installed payload predates the lane. Run `ls <root>/.archon/workflows/` and `cat <root>/.archon/VERSION`. If the yaml is absent, pull the gist and rerun `install.sh`. If the gist itself lacks `archon__workflows__<name>.yaml`, the maintainer must add it to the `package.sh` MANIFEST and `--publish`. Never auto-retry the run.
 - **Approving a bugfix run: use `archon workflow approve`, which is what the gate packet prints.** `archon-run.py approve/resume --token` is the CODEX path: the control token is printed only for `provider == codex` (`archon-run.py` ~line 2415) and is never persisted, so for a claude run there is no token to pass and the guard it protects (`codex-control-guard`) is a typed no-op anyway. The CLI path works because `post-approval-integrity` resolves `ARCHON_BUGFIX_CHAIN_STATE` and `ARCHON_ATTESTATION_DIR` itself via `setup/chain-paths.sh`; before that it failed with `POST_APPROVAL=FAIL no chain state` naming a file that was sitting there readable (observed 2026-09-04, run 127a883f).
-- **Do not free ports 3124/4124 while a run is paused at the smoke gate.** The matrix's judgment rows are walked against the live app on 3124, and `smoke-teardown` releases both for you after approval. Killing them during "cleanup" leaves the gate undecidable and forces an approval on unverified rows — observed 2026-09-04, same run.
+- **Do not free a paused run's smoke ports while it waits at the smoke gate.** (They are per-run since §5a; the gate packet and `MATRIX_RENDER_GATE` print this run's pair, and `smoke-urls.txt` in the artifacts dir carries them.) The matrix's judgment rows are walked against this run's live app, and `smoke-teardown` releases both for you after approval. Killing them during "cleanup" leaves the gate undecidable and forces an approval on unverified rows — observed 2026-09-04, same run.
 - **`CLOSURE_REACHABLE=NO` at intake-gate is a notice, not a fault.** It means the report has more than one effective symptom, so `RESOLVED` is unreachable (it needs every symptom `fixed`, and a track split to its own ticket is not) and the smoke gate will ask for `accept-residuals.txt`. Expected for a multi-track customer report. If you want an unassisted ticket-to-PR run, pick a single-track report with a reproduction.
 - **`test_runner_selfcheck.py::AmbientGitConfigIsolation` is intermittently red under the full suite** (seen twice on 2026-09-04, `SHA:1 took 2 values across runs`), and passes in isolation both times. It is the node-stress harness's own determinism check, unrelated to whatever else is in the run. Re-run the file alone before treating it as a real failure; do not treat a single full-suite sighting as a regression in your change.
 - Nodes start at the (non-git) folder root with no git context — which is why every repo path in the workflows is absolute and rendered per machine at install time. Don't "fix" one to a relative path.
+- **The e2e stack is one shared Postgres for the whole machine** and `docker compose ... up -d --wait` attaches to a running one rather than failing. `setup/e2e-mutex.sh` makes a second boot a typed stop instead of a silent re-seed over live rows; a run that dies before `smoke-teardown` strands the lock and the message prints the `rm -rf` that clears it. See §5a.
 - **`CE_REVIEW_ROOT` overrides where the review gate looks for ce-code-review run dirs** (default `/tmp/compound-engineering/ce-code-review`). `round-pre` and `review-gate` both honor it, so set it for the whole run or not at all. **Read side only** — the skill still writes to the default root, so this is an isolation/override knob (it is what makes `review-gate` testable), not a per-run guarantee: two lanes reviewing the *same* head sha can still each see the other's dir as new, and the `head_sha` prefix match cannot separate them.
 - **Both ce-code-review listings are `LC_ALL=C sort`ed on purpose — do not drop it.** `round-pre` writes `prerun-dirs.txt` and `review-gate` writes `post-dirs.txt` in separate node executions, and a resume can come from a differently-configured shell. Collate the two lists differently and `comm -13` reports a **pre-existing** dir as new — silently, exit 0, no warning — which is how the gate ends up reading a foreign run's verdict. Regression-tested in `setup/tests/test_node_stress.py::ReviewGateScanIsolation`, negative control included.
 
@@ -350,7 +478,7 @@ external curated pages.
 DISABLE_OMC=1 archon workflow run cleanup "teardown" </dev/null 2>&1 | tee /tmp/archon-cleanup.log
 ```
 
-- Kills stray 4123/3123 PIDs (by lsof-derived PID), removes worktrees, deletes local `archon/*` branches, deletes remote branches **only when no open PR uses them**.
+- **Reports** listeners across every lane's port range and never kills one — ports are per-run since §5a, so a listener there may be a live run's server. Also reports a held e2e mutex and its owner. Removes worktrees, deletes local `archon/*` branches, deletes remote branches **only when no open PR uses them**.
 - It **refuses** to touch a branch that isn't `archon/*` and refuses dirty trees — exiting 1 as `CLEANUP=PARTIAL`. That refusal is deliberate, not a bug: look at what it refused and resolve by hand.
 - Rollback of a bad ship: close the PRs (operator action — never automated), then `cleanup` deletes the branches. Committed review fixes live on the feature branches, so nothing is lost until you delete those.
 
@@ -381,12 +509,13 @@ so `bind-repo` rewrites params and creates the worktree only AFTER the human app
 
 Lane-specific facts:
 
-- **Ports: this lane owns 4124 (api smoke) and 3124 (reserved). It never touches 4123/3123.** Ports are
-  disjoint, but the runs still cannot overlap: archon 0.8.0 holds ONE active run per project path, and a
-  second `workflow run` of any lane fails immediately with `Workflow already active on this path (running):
-  <lane>` (observed 2026-08-29 for both `full-sdlc-api` and `bugfix`; a PAUSED run holds the lock too —
-  `already active on this path (paused)`). The CLI's `--branch <other>` escape needs the project path itself
-  to be a git repo, which the Goodword root is not. Wait for the active run to finish, or `abandon` it. Port sweeps follow §5 rules within that ownership.
+- **Ports: allocated per run from this lane's bases 4124 (api smoke) and 3124 (web).** Two `bugfix` runs
+  can be in flight at once — launch each with its own `--branch` (§5a) and they get disjoint locks and
+  disjoint ports. Without `--branch` they still share one `working_path` and the second self-cancels with
+  `Workflow already active on this path` (a PAUSED run holds it too). This run's pair is on the
+  `PREFLIGHT_PORTS` line and in `params.json`; port sweeps follow §5 rules within that ownership. What
+  still serializes is the **e2e stack** (`e2e-mutex.sh`), and an integration-kind repro shares it without
+  taking the lock — see §5a's known ceiling.
 - **`aws login` before starting** is a soft prerequisite here, not a hard one: expired SSO degrades the
   evidence stage (`EVIDENCE_AWS=DEGRADED sso expired`) instead of failing preflight. Same for
   `SENTRY_AUTH_TOKEN` and `LINEAR_API_KEY` (`PREFLIGHT_WARN ... unset`). A local-only repro runs with zero
@@ -408,9 +537,9 @@ Lane-specific facts:
   starts UNATTENDED red -> fix -> deslop -> negcontrol -> review. Treat `cannot_determine` verdicts and
   `EXPERIMENT=DEGRADED` as the chain's soft spots, exactly like premise checks in §2a.
 - **Gate 2 is the in-app smoke matrix** (`smoke-matrix.html`): after the exit gate, `smoke-stack` boots
-  the real stack — e2e compose (54322/8001) + search-eval fixture + api on 4124 (fix worktree for api
-  bugs, main checkout for web bugs) + web on 3124 (fix worktree for web bugs, else a disposable
-  `web-app/.worktrees/bugfix-smoke` off origin/main). `smoke-auto` runs the generated Playwright rows;
+  the real stack — e2e compose (54322/8001, under the host mutex) + search-eval fixture + api on this run's api port (fix worktree for api
+  bugs, main checkout for web bugs) + web on this run's web port (fix worktree for web bugs, else a
+  disposable `web-app/.worktrees/bugfix-smoke-<slug>` off origin/main). `smoke-auto` runs the generated Playwright rows;
   the pause shows auto rows pre-filled and judgment rows as a checklist to walk in the live app
   (login `search-eval@goodword.internal`, any 6-digit code — whitelisted locally). The stack SURVIVES
   the pause by design (nohup + PID files under `<artifacts>/smoke-stack/`); `smoke-teardown` kills it
@@ -431,12 +560,13 @@ Lane-specific facts:
   restore triple (`git read-tree <checkpoint> && git checkout-index -af`) puts the lockfile back to HEAD
   too — undoing the unfrozen `pnpm install` the web bootstrap ran. Re-run the install
   (`mise x node@20 -- pnpm install --no-frozen-lockfile`) after restoring, before resuming.
-- **Cleanup**: `smoke-teardown` handles the matrix stack (kills 4124/3124 by PID, removes
-  `web-app/.worktrees/bugfix-smoke`) after gate-2 approval; the e2e compose (54322/8001) is left up on
-  purpose. For an ABANDONED run the sweep is manual per §10 conventions: abandon the run,
-  `git -C <repo> worktree remove <wt>` (including `web-app/.worktrees/bugfix-smoke` and
-  `web-app/.worktrees/bugfix-smoke-deployed` if present), delete `archon/<slug>` branches, sweep only
-  4124/3124 by PID (PID files live under `<artifacts>/smoke-stack/`).
+- **Cleanup**: `smoke-teardown` handles the matrix stack (kills this run's own ports by PID, removes
+  `web-app/.worktrees/bugfix-smoke-<slug>`, releases the e2e mutex) after gate-2 approval; the e2e compose
+  (54322/8001) is left up on purpose. For an ABANDONED run the sweep is manual per §10 conventions:
+  abandon the run, `git -C <repo> worktree remove <wt>` (including `web-app/.worktrees/bugfix-smoke-<slug>`
+  and `web-app/.worktrees/bugfix-smoke-deployed` if present), delete `archon/<slug>` branches, sweep only
+  THAT run's ports by PID (PID files live under `<artifacts>/smoke-stack/`, the port pair in
+  `<artifacts>/params.json`), and `rm -rf ~/.archon/control/e2e-stack.lock` if it still names that run.
 
 RCA planning-critic loop exits (`rca-plan-loop`, VERSION 2026.08.28-2, design-only — not yet observed
 live; mirrors §3a's `plan-loop`, with the diagnosis files immutable for the whole loop instead of the
@@ -463,7 +593,8 @@ Failure taxonomy (in addition to the shared discriminators of §3 — same resum
 |---|---|---|
 | `PREFLIGHT_WARN <source> ...` | Non-fatal; that evidence source degrades. | Optionally provision and restart; otherwise none. |
 | `EVIDENCE_AWS=DEGRADED sso expired` | AWS evidence skipped; run continues. | `aws login` before the next run if you want DB/log evidence. |
-| `RCA_GATE=FAIL chain link N uncited` / `signature too generic` | The RCA broke its own contract. | Resume re-runs the RCA; recurring = engineer. |
+| `RCA_GATE=FAIL chain link N uncited` / `signature too generic` | The RCA broke its own contract. | **A plain resume does NOT re-run the RCA.** `rca-gate` is a bash node; `rca` and `rca-reassess` are completed AI nodes, which never re-run (§4). The gate re-reads the same bytes and fails identically. Hand-edit the named artifact, then `resume.sh`. Recurring = engineer. |
+| `RCA_SHAPE=FAIL PROOF_SELF_CONTRADICTED occurrence_attributed=true cites <source> ...` | `proof-assessment.json` claims the reported occurrence was attributed, but the cited source's provenance row is `evidence_kind: class` — a census or a sample, not a record naming the reported instance. The probes are fine; the proof over-claimed. Observed 2026-09-07 on run 3d4bfb77, where `rca-reassess` wrote the flag and, 35 s later, prose saying "no single row here can be pinned as *the* reported occurrence". | Decide which is true. If another cited source carries the attribution, drop the class-kind one from `occurrence_evidence_sources`. If none does, set `occurrence_attributed: false` and accept `class-hardening-only`. Then `resume.sh` — a resume without the edit re-fails identically. |
 | `RCA_GATE=FAIL CROSS_REPO_BUG` (also `BIND=FAIL CROSS_REPO_BUG`) | RCA says the bug spans api and web-app. v1 hard stop; RCA artifacts preserved. | Split the report into per-repo bugs (the expensive analysis already exists) or escalate. |
 | `CHAIN_CONFLICT [link=N]` | Blind re-derivation contradicts the RCA chain. Same class as `PREMISE_CONFLICT`. | Never "fix" the verifier. Read both artifacts, fix the RCA or the report, resume. |
 | `EXPERIMENT_CONFLICT observed=<id> rca=<id>` | The LIVE RUN contradicts the RCA's mechanism. Same class as `CHAIN_CONFLICT`. | Never "fix" the experiment. Fix the RCA, then resume. |
@@ -475,7 +606,7 @@ Failure taxonomy (in addition to the shared discriminators of §3 — same resum
 | Smoke-only behavior differs from the accepted integration/eval profile | The smoke stack omitted a required seed, override, feature flag, clock, or provider stub, so its output is not product-runtime evidence. | Classify harness drift and repair the harness profile. Do not change production defaults merely to make a toy fixture behave like the accepted profile. |
 | `RCA_INVESTIGATION_REQUIRED reason=surface-ambiguous ticket=open no_implementation=true` | A thin report maps to multiple runtime entrypoints and no report/runtime reproduction selects one. This is valid open investigation, not a malformed RCA. | Gather the missing surface/repro evidence or create a distinct class-hardening report. Never force owner strings to match or close the source ticket. |
 | `EVAL_DIVERGED lane=... cause=missing-reranker-fixture` / `cause=behavior-regression` | A search-touching fix changed candidate shape or actual outcomes. Missing reranker keys are transport drift; replayed failures after those keys exist are product regressions. | For missing keys only, freeze planner/embed inputs and run `run.ts --replay <baseline-cassette> --record-reranker --subset <ids>`. Require every existing fixture to remain byte-identical and only new keys to be added, then replay the full corpus. If the full replay has regressions, revisit the fix. Never overwrite planner fixtures, lower floors, or rewrite a passing baseline merely to make the gate green. |
-| `SMOKE_STACK=FAIL ...` | The matrix stack failed to boot (compose, migrations, seed, api, or web). | Resume once (boot flake); recurring = stack recipe broke — engineer. Sweep 4124/3124 by PID first. |
+| `SMOKE_STACK=FAIL ...` | The matrix stack failed to boot (compose, migrations, seed, api, or web). | Resume once (boot flake); recurring = stack recipe broke — engineer. Sweep THIS run's ports by PID first (`params.json`). `E2E_MUTEX=FAIL` in the same node means another run holds the shared stack, not a broken recipe. |
 | Smoke auto row `failure_class=product|harness|infrastructure|unknown` | The runner separates visibly wrong behavior from selector/route drift and unavailable execution. | `product`: reject/reopen. `harness`: inspect the current reported surface manually and repair the locator; never ignore wrong visible content. `infrastructure`/`unknown`: unverified. Screenshots and visible responses outrank stale testids. |
 | `MATRIX_RENDER_GATE=FAIL ...` | The matrix page broke its contract. | Resume re-runs the renderer. |
 | `RED_GATE=FAIL test passed - does not reproduce the bug` | The repro test passes on the buggy tree. | Engineer: the chain is wrong, or the bug needs an environment the test lacks. |
