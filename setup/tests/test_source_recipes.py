@@ -20,6 +20,7 @@ class SourceRecipeTest(unittest.TestCase):
         fixture.profile["sourceRecipe"] = recipe
         fixture.profile["repository"].pop("packageManager")
         fixture.profile["delivery"]["baseBranch"] = "main"
+        fixture.profile["noChangeClosure"] = {"enabled": False, "verifierIds": ["test"]}
         return fixture.profile
 
     def test_explicit_engine_recipe_does_not_invent_package_manager_metadata(self):

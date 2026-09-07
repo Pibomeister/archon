@@ -77,6 +77,18 @@ class PortableProjectTest(unittest.TestCase):
     def capture(self):
         return portable.capture(self.binding_path, self.artifacts)
 
+    def factory_execution(self):
+        return {
+            "factoryJobId": "job:fixture:001",
+            "logicalChainId": "chain:fixture:001",
+            "readySnapshotId": "ready:fixture:001",
+            "readyDigest": "sha256:" + "1" * 64,
+            "commandId": "command:fixture:001",
+            "launchId": "launch:fixture:001",
+            "attemptId": "attempt:fixture:001",
+            "runtimeBundleId": "runtime:archon:test",
+        }
+
     def test_captures_pinned_knowledge_without_reading_dirty_worktree(self):
         (self.repo / "README.md").write_text("dirty unapproved knowledge\n")
         result = self.capture()
@@ -169,6 +181,37 @@ class PortableProjectTest(unittest.TestCase):
         self.assertEqual(json.loads((self.artifacts / "kb-capture.json").read_text())["status"], "proposed")
         self.assertEqual(self.git(self.repo, "status", "--porcelain"), before)
 
+
+    def test_capture_freezes_factory_execution_identity_sidecar(self):
+        execution = self.factory_execution()
+        execution_path = self.root / "factory-execution.json"
+        execution_path.write_text(json.dumps(execution))
+        with patch.dict(os.environ, {"INPUTS_FACTORY_EXECUTION": str(execution_path)}):
+            self.capture()
+        context = json.loads((self.artifacts / "run-context.json").read_text())
+        self.assertEqual(context["factoryExecution"], execution)
+        execution_path.write_text(json.dumps({**execution, "attemptId": "attempt:fixture:other"}))
+        with patch.dict(os.environ, {"INPUTS_FACTORY_EXECUTION": str(execution_path)}):
+            with self.assertRaisesRegex(ValueError, "factory execution identity drift"):
+                portable.capture(self.binding_path, self.artifacts)
+
+    def test_merge_review_manifest_binds_exact_pr_head_and_factory_execution(self):
+        execution = self.factory_execution()
+        context = {"factoryExecution": execution}
+        manifest = portable.merge_review_manifest(
+            context,
+            "example/fixture",
+            "https://github.com/example/fixture/pull/42",
+            self.base,
+        )
+        self.assertEqual(manifest["kind"], "factory-merge-review.v1")
+        self.assertEqual(manifest["repository"], {"provider": "github", "owner": "example", "name": "fixture"})
+        self.assertEqual(manifest["pullRequestNumber"], 42)
+        self.assertEqual(manifest["headSha"], self.base)
+        self.assertEqual(manifest["execution"], execution)
+        with self.assertRaisesRegex(ValueError, "exact PR URL"):
+            portable.merge_review_manifest(context, "example/fixture", "https://github.com/example/other/pull/42", self.base)
+
     def test_no_publish_authorization_records_intent_without_commit_or_push(self):
         self.ready_product()
         result = portable.ship(self.artifacts, {"title": "Clarify the CTA", "body": "Verified change"})
@@ -200,6 +243,141 @@ class PortableProjectTest(unittest.TestCase):
         self.assertEqual(len(profile["scope"]["allowedPaths"]), 2)
         self.assertNotIn("typecheck:all", json.dumps(profile))
 
+    def test_v2_no_change_closure_names_pinned_verifiers(self):
+        profile = json.loads((ROOT / "profiles/goodword-archon.v2.json").read_text())
+        portable.validate_profile(profile)
+        self.assertEqual(profile["noChangeClosure"]["enabled"], False)
+        self.assertEqual(profile["noChangeClosure"]["verifierIds"], ["portable-and-policy-tests"])
+        without_policy = dict(profile)
+        without_policy.pop("noChangeClosure")
+        portable.validate_profile(without_policy)
+        profile["noChangeClosure"]["verifierIds"] = ["portable-and-policy-tests", "missing"]
+        with self.assertRaisesRegex(ValueError, "pinned verification"):
+            portable.validate_profile(profile)
+        profile["noChangeClosure"]["verifierIds"] = ["portable-and-policy-tests", "portable-and-policy-tests"]
+        with self.assertRaisesRegex(ValueError, "pinned verification"):
+            portable.validate_profile(profile)
+        profile["noChangeClosure"] = {"enabled": True, "verifierIds": []}
+        with self.assertRaisesRegex(ValueError, "pinned verification"):
+            portable.validate_profile(profile)
+
+    def test_no_change_closure_requires_claim_and_pinned_baseline_final_verification(self):
+        self.capture()
+        portable.seal_plan(self.artifacts, {"goal": "CTA", "files": ["view.txt"], "approach": "Keep current label", "testScenarios": ["CTA already works"]}, {"approved": True, "findings": []})
+        self.profile["noChangeClosure"] = {"enabled": True, "verifierIds": ["test"]}
+        self.profile["verification"] = [{"id": "test", "argv": [sys.executable, "-c", "assert open('view.txt').read().strip() == 'original CTA'"], "timeoutSeconds": 30}]
+        with patch.object(portable, "load_context", return_value={"binding": self.binding, "profile": self.profile, "toolchain": {}}):
+            self.assertTrue(portable.baseline_verify(self.artifacts)["passed"])
+            portable.begin_round(self.artifacts)
+            claim_status = portable.record_no_change_claim(self.artifacts, {"summary": "Already correct", "changes": [], "testNotes": [], "category": "already-satisfied"})
+            self.assertTrue(claim_status["recorded"])
+            self.assertTrue(portable.verify(self.artifacts)["passed"])
+            closure = portable.no_change_closure(self.artifacts)
+            self.assertEqual(closure["lifecycleResult"], "fulfilled-no-change")
+            portable.converge(self.artifacts, {"status": "complete", "verdict": "Ready to merge", "findings": []})
+            result = portable.ship(self.artifacts, {"title": "Unused", "body": "Unused"})
+            self.assertEqual(result["status"], "fulfilled-no-change")
+            self.assertFalse(result["draft"])
+            self.assertFalse((self.artifacts / "commit-receipt.json").exists())
+
+    def test_later_non_no_change_outcome_invalidates_previous_claim_and_intent(self):
+        self.capture()
+        portable.seal_plan(self.artifacts, {"goal": "CTA", "files": ["view.txt"], "approach": "Keep current label", "testScenarios": ["CTA already works"]}, {"approved": True, "findings": []})
+        self.profile["noChangeClosure"] = {"enabled": True, "verifierIds": ["test"]}
+        self.profile["verification"] = [{"id": "test", "argv": [sys.executable, "-c", "assert open('view.txt').read().strip() == 'original CTA'"], "timeoutSeconds": 30}]
+        with patch.object(portable, "load_context", return_value={"binding": self.binding, "profile": self.profile, "toolchain": {}}):
+            portable.baseline_verify(self.artifacts)
+            portable.begin_round(self.artifacts)
+            self.assertTrue(portable.record_no_change_claim(self.artifacts, {"summary": "Already correct", "category": "already-satisfied"})["recorded"])
+            portable.verify(self.artifacts)
+            portable.no_change_closure(self.artifacts)
+            self.assertTrue((self.artifacts / "no-change-closure-intent.json").exists())
+            portable.record_no_change_claim(self.artifacts, {"summary": "Need human detail", "category": "blocked"})
+            self.assertFalse((self.artifacts / "no-change-claim.json").exists())
+            self.assertFalse((self.artifacts / "no-change-closure-intent.json").exists())
+
+    def test_ship_revalidates_no_change_intent_against_current_policy_and_product(self):
+        self.capture()
+        portable.seal_plan(self.artifacts, {"goal": "CTA", "files": ["view.txt"], "approach": "Keep current label", "testScenarios": ["CTA already works"]}, {"approved": True, "findings": []})
+        self.profile["noChangeClosure"] = {"enabled": True, "verifierIds": ["test"]}
+        self.profile["verification"] = [{"id": "test", "argv": [sys.executable, "-c", "assert open('view.txt').read().strip() == 'original CTA'"], "timeoutSeconds": 30}]
+        with patch.object(portable, "load_context", return_value={"binding": self.binding, "profile": self.profile, "toolchain": {}}):
+            portable.baseline_verify(self.artifacts)
+            portable.begin_round(self.artifacts)
+            portable.record_no_change_claim(self.artifacts, {"summary": "Already correct", "category": "already-satisfied"})
+            portable.verify(self.artifacts)
+            portable.no_change_closure(self.artifacts)
+            portable.converge(self.artifacts, {"status": "complete", "verdict": "Ready to merge", "findings": []})
+            self.profile["noChangeClosure"] = {"enabled": False, "verifierIds": ["test"]}
+            with self.assertRaisesRegex(ValueError, "disabled|enabled"):
+                portable.ship(self.artifacts, {"title": "Unused", "body": "Unused"})
+
+    def test_no_change_ship_requires_ready_final_review(self):
+        self.capture()
+        portable.seal_plan(self.artifacts, {"goal": "CTA", "files": ["view.txt"], "approach": "Keep current label", "testScenarios": ["CTA already works"]}, {"approved": True, "findings": []})
+        self.profile["noChangeClosure"] = {"enabled": True, "verifierIds": ["test"]}
+        self.profile["verification"] = [{"id": "test", "argv": [sys.executable, "-c", "assert open('view.txt').read().strip() == 'original CTA'"], "timeoutSeconds": 30}]
+        with patch.object(portable, "load_context", return_value={"binding": self.binding, "profile": self.profile, "toolchain": {}}):
+            portable.baseline_verify(self.artifacts)
+            portable.begin_round(self.artifacts)
+            portable.record_no_change_claim(self.artifacts, {"summary": "Already correct", "category": "already-satisfied"})
+            portable.verify(self.artifacts)
+            portable.no_change_closure(self.artifacts)
+            with self.assertRaisesRegex(ValueError, "review"):
+                portable.ship(self.artifacts, {"title": "Unused", "body": "Unused"})
+            portable.converge(self.artifacts, {"status": "complete", "verdict": "Not ready", "findings": ["missing proof"]})
+            with self.assertRaisesRegex(ValueError, "review"):
+                portable.ship(self.artifacts, {"title": "Unused", "body": "Unused"})
+
+    def test_no_change_claim_with_changed_work_product_fails_closed(self):
+        self.capture()
+        portable.seal_plan(self.artifacts, {"goal": "CTA", "files": ["view.txt"], "approach": "Keep current label", "testScenarios": ["CTA already works"]}, {"approved": True, "findings": []})
+        self.profile["noChangeClosure"] = {"enabled": True, "verifierIds": ["test"]}
+        with patch.object(portable, "load_context", return_value={"binding": self.binding, "profile": self.profile, "toolchain": {}}):
+            portable.begin_round(self.artifacts)
+            (self.worktree / "view.txt").write_text("changed CTA\n")
+            with self.assertRaisesRegex(ValueError, "already-satisfied"):
+                portable.record_no_change_claim(self.artifacts, {"summary": "Already correct", "changes": [], "testNotes": [], "category": "already-satisfied"})
+
+
+    def test_feature_workflow_has_conditional_post_pr_merge_review_gate(self):
+        workflow = (ROOT / "workflows/portable/single-repo-feature/feature.yaml").read_text()
+        self.assertIn("- id: merge-review-route", workflow)
+        self.assertIn("- id: prepare-merge-review", workflow)
+        self.assertIn("- id: merge-review", workflow)
+        self.assertIn("when: \"$merge-review-route.output.required == true\"", workflow)
+        self.assertIn("approval-evidence packet", workflow)
+        self.assertIn("Approving this gate authorizes only the Control API", workflow)
+        self.assertIn("- id: bind-merge-review", workflow)
+        self.assertIn("- id: kb-capture\n  command: capture-knowledge", workflow)
+        self.assertLess(workflow.index("- id: ship"), workflow.index("- id: merge-review-route"))
+        self.assertLess(workflow.index("- id: prepare-merge-review"), workflow.index("\n- id: merge-review\n"))
+        self.assertLess(workflow.index("- id: bind-merge-review"), workflow.index("\n- id: kb-capture\n"))
+        kb_block = workflow[workflow.index("- id: kb-capture"):workflow.index("- id: capture-knowledge")]
+        self.assertIn("depends_on:\n  - merge-review-route\n  - bind-merge-review", kb_block)
+        self.assertIn("trigger_rule: all_done", kb_block)
+
+    def test_merge_review_route_is_false_without_managed_pr_manifest(self):
+        self.ready_product()
+        portable.write(self.artifacts / "pr-evidence.json", {"ready": False, "status": "publication_requires_authorization"})
+        result = portable.merge_review_route(self.artifacts)
+        self.assertFalse(result["required"])
+
+    def test_prepare_merge_review_replaces_plan_packet_with_exact_pr_packet(self):
+        self.capture()
+        portable.seal_plan(self.artifacts, {"goal": "CTA", "files": ["view.txt"], "approach": "Change", "testScenarios": ["CTA works"]}, {"approved": True, "findings": []})
+        plan_manifest = json.loads((self.artifacts / "approval-evidence/manifest.json").read_text())
+        self.assertIn("plan.json", plan_manifest["files"])
+        execution = self.factory_execution()
+        manifest = portable.merge_review_manifest({"factoryExecution": execution}, "example/fixture", "https://github.com/example/fixture/pull/42", self.base)
+        portable.write(self.artifacts / "merge-review-manifest.json", manifest)
+        portable.write(self.artifacts / "pr-evidence.json", {"ready": True, "draft": True, "url": "https://github.com/example/fixture/pull/42", "head": self.base, "mergeReviewManifest": manifest, "mergeReviewManifestPath": str(self.artifacts / "merge-review-manifest.json")})
+        prepared = portable.prepare_merge_review(self.artifacts)
+        self.assertTrue(prepared["prepared"])
+        packet_manifest = json.loads((self.artifacts / "approval-evidence/manifest.json").read_text())
+        self.assertEqual(packet_manifest["files"], ["merge-review-manifest.json", "pr-evidence.json"])
+        self.assertEqual(json.loads((self.artifacts / "approval-evidence/merge-review-manifest.json").read_text()), manifest)
+        self.assertFalse((self.artifacts / "approval-evidence/plan.json").exists())
 
     def test_portable_resources_are_in_team_package_manifest(self):
         manifest = (ROOT / "setup/package.sh").read_text()

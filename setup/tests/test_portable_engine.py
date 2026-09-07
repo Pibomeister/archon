@@ -55,15 +55,16 @@ class PortableEngineTest(unittest.TestCase):
         fixture = self.fixture()
         result = self.cli(fixture, "run", "portable-single-repo-feature", "--workflow-source", str(fixture.authoring), "--dry-run", "--stubs-init", str(fixture.root / "stubs.yaml"), "--input", "binding=" + str(fixture.binding_path), json_output=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(json.loads(result.stdout)["nodeCount"], 15)
+        self.assertEqual(json.loads(result.stdout)["nodeCount"], 21)
 
-    def mechanical_graph(self, fixture):
+    def mechanical_graph(self, fixture, mode="publication-hold"):
         workflow = yaml.safe_load((fixture.pack / "feature.yaml").read_text())
         workflow["name"] = "portable-mechanical-qualification"
+        no_change = mode == "no-change"
         outputs = {
-            "plan": {"goal": "CTA", "files": ["view.txt"], "approach": "Change label", "testScenarios": ["CTA label"]},
+            "plan": {"goal": "CTA", "files": ["view.txt"], "approach": "Keep label" if no_change else "Change label", "testScenarios": ["CTA label"]},
             "critique": {"approved": True, "findings": []},
-            "implement": {"summary": "Deterministic fixture changed label", "changes": ["view.txt"], "testNotes": []},
+            "implement": {"summary": "Existing label already satisfied" if no_change else "Deterministic fixture changed label", "changes": [] if no_change else ["view.txt"], "testNotes": [], "category": "already-satisfied" if no_change else "changes-produced"},
             "review": {"status": "complete", "verdict": "Ready to merge", "findings": [], "summary": "Fixture judgment, not provider qualification"},
             "pr-body": {"title": "Fixture CTA", "body": "## Summary\nFixture only\n## Validation\nRecorded command\n## Known Residuals\nNo model qualification"},
             "kb-capture": {"summary": "Mechanical fixture", "promotionCandidates": []},
@@ -77,12 +78,44 @@ class PortableEngineTest(unittest.TestCase):
                 for key in ("command", "retry", "output_format"):
                     node.pop(key, None)
                 source = "import json\n"
-                if node["id"] == "implement":
+                if node["id"] == "implement" and not no_change:
                     source += "import os\nfrom pathlib import Path\nb = json.loads(Path(os.environ['INPUTS_BINDING']).read_text())\n(Path(b['repositoryRoot']) / 'view.txt').write_text('new CTA\\n')\n"
                 source += "print(json.dumps(" + repr(outputs[node["id"]]) + "))\n"
                 node.update(script=source, runtime="uv", with_={"binding": "$INPUTS.binding"})
                 node["with"] = node.pop("with_")
         replace(workflow["nodes"])
+        if mode == "factory-pr":
+            for node in workflow["nodes"]:
+                if node.get("id") == "ship":
+                    node.pop("script", None)
+                    node.pop("runtime", None)
+                    source = """import json, os, re
+from pathlib import Path
+artifacts = Path(os.environ['ARTIFACTS_DIR'])
+binding = json.loads(Path(os.environ['INPUTS_BINDING']).read_text())
+head = '""" + fixture.base + """'
+manifest = {
+  'kind': 'factory-merge-review.v1',
+  'repository': {'provider': 'github', 'owner': 'example', 'name': 'fixture'},
+  'pullRequestNumber': 42,
+  'headSha': head,
+  'execution': {
+    'factoryJobId': 'job:fixture:001',
+    'logicalChainId': 'chain:fixture:001',
+    'readySnapshotId': 'ready:fixture:001',
+    'readyDigest': 'sha256:' + '1' * 64,
+    'commandId': 'command:fixture:001',
+    'launchId': 'launch:fixture:001',
+    'attemptId': 'attempt:fixture:001',
+    'runtimeBundleId': 'runtime:archon:test',
+  },
+}
+(artifacts / 'merge-review-manifest.json').write_text(json.dumps(manifest, sort_keys=True) + '\\n')
+evidence = {'ready': True, 'draft': True, 'url': 'https://github.com/example/fixture/pull/42', 'head': head, 'baseCommit': binding['baseCommit'], 'workProduct': {'files': [{'path': 'view.txt', 'sha256': 'fixture', 'executable': False}], 'sha256': '""" + ("2" * 64) + """'}, 'mergeReviewManifest': manifest, 'mergeReviewManifestPath': str(artifacts / 'merge-review-manifest.json')}
+(artifacts / 'pr-evidence.json').write_text(json.dumps(evidence, sort_keys=True) + '\\n')
+print(json.dumps(evidence))
+"""
+                    node.update(script=source, runtime="uv")
         def assert_mechanical(nodes):
             for node in nodes:
                 if "loop_group" in node:
@@ -137,6 +170,63 @@ class PortableEngineTest(unittest.TestCase):
 
     def test_editing_plan_and_local_checksum_cannot_change_engine_approved_original(self):
         self.exercise(True)
+
+    def test_verified_no_change_completes_without_merge_review_gate(self):
+        fixture = self.fixture()
+        fixture.profile["verification"] = [{"id": "test", "argv": ["python3", "-c", "assert open('view.txt').read().strip() == 'original CTA'"], "timeoutSeconds": 30}]
+        fixture.profile["noChangeClosure"] = {"enabled": True, "verifierIds": ["test"]}
+        fixture.profile_path.write_text(json.dumps(fixture.profile))
+        fixture.binding["profileSha256"] = portable.file_digest(fixture.profile_path)
+        fixture.save_binding()
+        self.mechanical_graph(fixture, "no-change")
+        start = self.cli(fixture, "run", "portable-mechanical-qualification", "--workflow-source", str(fixture.authoring), "--input", "binding=" + str(fixture.binding_path), "--launch-key", "mechanical-no-change")
+        self.assertEqual(start.returncode, 0, start.stdout + start.stderr)
+        state = json.loads(self.cli(fixture, "launch-status", "mechanical-no-change", json_output=True).stdout)
+        run_id = state["receipt"]["runId"]
+        gate_response = json.loads(self.cli(fixture, "get", run_id, json_output=True).stdout)
+        gate = gate_response.get("run", gate_response)["metadata"]["approval"]
+        decision = self.cli(fixture, "respond", run_id, "approve", "--command-id", "approved-plan-no-change", "--expected-occurrence", gate["occurrenceId"], "--expected-evidence-digest", gate["evidenceDigest"], json_output=True)
+        self.assertEqual(decision.returncode, 0, decision.stdout + decision.stderr)
+        resumed = self.cli(fixture, "resume", run_id)
+        self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+        run_response = json.loads(self.cli(fixture, "get", run_id, json_output=True).stdout)
+        run = run_response.get("run", run_response)
+        self.assertEqual(run["status"], "completed")
+        artifacts = Path(run["output_root"]) / "artifacts/runs" / run_id
+        self.assertEqual(json.loads((artifacts / "pr-evidence.json").read_text())["status"], "fulfilled-no-change")
+        self.assertFalse((artifacts / "merge-review-manifest.json").exists())
+        self.assertFalse((artifacts / "merge-review-approval-binding.json").exists())
+
+    def test_factory_pr_pauses_at_merge_review_and_completes_after_bound_approval(self):
+        fixture = self.fixture()
+        self.mechanical_graph(fixture, "factory-pr")
+        start = self.cli(fixture, "run", "portable-mechanical-qualification", "--workflow-source", str(fixture.authoring), "--input", "binding=" + str(fixture.binding_path), "--launch-key", "mechanical-factory-pr")
+        self.assertEqual(start.returncode, 0, start.stdout + start.stderr)
+        state = json.loads(self.cli(fixture, "launch-status", "mechanical-factory-pr", json_output=True).stdout)
+        run_id = state["receipt"]["runId"]
+        plan_response = json.loads(self.cli(fixture, "get", run_id, json_output=True).stdout)
+        plan_gate = plan_response.get("run", plan_response)["metadata"]["approval"]
+        decision = self.cli(fixture, "respond", run_id, "approve", "--command-id", "approved-plan-factory-pr", "--expected-occurrence", plan_gate["occurrenceId"], "--expected-evidence-digest", plan_gate["evidenceDigest"], json_output=True)
+        self.assertEqual(decision.returncode, 0, decision.stdout + decision.stderr)
+        resumed = self.cli(fixture, "resume", run_id)
+        self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+        paused_response = json.loads(self.cli(fixture, "get", run_id, json_output=True).stdout)
+        paused = paused_response.get("run", paused_response)
+        self.assertEqual(paused["status"], "paused")
+        merge_gate = paused["metadata"]["approval"]
+        self.assertEqual(merge_gate["nodeId"], "merge-review")
+        artifacts = Path(paused["output_root"]) / "artifacts/runs" / run_id
+        packet = json.loads((artifacts / "approval-evidence/manifest.json").read_text())
+        self.assertEqual(packet["files"], ["merge-review-manifest.json", "pr-evidence.json"])
+        merge_decision = self.cli(fixture, "respond", run_id, "approve", "--command-id", "approved-merge-factory-pr", "--expected-occurrence", merge_gate["occurrenceId"], "--expected-evidence-digest", merge_gate["evidenceDigest"], json_output=True)
+        self.assertEqual(merge_decision.returncode, 0, merge_decision.stdout + merge_decision.stderr)
+        completed = self.cli(fixture, "resume", run_id)
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        run_response = json.loads(self.cli(fixture, "get", run_id, json_output=True).stdout)
+        run = run_response.get("run", run_response)
+        self.assertEqual(run["status"], "completed")
+        self.assertTrue((artifacts / "merge-review-approval-binding.json").is_file())
+        self.assertTrue((artifacts / "kb-capture.json").is_file())
 
 
 if __name__ == "__main__":

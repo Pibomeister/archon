@@ -51,5 +51,11 @@
     "autoMerge": false,
     "autoDeploy": false,
     "baseBranch": "fix/exact-run-command-receipts"
+  },
+  "noChangeClosure": {
+    "enabled": false,
+    "verifierIds": [
+      "validate"
+    ]
   }
 }
