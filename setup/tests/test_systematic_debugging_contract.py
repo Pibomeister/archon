@@ -238,6 +238,76 @@ class SystematicDebuggingContractTest(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("architecture review", r.stdout)
 
+    def test_a_class_kind_probe_is_reported_as_a_proof_contradiction(self):
+        # Run 3d4bfb77 (2026-09-07): rca-reassess wrote occurrence_attributed=true
+        # citing prod-probes, and 35 seconds later wrote prose saying "no single
+        # row here can be pinned as *the* reported occurrence". The probes were
+        # complete, unexpired and attribution-valid; the ONLY failing property was
+        # evidence_kind=class. The old message said "incomplete, stale, or
+        # invalidated", which points at evidence COLLECTION -- re-run the probes --
+        # when the actual defect was the proof over-claiming. They are fixed
+        # differently, so the message must distinguish them.
+        proof = json.loads((self.tmp / "proof-assessment.json").read_text())
+        proof["occurrence_evidence_sources"] = ["prod-probes"]
+        write(self.tmp, "proof-assessment.json", proof)
+        write(self.tmp, "evidence-provenance.json", {
+            "schema_version": 2,
+            "sources": [{
+                "source": "prod-probes", "status": "complete",
+                "completeness": "complete", "evidence_kind": "class",
+                "occurrence_attribution_valid": True,
+                "expires_at": "2099-01-01T00:00:00Z",
+            }],
+        })
+        r = self.run_coverage()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("PROOF_SELF_CONTRADICTED", r.stdout)
+        self.assertIn("evidence_kind='class'", r.stdout)
+        self.assertNotIn("incomplete, stale, or invalidated", r.stdout)
+        # The message must say what to DO. RUNBOOK 12 used to tell the operator
+        # to resume on this class of failure; a resume re-runs only the bash
+        # gate, which re-reads the same unchanged artifact and fails identically.
+        self.assertIn("occurrence_evidence_sources", r.stdout)
+        self.assertIn("EDIT FIRST", r.stdout)
+
+    def test_the_failing_property_is_named_for_every_condition(self):
+        # The check tests five properties and used to report one sentence for all
+        # of them; establishing which one failed on a real run took roughly ten
+        # tool calls. Each must name itself. Note evidence_kind is asserted by the
+        # test above, because it routes to a different message on purpose.
+        proof = json.loads((self.tmp / "proof-assessment.json").read_text())
+        proof["occurrence_evidence_sources"] = ["prod-probes"]
+        write(self.tmp, "proof-assessment.json", proof)
+        good = {"source": "prod-probes", "status": "complete", "completeness": "complete",
+                "evidence_kind": "occurrence", "occurrence_attribution_valid": True,
+                "expires_at": "2099-01-01T00:00:00Z"}
+        for field, bad, expect in (
+            ("status", "degraded", "status='degraded'"),
+            ("completeness", "incomplete", "completeness='incomplete'"),
+            ("occurrence_attribution_valid", False, "occurrence_attribution_valid=False"),
+            ("expires_at", "2000-01-01T00:00:00Z", "expires_at='2000-01-01T00:00:00Z'"),
+        ):
+            with self.subTest(field=field):
+                row = dict(good, **{field: bad})
+                write(self.tmp, "evidence-provenance.json",
+                      {"schema_version": 2, "sources": [row]})
+                r = self.run_coverage()
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn(expect, r.stdout)
+
+    def test_a_valid_occurrence_row_still_passes(self):
+        # Negative control on the whole check: with every property satisfied it
+        # must NOT raise, or the tests above would pass for the wrong reason.
+        proof = json.loads((self.tmp / "proof-assessment.json").read_text())
+        proof["occurrence_evidence_sources"] = ["prod-probes"]
+        write(self.tmp, "proof-assessment.json", proof)
+        write(self.tmp, "evidence-provenance.json", {"schema_version": 2, "sources": [{
+            "source": "prod-probes", "status": "complete", "completeness": "complete",
+            "evidence_kind": "occurrence", "occurrence_attribution_valid": True,
+            "expires_at": "2099-01-01T00:00:00Z"}]})
+        r = self.run_coverage()
+        self.assertEqual(r.returncode, 0, r.stdout)
+
     def test_incomplete_prod_probe_cannot_authorize_occurrence_attribution(self):
         proof = json.loads((self.tmp / "proof-assessment.json").read_text())
         proof["occurrence_evidence_sources"] = ["prod-probes"]

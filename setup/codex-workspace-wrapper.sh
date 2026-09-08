@@ -52,6 +52,19 @@ print(paths[0] if paths else "")
   forced=(exec --sandbox workspace-write --cd "$ROOT/api" --add-dir "$ROOT/web-app"
     --config sandbox_workspace_write.network_access=false)
   [ -z "$ARTIFACTS_DIR" ] || forced+=(--add-dir "$ARTIFACTS_DIR")
+  # Codex launches stdio MCP servers with a core-only environment (HOME, PATH,
+  # SHELL, TERM, TMPDIR, USER, LANG, LOGNAME), so the gitnexus dispatcher never
+  # inherits its pinned index/commit and exits before the handshake. Forward the
+  # pin as an argv-level MCP env override, keeping the chain binding whenever
+  # this node runs inside a bugfix chain.
+  if [ -n "${ARCHON_GITNEXUS_INDEX:-}" ] && [ -n "${ARCHON_GITNEXUS_COMMIT:-}" ]; then
+    forced+=(--config "mcp_servers.gitnexus.env.ARCHON_GITNEXUS_INDEX=\"$ARCHON_GITNEXUS_INDEX\""
+      --config "mcp_servers.gitnexus.env.ARCHON_GITNEXUS_COMMIT=\"$ARCHON_GITNEXUS_COMMIT\"")
+    if [ -n "${ARCHON_BUGFIX_CHAIN_ID:-}" ] && [ -n "${ARCHON_BUGFIX_CHAIN_STATE:-}" ]; then
+      forced+=(--config "mcp_servers.gitnexus.env.ARCHON_BUGFIX_CHAIN_ID=\"$ARCHON_BUGFIX_CHAIN_ID\""
+        --config "mcp_servers.gitnexus.env.ARCHON_BUGFIX_CHAIN_STATE=\"$ARCHON_BUGFIX_CHAIN_STATE\"")
+    fi
+  fi
   exec "$REAL" "${forced[@]}" "${args[@]}" <<< "$PROMPT"
 fi
 

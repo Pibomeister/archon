@@ -143,14 +143,45 @@ def is_test(path: str) -> bool:
     return any(path.endswith(suffix) for suffix in TEST_SUFFIXES)
 
 
-def test_candidates(repo: Path, production: str, commit: str | None) -> list[str]:
+# The tier a spec belongs to, by suffix. rca-shape.sh uses exactly this list to
+# reject non-unit patterns in verify.json, and the api unit runner reports "No
+# tests found" for them, so a unit fix cannot satisfy existing-test-preferred by
+# extending one.
+NON_UNIT_SUFFIXES = (".int.spec.ts", ".e2e.spec.ts", ".ai.spec.ts", ".ext.spec.ts")
+KIND_SUFFIXES = {
+    "unit": (".spec.ts", ".test.ts", ".test.js"),
+    "vitest": (".spec.ts", ".test.ts", ".test.js"),
+    "integration": (".int.spec.ts",),
+    "playwright": (".e2e.spec.ts",),
+}
+
+
+def is_unit_spec(path: str) -> bool:
+    return not any(path.endswith(suffix) for suffix in NON_UNIT_SUFFIXES)
+
+
+def test_candidates(repo: Path, production: str, commit: str | None,
+                    kind: str | None = None) -> list[str]:
+    """Existing specs that could own `production`, IN THE SAME TIER.
+
+    Without the tier filter every suffix sharing the stem is a candidate, so a
+    kind=unit fix gets told to extend `<name>.int.spec.ts` -- a spec verify.json
+    is forbidden to list and the unit runner ignores. That put
+    existing-test-preferred in direct conflict with the lane's test contract
+    whenever an integration spec shares a name with the production file.
+    """
     stem = Path(production).name
     for suffix in (".ts", ".js", ".tsx", ".jsx"):
         if stem.endswith(suffix):
             stem = stem[:-len(suffix)]
             break
+    allowed = KIND_SUFFIXES.get(kind or "", TEST_SUFFIXES)
     names = {stem + suffix for suffix in TEST_SUFFIXES}
-    return sorted(path for path in baseline_paths(repo, commit) if Path(path).name in names)
+    found = [path for path in baseline_paths(repo, commit) if Path(path).name in names]
+    same_tier = [path for path in found if path.endswith(tuple(allowed))]
+    if kind in ("unit", "vitest"):
+        same_tier = [path for path in same_tier if is_unit_spec(path)]
+    return sorted(same_tier)
 
 
 def selected_repo(root: Path, artifacts: Path) -> tuple[str, Path, dict]:
@@ -187,16 +218,25 @@ def validate_plan(root: Path, artifacts: Path) -> None:
             source = next(rule["source"] for rule in policy["rules"] if rule["id"] == "test-file-naming")
             fail(f"TEST_NAMING kind={kind} expected_suffix={expected} proposed={proposed} rule={source}")
     blocking = any(rule.get("id") == "existing-test-preferred" for rule in policy.get("rules", []))
+    baseline_commit = json.loads((artifacts / "repo-policy.json").read_text())["baseline"].get(name)
+    every_candidate: list[str] = []
     for production in productions:
-        candidates = test_candidates(repo, production, json.loads((artifacts / "repo-policy.json").read_text())["baseline"].get(name))
+        candidates = test_candidates(repo, production, baseline_commit, failing.get("kind"))
+        every_candidate.extend(candidates)
         decision = "extend-existing" if proposed in candidates else "new-file"
         rows.append({"production_file": production, "proposed_test": proposed,
                      "existing_candidates": candidates, "decision": decision})
-        if blocking and candidates and proposed not in candidates:
-            source = next(rule["source"] for rule in policy["rules"] if rule["id"] == "existing-test-preferred")
-            write_json(artifacts / "test-placement.json", {"schema_version": 1, "repo": name, "rows": rows})
-            fail(f"TEST_PLACEMENT existing_spec={candidates[0]} proposed={proposed} rule={source}")
     write_json(artifacts / "test-placement.json", {"schema_version": 1, "repo": name, "rows": rows})
+    # The rule asks "did you create a NEW scenario-specific spec when an existing
+    # one owns this behavior?" -- so the proposed test must be an existing spec
+    # for SOME production file, not for every one of them. Requiring it per-file
+    # made any multi-file fix unsatisfiable: touch two files that each own a
+    # spec and no single test can be a candidate for both. Run 60528f7b proposed
+    # ai.service.spec.ts, which was recorded extend-existing for ai.service.ts,
+    # and was rejected because csv-file-type.strategy.ts has its own spec too.
+    if blocking and every_candidate and proposed not in every_candidate:
+        source = next(rule["source"] for rule in policy["rules"] if rule["id"] == "existing-test-preferred")
+        fail(f"TEST_PLACEMENT existing_spec={every_candidate[0]} proposed={proposed} rule={source}")
     print(f"REPO_POLICY=PASS repo={name} test={proposed} production_files={len(productions)}")
 
 

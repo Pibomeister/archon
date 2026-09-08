@@ -1,6 +1,6 @@
 ---
 name: archon-linear
-description: Fetch a Linear issue into an immutable evidence snapshot and route supported Goodword defects or API-only features into the current provider's Archon lane. Use for `/archon-linear ENG-1234`, a Linear issue URL, or when selecting a Linear ticket as Archon input.
+description: Fetch a Linear issue into an immutable evidence snapshot and route supported Goodword defects, API features, or cross-repo features into the current provider's Archon lane. Use for `/archon-linear ENG-1234`, a Linear issue URL, or when selecting a Linear ticket as Archon input.
 ---
 
 <WORKFLOW-NODE-STOP>
@@ -63,7 +63,34 @@ The Markdown must contain:
 - attachment identity/source plus extracted material visual or textual evidence;
 - `## Intake gaps` listing missing repro, observed output, repository, timestamps,
   identifiers, exact user-visible surface/entrypoint, or evidence (write `None`
-  only when truly complete);
+  only when truly complete). Write one bullet per gap in the form
+  `- <gap> — retrievable_by: probe-prod|probe-code|report-author|unretrievable`.
+  `probe-prod` means a query against prod Postgres or CloudWatch could resolve
+  it — an id, an account, a timestamp, a count, a row. `probe-code` means the
+  code graph or the repository could resolve it — which entrypoint renders a
+  label, which service writes a column, whether a symptom still reproduces on
+  current `origin/main`. `report-author` means only a human can supply it;
+  `unretrievable` means no source holds it. Bare `probe` is still accepted and
+  is treated as `probe-prod`, so older snapshots keep working — but do not write
+  it in new ones, because the two need different capabilities and only one needs
+  AWS. This section is a retrieval work queue, not a blocker list: a gap marked
+  `probe-*` is work a downstream node is expected to do, and marking everything
+  `report-author` to be safe stops runs that could have answered themselves.
+  Downstream, `capability-gate` refuses to start a `defect` run that carries a
+  `probe-prod` (or bare `probe`) gap while prod Postgres is unreachable, and
+  ignores `probe-code` gaps entirely — measured 2026-09-07: ENG-3549 was blocked
+  on an AWS session for "exact user-visible surface", a gap its own triage
+  comment already answered from code;
+- for a `defect`, a gap asserting whether the symptom is still live:
+  `- Whether <symptom> still reproduces on current origin/main — retrievable_by: probe-code`,
+  unless the report carries evidence dated after the last commit touching the
+  named surface. A ticket that has sat in a backlog is a claim about the past.
+  Measured 2026-09-07: ENG-3059 was filed 2026-06-24, fixed 2026-07-01 by its own
+  reporter (`api@1f7a421a5e`), moved to Todo 2026-09-04 with nobody closing it,
+  and launched on 2026-09-07 — the run spent a full RCA rediscovering the fix.
+  The commit subject said `paused → active` while the ticket said
+  `Paused → Trialing`; only the commit BODY showed they were the same bug, so
+  read bodies, not subject lines;
 - `## Classification` with exactly one of `defect`, `api-feature`,
   `web-feature`, `cross-repo-feature`, or `unsupported`, plus concise evidence.
 
@@ -77,11 +104,18 @@ Classify from the ticket's requested outcome, not labels alone.
   The neutral launcher owns lite/full selection and same-provider fallback:
   Claude maps to `bugfix-lite`/`bugfix`; Codex maps to
   `bugfix-lite-codex`/`bugfix-codex`. Never cross that provider boundary.
-- **API-only feature:** invoke `archon-sdlc` with the existing
-  `full-sdlc-api` behavior (or `full-sdlc-api-codex` for Codex), preserving all
-  of that skill's controls. Do not invent a feature auto-router.
-- **Web or cross-repository feature:** stop with
-  `ARCHON_LINEAR=UNSUPPORTED kind=<classification>` and launch nothing.
+- **API-only feature:** launch the provider-neutral feature command and infer
+  scope `api`:
+  `python3 <Goodword>/.archon/setup/archon-run.py feature --provider <provider> --scope api <absolute-snapshot>`.
+- **Cross-repository feature:** launch the same provider through the generic
+  full-stack chain:
+  `python3 <Goodword>/.archon/setup/archon-run.py feature --provider <provider> --scope fullstack <absolute-snapshot>`.
+  It creates one immutable spec/plan baseline, runs API first, then starts the
+  web lane only from the tamper-checked API handoff. Never change provider
+  between the API and web lanes.
+- **Web-only feature:** classify explicitly and stop with
+  `ARCHON_LINEAR=UNSUPPORTED kind=web-feature` until a standalone web feature
+  chain exists.
 - Missing evidence does not make a defect unsupported; thin reports belong in
   the full bugfix graph.
 - Keep the ticket occurrence separate from incidental code-class findings. A
@@ -95,6 +129,15 @@ Before launch, verify the snapshot is an absolute existing file. A typed
 `ARCHON_BUGFIX=STARTED ...` line proves only that the guarded process and
 watchdog started; it is not a successful intake/RCA result and is not the end of
 the operator turn.
+
+**Concurrent launches are supported.** `archon-run.py` passes `--branch`, derived
+from the snapshot's slug, so every run gets its own worktree, path lock and smoke
+ports — several tickets can be in flight at once and `archon workflow runs` will
+show distinct `working_path`s. Two consequences for this skill: a snapshot filename
+must be unique per ticket (it is, being `<KEY>-<uuid>.md`), and relaunching the SAME
+ticket deliberately reuses that ticket's worktree rather than making a second one.
+What still serializes is the e2e docker stack, which surfaces as a typed
+`E2E_MUTEX=FAIL` naming the owning run — see `archon-sdlc` §5a.
 
 After launch, hand supervision to `archon-sdlc` and watch the exact run until it
 reaches its first human gate or a terminal state (`failed`, `cancelled`, or

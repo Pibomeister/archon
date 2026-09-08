@@ -261,7 +261,12 @@ def validate_systematic_debugging(artifacts_dir: Path) -> dict[str, Any]:
         or not item.get("quote")
         for item in evidence
     ):
-        raise ContractError("surface_equivalence needs typed file/quote evidence")
+        raise ContractError(
+            "surface_equivalence needs typed file/quote evidence: `evidence` holds exactly the "
+            "three claims runtime-entrypoint-to-owner, test-entrypoint-to-owner and "
+            "smoke-entrypoint-to-owner, each with file and quote, and no others "
+            "(a captured runtime record belongs in surface_selection_basis)"
+        )
     evidence_claims = {item["claim"] for item in evidence}
     required_claims = {
         "runtime-entrypoint-to-owner",
@@ -288,7 +293,19 @@ def validate_systematic_debugging(artifacts_dir: Path) -> dict[str, Any]:
     if fix_plan.get("approach"):
         runtime_owner = surface["runtime_owner"].strip()
         if surface["reported_surface_status"] == "ambiguous":
-            raise ContractError("implementation-ready plan requires an identified surface and test/smoke runtime equivalence")
+            # Name both exits, because "requires an identified surface" reads as
+            # a shape complaint and the real choice is evidential: either get the
+            # runtime record that identifies the entrypoint, or admit the plan is
+            # not implementable yet. Guessing the surface is the one thing this
+            # check exists to stop.
+            raise ContractError(
+                "implementation-ready plan requires an identified surface: reported_surface_status "
+                "is 'ambiguous' while fix-plan.json carries an approach. Either identify the "
+                "entrypoint from a captured runtime record (production logs name the route that "
+                "served the occurrence; an expired AWS session is the usual reason there are none) "
+                "and set 'runtime-reproduced', or leave fix-plan.json empty and let the run end as "
+                "open investigation. Never pick an entrypoint to make the plan pass"
+            )
         if surface["test_runtime_owner"].strip() != runtime_owner:
             raise ContractError("surface_equivalence test runtime owner mismatch")
         if surface["smoke_runtime_owner"].strip() != runtime_owner:
@@ -341,20 +358,60 @@ def validate_systematic_debugging(artifacts_dir: Path) -> dict[str, Any]:
                 continue
             candidates = [row for row in rows if row.get("source") == source]
             valid = False
+            kind_only = False
+            # Why each candidate was rejected. One generic sentence for five
+            # different conditions cost about ten tool calls to diagnose on run
+            # 3d4bfb77 (2026-09-07), and pointed at evidence COLLECTION when the
+            # actual defect was a FLAG: prod-probes was complete, unexpired and
+            # attribution-valid, and the only failing property was
+            # evidence_kind=class. Those are fixed very differently -- one means
+            # re-run the probes, the other means the proof over-claimed -- so
+            # the message has to say which.
+            why = []
             for row in candidates:
                 try:
                     expires = dt.datetime.fromisoformat(str(row.get("expires_at", "")).replace("Z", "+00:00"))
                 except ValueError:
+                    why.append(f"expires_at={row.get('expires_at')!r} (unparseable)")
                     continue
-                if (row.get("status") == "complete"
-                        and row.get("completeness") == "complete"
-                        and row.get("evidence_kind") == "occurrence"
-                        and row.get("occurrence_attribution_valid") is True
-                        and expires > now):
+                failed = [
+                    f"{name}={value!r}"
+                    for name, value, ok in (
+                        ("status", row.get("status"), row.get("status") == "complete"),
+                        ("completeness", row.get("completeness"), row.get("completeness") == "complete"),
+                        ("evidence_kind", row.get("evidence_kind"), row.get("evidence_kind") == "occurrence"),
+                        ("occurrence_attribution_valid", row.get("occurrence_attribution_valid"),
+                         row.get("occurrence_attribution_valid") is True),
+                        ("expires_at", row.get("expires_at"), expires > now),
+                    )
+                    if not ok
+                ]
+                if not failed:
                     valid = True
                     break
+                why.append(", ".join(failed))
+                # A row that fails ONLY on evidence_kind is a different animal:
+                # the evidence was collected fine and is in date, and the proof
+                # claimed an occurrence it cannot support. A row that ALSO fails
+                # on status/completeness/expiry really is incomplete or stale,
+                # and must keep saying so -- routing that to the proof message
+                # would tell the operator to edit a flag when they need to
+                # re-collect. Only the sole-failure case is a contradiction.
+                if failed == [f"evidence_kind={row.get('evidence_kind')!r}"]:
+                    kind_only = True
             if not valid:
-                raise ContractError(f"occurrence evidence source is incomplete, stale, or invalidated: {source}")
+                detail = "; ".join(why) if why else "no provenance row for this source"
+                if kind_only:
+                    raise ContractError(
+                        f"PROOF_SELF_CONTRADICTED occurrence_attributed=true cites {source}, "
+                        f"but its evidence is class-level, not occurrence-level [{detail}]. "
+                        "The probes are fine; the proof over-claimed. If another cited source carries "
+                        f"the attribution, drop '{source}' from occurrence_evidence_sources; if none "
+                        "does, set occurrence_attributed=false and accept class-hardening-only. "
+                        "Then resume -- but EDIT FIRST: this gate is bash and the AI node that wrote "
+                        "the flag never re-runs, so a plain resume re-fails identically.")
+                raise ContractError(
+                    f"occurrence evidence source is incomplete, stale, or invalidated: {source} [{detail}]")
     return {"reproduction_status": status, "active_hypothesis_id": active[0].get("id")}
 
 
@@ -389,8 +446,30 @@ def classify(
         if value == "by-design" and not item.get("authority"):
             raise ContractError(f"by-design requires product authority for {eid}")
         if value == "separate-ticket":
-            if item.get("repo") not in {"api", "web-app"} or not item.get("ticket_stub") or not item.get("authority"):
-                raise ContractError(f"separate-ticket requires authority, repo, and ticket_stub for {eid}")
+            # authority here is EVIDENCE, not a product receipt. separate-ticket
+            # claims "real defect, different mechanism"; that is an evidential
+            # claim the RCA can make and must cite. Requiring a human receipt
+            # made this disposition unreachable for an unattended run — and
+            # since it is the only non-open way to close a symptom the chain
+            # does not fix, it made every multi-symptom report unclosable.
+            # Name the field that is actually missing. "requires repo and
+            # ticket_stub" sent a reviser looking at a repo that was already
+            # correct while ticket_stub was the omission.
+            missing = []
+            if item.get("repo") not in {"api", "web-app"}:
+                missing.append("repo (api|web-app)")
+            if not str(item.get("ticket_stub", "")).strip():
+                missing.append("ticket_stub (one-line title for the split ticket)")
+            if missing:
+                raise ContractError(
+                    f"separate-ticket for {eid} is missing {' and '.join(missing)}"
+                )
+            if not str(item.get("authority", "")).strip():
+                raise ContractError(
+                    f"separate-ticket requires authority for {eid}: cite the evidence that this "
+                    "symptom has a different mechanism than the selected cause (file:line or an "
+                    "evidence-file reference), the same citation residuals.json carries for it"
+                )
         values[eid] = value
 
     all_fixed = all(v == "fixed" for v in values.values())
@@ -453,9 +532,19 @@ def validate_smoke_readiness(artifacts_dir: Path, *, allow_open_ticket: bool = F
     classification = load_json(safe_artifact_path(artifacts_dir, "fix-classification.json"))
     open_ids = classification.get("open_effective_ids") or []
     if classification.get("ticket_closure_allowed") is not True and not allow_open_ticket:
+        # Name the actual condition. DISPOSITION_COMPLETE has NO open symptoms —
+        # every one is fixed, by-design, or split to a tracked ticket — so the
+        # old "open symptoms" wording sent operators hunting for something that
+        # open_effective_ids=[] on the same line said did not exist. Blocking is
+        # still right: shipping a partial fix for a multi-symptom report is a
+        # human scope decision.
+        detail = (f"open symptoms {open_ids} must be resolved or accepted" if open_ids
+                  else "no symptom is open, but this ships less than the whole ticket "
+                       "(some symptoms are dispositioned by-design or split to their own tickets), "
+                       "which is a human scope decision")
         raise ContractError(
-            "ticket disposition is not RESOLVED; open symptoms require explicit residual acceptance "
-            f"before smoke approval/ship (ticket={classification.get('ticket_disposition')} "
+            f"ticket disposition is not RESOLVED: {detail}; write accept-residuals.txt to accept and ship "
+            f"(ticket={classification.get('ticket_disposition')} "
             f"implementation={classification.get('implementation_result')} open_effective_ids={open_ids})"
         )
 
@@ -559,10 +648,18 @@ def validate_causal_coverage(
 
     expected = set(shape["effective_ids"])
     if set(dispositions) != expected or set(coverage) != expected:
+        # Say how to comply. The rows that go missing are almost always the
+        # ones split to their own ticket -- they feel "not covered by this
+        # chain", but the bijection is over EVERY effective symptom, and a
+        # split-out symptom's row is what records that it is not covered.
         raise ContractError(
             "effective coverage mismatch "
             f"dispositions_missing={sorted(expected-set(dispositions))} "
             f"coverage_missing={sorted(expected-set(coverage))}"
+            " -- every effective symptom needs BOTH a disposition and a"
+            " causal-coverage row, including ones dispositioned separate-ticket"
+            " or by-design; theirs records the absence of coverage"
+            ' (planned_diff [], red_test "", occurrence_attributed false)'
         )
     for eid in shape["effective_ids"]:
         disposition = dispositions[eid].get("disposition")

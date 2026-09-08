@@ -24,8 +24,9 @@ class ProbeRunTimeoutContract(unittest.TestCase):
                 self.assertIn('record_probe degraded || { echo "PROBE_RUN=FAIL provenance"; exit 1; }', node["bash"])
                 self.assertGreaterEqual(node["bash"].count("record_probe unavailable"), 3)
                 self.assertIn("--evidence-kind occurrence", node["bash"])
+                self.assertEqual(node["depends_on"], ["rca"])
                 seal = next(n for n in doc["nodes"] if n["id"] == "evidence-seal")
-                self.assertEqual(seal["depends_on"], ["probe-run"])
+                self.assertEqual(seal["depends_on"], ["rca-gate"])
                 self.assertIn("--require-source prod-probes", seal["bash"])
 
 

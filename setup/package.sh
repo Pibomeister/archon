@@ -54,6 +54,8 @@ MANIFEST=(
   setup/bind-repo.py
   setup/check-fixer-result.py
   setup/change-context.py
+  setup/check-browser-evidence.py
+  setup/check-feature-handoff-integrity.py
   setup/check-lite-prbody.py
   setup/check-scope.py
   setup/check-slop.py
@@ -67,9 +69,25 @@ MANIFEST=(
   setup/parse-review-envelope.py
   setup/plan-shape.sh
   setup/rca-shape.sh
+  setup/probe-shape.py
+  setup/round-reclaim.sh
+  setup/armed-exec.sh
+  setup/census-runner.py
+  setup/occurrence-logs.py
+  setup/occurrence-window.py
+  setup/assert-ro.sh
   setup/repo-policy.py
   setup/resolve-params.sh
+  setup/resolve-web-params.sh
+  # Concurrency: per-run smoke ports and the host mutex for the shared e2e
+  # stack. Both are called from resolve-params.sh / the lane bodies, so a
+  # missing one fails at run time on the operator's machine, not here.
+  setup/port-alloc.sh
+  setup/e2e-mutex.sh
   setup/resume.sh
+  setup/chain-env.py
+  setup/gate-approve.sh
+  setup/run-artifacts.sh
   setup/run-repro.sh
   setup/smoke-matrix.py
   setup/selective-genapi-patch.py
@@ -92,6 +110,14 @@ MANIFEST=(
   workflows/full-sdlc-api-lite-codex.yaml
   workflows/bugfix-lite-codex.yaml
   setup/derive-codex.py
+  # Cross-lane prompt doctrine. The lite overlays replace a parent prompt
+  # wholesale, so a fix can land in four lanes and miss the fifth; the lock
+  # records what the lanes share today and packaging diffs it (LANE_DOCTRINE).
+  setup/lane-doctrine.py
+  setup/chain-paths.sh
+  setup/critic-converging.py
+  setup/reproduction-attribution.py
+  setup/lane-doctrine.lock.json
   setup/codex-usage.py
   setup/codex-watchdog.sh
   setup/codex-workspace-wrapper.sh
@@ -280,6 +306,13 @@ done
 # chain from; a hand edit or an unregenerated parent edit fails packaging here.
 echo "--- codex drift check ---"
 python3 "$ARCHON/setup/derive-codex.py" --all --check || { echo "PACKAGE=FAIL codex drift: regenerate with python3 .archon/setup/derive-codex.py --all"; exit 1; }
+
+# --- Cross-lane prompt doctrine (fail-closed) ---------------------------------
+# Generation covers the claude<->codex axis; nothing covers full<->lite, where a
+# lite overlay replaces a parent prompt wholesale. This fails packaging when a
+# line the lanes used to share survives in some of them and not others.
+echo "--- lane doctrine check ---"
+python3 "$ARCHON/setup/lane-doctrine.py" check || { echo "PACKAGE=FAIL lane doctrine: patch the missing lanes, or re-lock with python3 .archon/setup/lane-doctrine.py update"; exit 1; }
 
 # --- Secret gate (fail-closed) -------------------------------------------------
 echo "--- secret gate ---"

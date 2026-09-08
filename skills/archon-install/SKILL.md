@@ -11,7 +11,8 @@ sessions setting up a machine. A node never installs anything.
 # Installing the Archon SDLC stack
 
 The setup gist ships the **Archon layer only** - workflows, setup scripts,
-templates, the runbook, the operator skills, and a derived permissions allowlist.
+templates, the runbook, the operator skills, provider-neutral feature launcher,
+and a derived permissions allowlist.
 The dev environment is a **precondition**: `install.sh` asserts it and refuses to
 continue if anything is missing. It never installs dev tooling.
 
@@ -149,8 +150,34 @@ What its seven steps do, so you can read a failure:
    `$ROOT/.agents/skills/`. Node sessions do not
    load installed plugins (proven), so the project-scope symlink plus a `skills:`
    declaration on the node is the only mechanism that works.
-5. **Folder registration** - one `register-probe` run; must print
-   `REGISTER_PROBE_OK` and `BASE_BRANCH=[main]`.
+5. **Git shell + repo registration** - `install.sh` makes the root a git SHELL
+   (`.gitignore` = `*`, one empty commit, a bare origin under
+   `~/.archon/shells/`) when it is not already a git repo, then runs
+   `register-probe --branch archon-setup-probe`. It must print
+   `REGISTER_PROBE_OK`, `BASE_BRANCH=[main]`, and a cwd under
+   `worktrees/archon/task-archon-setup-probe`.
+
+   The shell exists so `--branch` works, and `--branch` is what makes runs
+   concurrent: archon locks a run on its `working_path` and nothing else, so
+   without it every lane shares the root and a second launch self-cancels. Nothing
+   is ever tracked in the shell — node bodies address every repo by absolute path,
+   so the archon worktree is only a lock key and an artifacts anchor.
+
+   **If a machine registered the root as a FOLDER project first**, the stored kind
+   is sticky and archon refuses `--branch` with *"Worktree options require a
+   git-repo project."* Flip it:
+
+   ```bash
+   sqlite3 ~/.archon/archon.db "update remote_agent_codebases \
+     set kind='repo', default_branch='main' where default_cwd='$ROOT'"
+   ```
+
+   Rollback of the whole thing is `rm -rf "$ROOT/.git"`, then re-register.
+
+   **The artifacts root moves with it**: a repo project writes to
+   `~/.archon/workspaces/_local/<Project>/artifacts/runs/`, not
+   `_folder/goodword/...`. Anything resolving a run's artifacts must go through
+   `setup/run-artifacts.sh`, which reads the run's own `output_root`.
 6. **Workflow validation** - gates on OUR shipped workflows only (`babysit`,
    `bugfix`, `bugfix-lite`, `bugfix-smoke-deployed`, `cleanup`, `full-sdlc-api`,
    `full-sdlc-api-lite`, `full-sdlc-web`, `register-probe`). Archon validates its
@@ -220,8 +247,12 @@ blocking launch/control:
 # Recommended: pin the server's cwd for deterministic default-repo selection:
 #   [mcp_servers.gitnexus]
 #   cwd = "/absolute/path/to/Goodword"   # add to $CODEX_HOME/config.toml
-# The Goodword root is not a git repo. Build the pinned API main index from a
-# dedicated clean worktree so lite impact is deterministic:
+# The Goodword root is only a git SHELL (tracks nothing), so it is not a source of
+# code to index. Build the pinned API main index from a dedicated clean worktree so
+# lite impact is deterministic. NOTE: this index is a SHARED, UNVERSIONED resource --
+# re-analyzing it while another lane is mid-run changes what that run reads. Since
+# 2026-09-07 `capabilities.json` records `index_commit`/`expected_commit` so a run can
+# say which index it used; re-analyze between runs, not during one:
 git -C "$ROOT/api" fetch origin main
 # GitNexus names indexes from the remote repo. Remove the old main-checkout
 # index first so the pinned worktree is the ONE registry entry named `api`.
@@ -269,7 +300,7 @@ those roots. Real adapter probes must deny control-code writes and allow the
 single run artifact directory.
 
 `stage-skills.sh` (installer step 4) links the CE review and operator skills into
-`$ROOT/.agents/skills/`; the guarded launcher mirrors **only** the external CE
+`$ROOT/.agents/skills/`; the guarded launcher covers Codex API/web feature lanes plus bugfix lanes and mirrors **only** the external CE
 review targets into `$CODEX_HOME/skills/` because the narrowed Codex cwd is
 `api`. Operator skills retain `WORKFLOW-NODE-STOP` and are never exposed in
 that dedicated workflow-node home.

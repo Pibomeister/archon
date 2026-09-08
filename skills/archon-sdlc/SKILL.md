@@ -1,6 +1,6 @@
 ---
 name: archon-sdlc
-description: Use when driving or supervising a Goodword Archon SDLC, bugfix, or backfill run - starting full-sdlc-api on a feature spec, bugfix on a bug report, or backfill on a backfill spec, reading the plan-gate, RCA-gate, or backfill-packet, interpreting loop exits (CONVERGED, NO_PROGRESS, FIXER_BLOCKED, SCOPE_BREACH, ROUND_CAP_REACHED, CHAIN_CONFLICT, FIX_STALLED, ARCHITECTURE_SUSPECT, NEGCONTROL=FAIL, CLAIM_DIVERGED, SAMPLE_SUSPECT, BOUND_BREACH, RECONCILE_FAIL, PLAN_REJECTED, PLAN_NO_PROGRESS, PLAN_SCOPE_DISPUTE, PLAN_ROUND_CAP, RCA_PLAN_REJECTED, RCA_PLAN_SCOPE_DISPUTE, RCA_PLAN_SHAPE=FAIL, CRITIC_GATE=FAIL, IMPACT=UNAVAILABLE, IMPACT=SKIPPED, DESLOP=DIRTY, DESLOP_GATE=FAIL, DESLOP_REVIEW=FAIL, DESLOP_ROUND_CAP, ROUTE=FULL, LITE_FIXES_UNREVIEWED), choosing between a lite lane (full-sdlc-api-lite, bugfix-lite) and the full lane, deciding resume vs escalate, or running babysit/cleanup afterwards. Triggers on "archon run", "start the SDLC lane", "archon bugfix", "archon backfill", "the run is stuck", "resume the run", or any mention of a paused/failed archon workflow.
+description: Use when driving or supervising a Goodword Archon SDLC, bugfix, or backfill run - starting full-sdlc-api on a feature spec, bugfix on a bug report, or backfill on a backfill spec, reading the plan-gate, RCA-gate, or backfill-packet, interpreting loop exits (CONVERGED, NO_PROGRESS, FIXER_BLOCKED, SCOPE_BREACH, ROUND_CAP_REACHED, CHAIN_CONFLICT, FIX_STALLED, ARCHITECTURE_SUSPECT, NEGCONTROL=FAIL, CLAIM_DIVERGED, SAMPLE_SUSPECT, BOUND_BREACH, RECONCILE_FAIL, PLAN_REJECTED, PLAN_NO_PROGRESS, PLAN_SCOPE_DISPUTE, PLAN_ROUND_CAP, RCA_PLAN_REJECTED, RCA_PLAN_SCOPE_DISPUTE, RCA_PLAN_SHAPE=FAIL, CRITIC_GATE=FAIL, IMPACT=UNAVAILABLE, IMPACT=SKIPPED, DESLOP=DIRTY, DESLOP_GATE=FAIL, DESLOP_REVIEW=FAIL, DESLOP_ROUND_CAP, ROUTE=FULL, LITE_FIXES_UNREVIEWED, PROOF_SELF_CONTRADICTED, RCA_PLAN_FINDING_RESTATED, RCA_PLAN_SCOPE_WIDENED, RCA_PLAN_CRITIQUE_ORPHANED, E2E_MUTEX=FAIL), choosing between a lite lane (full-sdlc-api-lite, bugfix-lite) and the full lane, deciding resume vs escalate, or running babysit/cleanup afterwards. Triggers on "archon run", "start the SDLC lane", "archon bugfix", "archon backfill", "the run is stuck", "resume the run", or any mention of a paused/failed archon workflow.
 ---
 
 <WORKFLOW-NODE-STOP>
@@ -79,8 +79,18 @@ Every part of that line is load-bearing (RUNBOOK §1):
   abandon are off limits (§0), and the derived allowlist reflects exactly that
   split — `archon workflow run|resume|get|runs|status` are permitted verbs.
 
-The web lane is still toy-pinned (no `params.json`, inlined worktree). **Real
-tickets are api-lane-only.** Do not start `full-sdlc-web` on a real spec.
+Feature runs now use the provider-neutral launcher:
+
+```bash
+python3 "$ROOT/.archon/setup/archon-run.py" feature --provider claude --scope api "/abs/path/to/spec.md"
+python3 "$ROOT/.archon/setup/archon-run.py" feature --provider codex --scope fullstack "/abs/path/to/spec.md"
+```
+
+Direct shell use must pass both `--provider` and `--scope`. `archon-linear`
+infers them from ticket classification. Cross-repository features run API first
+and web second with the same provider; the web lane accepts only the generated
+`feature-api-handoff.json`, validates its spec bytes, API head, shared plan hash,
+and chain identity, then derives its own web worktree from that handoff.
 
 Before starting anything large, read §6 below - a run spends the operator's Claude
 subscription window.
@@ -144,15 +154,22 @@ lite; `L` is never overridable. That line is a human's decision to write.
 
 ```bash
 cd "$ROOT"
-DISABLE_OMC=1 archon workflow run full-sdlc-api-lite "$ROOT/.omc/research/<spec>.md" </dev/null 2>&1 | tee /tmp/archon-lite.log
-DISABLE_OMC=1 archon workflow run bugfix-lite "/abs/path/to/bug-report.md" </dev/null 2>&1 | tee /tmp/archon-bugfix-lite.log
+DISABLE_OMC=1 archon workflow run full-sdlc-api-lite --branch <unique-slug> "$ROOT/.omc/research/<spec>.md" </dev/null 2>&1 | tee /tmp/archon-lite.log
+DISABLE_OMC=1 archon workflow run bugfix-lite --branch <other-slug> "/abs/path/to/bug-report.md" </dev/null 2>&1 | tee /tmp/archon-bugfix-lite.log
 ```
 
-Ports: `full-sdlc-api-lite` owns 4125, `bugfix-lite` owns 4126/3126, so leftover
-servers never collide across lanes. That does not make runs concurrent: Archon
-runs ONE workflow per folder project at a time and a second `workflow run`
-exits 1 with `Workflow already active on this path` (a run paused at its gate
-counts as active). Queue behind it. Everything in §0 applies unchanged.
+**`--branch` is not optional.** Archon locks a run on its `working_path` and
+nothing else. With `--branch` each run gets its own worktree and its own lock, so
+runs are concurrent; without it every lane shares the project root and the second
+launch self-cancels with `Workflow already active on this path`. Give each run a
+branch nobody else is using — `archon-run.py` derives one from the spec slug
+automatically, so only a raw `archon workflow run` needs you to pick it. See §5a.
+
+Ports are **per run**, allocated at preflight from each lane's base
+(4123 sdlc-api, 4124/3124 bugfix, 4125 api-lite, 4126/3126 bugfix-lite,
+4127/3127 sdlc-web) at stride 10. Read this run's pair from its `PREFLIGHT_PORTS`
+line or `params.json`; never assume a lane's base is what it bound. Everything in
+§0 applies unchanged.
 
 What the lite lanes give up, so you can say it plainly at the gate: on
 `full-sdlc-api-lite` the single review round means fixes the fixer lands are
@@ -169,7 +186,7 @@ Every lane has a GENERATED `provider: codex` twin (`bugfix-lite-codex`, `full-sd
 
 Two differences that change supervision (RUNBOOK §15):
 
-- Codex lite and full bugfix have one supported launcher; raw Archon run/control commands are rejected by an always-run workflow guard:
+- Codex feature, lite, and full bugfix lanes have one supported launcher; raw Archon run/control commands are rejected by an always-run workflow guard:
 
   ```bash
   python3 "$ROOT/.archon/setup/archon-run.py" check
@@ -177,7 +194,7 @@ Two differences that change supervision (RUNBOOK §15):
   python3 "$ROOT/.archon/setup/archon-run.py" run full-sdlc-api-lite-codex "/abs/path/to/spec.md"
   ```
 
-  Use the same script's `approve`, `reject`, `resume`, and `abandon` subcommands at gates, passing `--token CONTROL_TOKEN_FROM_LAST_LAUNCH` and replacing the placeholder with the token printed by the latest `STARTED` line. It validates ChatGPT auth and dedicated-home skills, checks optional GitNexus health for the pinned `api` index at `$HOME/.archon/gitnexus/api-main`, captures a stable exact launcher PGID/fingerprint, and returns only after the watchdog arms and the workflow consumes a one-time private guard. Lite defaults are 90 active minutes/8M cumulative tokens; full bugfix defaults are 240/30M. When GitNexus is healthy, its index, token hash, signal authority, and enforced Codex wrapper all live outside the AI-writable API/web roots; when it is absent/stale/missing MCP, the run emits explicit degraded evidence and continues with repo-local investigation. `abandon` and `reject` remain available even when auth, ports, or optional evidence sources are unhealthy.
+  Use the same script's `approve`, `reject`, `resume`, and `abandon` subcommands at gates, passing `--token CONTROL_TOKEN_FROM_LAST_LAUNCH` and replacing the placeholder with the token printed by the latest `STARTED` line. It validates ChatGPT auth and dedicated-home skills, checks optional GitNexus health for the pinned `api` index at `$HOME/.archon/gitnexus/api-main`, captures a stable exact launcher PGID/fingerprint, and returns only after the watchdog arms and the workflow consumes a one-time private guard. Lite defaults are 90 active minutes/8M cumulative tokens; full feature and full bugfix defaults are 240/30M per lane. When GitNexus is healthy, its index, token hash, signal authority, and enforced Codex wrapper all live outside the AI-writable API/web roots; when it is absent/stale/missing MCP, the run emits explicit degraded evidence and continues with repo-local investigation. `abandon` and `reject` remain available even when auth, ports, or optional evidence sources are unhealthy.
 - `maxBudgetUsd` is unsupported under codex, so generated twins remove the inert fields. AI-node timeouts remain non-lethal; the mandatory external watchdog is the structural brake.
 
 Twins are generated by `setup/derive-codex.py`; never edit one by hand — fix the parent and regenerate.
@@ -460,31 +477,62 @@ recipe for it is.
 Never "fix" a verifier to get past a gate. If `premise-verify` contradicts the
 plan, the plan or the spec is wrong.
 
-## 5a. Concurrency: one run per project path, by measurement
+## 5a. Concurrency: N runs at once, one worktree each
 
-Archon's run lock keys on `working_path` and nothing else, and the Goodword root is a
-"folder" project, so **every run of every lane shares one lock**. Measured 2026-08-30
-(`workflows/lock-probe.yaml`, a zero-spend probe that holds its node 45 s; full analysis
-RUNBOOK §5a):
+Runs are concurrent as of 2026-09-07. Three ran simultaneously with no measurable
+slowdown (RCA wall-clock 11.0/14.1/14.6 min, against 10.3-17.3 min across eleven
+serial runs). Full contract in RUNBOOK §5a.
 
-- A second `workflow run` of ANY lane while one is `running` **or `paused`** is created
-  and instantly self-cancelled: `Workflow already active on this path (<status>): <lane>`.
-  A paused run at a gate holds the lock until a human decides it.
-- Symlinking a second directory does not help — the CLI realpaths the cwd.
-- `--branch <b>` DOES give each run its own worktree `working_path` (two probe runs ran
-  concurrently in a scratch git project), but it requires the project to be a git repo
-  with an `origin` remote, which the Goodword root is not today. Making it one, and
-  parameterizing the hardcoded smoke ports (4123 sdlc / 4124+3124 bugfix), are the two
-  changes that would make runs truly independent — a supervised decision, not a launch-time
-  flag. Until then:
+**The rule: every run needs its own `working_path`, and `--branch` is how it gets
+one.** The lock keys on `working_path` and nothing else. `--branch <b>` puts the run
+in `~/.archon/workspaces/_local/Goodword/worktrees/archon/task-<b>`; drop it and you
+are back to one shared path and an instant self-cancel. `archon workflow runs` showing
+distinct `working_path`s is the proof that runs are really in flight.
 
-**Operating rules.** Before any launch or resume, `archon workflow runs` and clear the
-path: wait, `approve`/`reject` the paused run, or `archon workflow abandon <id>` a dead
-one. Never queue a second run and walk away — it is already cancelled. To test whether
-the path is actually free, launch `lock-probe` (costs nothing, exits in ~45 s). And
-because several failed runs of one lane can accumulate on the path, resume is only safe
-through `setup/resume.sh` (§5) — the raw CLI resumes the newest resumable run, not the
-one you name.
+`archon-run.py` passes `--branch` itself, derived from the spec slug, so the launchers
+in §2 need nothing extra. Only a raw `archon workflow run` makes you choose, and the
+branch must be unique per run — two launches sharing a branch share a lock.
+
+**Why this works here:** the Goodword root is a *git shell* (`.gitignore` = `*`, one
+empty commit, a bare origin under `~/.archon/shells/`). Nothing is ever tracked in it.
+Node bodies address every repo by absolute path, so the archon worktree is only a lock
+key and an artifacts anchor — never the tree the work happens in. The api/web-app
+worktrees are still cut under `<repo>/.worktrees/` as before.
+
+**What is isolated, and what is not:**
+
+| Resource | Isolation |
+|---|---|
+| Path lock, artifacts dir | per run |
+| Smoke ports | per run (`setup/port-alloc.sh`, recorded in `params.json`) |
+| api/web worktrees, incl. `bugfix-smoke-<slug>` | per run |
+| **e2e docker stack (54322/8001)** | **shared, serialized by `setup/e2e-mutex.sh`** |
+| **ce-code-review `/tmp` root** | **shared**; only the `head_sha` prefix match separates lanes |
+| **goodword-kb** | shared; the gates are scoped to each run's own file |
+
+**The e2e stack is the one thing that still serializes.** `up -d --wait` attaches to a
+running stack instead of erroring, so a second run's migrations and seed would rewrite
+the first's rows silently. `E2E_MUTEX=FAIL` is a typed stop naming the owning run's
+artifacts dir — it is not a queue, because the smoke stack stays up across a human gate
+that can take hours. `smoke-teardown` (`always_run`) releases it; a run that dies before
+teardown strands it and the message prints the `rm -rf` that clears it.
+
+*Known ceiling:* an **integration-kind repro** reaches the same database through
+`.env.e2e` at red-gate, green-check, exit-gate and negcontrol WITHOUT taking the mutex.
+Never run one alongside anything that boots the e2e stack.
+
+**Every bash gate tees its typed line to `$ARTIFACTS_DIR/node-<id>.out`.** That is
+where a failed gate's reason lives: `archon.db` stores the node's SCRIPT, not its
+stdout, so `archon workflow get` echoes source and truncates. With detached
+concurrent runs there is no terminal either. Read the file; if it predates this
+change, replay the gate's helper against a COPY of the artifacts dir, never the
+live one (those helpers write files the gate reads).
+
+**Operating rules.** Read this run's ports from its own `PREFLIGHT_PORTS` line or
+`params.json`, and its live URLs from `$ARTIFACTS_DIR/smoke-urls.txt` — a lane base is
+no longer where anything binds. Resume only through `setup/resume.sh` (§5): a relaunch
+of the same ticket reuses its worktree, so a path can hold several runs and the raw CLI
+takes the newest. `lock-probe` still costs nothing if you want to prove a path is free.
 
 ## 6. Quota - the real currency
 
@@ -655,6 +703,38 @@ tee, quota). Differences that decide supervision calls:
   `RCA_PLAN_ROUND_CAP` is resumable the same way `PLAN_ROUND_CAP` is: raise the
   cap (`echo N > <artifacts>/rca-round-cap.txt`) or accept the loop's last state
   by hand first, since a bare resume re-enters the loop and hits the same cap.
+- **A failed bash GATE whose cause lives in an artifact an AI node wrote is NOT
+  fixed by resuming.** Only the gate re-executes — completed AI nodes never
+  re-run (§5) — so it re-reads the same bytes and returns the same verdict. Edit
+  the named artifact first, then `resume.sh`. `PROOF_SELF_CONTRADICTED` is the
+  clearest case: `proof-assessment.json` claims `occurrence_attributed: true`
+  while the cited source's provenance row is `evidence_kind: class`. Either drop
+  that source from `occurrence_evidence_sources` (if another cited source carries
+  the attribution) or set `occurrence_attributed: false` and accept
+  `class-hardening-only`. RUNBOOK §12 used to say "resume re-runs the RCA" here;
+  it does not.
+- **`RCA_PLAN_FINDING_RESTATED` and `RCA_PLAN_SCOPE_WIDENED` are diagnostics, not
+  stops.** They print inside `rca-converge` and change no verdict. RESTATED means
+  the critic re-raised something the reviser DECLINED last round — the reviser may
+  not edit that artifact, so another round cannot close it; read the previous
+  round's `revision.json` justification and either settle it or accept at the cap
+  with `rca-plan-accept.txt` (which never waives a P0). SCOPE_WIDENED means a
+  revision pulled a HIGH/CRITICAL symbol into the blast radius that round 1 did not
+  carry. Seeing both on the same run means the loop is escalating, not converging:
+  on run 08389c0f it went 5 -> 40 -> 29+26 direct dependents across three rounds and
+  then died on the critic's cost cap. **Raising that cap buys another wider round —
+  read these two lines before touching `maxBudgetUsd`.**
+- **`RCA_PLAN_CRITIQUE_ORPHANED round=N`** prints at the start of a RESUMED round:
+  round N's critic finished and wrote `rca-round-N/critique.json`, then the round
+  died before converge. A `maxBudgetUsd` cap does exactly this — archon throws from
+  inside the node and that throw cannot be intercepted from the workflow, so the
+  node is `failed` even though its contract artifact is complete and valid. Read
+  that critique before paying for the next one; the resumed round WILL commission a
+  fresh critic, deliberately, because a resumed round must not be judged by a
+  critique written against the pre-edit plan.
+- **`E2E_MUTEX=FAIL`** means another run owns the shared e2e stack (§5a), not that
+  anything is broken. The message names the owner's artifacts dir. Let that run reach
+  its smoke gate and approve it, or release by hand once it is gone.
 - **Resume is not arbitrary rewind.** Archon resumes failed loop/node work while
   skipping completed nodes; it cannot safely jump behind a frozen RED or an
   approved manifest. Never delete workflow-event rows or rewrite hashes to fake
