@@ -16,22 +16,60 @@
 # rca-gate: it (re)writes repo.txt = "<repo>\n" idempotently (9 downstream
 # nodes `cat` it) and re-emits the RCA_NOTE=integration mutex line for
 # kind=integration.
-# Usage: rca-shape.sh <artifacts-dir>
+# Usage: rca-shape.sh <artifacts-dir> [caller-token]
+# caller-token (default RCA_SHAPE) stamps the persisted stop with the calling
+# node's identity -- RCA_GATE or RCA_PLAN_SHAPE -- which RUNBOOK.md routes on.
+# stdout is unchanged either way: callers still sed RCA_SHAPE= themselves.
 set -euo pipefail
-AD="${1:?usage: rca-shape.sh <artifacts-dir>}"
+AD="${1:?usage: rca-shape.sh <artifacts-dir> [caller-token]}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+
+# A typed stop is the operator's only routing signal, but a failing node's
+# stdout does not survive the workflow executor's failure path -- it reports a
+# fragment of the script source instead, so every RCA_SHAPE=FAIL/
+# RCA_INVESTIGATION_REQUIRED reason is destroyed at the failure boundary.
+# Persist each typed line here, at the one chokepoint every caller shares,
+# so terminal supervision can read the discriminator back off the run dir.
+# Never let the surfacing path itself become a silent stop: if the run dir is
+# unwritable, degrade to stdout rather than aborting before any typed message.
+GATE_STATUS="$AD/gate-status.txt"
+{ : > "$GATE_STATUS"; } 2>/dev/null || true
+# Each caller renames this script's token to its own node-specific form
+# (RCA_GATE=FAIL, RCA_PLAN_SHAPE=FAIL) and RUNBOOK.md gives those DIFFERENT
+# remediations, so the persisted line has to carry the caller's identity or an
+# operator cannot tell which call site stopped.
+TOKEN="${2:-RCA_SHAPE}"
+# Records typed STOPS only, one line, never a traceback. The truncate above
+# clears a previous round's stop, so a run that passes this check and dies later
+# has an empty file and no discriminator rather than a stale, misrouting one.
+record() {
+  local line
+  line="$(printf '%s' "$1" | tr '\n' ' ')"
+  { printf '%s\n' "${line/#RCA_SHAPE/$TOKEN}" >> "$GATE_STATUS"; } 2>/dev/null || true
+}
+emit() { printf '%s\n' "$1"; record "$1"; }
 
 # V2 bugfix contract: the immutable source/effective symptom ledger, exact
 # disposition/coverage bijections, lineage, occurrence proof, and closure
 # classification are deterministic gates rather than RCA prose.
 python3 "$HERE/bugfix-contract.py" normalize-gather-more "$AD" \
-  || { echo "RCA_SHAPE=FAIL gather-more normalization"; exit 1; }
+  || { emit "RCA_SHAPE=FAIL gather-more normalization"; exit 1; }
 CONTRACT_OUT="$(python3 "$HERE/bugfix-contract.py" validate-causal-coverage --artifacts "$AD" 2>&1)" || {
-  printf '%s\n' "$CONTRACT_OUT" | sed -E 's/^BUGFIX_(COVERAGE|CONTRACT)=FAIL/RCA_SHAPE=FAIL/'
+  RETYPED="$(printf '%s\n' "$CONTRACT_OUT" | sed -E 's/^BUGFIX_(COVERAGE|CONTRACT)=FAIL/RCA_SHAPE=FAIL/')"
+  printf '%s\n' "$RETYPED"
+  # Persist exactly one typed line. A crash inside the contract produces a
+  # traceback with no typed token; record a typed stop for it rather than
+  # letting "AttributeError: ..." become the routing signal.
+  TYPED="$(printf '%s\n' "$RETYPED" | grep -m1 '^RCA_SHAPE=FAIL' || true)"
+  record "${TYPED:-RCA_SHAPE=FAIL contract crashed without a typed line (see run log)}"
   exit 1
 }
-python3 "$HERE/bugfix-contract.py" classify "$AD" >/dev/null \
-  || { echo "RCA_SHAPE=FAIL classification"; exit 1; }
+CLASSIFY_OUT="$(python3 "$HERE/bugfix-contract.py" classify "$AD" 2>&1)" || {
+  printf '%s\n' "$CLASSIFY_OUT" | sed -E 's/^BUGFIX_(COVERAGE|CONTRACT)=FAIL/RCA_SHAPE=FAIL/'
+  CTYPED="$(printf '%s\n' "$CLASSIFY_OUT" | sed -E 's/^BUGFIX_(COVERAGE|CONTRACT)=FAIL/RCA_SHAPE=FAIL/' | grep -m1 '^RCA_SHAPE=FAIL' || true)"
+  record "${CTYPED:-RCA_SHAPE=FAIL classification crashed without a typed line (see run log)}"
+  exit 1
+}
 
 # A thin report may truthfully end investigation without an implementation
 # plan. That is valid open work, but it must stop with a typed evidence request
@@ -67,17 +105,23 @@ PY
   if [ "$PROBE_STATE" != answered ] && [ "$INVESTIGATION_REASON" = reproduction-or-causal-proof-missing ]; then
     INVESTIGATION_REASON="occurrence-retrieval-unavailable"
   fi
-  echo "RCA_INVESTIGATION_REQUIRED reason=$INVESTIGATION_REASON probes=$PROBE_STATE ticket=open no_implementation=true"
+  emit "RCA_INVESTIGATION_REQUIRED reason=$INVESTIGATION_REASON probes=$PROBE_STATE ticket=open no_implementation=true"
   exit 1
 fi
 
 # probe.json is validated by the SAME script probe-run uses before it executes
 # these statements against production. One contract, two callers.
 PROBE_OUT="$(python3 "$HERE/probe-shape.py" "$AD" --token "RCA_SHAPE=FAIL" 2>&1)" \
-  || { printf '%s\n' "$PROBE_OUT"; exit 1; }
+  || { printf '%s\n' "$PROBE_OUT"
+       # Persist exactly one typed line, the same way the contract output above
+       # is handled: probe-shape can emit a traceback with no typed token, and a
+       # traceback must never become the routing signal.
+       TYPED="$(printf '%s\n' "$PROBE_OUT" | grep -m1 '^RCA_SHAPE=FAIL' || true)"
+       record "${TYPED:-RCA_SHAPE=FAIL probe shape crashed without a typed line (see run log)}"
+       exit 1; }
 
-python3 - "$AD" <<'PY'
-import json, os, sys
+RCA_SHAPE_TOKEN="$TOKEN" python3 - "$AD" <<'PY'
+import json, os, re, sys
 
 ad = sys.argv[1]
 
@@ -86,8 +130,25 @@ def load(name):
     return json.load(open(os.path.join(ad, name), encoding="utf-8"))
 
 
+TOKEN = os.environ.get("RCA_SHAPE_TOKEN", "RCA_SHAPE")
+
+
+def emit(line):
+    print(line)
+    # One line, carrying the caller's token: gate_discriminator reads the last
+    # line, so a reason wrapped over several lines would lose its typed prefix.
+    flat = " ".join(line.split())
+    if TOKEN != "RCA_SHAPE" and flat.startswith("RCA_SHAPE"):
+        flat = TOKEN + flat[len("RCA_SHAPE"):]
+    try:
+        with open(os.path.join(ad, "gate-status.txt"), "a", encoding="utf-8") as fh:
+            fh.write(flat + "\n")
+    except OSError:
+        pass  # stdout is still the primary channel; never mask a typed stop
+
+
 def fail(msg):
-    print(f"RCA_SHAPE=FAIL {msg}")
+    emit(f"RCA_SHAPE=FAIL {msg}")
     sys.exit(1)
 
 
@@ -214,5 +275,5 @@ if fp_files:
         fail(f"fix-plan.files not subset of files-allowlist: {missing}")
 
 open(os.path.join(ad, "repo.txt"), "w", encoding="utf-8").write(repo + "\n")
-print(f"RCA_SHAPE=OK repo={repo} kind={ft['kind']}")
+print(f"RCA_SHAPE=OK repo={repo} kind={ft['kind']}")  # success is not a stop: never persisted
 PY

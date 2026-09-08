@@ -825,6 +825,8 @@ nodes:
       killed merely to satisfy the shape.
 
       repo.json — {"repo": "api" | "web-app" | "both", "rationale": "<one line>"}
+      Select the repository that OWNS the mechanism this chain actually fixes —
+      the fix site, not the union of every repo a symptom touches.
       repo is the repository THIS CHAIN CHANGES — the repo of the final causal
       link's fix_site and of fix-plan.json's files. It is NOT the ticket's
       surface area. A symptom you disposition separate-ticket, by-design, or
@@ -1017,6 +1019,13 @@ nodes:
         product decision, so authority is a product or human receipt, and you
         will usually not have one. Code behavior alone never establishes
         by-design; when you have no receipt, do not use these dispositions.
+        A receipt must be QUOTED, never a bare token — the admissible forms are
+        "report:<verbatim clause from the sealed report>", "human:<one-line
+        receipt>", or "controller:<one-line receipt>". A bare "report" is
+        self-certifying, tells a reviewer nothing, and passes the contract only
+        because the contract checks truthiness. When no such receipt exists the
+        correct disposition is `unresolved`, which keeps the ticket open and
+        costs nothing.
       - separate-ticket claims a REAL DEFECT with a DIFFERENT MECHANISM than
         your selected cause. That is an evidential claim you are entitled to
         make, so authority is a CITATION: the file:line or evidence-file
@@ -1590,7 +1599,7 @@ nodes:
       # copy would be two contracts drifting apart, and the drift would show up as
       # artifacts that pass here and fail after the loop, or worse, the reverse.
       SHAPE=0
-      OUT=$(bash "$ROOT/.archon/setup/rca-shape.sh" "$ARTIFACTS_DIR" 2>&1) || SHAPE=$?
+      OUT=$(bash "$ROOT/.archon/setup/rca-shape.sh" "$ARTIFACTS_DIR" RCA_GATE 2>&1) || SHAPE=$?
       if [ "$SHAPE" != 0 ]; then
         # This node keeps its own typed token: RCA_GATE=FAIL <reason> is what
         # RUNBOOK.md and every existing grep over run logs look for. rca-shape.sh
@@ -1599,6 +1608,12 @@ nodes:
         case "$OUT" in
           *CROSS_REPO_BUG*)
             echo "RCA_GATE=FAIL CROSS_REPO_BUG (v1 is single-repo: split the bug report per repo or escalate; the RCA artifacts are preserved in this run's dir)" ;;
+          *RCA_INVESTIGATION_REQUIRED*)
+            # Not malformed output and not a crash: the RCA truthfully concluded
+            # the report cannot carry an implementation yet. Keep the typed
+            # reason verbatim so RUNBOOK.md routes it to evidence-gathering
+            # rather than to the generic "untyped stop" path.
+            printf '%s\n' "$OUT" | grep '^RCA_INVESTIGATION_REQUIRED' ;;
           *RCA_SHAPE=FAIL*)
             printf '%s\n' "$OUT" | sed 's/^RCA_SHAPE=FAIL/RCA_GATE=FAIL/' ;;
           *)
@@ -2452,10 +2467,17 @@ nodes:
             # mutable artifacts inconsistent with each other.
             if [ "$V" = ACCEPT ]; then
               SHAPE=0
-              OUT=$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/rca-shape.sh "$AD" 2>&1) || SHAPE=$?
+              OUT=$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/rca-shape.sh "$AD" RCA_PLAN_SHAPE 2>&1) || SHAPE=$?
               if [ "$SHAPE" != 0 ]; then
                 printf '%s\n' "$OUT" | sed 's/^RCA_SHAPE=FAIL/RCA_PLAN_SHAPE=FAIL/'
-                echo "RCA_CONVERGE=FAIL shape round=$N"
+                # A reviser that blanked fix-plan.approach leaves a valid open
+                # investigation, not shape drift. Typing it as shape sends the
+                # operator to the "repair the contracts" row instead of the
+                # evidence-gathering one.
+                case "$OUT" in
+                  *RCA_INVESTIGATION_REQUIRED*) echo "RCA_CONVERGE=FAIL investigation-required round=$N" ;;
+                  *) echo "RCA_CONVERGE=FAIL shape round=$N" ;;
+                esac
                 exit 1
               fi
               echo "RCA_PLAN_CONVERGED round=$N"
@@ -2538,10 +2560,13 @@ nodes:
                 P0=$(python3 -c "import json,sys; f=json.load(open(sys.argv[1],encoding='utf-8')).get('findings') or []; print(sum(1 for x in f if isinstance(x,dict) and x.get('severity')=='P0' and int(str(x.get('confidence')))>=75))" "$RD/critique.json" 2>/dev/null || echo unreadable)
                 if [ "$P0" = 0 ]; then
                   SHAPE=0
-                  OUT=$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/rca-shape.sh "$AD" 2>&1) || SHAPE=$?
+                  OUT=$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/rca-shape.sh "$AD" RCA_PLAN_SHAPE 2>&1) || SHAPE=$?
                   if [ "$SHAPE" != 0 ]; then
                     printf '%s\n' "$OUT" | sed 's/^RCA_SHAPE=FAIL/RCA_PLAN_SHAPE=FAIL/'
-                    echo "RCA_CONVERGE=FAIL shape round=$N (human accept)"
+                    case "$OUT" in
+                      *RCA_INVESTIGATION_REQUIRED*) echo "RCA_CONVERGE=FAIL investigation-required round=$N (human accept)" ;;
+                      *) echo "RCA_CONVERGE=FAIL shape round=$N (human accept)" ;;
+                    esac
                     exit 1
                   fi
                   echo "RCA_PLAN_CONVERGED round=$N (human accepted at cap: $(head -1 "$AD/rca-plan-accept.txt"))"
@@ -2568,9 +2593,11 @@ nodes:
       # the human gate nothing else re-validates them — while nine downstream nodes,
       # the RED test and the scope gate all read them as contracts.
       SHAPE=0
-      OUT=$(bash "$ROOT/.archon/setup/rca-shape.sh" "$ARTIFACTS_DIR" 2>&1) || SHAPE=$?
+      OUT=$(bash "$ROOT/.archon/setup/rca-shape.sh" "$ARTIFACTS_DIR" RCA_PLAN_SHAPE 2>&1) || SHAPE=$?
       if [ "$SHAPE" != 0 ]; then
         case "$OUT" in
+          *RCA_INVESTIGATION_REQUIRED*)
+            printf '%s\n' "$OUT" | grep '^RCA_INVESTIGATION_REQUIRED' ;;
           *RCA_SHAPE=FAIL*)
             printf '%s\n' "$OUT" | sed 's/^RCA_SHAPE=FAIL/RCA_PLAN_SHAPE=FAIL/' ;;
           *)

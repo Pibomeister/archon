@@ -1,0 +1,36 @@
+{
+  "baseline": {
+    "commits": {
+      "api": "e45c20365251111be71c14506f6e54f57671c7c9",
+      "web-app": "47cce4156b0cc3b55261ecae2e399c583593e914"
+    },
+    "gitnexus": {
+      "commit": "e45c20365251111be71c14506f6e54f57671c7c9",
+      "index_path": "/fixture/gitnexus/api-main",
+      "repo": "api"
+    },
+    "sha256": "45172aaac4d1008276947e674d334eea091fd5357d4b5fa462a93330aeb0b4aa"
+  },
+  "counters": {
+    "causal_fix_failures": 0,
+    "proof_rounds": 0,
+    "recovery_successors": 0,
+    "successors": 0
+  },
+  "current_run_id": "554842f98a4c799f2930e98493cfbc01",
+  "ledger_revision_hash": "f9292e9693c1a8eebf8840e672a6944a19a8ab550f7fb0109f25ea4cd54efbb9",
+  "ledger_root_hash": "306ca40028fb5f6236b3671730eae661bca325393d40619c4336633af54a19e2",
+  "logical_chain_id": "e21384fc05af800be7a8acbca0af5366",
+  "parent_run_id": null,
+  "provider": "codex",
+  "report": "/fixture/report.md",
+  "report_sha256": "d7bd51b8a89ca7c854724373a72639bf8b1bdc4115b8234093b62b319d41aee7",
+  "root_run_id": "554842f98a4c799f2930e98493cfbc01",
+  "root_source_ids": [
+    "S1",
+    "S2",
+    "S3"
+  ],
+  "sequence": 0,
+  "transition_reason": "static-missing-single-repository"
+}

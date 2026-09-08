@@ -1,0 +1,5 @@
+{"residuals":[
+  {"symptom":"Expected contact notes are missing after a Mesh import.","disposition":"separate-bug","citation":"bug-report-normalized.md:7","repo":"api","ticket_stub":"Reproduce Mesh note omissions with the customer's CSV and confirmed mapping"},
+  {"symptom":"Duplicate-contact merge attempts repeatedly fail.","disposition":"separate-bug","citation":"bug-report-normalized.md:7","repo":"api","ticket_stub":"Diagnose repeated duplicate-merge failures from suggestion IDs and responses"},
+  {"symptom":"Product guidance conflicts about whether Sales Navigator extends person discovery.","disposition":"separate-bug","citation":"bug-report-normalized.md:7","repo":"web-app","ticket_stub":"Reconcile Sales Navigator capability guidance across onboarding and assistant"}
+]}

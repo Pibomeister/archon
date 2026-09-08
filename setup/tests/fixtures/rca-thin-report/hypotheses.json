@@ -1,0 +1,38 @@
+[
+  {
+    "hypothesis": "The Mesh occurrence used multiple scalar rules targeting Note.content, and rulesToMappingConfig overwrote all but the final note-bound source.",
+    "id": 1,
+    "note": "Mechanism is proven in pinned code; occurrence awaits the customer's confirmed mapping and CSV replay.",
+    "status": "open"
+  },
+  {
+    "hypothesis": "Notes were staged but became unlinked because the same-row profile was ambiguous or unresolved.",
+    "id": 2,
+    "note": "Requires staged entries, affected contacts, and row-level action evidence.",
+    "status": "queued"
+  },
+  {
+    "hypothesis": "The report's spot check queried different contacts or an environment inconsistent with the reported count.",
+    "id": 3,
+    "note": "First-class measurement mismatch; query, environment, and sampled contacts are absent.",
+    "status": "queued"
+  },
+  {
+    "hypothesis": "Duplicate merges returned intentional pending or blocked outcomes from identity, ownership, shared-pair, or disabled-merge guards.",
+    "id": 4,
+    "note": "Pinned code supports these outcomes, but exact suggestion IDs and responses are absent.",
+    "status": "queued"
+  },
+  {
+    "hypothesis": "Duplicate merges failed from a stale-profile or concurrent execution defect.",
+    "id": 5,
+    "note": "Open PR #2315 overlaps this class; customer runtime evidence is absent.",
+    "status": "queued"
+  },
+  {
+    "hypothesis": "Sales Navigator guidance differs because onboarding and assistant responses use separate ungoverned content sources.",
+    "id": 6,
+    "note": "No screenshot, app version, assistant transcript, or product contract identifies either source.",
+    "status": "queued"
+  }
+]

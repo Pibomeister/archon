@@ -1,0 +1,88 @@
+{
+  "schema_version": 5,
+  "surface_equivalence": {
+    "reported_surface": "Mesh CSV import flow, duplicate-merge flow, and Sales Navigator onboarding/AI-assistant guidance",
+    "reported_surface_status": "ambiguous",
+    "surface_selection_basis": "The exact browser or client entrypoint is not identified.",
+    "runtime_entrypoint": "Candidate E1 path: UserImportService.analyzeImport followed by confirmed mapping staging",
+    "runtime_owner": "AIService.rulesToMappingConfig",
+    "test_entrypoint": "libs/external-services/src/lib/ai/__tests__/ai.service.spec.ts calls AIService.generateEntityMapping",
+    "test_runtime_owner": "AIService.rulesToMappingConfig",
+    "smoke_entrypoint": "apps/api-e2e/src/user-flows/user-import-flow.ai.spec.ts exercises analyzeImport",
+    "smoke_runtime_owner": "AIService.rulesToMappingConfig",
+    "test_matches_runtime": true,
+    "smoke_matches_runtime": true,
+    "reproduction_equivalence": {
+      "observed_preconditions": [
+        "unknown customer CSV headers and values",
+        "unknown stored confirmed mapping",
+        "unknown import ID and tenant",
+        "1,171 reported contacts",
+        "24 reported notes and 672 reported actions"
+      ],
+      "test_preconditions": [
+        "synthetic Mesh-like headers with multiple non-empty note-bound columns",
+        "generated mapping rules targeting Note.content",
+        "no customer tenant or persisted import"
+      ],
+      "material_differences": [
+        {
+          "dimension": "confirmed mapping",
+          "observed": "unavailable",
+          "test": "generated fixture",
+          "impact": "changes-causal-boundary"
+        },
+        {
+          "dimension": "customer CSV",
+          "observed": "unavailable",
+          "test": "synthetic rows",
+          "impact": "changes-causal-boundary"
+        },
+        {
+          "dimension": "runtime surface",
+          "observed": "three possible product entrypoints",
+          "test": "API mapping service only",
+          "impact": "changes-causal-boundary"
+        }
+      ],
+      "equivalent": false
+    },
+    "evidence": [
+      {
+        "claim": "runtime-entrypoint-to-owner",
+        "file": "api/libs/business-logic/src/lib/user-import/user-import.service.ts",
+        "quote": "this.aiService.generateEntityMapping"
+      },
+      {
+        "claim": "test-entrypoint-to-owner",
+        "file": "api/libs/external-services/src/lib/ai/__tests__/ai.service.spec.ts",
+        "quote": "describe('AIService.executeStructuredCompletion'"
+      },
+      {
+        "claim": "smoke-entrypoint-to-owner",
+        "file": "api/apps/api-e2e/src/user-flows/user-import-flow.ai.spec.ts",
+        "quote": "importsService.analyzeImport"
+      }
+    ]
+  },
+  "boundaries": [
+    {
+      "component": "AI mapping generation",
+      "input": "flat mapping rules, one file source per rule",
+      "output": "MappingConfig grouped by entity and field",
+      "evidence": "api/libs/external-services/src/lib/ai/ai.service.ts:3900-3910,3750-3809"
+    },
+    {
+      "component": "CSV staging",
+      "input": "file bytes plus metadata.confirmedMapping",
+      "output": "one staged entry per surviving mapped entity per row",
+      "evidence": "api/apps/enrichment-service/src/functions/stage-user-import-handler.ts:1298-1307"
+    },
+    {
+      "component": "merge HTTP boundary",
+      "input": "hashed merge suggestion ID",
+      "output": "confirmed, pending, or blocked outcome with optional reason",
+      "evidence": "api/apps/api/src/connection/connection.controller.ts:1621-1696"
+    }
+  ]
+}

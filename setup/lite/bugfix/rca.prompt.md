@@ -97,7 +97,14 @@ hypotheses.json — the full ledger, including dead ones:
     "note": "<what killed or confirmed it>"}]
 
 repo.json — {"repo": "api" | "web-app" | "both", "rationale": "<one line>"}
+Select the repository that OWNS the mechanism this chain actually fixes — the
+fix site, not the union of every repo a symptom touches. A report whose symptoms
+span both repos still binds to one repo when a single fixable mechanism is
+selected; the other repos' symptoms stay accounted for as separate-ticket/
+unresolved rows and become protected successor lanes.
 "both" is honest and allowed but hard-stops the run (v1 is single-repo).
+Reserve it for when there is genuinely no single current fix site — never as
+shorthand for "the report mentions both".
 
 fix-plan.json — {"approach": "<how the fix works, one paragraph>",
   "fix_site": "<repo-relative file:line>",
@@ -195,7 +202,29 @@ debug-phase.json, boundary-trace.json and pattern-comparison.json using the same
 contract as the full bugfix parent: every effective E-ID appears exactly once;
 fixed requires occurrence attribution plus cause/diff/RED/counterfactual;
 class-hardening-only cannot close the ticket; by-design requires product
-authority; product-semantics and unresolved stay open. Keep mechanism_valid and
+authority; product-semantics and unresolved stay open.
+`authority` is REQUIRED on by-design and on separate-ticket rows, but it means
+two DIFFERENT things and conflating them stops the lane. Select the repository
+that OWNS the mechanism this chain actually fixes — the fix site, not the union
+of every repo a symptom touches.
+- by-design / product-semantics claim the behavior is INTENDED. That is a
+product decision, so authority is a product or human receipt, QUOTED and never a
+bare token: "report:<verbatim clause from the sealed report>" (the report itself
+states the intended behavior; quote the clause, since a bare "report" is
+self-certifying and tells a human reviewer nothing), "human:<one-line receipt>",
+or "controller:<one-line receipt>". Never infer authority from code or from your
+own judgement. When no such receipt exists the correct disposition is
+`unresolved`, which keeps the ticket open and costs nothing.
+- separate-ticket claims a REAL DEFECT with a DIFFERENT MECHANISM than your
+selected cause. That is an evidential claim you ARE entitled to make, so
+authority is a CITATION — the file:line or evidence-file reference showing the
+mechanism differs, the same citation residuals.json carries for that symptom.
+Requiring a product receipt here would make the disposition unreachable for an
+unattended run, and since it is the only non-open way to close a symptom the
+chain does not fix, it would make every multi-symptom report unclosable
+(setup/bugfix-contract.py enforces the citation form). A separate-ticket row
+needs ALL THREE of `authority`, `repo`, and `ticket_stub`; an empty authority is
+what stops the run, not the split itself. Keep mechanism_valid and
 occurrence_attributed separate. Record the ordered phases root-cause-
 When occurrence_attributed is true, proof-assessment.json must include
 occurrence_evidence_sources. Use "report" for a direct report/repro; any named

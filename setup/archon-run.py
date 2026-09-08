@@ -1449,6 +1449,41 @@ def enrich_gate_handoff(row: dict, result: dict) -> dict:
     return result
 
 
+def gate_discriminator(row: dict) -> str:
+    """Last typed stop line rca-shape.sh persisted for this run.
+
+    The workflow executor's failure path reports a fragment of the failing
+    node's own script source, not its stdout, so a typed RCA_SHAPE=FAIL /
+    RCA_INVESTIGATION_REQUIRED reason never reaches the operator through the
+    log. rca-shape.sh writes each typed line to gate-status.txt in the run dir;
+    read it back so a terminal run carries a routable discriminator. This runs
+    for every TERMINAL_STATUS, not just `failed`; a completed run is silent only
+    because rca-shape.sh never persists a success, so do not add one.
+    Machine-specific prefixes are stripped by literal substitution, not by a
+    path-shaped regex: the most useful reasons here ("fix-plan.files not subset
+    of files-allowlist: ['api/src/...']") ARE a repo-relative path, and a regex
+    general enough to catch an absolute path eats those too, while still missing
+    any path containing a space.
+    """
+    try:
+        lines = [
+            ln.strip()
+            for ln in (artifact_dir(row) / "gate-status.txt").read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        ]
+    except OSError:
+        return ""
+    if not lines:
+        return ""
+    reason = lines[-1]
+    for prefix, replacement in ((str(artifact_dir(row)), "<run>"),
+                               (str(row.get("output_root") or ""), "<out>"),
+                               (str(Path.home()), "~")):
+        if prefix:
+            reason = reason.replace(prefix, replacement)
+    return redact_control_tokens(reason)[:200]
+
+
 def supervise_exact_run(db: Path, run_id: str, timeout_s: int, interval_s: float = 2.0) -> dict:
     deadline = time.time() + timeout_s
     while True:
@@ -1463,7 +1498,11 @@ def supervise_exact_run(db: Path, run_id: str, timeout_s: int, interval_s: float
                 "lane": row["workflow_name"], "gate": gate_name_from_event(event),
             })
         if status in TERMINAL_STATUSES:
-            return {"state": "terminal", "run": row["id"], "status": status, "lane": row["workflow_name"]}
+            terminal = {"state": "terminal", "run": row["id"], "status": status, "lane": row["workflow_name"]}
+            discriminator = gate_discriminator(row)
+            if discriminator:
+                terminal["discriminator"] = discriminator
+            return terminal
         if time.time() >= deadline:
             return {"state": "handoff", "run": row["id"], "status": status, "lane": row["workflow_name"], "reason": "timeout"}
         time.sleep(interval_s)
