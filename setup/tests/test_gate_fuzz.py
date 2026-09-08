@@ -145,12 +145,13 @@ def make_plan_converge_fixture(tmp, critique_verdict_baseline):
     (ad / "plan.md").write_text(PLAN_MD, encoding="utf-8")
     (ad / "verify.json").write_text(json.dumps({"test_patterns": ["x.spec"]}), encoding="utf-8")
     (ad / "files-allowlist.json").write_text(json.dumps(["apps/api/src/app/x.ts"]), encoding="utf-8")
+    (ad / "web-files-allowlist.json").write_text(json.dumps(["app/routes/feature.tsx"]), encoding="utf-8")
     (ad / "reader-audit.json").write_text(json.dumps({"columns": []}), encoding="utf-8")
     (ad / "plan-round.txt").write_text("1\n", encoding="utf-8")
     rd = ad / "plan-round-1"
     rd.mkdir()
     (rd / "plan.pre.md").write_text(PLAN_MD, encoding="utf-8")
-    for f in ("verify.json", "files-allowlist.json", "reader-audit.json"):
+    for f in ("verify.json", "files-allowlist.json", "web-files-allowlist.json", "reader-audit.json"):
         shutil.copyfile(ad / f, rd / f"pre-{f}")
     if critique_verdict_baseline == "REVISE":
         (rd / "critique.json").write_text(json.dumps({"verdict": "REVISE", "findings": []}), encoding="utf-8")

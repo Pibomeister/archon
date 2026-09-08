@@ -137,9 +137,66 @@ class RcaShapeTest(unittest.TestCase):
         r = run(self.tmp)
         self.assertEqual(r.returncode, 1)
         self.assertIn(
-            "RCA_INVESTIGATION_REQUIRED reason=surface-ambiguous ticket=open no_implementation=true",
+            "RCA_INVESTIGATION_REQUIRED reason=surface-ambiguous probes=not-run "
+            "ticket=open no_implementation=true",
             r.stdout,
         )
+
+    def _no_plan(self):
+        write(self.tmp, "fix-plan.json", {
+            "approach": "", "fix_site": "", "files": [], "risks": [], "alternatives": []
+        })
+
+    def test_missing_proof_names_retrieval_when_probes_did_not_answer(self):
+        # probe-run now precedes rca-gate, so a stop for missing causal proof can
+        # say whether retrieval was even attempted. A degraded probe means the
+        # capability failed, not that the analysis was lazy.
+        minimal_artifacts(self.tmp)
+        self._no_plan()
+        write_text = (self.tmp / "probe-results.txt")
+        write_text.write_text("PROBE_RUN=DEGRADED sso expired\n", encoding="utf-8")
+        r = run(self.tmp)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn(
+            "RCA_INVESTIGATION_REQUIRED reason=occurrence-retrieval-unavailable "
+            "probes=degraded ticket=open no_implementation=true",
+            r.stdout,
+        )
+
+    def test_missing_proof_keeps_its_reason_when_probes_answered(self):
+        # Negative control for the line above: with real probe output the reason
+        # must stay the analysis one, not be relabelled as a capability failure.
+        minimal_artifacts(self.tmp)
+        self._no_plan()
+        (self.tmp / "probe-results.txt").write_text(
+            "== probe: import-lookup\n rows\n", encoding="utf-8")
+        r = run(self.tmp)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn(
+            "RCA_INVESTIGATION_REQUIRED reason=reproduction-or-causal-proof-missing "
+            "probes=answered ticket=open no_implementation=true",
+            r.stdout,
+        )
+
+    def test_repo_narrower_than_the_fix_is_rejected(self):
+        minimal_artifacts(self.tmp)
+        disp = json.loads((self.tmp / "symptom-dispositions.json").read_text())
+        disp["dispositions"][0]["repo"] = "web-app"
+        write(self.tmp, "symptom-dispositions.json", disp)
+        r = run(self.tmp)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("REPO_SCOPE repo=api but fix-shaped symptoms are in ['web-app']", r.stdout)
+
+    def test_fix_shaped_disposition_without_a_repo_is_rejected(self):
+        # Without this the cross-check is defeatable by omission: repo is only
+        # contract-required on separate-ticket rows.
+        minimal_artifacts(self.tmp)
+        disp = json.loads((self.tmp / "symptom-dispositions.json").read_text())
+        del disp["dispositions"][0]["repo"]
+        write(self.tmp, "symptom-dispositions.json", disp)
+        r = run(self.tmp)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("REPO_SCOPE fix-shaped dispositions missing repo: ['E1']", r.stdout)
 
     def test_writes_repo_txt_on_pass(self):
         # rca-gate (bugfix.yaml:721) writes repo.txt after validation and 9

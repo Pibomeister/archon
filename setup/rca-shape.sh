@@ -5,30 +5,71 @@
 # rca-gate's job, run once against the frozen chain); this covers only the
 # mutable-planning-artifact checks rca-gate runs from repo.json onward:
 # repo enum, failing-test fields/enum/signature/integration_note, fix-plan
-# approach/fix_site/alternatives, probe.json validator, residuals, verify.json,
+# approach/fix_site/alternatives, residuals, verify.json,
 # files-allowlist normalization + test_file membership — plus two checks not
 # in the original gate: fix-plan.files subset-of-allowlist, and the
 # failing-test/repo cross-check restated explicitly (it was implicit there).
+# probe.json is validated by setup/probe-shape.py, called from here — probe-run
+# now executes those statements BEFORE this script runs, so the check has two
+# callers and cannot live inline in either.
 # On success this is a true drop-in for the mutable-artifact half of
 # rca-gate: it (re)writes repo.txt = "<repo>\n" idempotently (9 downstream
 # nodes `cat` it) and re-emits the RCA_NOTE=integration mutex line for
 # kind=integration.
-# Usage: rca-shape.sh <artifacts-dir>
+# Usage: rca-shape.sh <artifacts-dir> [caller-token]
+# caller-token (default RCA_SHAPE) stamps the persisted stop with the calling
+# node's identity -- RCA_GATE or RCA_PLAN_SHAPE -- which RUNBOOK.md routes on.
+# stdout is unchanged either way: callers still sed RCA_SHAPE= themselves.
 set -euo pipefail
-AD="${1:?usage: rca-shape.sh <artifacts-dir>}"
+AD="${1:?usage: rca-shape.sh <artifacts-dir> [caller-token]}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+
+# A typed stop is the operator's only routing signal, but a failing node's
+# stdout does not survive the workflow executor's failure path -- it reports a
+# fragment of the script source instead, so every RCA_SHAPE=FAIL/
+# RCA_INVESTIGATION_REQUIRED reason is destroyed at the failure boundary.
+# Persist each typed line here, at the one chokepoint every caller shares,
+# so terminal supervision can read the discriminator back off the run dir.
+# Never let the surfacing path itself become a silent stop: if the run dir is
+# unwritable, degrade to stdout rather than aborting before any typed message.
+GATE_STATUS="$AD/gate-status.txt"
+{ : > "$GATE_STATUS"; } 2>/dev/null || true
+# Each caller renames this script's token to its own node-specific form
+# (RCA_GATE=FAIL, RCA_PLAN_SHAPE=FAIL) and RUNBOOK.md gives those DIFFERENT
+# remediations, so the persisted line has to carry the caller's identity or an
+# operator cannot tell which call site stopped.
+TOKEN="${2:-RCA_SHAPE}"
+# Records typed STOPS only, one line, never a traceback. The truncate above
+# clears a previous round's stop, so a run that passes this check and dies later
+# has an empty file and no discriminator rather than a stale, misrouting one.
+record() {
+  local line
+  line="$(printf '%s' "$1" | tr '\n' ' ')"
+  { printf '%s\n' "${line/#RCA_SHAPE/$TOKEN}" >> "$GATE_STATUS"; } 2>/dev/null || true
+}
+emit() { printf '%s\n' "$1"; record "$1"; }
 
 # V2 bugfix contract: the immutable source/effective symptom ledger, exact
 # disposition/coverage bijections, lineage, occurrence proof, and closure
 # classification are deterministic gates rather than RCA prose.
 python3 "$HERE/bugfix-contract.py" normalize-gather-more "$AD" \
-  || { echo "RCA_SHAPE=FAIL gather-more normalization"; exit 1; }
+  || { emit "RCA_SHAPE=FAIL gather-more normalization"; exit 1; }
 CONTRACT_OUT="$(python3 "$HERE/bugfix-contract.py" validate-causal-coverage --artifacts "$AD" 2>&1)" || {
-  printf '%s\n' "$CONTRACT_OUT" | sed -E 's/^BUGFIX_(COVERAGE|CONTRACT)=FAIL/RCA_SHAPE=FAIL/'
+  RETYPED="$(printf '%s\n' "$CONTRACT_OUT" | sed -E 's/^BUGFIX_(COVERAGE|CONTRACT)=FAIL/RCA_SHAPE=FAIL/')"
+  printf '%s\n' "$RETYPED"
+  # Persist exactly one typed line. A crash inside the contract produces a
+  # traceback with no typed token; record a typed stop for it rather than
+  # letting "AttributeError: ..." become the routing signal.
+  TYPED="$(printf '%s\n' "$RETYPED" | grep -m1 '^RCA_SHAPE=FAIL' || true)"
+  record "${TYPED:-RCA_SHAPE=FAIL contract crashed without a typed line (see run log)}"
   exit 1
 }
-python3 "$HERE/bugfix-contract.py" classify "$AD" >/dev/null \
-  || { echo "RCA_SHAPE=FAIL classification"; exit 1; }
+CLASSIFY_OUT="$(python3 "$HERE/bugfix-contract.py" classify "$AD" 2>&1)" || {
+  printf '%s\n' "$CLASSIFY_OUT" | sed -E 's/^BUGFIX_(COVERAGE|CONTRACT)=FAIL/RCA_SHAPE=FAIL/'
+  CTYPED="$(printf '%s\n' "$CLASSIFY_OUT" | sed -E 's/^BUGFIX_(COVERAGE|CONTRACT)=FAIL/RCA_SHAPE=FAIL/' | grep -m1 '^RCA_SHAPE=FAIL' || true)"
+  record "${CTYPED:-RCA_SHAPE=FAIL classification crashed without a typed line (see run log)}"
+  exit 1
+}
 
 # A thin report may truthfully end investigation without an implementation
 # plan. That is valid open work, but it must stop with a typed evidence request
@@ -47,11 +88,39 @@ else:
 PY
 )"
 if [ -n "$INVESTIGATION_REASON" ]; then
-  echo "RCA_INVESTIGATION_REQUIRED reason=$INVESTIGATION_REASON ticket=open no_implementation=true"
+  # probe-run executes before rca-gate, so a stop here can say whether retrieval
+  # was attempted and what it returned. An unanswered probe names the capability
+  # that failed rather than blaming the analysis for not knowing.
+  PROBE_STATE="$(python3 - "$AD" <<'PY'
+import os, re, sys
+path = os.path.join(sys.argv[1], "probe-results.txt")
+if not os.path.isfile(path):
+    print("not-run")
+    raise SystemExit
+head = open(path, encoding="utf-8", errors="replace").readline().strip()
+match = re.match(r"PROBE_RUN=(SKIP|DEGRADED)\b", head)
+print(match.group(1).lower() if match else "answered")
+PY
+)"
+  if [ "$PROBE_STATE" != answered ] && [ "$INVESTIGATION_REASON" = reproduction-or-causal-proof-missing ]; then
+    INVESTIGATION_REASON="occurrence-retrieval-unavailable"
+  fi
+  emit "RCA_INVESTIGATION_REQUIRED reason=$INVESTIGATION_REASON probes=$PROBE_STATE ticket=open no_implementation=true"
   exit 1
 fi
 
-python3 - "$AD" <<'PY'
+# probe.json is validated by the SAME script probe-run uses before it executes
+# these statements against production. One contract, two callers.
+PROBE_OUT="$(python3 "$HERE/probe-shape.py" "$AD" --token "RCA_SHAPE=FAIL" 2>&1)" \
+  || { printf '%s\n' "$PROBE_OUT"
+       # Persist exactly one typed line, the same way the contract output above
+       # is handled: probe-shape can emit a traceback with no typed token, and a
+       # traceback must never become the routing signal.
+       TYPED="$(printf '%s\n' "$PROBE_OUT" | grep -m1 '^RCA_SHAPE=FAIL' || true)"
+       record "${TYPED:-RCA_SHAPE=FAIL probe shape crashed without a typed line (see run log)}"
+       exit 1; }
+
+RCA_SHAPE_TOKEN="$TOKEN" python3 - "$AD" <<'PY'
 import json, os, re, sys
 
 ad = sys.argv[1]
@@ -61,8 +130,25 @@ def load(name):
     return json.load(open(os.path.join(ad, name), encoding="utf-8"))
 
 
+TOKEN = os.environ.get("RCA_SHAPE_TOKEN", "RCA_SHAPE")
+
+
+def emit(line):
+    print(line)
+    # One line, carrying the caller's token: gate_discriminator reads the last
+    # line, so a reason wrapped over several lines would lose its typed prefix.
+    flat = " ".join(line.split())
+    if TOKEN != "RCA_SHAPE" and flat.startswith("RCA_SHAPE"):
+        flat = TOKEN + flat[len("RCA_SHAPE"):]
+    try:
+        with open(os.path.join(ad, "gate-status.txt"), "a", encoding="utf-8") as fh:
+            fh.write(flat + "\n")
+    except OSError:
+        pass  # stdout is still the primary channel; never mask a typed stop
+
+
 def fail(msg):
-    print(f"RCA_SHAPE=FAIL {msg}")
+    emit(f"RCA_SHAPE=FAIL {msg}")
     sys.exit(1)
 
 
@@ -71,10 +157,36 @@ try:
 except Exception as e:
     fail(f"repo.json missing or malformed: {e}")
 
+if repo not in ("api", "web-app", "both"):
+    fail(f"repo out of enum: {repo}")
+
+# repo names the repository THIS CHAIN CHANGES, not the ticket's surface area.
+# A symptom dispositioned separate-ticket / by-design / product-semantics
+# becomes a split ticket and never widens repo; scoping repo over the whole
+# report turns any bug with a cross-repo symptom into a spurious
+# CROSS_REPO_BUG, stopping a run whose fix was single-repo all along.
+FIX_SHAPED = {"fixed", "class-hardening-only"}
+try:
+    dispositions = load("symptom-dispositions.json")["dispositions"]
+except Exception as e:
+    fail(f"symptom-dispositions.json missing or malformed: {e}")
+fix_shaped = [d for d in dispositions if d.get("disposition") in FIX_SHAPED]
+# repo is contract-required on separate-ticket rows already; require it here too,
+# or a fix-shaped row that simply omits it silently defeats the cross-check below.
+missing_repo = [d.get("symptom_id") for d in fix_shaped if d.get("repo") not in ("api", "web-app")]
+if missing_repo:
+    fail(f"REPO_SCOPE fix-shaped dispositions missing repo: {sorted(missing_repo)}")
+fix_repos = {d["repo"] for d in fix_shaped}
+# Only the unambiguous contradiction is a gate: repo names one repository while
+# the symptoms this chain fixes live in a different one. repo="both" is left to
+# CROSS_REPO_BUG below — a single symptom whose one fix legitimately spans repos
+# cannot express that through per-symptom dispositions, so rejecting "both"
+# mechanically would block a legitimate run. The prompt carries that rule.
+if fix_repos and repo != "both" and fix_repos != {repo}:
+    fail(f"REPO_SCOPE repo={repo} but fix-shaped symptoms are in {sorted(fix_repos)}")
+
 if repo == "both":
     fail("CROSS_REPO_BUG (v1 is single-repo)")
-if repo not in ("api", "web-app"):
-    fail(f"repo out of enum: {repo}")
 
 try:
     ft = load("failing-test.json")
@@ -111,35 +223,6 @@ elif not (fp.get("approach") and fp.get("fix_site")):
 alts = fp.get("alternatives")
 if not (isinstance(alts, list) and (gather_more or alts or fp.get("approach"))):
     fail("fix-plan.json missing alternatives (list; may hold a 'none' entry)")
-
-try:
-    pr = load("probe.json")
-except Exception as e:
-    fail(f"probe.json missing or malformed: {e}")
-probes = pr.get("probes")
-if not (isinstance(probes, list) and len(probes) <= 3):
-    fail("probe.json probes must be a list of at most 3")
-if not (probes or pr.get("none_reason")):
-    fail("probe.json: empty probes requires none_reason")
-for pb in probes:
-    if not (pb.get("id") and pb.get("question") and pb.get("sql")):
-        fail("probe entry missing id/question/sql")
-    sql = pb["sql"].strip().rstrip(";")
-    if not re.match(r"(?is)^(select|with)\b", sql):
-        fail(f"probe {pb['id']}: must start with SELECT/WITH")
-    if re.search(
-        r"(?i)\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|copy|vacuum)\b",
-        sql,
-    ):
-        fail(f"probe {pb['id']}: write/DDL keyword rejected")
-    if ";" in sql:
-        fail(f"probe {pb['id']}: single statement only")
-    limits = [int(x) for x in re.findall(r"(?i)\blimit\s+(\d+)\b", sql)]
-    aggregate_only = bool(re.search(r"(?i)\b(count|sum|avg|min|max)\s*\(", sql))
-    if not aggregate_only and not limits:
-        fail(f"probe {pb['id']}: row-returning query requires LIMIT <= 100")
-    if limits and max(limits) > 100:
-        fail(f"probe {pb['id']}: LIMIT exceeds 100")
 
 try:
     res = load("residuals.json")["residuals"]
@@ -192,5 +275,5 @@ if fp_files:
         fail(f"fix-plan.files not subset of files-allowlist: {missing}")
 
 open(os.path.join(ad, "repo.txt"), "w", encoding="utf-8").write(repo + "\n")
-print(f"RCA_SHAPE=OK repo={repo} kind={ft['kind']}")
+print(f"RCA_SHAPE=OK repo={repo} kind={ft['kind']}")  # success is not a stop: never persisted
 PY

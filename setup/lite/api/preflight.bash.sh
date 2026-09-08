@@ -35,12 +35,17 @@ port_pids() { # $1 = port
   [ -n "$out" ] && printf '%s\n' "$out"
   return 0
 }
+# Tool presence only. The port itself is ALLOCATED below, not asserted free:
+# port-alloc.sh walks past an occupied slot, which is what lets a second run of
+# this lane start while the first is still up.
 port_pids 4123 >/dev/null || { echo "PREFLIGHT=FAIL no port-inspection tool (need lsof, ss, or fuser)"; exit 1; }
-test -z "$(port_pids 4123)" || { echo "PREFLIGHT=FAIL port 4123 busy"; exit 1; }
 test -d /Users/eduardopicazo/Documents/Workspace/Goodword/api/.git || { echo "PREFLIGHT=FAIL api repo missing"; exit 1; }
 # Run identity: message = absolute spec path (empty = hard fail). Single derivation point.
 bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/resolve-params.sh \
-  /Users/eduardopicazo/Documents/Workspace/Goodword "${ARGUMENTS-}" "$ARTIFACTS_DIR"
+  /Users/eduardopicazo/Documents/Workspace/Goodword "${ARGUMENTS-}" "$ARTIFACTS_DIR" 4123
+eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+test -n "$APIPORT" || { echo "PREFLIGHT=FAIL params.json carries no smoke port"; exit 1; }
+echo "PREFLIGHT_PORTS api=$APIPORT (per-run, allocated from this lane's base)"
 test -d /Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb/wiki || { echo "PREFLIGHT=FAIL knowledge base missing"; exit 1; }
 git -C /Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb status --porcelain | sort > "$ARTIFACTS_DIR/kb-pre-porcelain.txt"
 echo "PREFLIGHT=PASS"

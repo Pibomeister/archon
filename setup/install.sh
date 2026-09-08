@@ -206,15 +206,46 @@ echo "=== 4. Stage CE skills (project-scope symlinks) ==="
 bash "$ROOT/.archon/setup/stage-skills.sh" "$ROOT" || { echo "FAIL  skill staging failed (CE version drift?) — see output above"; exit 1; }
 pass "CE skills staged"
 
-echo "=== 5. One-time folder registration (register-probe) ==="
+echo "=== 5. Git shell + one-time project registration (register-probe) ==="
+# archon locks a run on its working_path and nothing else, so every run of a
+# FOLDER project shares one lock and the lanes serialize -- a second launch of
+# any lane self-cancels with "Workflow already active on this path". A repo
+# project with --branch gets one worktree, and one lock, per run.
+#
+# The multi-repo root is not a git repo, so this makes it a SHELL: .gitignore
+# everything, one empty commit, a local bare origin. Nothing is ever tracked in
+# it. Node bodies use absolute hardcoded paths, so the archon worktree is only a
+# lock key and an artifacts anchor -- never the tree the work happens in.
+#
+# Rollback is one command: rm -rf "$ROOT/.git" (and re-register). See RUNBOOK §5a.
+if git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  pass "root is already a git repo — leaving it alone"
+else
+  SHELL_ORIGIN="$HOME/.archon/shells/$(basename "$ROOT")-origin.git"
+  git -C "$ROOT" init -q -b main || { echo "FAIL  cannot git init the archon shell at $ROOT"; exit 1; }
+  printf '# archon git shell: track nothing. See .archon/RUNBOOK.md §5a.\n*\n' > "$ROOT/.gitignore"
+  git -C "$ROOT" -c user.name=archon -c user.email=archon@local commit -q --allow-empty -m "archon shell root" \
+    || { echo "FAIL  cannot create the archon shell commit"; exit 1; }
+  mkdir -p "$(dirname "$SHELL_ORIGIN")"
+  git init -q --bare "$SHELL_ORIGIN" 2>/dev/null || true
+  git -C "$ROOT" remote add origin "$SHELL_ORIGIN" 2>/dev/null || git -C "$ROOT" remote set-url origin "$SHELL_ORIGIN"
+  git -C "$ROOT" push -q -u origin main || { echo "FAIL  cannot push the archon shell to $SHELL_ORIGIN"; exit 1; }
+  pass "archon git shell created (bare origin at $SHELL_ORIGIN)"
+fi
 REG_LOG="$(mktemp)"
-( cd "$ROOT" && DISABLE_OMC=1 archon workflow run register-probe --folder --no-worktree "setup" </dev/null >"$REG_LOG" 2>&1 )
+( cd "$ROOT" && DISABLE_OMC=1 archon workflow run register-probe --branch archon-setup-probe "setup" </dev/null >"$REG_LOG" 2>&1 )
 REG_RC=$?
 if [ $REG_RC -ne 0 ] || ! "$GREP" -q "REGISTER_PROBE_OK" "$REG_LOG"; then
-  echo "FAIL  register-probe did not pass (exit $REG_RC) — full output:"; cat "$REG_LOG"; exit 1
+  echo "FAIL  register-probe did not pass (exit $REG_RC) — full output:"; cat "$REG_LOG"
+  echo "HINT  if this machine already registered the root as a FOLDER project, archon refuses"
+  echo "      --branch with 'Worktree options require a git-repo project.' Flip the stored kind:"
+  echo "      sqlite3 ~/.archon/archon.db \"update remote_agent_codebases set kind='repo', default_branch='main' where default_cwd='\$ROOT'\""
+  exit 1
 fi
 "$GREP" -q "BASE_BRANCH=\[main\]" "$REG_LOG" || { echo "FAIL  BASE_BRANCH did not resolve to [main] — check .archon/config.yaml"; cat "$REG_LOG"; exit 1; }
-pass "folder registered: ARTIFACTS_DIR populated, BASE_BRANCH=[main]"
+"$GREP" -q "worktrees/archon/task-archon-setup-probe" "$REG_LOG" \
+  || { echo "FAIL  register-probe did not run in a per-run worktree — concurrent runs would still serialize on one working_path"; cat "$REG_LOG"; exit 1; }
+pass "repo project registered: per-run worktree, ARTIFACTS_DIR populated, BASE_BRANCH=[main]"
 rm -f "$REG_LOG"
 
 echo "=== 6. Validate workflows ==="

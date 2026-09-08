@@ -74,7 +74,8 @@ TARGETS = [
 # and stable if the adapter default ever drifts.
 FLAGSHIP_MODEL = "gpt-5.6-sol"
 LITE_TARGETS = {"full-sdlc-api-lite", "bugfix-lite"}
-GUARDED_TARGETS = LITE_TARGETS | {"bugfix"}
+INJECTED_GUARD_TARGETS = {"full-sdlc-api"}
+GUARDED_TARGETS = LITE_TARGETS | {"bugfix", "full-sdlc-api", "full-sdlc-web"}
 CONTROL_SCRIPT = "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/archon-run.py"
 UNSUPPORTED_CODEX_FIELDS = {
     "allowed_tools", "denied_tools", "hooks", "agents", "thinking",
@@ -309,6 +310,16 @@ def derive(target, pin_review_claude=False):
         out[k] = v
     out["provider"] = "codex"
     out["nodes"] = doc["nodes"]
+    if target in INJECTED_GUARD_TARGETS:
+        guard_node = {
+            "id": "codex-control-guard",
+            "always_run": True,
+            "timeout": 60000,
+            "bash": "echo \"CODEX_CONTROL_GUARD=PASS provider=claude\"\n",
+        }
+        out["nodes"] = [guard_node, *out["nodes"]]
+        if out["nodes"][1].get("id") == "preflight":
+            out["nodes"][1]["depends_on"] = ["codex-control-guard"]
 
     guard_swaps = 0
     agents_inserts = 0

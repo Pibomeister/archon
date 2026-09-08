@@ -237,7 +237,32 @@ BEFORE="$QOUT"
 # guard error: archon may already have moved the run. stage=exec says so.
 STAGE=exec
 set +e
-DISABLE_OMC=1 archon workflow resume "$RUN_ID" "$@" </dev/null
+# A bugfix run's attestation nodes need the chain env the LAUNCHER exported
+# (archon-run.py chain_env). Resume never had it, so every documented recovery
+# for this lane -- raise the round cap and resume, fix an artifact and resume --
+# died at the first attestation node with
+# "APPROVAL_ATTESTATION=REQUIRED no private chain state", after paying for the
+# whole RCA again. Reconstruct it from the run's own bugfix-chain.json; a lane
+# with no chain file (the feature lanes) exports nothing and is unaffected.
+CHAIN_ENV=()
+# Resolved from the run's own output_root: the artifacts root moved when the
+# Goodword root became a repo project (RUNBOOK 5a), and this lookup failing is
+# silent -- it restores zero chain vars and the run then dies at its first
+# attestation node, after paying for the whole RCA again.
+RUN_AD="$(bash "$(dirname "$0")/run-artifacts.sh" "$RUN_ID" 2>/dev/null || true)"
+# One source for the launcher env, shared with gate-approve.sh so the two
+# post-launch controls cannot drift. Array, not a split string: word-splitting
+# is bash-only and silently yields ONE argument under zsh.
+while IFS= read -r line; do
+  [ -n "$line" ] && CHAIN_ENV+=("$line")
+done < <(test -n "$RUN_AD" && python3 "$(dirname "$0")/chain-env.py" "$RUN_AD" \
+           --control-dir "${ARCHON_CONTROL_DIR:-$HOME/.archon/control/codex-lite}" 2>/dev/null || true)
+if [ "${#CHAIN_ENV[@]}" -gt 0 ]; then
+  echo "RESUME_CHAIN_ENV=RESTORED vars=${#CHAIN_ENV[@]}"
+elif [ -z "$RUN_AD" ]; then
+  echo "RESUME_CHAIN_ENV=NONE reason=no-artifacts-dir run=$(short "$RUN_ID") (a bugfix resume will fail at its first attestation node)"
+fi
+env "${CHAIN_ENV[@]}" DISABLE_OMC=1 archon workflow resume "$RUN_ID" "$@" </dev/null
 ARCHON_RC=$?
 set -e
 

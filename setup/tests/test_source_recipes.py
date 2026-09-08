@@ -3,7 +3,12 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from setup.tests import test_portable_project as fixtures
+# Sibling test modules are imported by bare name, the way every other module in
+# this suite does it: the canonical invocation is `cd setup && python3 -m unittest
+# discover -s tests`, which puts tests/ on sys.path but NOT the repo root, so
+# `from setup.tests import ...` raises ModuleNotFoundError at import time and
+# turns these deliberate skipUnless integration tests into hard suite ERRORS.
+import test_portable_project as fixtures
 
 portable = fixtures.portable
 

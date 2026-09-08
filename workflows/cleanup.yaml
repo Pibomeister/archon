@@ -6,7 +6,12 @@ nodes:
     timeout: 600000
     bash: |
       set -uo pipefail
-      # 1. Stray workflow servers on the dedicated ports - kill by PID, never pkill.
+      # 1. Stray workflow servers: REPORT, never kill.
+      # Smoke ports are per-run since RUNBOOK 5a (base + 10*k, k from the run
+      # slug), so a listener anywhere in a lane's range may be a LIVE run's
+      # server -- and killing it is the exact cross-run teardown this layer
+      # spent a release removing. The owning run releases its own ports at
+      # smoke-teardown / servers-down; this lane's job is worktrees and branches.
       # port_pids: lsof -> ss -> fuser. lsof is preinstalled on macOS and often
       # absent on Linux; rc 1 means NO backend at all, never "the port is free".
       port_pids() { # $1 = port
@@ -23,11 +28,18 @@ nodes:
         [ -n "$out" ] && printf '%s\n' "$out"
         return 0
       }
-      port_pids 4123 >/dev/null || { echo "CLEANUP=PARTIAL no port-inspection tool (need lsof, ss, or fuser) — cannot prove ports are free"; exit 1; }
-      for port in 4123 3123; do
-        PID=$(port_pids "$port")
-        test -n "$PID" && kill $PID 2>/dev/null && echo "KILLED_PORT $port pid=$PID" || echo "PORT_FREE $port"
+      port_pids 4123 >/dev/null || { echo "CLEANUP=PARTIAL no port-inspection tool (need lsof, ss, or fuser) — cannot inspect ports"; exit 1; }
+      HELD=0
+      for base in 4123 4124 4125 4126 4127 3124 3126 3127; do
+        for slot in $(seq 0 19); do
+          port=$(( base + 10 * slot ))
+          PID=$(port_pids "$port")
+          test -n "$PID" && { echo "PORT_HELD $port pid=$PID (a live run may own this - check 'archon workflow runs' before killing)"; HELD=1; }
+        done
       done
+      test "$HELD" = 0 && echo "PORTS_FREE across every lane range"
+      LOCK="${ARCHON_E2E_LOCK:-$HOME/.archon/control/e2e-stack.lock}"
+      test -d "$LOCK" && echo "E2E_MUTEX_HELD owner=$(cat "$LOCK/owner" 2>/dev/null) (release with: rm -rf $LOCK, once that run is gone)"
 
       teardown() {
         REPO="$1"; WT="$2"; BR="$3"
