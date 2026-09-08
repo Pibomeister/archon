@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "bindingVersion": {
+      "const": "archon.machine-binding.v1"
+    },
+    "projectId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "machineId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "repositoryRoot": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "allowedWorktreeRoot": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "branch": {
+      "type": "string",
+      "minLength": 1
+    },
+    "baseCommit": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "profilePath": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "profileSha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "briefPath": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "briefSha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "knowledgeRoot": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "knowledgeCommit": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "engineCommand": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 1
+    },
+    "allowPublish": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "bindingVersion",
+    "projectId",
+    "machineId",
+    "repositoryRoot",
+    "allowedWorktreeRoot",
+    "branch",
+    "baseCommit",
+    "profilePath",
+    "profileSha256",
+    "briefPath",
+    "briefSha256",
+    "knowledgeRoot",
+    "knowledgeCommit",
+    "engineCommand",
+    "allowPublish"
+  ],
+  "additionalProperties": false
+}
