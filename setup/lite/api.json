@@ -14,9 +14,7 @@
     "lite-envelope",
     "plan-render",
     "plan-render-gate",
-    "plan-freeze",
     "plan-gate",
-    "plan-approval-verify",
     "lite-impact-post",
     "lite-envelope-post",
     "implement",
@@ -29,8 +27,6 @@
     "smoke",
     "prbody",
     "prbody-gate",
-    "candidate-export",
-    "candidate-import",
     "ship",
     "run-report",
     "kb-capture",
@@ -48,7 +44,7 @@
       "lite-envelope"
     ],
     "lite-impact-post": [
-      "plan-approval-verify"
+      "plan-gate"
     ],
     "lite-envelope-post": [
       "lite-impact-post"
@@ -78,12 +74,6 @@
       "prbody"
     ],
     "ship": [
-      "candidate-import"
-    ],
-    "plan-gate": [
-      "plan-freeze"
-    ],
-    "candidate-export": [
       "prbody-gate"
     ]
   },
@@ -407,44 +397,6 @@
         "envelope-post.txt",
         "smoke-result.txt",
         "lite-fixes-unreviewed.txt"
-      ]
-    },
-    "plan-freeze": {
-      "produces": [],
-      "consumes": [
-        "plan-review.html",
-        "plan.md",
-        "files-allowlist.json",
-        "reader-audit.json",
-        "premises.json",
-        "envelope-plan.txt"
-      ]
-    },
-    "plan-approval-verify": {
-      "produces": [],
-      "consumes": [
-        "plan-review.html",
-        "plan.md",
-        "files-allowlist.json",
-        "reader-audit.json",
-        "premises.json",
-        "envelope-plan.txt"
-      ]
-    },
-    "candidate-export": {
-      "produces": [
-        "candidate.bundle",
-        "candidate.json"
-      ],
-      "consumes": [
-        "params.json"
-      ]
-    },
-    "candidate-import": {
-      "produces": [],
-      "consumes": [
-        "candidate.bundle",
-        "candidate.json"
       ]
     }
   }

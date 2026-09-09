@@ -84,7 +84,15 @@ class CandidateExportTest(unittest.TestCase):
         self.assertIn("already exists", result.stdout)
         self.assertEqual((self.artifacts / "candidate.json").read_text(), "preserve this artifact")
 
-    def test_workflow_variants_export_then_import_before_publication(self):
+    def test_no_workflow_variant_stages_a_candidate_for_controller_import(self):
+        """Inverse of the assertion 229090a introduced.
+
+        export-candidate.py above is still correct and stays tested, but the
+        controller that imported the bundle is gone: candidate-import was a
+        controller_action node, and stock Archon has no such node kind. Exporting
+        a bundle nothing imports would be dead work in every run, so both nodes
+        were removed and ship pushes the branch directly again.
+        """
         import yaml
         names = ("full-sdlc-api", "full-sdlc-api-lite", "full-sdlc-api-codex", "full-sdlc-api-lite-codex",
                  "full-sdlc-web", "full-sdlc-web-codex", "bugfix", "bugfix-lite", "bugfix-codex", "bugfix-lite-codex")
@@ -92,8 +100,7 @@ class CandidateExportTest(unittest.TestCase):
             with self.subTest(workflow=name):
                 doc = yaml.safe_load((ARCHON / "workflows" / (name + ".yaml")).read_text())
                 nodes = {node["id"]: node for node in doc["nodes"]}
-                self.assertEqual(nodes["ship"]["depends_on"], ["candidate-import"])
-                self.assertEqual(nodes["candidate-import"]["depends_on"], ["candidate-export"])
-                self.assertEqual(nodes["candidate-import"]["controller_action"], "finalize-evidence")
-                self.assertEqual(nodes["candidate-import"]["phase"], "candidate-import")
-                self.assertIn("export-candidate.py", nodes["candidate-export"]["bash"])
+                self.assertNotIn("candidate-export", nodes)
+                self.assertNotIn("candidate-import", nodes)
+                self.assertIn(nodes["ship"]["depends_on"], (["prbody"], ["prbody-gate"]))
+                self.assertIn("bash", nodes["ship"])

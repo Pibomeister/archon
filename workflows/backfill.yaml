@@ -1,13 +1,11 @@
 name: backfill
 description: >-
-  Proposal-v2 backfill controller lane. Instruments only propose materialized
-  identities and typed mutations under read-only database authority. The existing
-  human apply gate is retained. Production admission remains disabled until the
-  pinned runtime, controller handlers, approval envelope, and isolated database
-  failure matrix are certified together. Legacy runs require fresh guarded runs.
+  Backfill lane, disabled. Production admission stays off until the apply path
+  is certified end to end: transactional executor, approval envelope, isolated
+  database failure matrix. The controller nodes that carried snapshot, apply and
+  reconcile were removed with the hardened runtime they required (see
+  test_backfill_production_disabled). Nothing here acquires write credentials.
 provider: claude
-hardened:
-  required: true
 nodes:
   - id: preflight
     always_run: true
@@ -17,45 +15,3 @@ nodes:
       if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-preflight.out") 2> >(tee -a "$ARTIFACTS_DIR/node-preflight.out" >&2); fi
       echo "BACKFILL_PRODUCTION_ADMISSION=DISABLED proposal-v2 controller integration and distribution certification required"
       exit 1
-
-  - id: intake
-    depends_on: [preflight]
-    controller_action: backfill
-    phase: proposal-materialization
-
-  - id: intake-gate
-    depends_on: [intake]
-    controller_action: backfill
-    phase: proposal-v2-validation
-
-  - id: render-gate
-    depends_on: [intake-gate]
-    controller_action: backfill
-    phase: approval-envelope
-
-  - id: apply-approval
-    depends_on: [render-gate]
-    approval:
-      message: >-
-        Review the controller-sealed proposal-v2 packet for this run: exact database
-        and instrument identities, proposed record identities and typed mutations,
-        preconditions, cumulative bounds, verification rules, and undo definition.
-        Approval permits only those sealed mutations after snapshotting. Changed
-        contents require renewed approval. Reject or abandon makes no new writes.
-        Already committed chunks remain explicitly recorded and recoverable; restore
-        and recovery-data deletion always require separate manual authorization.
-
-  - id: snapshot
-    depends_on: [apply-approval]
-    controller_action: backfill
-    phase: snapshot-attestation
-
-  - id: apply
-    depends_on: [snapshot]
-    controller_action: backfill
-    phase: transactional-apply
-
-  - id: reconcile
-    depends_on: [apply]
-    controller_action: backfill
-    phase: exact-reconciliation

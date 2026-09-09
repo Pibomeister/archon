@@ -840,20 +840,23 @@ class UatGateStress(unittest.TestCase):
                 return node
         raise AssertionError(f"{workflow} uat-gate node missing")
 
-    def test_full_sdlc_web_uat_gate_is_controller_action_only(self):
+    def test_full_sdlc_web_uat_gate_checks_browser_evidence_from_bash(self):
+        # Was controller_action: finalize-evidence until the hardened runtime
+        # was dropped. check-browser-evidence.py is the same seal check the
+        # controller would have delegated to, so the assertion moved to it.
         node = self._uat_gate_node()
-        self.assertEqual(node.get("controller_action"), "finalize-evidence")
-        self.assertEqual(node.get("phase"), "browser-verification")
+        self.assertNotIn("controller_action", node)
         self.assertEqual(node.get("depends_on"), ["servers-down"])
-        for forbidden in ("bash", "prompt", "model", "maxBudgetUsd"):
+        self.assertIn("check-browser-evidence.py", node["bash"])
+        for forbidden in ("prompt", "model", "maxBudgetUsd"):
             self.assertNotIn(forbidden, node)
 
-    def test_full_sdlc_web_codex_uat_gate_is_controller_action_only(self):
+    def test_full_sdlc_web_codex_uat_gate_checks_browser_evidence_from_bash(self):
         node = self._uat_gate_node("full-sdlc-web-codex")
-        self.assertEqual(node.get("controller_action"), "finalize-evidence")
-        self.assertEqual(node.get("phase"), "browser-verification")
+        self.assertNotIn("controller_action", node)
         self.assertEqual(node.get("depends_on"), ["servers-down"])
-        for forbidden in ("bash", "prompt", "model", "maxBudgetUsd"):
+        self.assertIn("check-browser-evidence.py", node["bash"])
+        for forbidden in ("prompt", "model", "maxBudgetUsd"):
             self.assertNotIn(forbidden, node)
 
     def test_full_sdlc_web_uat_gate_has_no_env_bypass(self):

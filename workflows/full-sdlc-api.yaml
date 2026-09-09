@@ -1,8 +1,6 @@
 name: full-sdlc-api
 description: API prong end-to-end (spec -> plan -> doc-review -> approval -> implement -> tests -> review loop -> smoke -> draft PR). Feature handoff v2 records premises_sha256 and reader_audit_sha256 so approved premise and reader declarations cannot disappear before the web lane. Run message = ABSOLUTE path to the feature spec; empty message fails preflight. Branch/worktree derive from the spec filename (archon/<slug>). Invoke with DISABLE_OMC=1.
 provider: claude
-hardened:
-  required: true
 interactive: true
 nodes:
   - id: preflight
@@ -978,10 +976,14 @@ nodes:
       typed in and holds that terminal until the run ends, which is why it is
       backgrounded, and that a failed resume still leaves the approval
       recorded so archon workflow resume <id> picks it up. Say that reject
-      records the reason and terminates this guarded run. It does not rework
-      the frozen plan or pause again. A changed plan requires a fresh guarded run
-      with renewed review, freeze and human approval. Abandon also ends the run.
-      Existing artifacts are retained as evidence, not approval for a successor.
+      records the reason typed after it and sends the plan back for one
+      revision pass: the run reworks it against that reason and pauses here
+      again, so reject holds the terminal exactly the way approve does and
+      wants the same backgrounding. Say the third rejection cancels the run
+      instead of reworking, and that abandon ends the run outright with no
+      rework. Files already written stay on disk either way. Close with one
+      line: these three verbs do not appear in archon --help, but they are
+      real.
 
       Writing rules for every section: plain sentences with varied length; no
       em dashes; no vocabulary like "crucial", "leverage", "robust", "seamless",
@@ -1020,37 +1022,62 @@ nodes:
       fi
 
   - id: plan-gate
-    depends_on: [plan-freeze]
+    depends_on: [plan-render-gate]
     approval:
-      message: "Plan review packet ready: open <this run's ARTIFACTS_DIR>/plan-review.html in a browser (raw plan.md + docreview.diff alongside). Controller planning freeze binding: $plan-freeze.output.binding_id. Frozen oracle digest: $plan-freeze.output.oracle_digest. Controller freeze receipt: $plan-freeze.output.receipt. The HTML packet is reviewer-facing context; the controller receipt and frozen snapshot are the approval authority. Approve only if the packet is consistent with those frozen artifacts. The run is paused, which is how this stage is meant to end, not a failure; nothing degrades while it waits. Approve continues after the controller verifies the human approval against the frozen binding. Reject records your reason and terminates this guarded run; update inputs and start a fresh guarded run so planning, premise verification, doc review, criticism, freeze and approval all rerun. Abandon ends the run outright. None of the three verbs appear in archon --help; they are real."
+      message: "Plan review packet ready: open <this run's ARTIFACTS_DIR>/plan-review.html in a browser (raw plan.md + docreview.diff alongside). The run is paused, which is how this stage is meant to end, not a failure; nothing degrades while it waits. The packet's DECIDE box has the three commands with this run's id filled in: approve continues (background it, it holds the terminal), reject records your reason and sends the work back for one revision pass, then pauses here again (it holds the terminal the way approve does, so background it too; the third rejection cancels the run instead of reworking), abandon ends the run outright. None of the three appear in archon --help; they are real."
       on_reject:
-        max_attempts: 1
+        max_attempts: 3
         prompt: |
           The human rejected this plan at the gate. Their reason, verbatim:
 
           $REJECTION_REASON
 
-          Do not revise the plan, allowlists, premise answers, reader audits,
-          browser policy, rendered packet, or any repository file in this run.
-          The controller has frozen the approval oracle; same-run rework would
-          stale the verified binding. This rejection is terminal for the guarded
-          run. Preserve the artifacts as evidence, update the rejected inputs
-          outside this run, and start a fresh guarded run so planning, review,
-          criticism, freeze and approval all rerun under a new binding. End
-          your reply with the single line: PLAN_REJECTION_REQUIRES_FRESH_GUARDED_RUN
+          Revise the plan so it answers that. You are the ONLY node that runs
+          before the gate pauses again. No upstream node re-runs, so anything
+          you do not update yourself stays stale, and no gate re-checks your
+          output.
 
-  - id: plan-freeze
-    depends_on: [plan-render-gate]
-    controller_action: finalize-evidence
-    phase: planning-freeze
+          Work in $ARTIFACTS_DIR.
+          1. Read plan.md, files-allowlist.json, web-files-allowlist.json,
+             reader-audit.json, premises.json, docreview-envelope.txt, and
+             plan-review.html.
+          2. Rewrite plan.md to address the rejection and nothing else. Change
+             only what the feedback requires. If the feedback asks a question
+             rather than giving an instruction, answer it inside the plan.
+          3. Keep the contracts consistent with the revised plan: every path
+             the plan now touches must appear in files-allowlist.json for API
+             paths or web-files-allowlist.json for web-app paths,
+             reader-audit.json must list any column whose interpretation or
+             presentation semantics the revision changes, and any premise
+             answer you alter keeps at least one citation whose quote appears
+             VERBATIM in the file it names. Verify each quote by reading the
+             file; an uncited answer is the exact failure this contract exists
+             to prevent.
+          4. Re-render plan-review.html yourself: same sections, same order,
+             each still wrapped in its HTML comment marker
+             (<!-- GIST --> <!-- KB --> <!-- MAP --> <!-- PLAN --> <!-- REVIEW -->
+             <!-- CRITIC --> <!-- DECIDE -->). Carry the DECIDE box over unchanged, including
+             this run's id and all three commands. The render gate does not
+             run again, so a marker you drop is a marker nobody restores.
+          5. Open REVIEW with a "Revision" block: the rejection reason
+             verbatim, what you changed in response, and one plain line saying
+             the blind premise-verify node does not re-run on a revision, so
+             any premise answer you touched carries your citation but not an
+             independent re-derivation.
+          6. Append one line to the CRITIC section, keeping the rest of it
+             unchanged: "Revision N — human-directed; not re-critiqued", where N
+             is one more than the number of lines already starting with
+             "Revision" in that section. The plan critic does not re-run on a
+             human rejection: a human-requested revision is a trusted exception,
+             the same way premise answers are not re-derived blind after a
+             revision. Do not restate the critic's earlier findings as though
+             they were re-checked against your new text, because they were not.
 
-  - id: plan-approval-verify
-    depends_on: [plan-gate]
-    controller_action: verify-approval
-    phase: planning-approval
+          Do not touch the worktree or any repository file. Plans only.
+          End your reply with the single line: PLAN_REVISED
 
   - id: implement
-    depends_on: [plan-approval-verify]
+    depends_on: [plan-gate]
     model: sonnet
     maxBudgetUsd: 8
     timeout: 1800000
@@ -2159,22 +2186,32 @@ nodes:
       smoke result exactly as recorded in smoke-result.txt in that directory.
       No co-author or attribution lines. End with the single line: PRBODY_WRITTEN
 
-  - id: candidate-export
+  - id: ship
     depends_on: [prbody]
-    timeout: 120000
+    timeout: 900000
     bash: |
       set -euo pipefail
-      python3 "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/export-candidate.py" --artifacts "$ARTIFACTS_DIR"
-
-  - id: candidate-import
-    depends_on: [candidate-export]
-    controller_action: finalize-evidence
-    phase: candidate-import
-
-  - id: ship
-    depends_on: [candidate-import]
-    controller_action: publish
-    phase: publication
+      eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+      test "$(git -C "$WT" rev-parse --abbrev-ref HEAD)" = "$BR"
+      test -s "$ARTIFACTS_DIR/pr-body.md"
+      grep -q '^## Known Residuals' "$ARTIFACTS_DIR/pr-body.md"
+      grep -q '^## Post-Deploy Monitoring & Validation' "$ARTIFACTS_DIR/pr-body.md"
+      TITLE=$(head -1 "$ARTIFACTS_DIR/commit-msg.txt" 2>/dev/null || true)
+      test -n "$TITLE" || TITLE="feat(api): $SLUG"
+      # gate-tests + exit-gate already ran typecheck/tests; hook re-run skipped by explicit choice.
+      git -C "$WT" push -u origin "$BR" --no-verify
+      cd "$WT"
+      EXISTING=$(gh pr list --head "$BR" --state open --json url --jq '.[0].url' 2>/dev/null || true)
+      if [ -n "$EXISTING" ]; then
+        printf '%s\n' "$EXISTING" > "$ARTIFACTS_DIR/pr-url.txt"
+        echo "SHIP=ADOPTED existing PR"
+      else
+        gh pr create --draft --base main --head "$BR" \
+          --title "$TITLE [archon]" \
+          --body-file "$ARTIFACTS_DIR/pr-body.md" > "$ARTIFACTS_DIR/pr-url.txt"
+      fi
+      echo "PR_URL=$(cat "$ARTIFACTS_DIR/pr-url.txt")"
+      echo "SHIP=OK"
 
   - id: run-report
     depends_on: [ship]

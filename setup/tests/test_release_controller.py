@@ -365,7 +365,14 @@ class ImmutablePublicationTest(ReleaseControllerTest):
 
 
 class PublicationWorkflowTest(unittest.TestCase):
-    def test_all_ship_nodes_use_controller_publication(self):
+    def test_all_ship_nodes_publish_from_bash(self):
+        """Inverse of the assertion 229090a introduced.
+
+        release-controller.py is still correct code and stays tested above, but
+        it has no call site: stock Archon has no controller_action node kind, so
+        a ship node declaring one fails validation before the run starts. Ship is
+        a bash node again, as it was for every completed run before 229090a.
+        """
         ships = {}
         for path in (SETUP.parent / "workflows").glob("*.yaml"):
             doc = yaml.safe_load(path.read_text())
@@ -374,10 +381,8 @@ class PublicationWorkflowTest(unittest.TestCase):
                     continue
                 ships[path.stem] = node
                 with self.subTest(workflow=path.stem):
-                    self.assertEqual(node.get("controller_action"), "publish")
-                    self.assertEqual(node.get("phase"), "publication")
-                    self.assertNotIn("bash", node)
-                    self.assertTrue(doc.get("hardened", {}).get("required"))
+                    self.assertNotIn("controller_action", node)
+                    self.assertIn("bash", node)
         self.assertTrue({"bugfix", "full-sdlc-api", "full-sdlc-web", "wrap-ship"}.issubset(ships))
 
 

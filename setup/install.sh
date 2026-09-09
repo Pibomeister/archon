@@ -2,7 +2,7 @@
 # Goodword Archon SDLC — teammate installer. Run from a clone of the setup gist:
 #   bash install.sh --root /absolute/path/to/Goodword [-y]
 # Idempotent. Asserts the dev environment (never installs it), pins archon CLI
-# v0.8.0, renders the .archon/ payload with your root path, stages CE skills,
+# v0.10.1, renders the .archon/ payload with your root path, stages CE skills,
 # registers the folder project, and validates the workflows. -y additionally
 # merges allowlist.json into <root>/.claude/settings.json (diff shown first).
 set -uo pipefail
@@ -23,7 +23,7 @@ PLACEHOLDER='{{GOODWORD''_ROOT}}'
 CE_BASE="$HOME/.claude/plugins/cache/compound-engineering-plugin/compound-engineering"
 CE_VALIDATED="3.2.0"
 CE_MIN="3.2.0"
-ARCHON_PIN="v0.8.0"
+ARCHON_PIN="v0.10.1"
 
 # Prints "<version> <skills-dir>" for the newest installed CE version >= CE_MIN
 # that has a skills/ dir; prints nothing (rc 1) when none qualifies.
@@ -259,7 +259,10 @@ VAL_LOG="$(mktemp)"
 VAL_FAIL=0
 for w in babysit bugfix bugfix-lite bugfix-smoke-deployed cleanup full-sdlc-api full-sdlc-api-lite full-sdlc-web register-probe \
          full-sdlc-api-codex bugfix-codex full-sdlc-web-codex full-sdlc-api-lite-codex bugfix-lite-codex; do
-  if "$GREP" -Eq "^[[:space:]]+$w[[:space:]]+ok[[:space:]]*$" "$VAL_LOG"; then
+  # v0.10.1 reports WARNINGS for upstream deprecations it still honours
+  # ("continue using it for now"), so a bare-ok match fails every real lane.
+  # ERRORS is a distinct status and still fails here.
+  if "$GREP" -Eq "^[[:space:]]+$w[[:space:]]+(ok|WARNINGS)[[:space:]]*$" "$VAL_LOG"; then
     pass "workflow validates: $w"
   else
     echo "FAIL  workflow not ok: $w — validator output:"

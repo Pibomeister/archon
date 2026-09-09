@@ -1,8 +1,6 @@
 name: cleanup
 description: M2.10 - deliberate teardown of toy-feature workflow state. Convention-driven (well-known worktrees/branches); only touches branches named archon/*; refuses dirty trees; deletes remote branches only when their PR is already closed. Closing PRs stays an operator action (rollback is documented, never automatic).
 provider: claude
-hardened:
-  required: true
 nodes:
   - id: cleanup
     timeout: 600000

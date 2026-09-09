@@ -109,19 +109,16 @@ class FullstackContractTest(unittest.TestCase):
         nodes = {node["id"]: node for node in self.load_workflow("full-sdlc-web")["nodes"]}
 
         self.assertIn('{"scope":"%s"}', nodes["web-scope"]["bash"])
-        for node_id in ("web-plan", "web-plan-oracle", "web-plan-render", "web-plan-controller-freeze", "web-plan-approval", "web-plan-approval-verify", "web-plan-freeze", "web-plan-lock-gate"):
+        for node_id in ("web-plan", "web-plan-oracle", "web-plan-render", "web-plan-approval", "web-plan-freeze", "web-plan-lock-gate"):
             self.assertEqual(nodes[node_id]["when"], "$web-scope.scope == 'web'")
         self.assertIn("approval", nodes["web-plan-approval"])
         self.assertIn("web-plan-review.html", nodes["web-plan-approval"]["approval"]["message"])
-        self.assertEqual(nodes["web-plan-controller-freeze"]["controller_action"], "finalize-evidence")
-        self.assertEqual(nodes["web-plan-controller-freeze"]["phase"], "planning-freeze")
-        self.assertEqual(nodes["web-plan-approval"]["depends_on"], ["web-plan-controller-freeze"])
-        self.assertIn("$web-plan-controller-freeze.output.binding_id", nodes["web-plan-approval"]["approval"]["message"])
-        self.assertIn("$web-plan-controller-freeze.output.oracle_digest", nodes["web-plan-approval"]["approval"]["message"])
-        self.assertEqual(nodes["web-plan-approval-verify"]["depends_on"], ["web-plan-approval"])
-        self.assertEqual(nodes["web-plan-approval-verify"]["controller_action"], "verify-approval")
-        self.assertEqual(nodes["web-plan-approval-verify"]["phase"], "planning-approval")
-        self.assertEqual(nodes["web-plan-freeze"]["depends_on"], ["web-plan-approval-verify"])
+        # The two controller nodes that used to bracket this gate are gone with
+        # the hardened runtime; web-plan-freeze carries the seal in bash.
+        self.assertNotIn("web-plan-controller-freeze", nodes)
+        self.assertNotIn("web-plan-approval-verify", nodes)
+        self.assertEqual(nodes["web-plan-approval"]["depends_on"], ["web-plan-render"])
+        self.assertEqual(nodes["web-plan-freeze"]["depends_on"], ["web-plan-approval"])
         self.assertIn("SCOPE_ESCALATION", nodes["web-plan"]["prompt"])
         self.assertIn("web-plan-approved.json", nodes["web-plan-freeze"]["bash"])
         self.assertEqual(nodes["premise-strip"]["trigger_rule"], "none_failed_min_one_success")
@@ -129,87 +126,77 @@ class FullstackContractTest(unittest.TestCase):
         self.assertEqual(nodes["implement"]["trigger_rule"], "none_failed_min_one_success")
         self.assertIn("web-plan-lock-gate", nodes["implement"]["depends_on"])
 
-    def test_api_plan_gate_is_bound_to_controller_freeze_and_verify(self):
+    def test_api_plan_gate_runs_between_render_gate_and_implement(self):
+        """Inverse of the assertion 229090a introduced: the freeze and verify
+        controller nodes that bracketed this gate are gone, so the gate sits
+        directly between plan-render-gate and implement as it did for every
+        completed run before that checkpoint."""
         nodes = {node["id"]: node for node in self.load_workflow("full-sdlc-api")["nodes"]}
 
-        self.assertEqual(nodes["plan-freeze"]["depends_on"], ["plan-render-gate"])
-        self.assertEqual(nodes["plan-freeze"]["controller_action"], "finalize-evidence")
-        self.assertEqual(nodes["plan-freeze"]["phase"], "planning-freeze")
-        self.assertEqual(nodes["plan-gate"]["depends_on"], ["plan-freeze"])
-        self.assertIn("$plan-freeze.output.binding_id", nodes["plan-gate"]["approval"]["message"])
-        self.assertIn("$plan-freeze.output.oracle_digest", nodes["plan-gate"]["approval"]["message"])
-        self.assertEqual(nodes["plan-gate"]["approval"]["on_reject"]["max_attempts"], 1)
-        self.assertIn("fresh guarded run", nodes["plan-gate"]["approval"]["on_reject"]["prompt"])
-        self.assertEqual(nodes["plan-approval-verify"]["depends_on"], ["plan-gate"])
-        self.assertEqual(nodes["plan-approval-verify"]["controller_action"], "verify-approval")
-        self.assertEqual(nodes["plan-approval-verify"]["phase"], "planning-approval")
-        self.assertEqual(nodes["implement"]["depends_on"], ["plan-approval-verify"])
+        self.assertNotIn("plan-freeze", nodes)
+        self.assertNotIn("plan-approval-verify", nodes)
+        self.assertEqual(nodes["plan-gate"]["depends_on"], ["plan-render-gate"])
+        self.assertEqual(nodes["plan-gate"]["approval"]["on_reject"]["max_attempts"], 3)
+        self.assertIn("PLAN_REVISED", nodes["plan-gate"]["approval"]["on_reject"]["prompt"])
+        self.assertEqual(nodes["implement"]["depends_on"], ["plan-gate"])
 
-    def test_bugfix_rca_gate_is_bound_to_controller_freeze_and_verify(self):
+    def test_bugfix_rca_gate_runs_between_render_gate_and_post_approval_integrity(self):
+        """Inverse of the assertion 229090a introduced. controller-attest.py
+        still seals the RCA from ordinary bash nodes either side of this gate;
+        only the controller_action nodes were removed."""
         nodes = {node["id"]: node for node in self.load_workflow("bugfix")["nodes"]}
 
-        self.assertEqual(nodes["rca-freeze"]["depends_on"], ["rca-render-gate"])
-        self.assertEqual(nodes["rca-freeze"]["controller_action"], "finalize-evidence")
-        self.assertEqual(nodes["rca-freeze"]["phase"], "planning-freeze")
-        self.assertEqual(nodes["rca-approval"]["depends_on"], ["rca-freeze"])
-        self.assertIn("$rca-freeze.output.binding_id", nodes["rca-approval"]["approval"]["message"])
-        self.assertIn("$rca-freeze.output.oracle_digest", nodes["rca-approval"]["approval"]["message"])
-        self.assertEqual(nodes["rca-approval"]["approval"]["on_reject"]["max_attempts"], 1)
-        self.assertIn("fresh guarded run", nodes["rca-approval"]["approval"]["on_reject"]["prompt"])
-        self.assertEqual(nodes["rca-approval-verify"]["depends_on"], ["rca-approval"])
-        self.assertEqual(nodes["rca-approval-verify"]["controller_action"], "verify-approval")
-        self.assertEqual(nodes["rca-approval-verify"]["phase"], "planning-approval")
-        self.assertEqual(nodes["post-approval-integrity"]["depends_on"], ["rca-approval-verify"])
+        self.assertNotIn("rca-freeze", nodes)
+        self.assertNotIn("rca-approval-verify", nodes)
+        self.assertEqual(nodes["rca-approval"]["depends_on"], ["rca-render-gate"])
+        self.assertEqual(nodes["rca-approval"]["approval"]["on_reject"]["max_attempts"], 3)
+        self.assertIn("RCA_REJECTION_RECORDED", nodes["rca-approval"]["approval"]["on_reject"]["prompt"])
+        self.assertEqual(nodes["post-approval-integrity"]["depends_on"], ["rca-approval"])
+        self.assertIn("controller-attest.py", nodes["post-approval-integrity"]["bash"])
 
-    def test_api_render_packets_do_not_promise_same_run_rework(self):
+    def test_api_render_packets_describe_the_revision_pass_they_actually_run(self):
+        """Inverse of the assertion 229090a introduced. The gate does three
+        rejection attempts with a revision pass again, so the rendered packet
+        must say so rather than promising a controller freeze that no longer
+        exists. A packet describing the wrong rejection behaviour is the failure
+        this test exists to catch, in either direction."""
         paths = [ARCHON / "workflows" / f"{name}.yaml" for name in (
             "full-sdlc-api", "full-sdlc-api-lite", "full-sdlc-api-codex", "full-sdlc-api-lite-codex"
         )] + [ARCHON / "setup/lite/api/plan-render.prompt.md"]
         for path in paths:
             with self.subTest(path=path.name):
                 text = path.read_text(encoding="utf-8")
-                self.assertNotIn("third rejection", text)
-                self.assertNotIn("revision pass: the run reworks", text)
-                self.assertIn("fresh guarded run", text)
+                self.assertIn("third rejection", text)
+                self.assertNotIn("fresh guarded run", text)
+                self.assertNotIn("controller_action", text)
 
-    def test_generated_variants_keep_controller_planning_gate_chain(self):
+    def test_generated_variants_carry_no_controller_planning_gate_chain(self):
+        """Inverse of the assertion 229090a introduced. The generated twins are
+        the place a stale controller node survives unnoticed, because nobody
+        hand-edits them: derive-lite/derive-codex must carry the removal through."""
         api_lanes = ("full-sdlc-api-lite", "full-sdlc-api-codex", "full-sdlc-api-lite-codex")
         for workflow in api_lanes:
             with self.subTest(workflow=workflow):
                 nodes = {node["id"]: node for node in self.load_workflow(workflow)["nodes"]}
-                self.assertEqual(nodes["plan-freeze"]["controller_action"], "finalize-evidence")
-                self.assertEqual(nodes["plan-freeze"]["phase"], "planning-freeze")
-                self.assertEqual(nodes["plan-gate"]["depends_on"], ["plan-freeze"])
-                self.assertIn("$plan-freeze.output.binding_id", nodes["plan-gate"]["approval"]["message"])
-                self.assertIn("$plan-freeze.output.receipt", nodes["plan-gate"]["approval"]["message"])
-                self.assertEqual(nodes["plan-approval-verify"]["depends_on"], ["plan-gate"])
-                self.assertEqual(nodes["plan-approval-verify"]["controller_action"], "verify-approval")
+                self.assertNotIn("plan-freeze", nodes)
+                self.assertNotIn("plan-approval-verify", nodes)
+                self.assertEqual(nodes["plan-gate"]["depends_on"], ["plan-render-gate"])
+                self.assertNotIn("controller_action", nodes["plan-gate"])
 
         bugfix_lanes = ("bugfix-lite", "bugfix-codex", "bugfix-lite-codex")
         for workflow in bugfix_lanes:
             with self.subTest(workflow=workflow):
                 nodes = {node["id"]: node for node in self.load_workflow(workflow)["nodes"]}
-                self.assertEqual(nodes["rca-freeze"]["controller_action"], "finalize-evidence")
-                self.assertEqual(nodes["rca-freeze"]["phase"], "planning-freeze")
-                self.assertEqual(nodes["rca-approval"]["depends_on"], ["rca-freeze"])
-                self.assertIn("$rca-freeze.output.binding_id", nodes["rca-approval"]["approval"]["message"])
-                self.assertIn("$rca-freeze.output.receipt", nodes["rca-approval"]["approval"]["message"])
-                self.assertEqual(nodes["rca-approval-verify"]["depends_on"], ["rca-approval"])
-                self.assertEqual(nodes["rca-approval-verify"]["controller_action"], "verify-approval")
+                self.assertNotIn("rca-freeze", nodes)
+                self.assertNotIn("rca-approval-verify", nodes)
+                self.assertEqual(nodes["rca-approval"]["depends_on"], ["rca-render-gate"])
+                self.assertEqual(nodes["post-approval-integrity"]["depends_on"], ["rca-approval"])
 
         nodes = {node["id"]: node for node in self.load_workflow("full-sdlc-web-codex")["nodes"]}
-        self.assertEqual(nodes["web-plan-controller-freeze"]["controller_action"], "finalize-evidence")
-        self.assertEqual(nodes["web-plan-approval"]["depends_on"], ["web-plan-controller-freeze"])
-        self.assertIn(
-            "$web-plan-controller-freeze.output.binding_id",
-            nodes["web-plan-approval"]["approval"]["message"],
-        )
-        self.assertIn(
-            "$web-plan-controller-freeze.output.receipt",
-            nodes["web-plan-approval"]["approval"]["message"],
-        )
-        self.assertEqual(nodes["web-plan-approval-verify"]["depends_on"], ["web-plan-approval"])
-        self.assertEqual(nodes["web-plan-approval-verify"]["controller_action"], "verify-approval")
+        self.assertNotIn("web-plan-controller-freeze", nodes)
+        self.assertNotIn("web-plan-approval-verify", nodes)
+        self.assertEqual(nodes["web-plan-approval"]["depends_on"], ["web-plan-render"])
+        self.assertEqual(nodes["web-plan-freeze"]["depends_on"], ["web-plan-approval"])
 
     def test_no_change_outcomes_are_content_based_and_prless(self):
         api_gate = self.load_prompt("full-sdlc-api", "gate-tests")

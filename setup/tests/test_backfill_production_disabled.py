@@ -24,11 +24,15 @@ class BackfillProductionDisabledTest(unittest.TestCase):
         for forbidden in ("apply_command", "apply_sql", "secretsmanager", "aws sts", "armed-exec.sh"):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, text)
-        for node in ("snapshot", "apply", "reconcile"):
-            section = node_section(text, node)
-            self.assertIn("controller_action: backfill", section)
-            self.assertNotIn("bash:", section)
-        self.assertIn("approval:", node_section(text, "apply-approval"))
+        # Stronger than the controller_action shape this replaced: the write
+        # nodes are absent outright. They were controller nodes, and stock
+        # Archon has no controller_action node kind, so they could only have
+        # come back as bash -- which is the legacy armed apply path this lane
+        # was disabled to prevent.
+        for node in ("snapshot", "apply", "reconcile", "intake", "intake-gate", "render-gate"):
+            with self.subTest(node=node):
+                self.assertNotIn(f"  - id: {node}\n", text)
+        self.assertNotIn("controller_action", text)
 
     def test_resume_cannot_skip_disabled_preflight_or_fetch_credentials(self):
         section = node_section(WORKFLOW.read_text(), "preflight")
@@ -37,19 +41,11 @@ class BackfillProductionDisabledTest(unittest.TestCase):
         self.assertIn("exit 1", section)
         self.assertNotIn("aws ", section)
 
-    def test_snapshot_and_apply_fail_closed_before_write_credentials(self):
+    def test_preflight_is_the_only_node_so_nothing_can_run_after_it(self):
         text = WORKFLOW.read_text(encoding="utf-8")
-        for node_id in ("snapshot", "apply"):
-            section = node_section(text, node_id)
-            self.assertIn("controller_action: backfill", section)
-            self.assertNotIn("bash:", section)
-            self.assertNotIn("aws ", section)
-
-    def test_intake_gate_requires_controller_proposal_validation(self):
-        text = WORKFLOW.read_text(encoding="utf-8")
-        section = node_section(text, "intake-gate")
-        self.assertIn("controller_action: backfill", section)
-        self.assertIn("phase: proposal-v2-validation", section)
+        self.assertEqual([m for m in text.split("\n") if m.startswith("  - id: ")],
+                         ["  - id: preflight"])
+        self.assertNotIn("aws ", text)
 
     def test_direct_apply_cli_cannot_bypass_disabled_workflow(self):
         with tempfile.TemporaryDirectory() as td:

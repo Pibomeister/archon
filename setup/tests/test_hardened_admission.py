@@ -16,11 +16,21 @@ spec.loader.exec_module(launcher)
 
 
 class HardenedAdmissionTest(unittest.TestCase):
-    def test_all_shipped_authoritative_workflows_require_container_isolation(self):
-        for name in ("babysit", "bugfix", "bugfix-smoke-deployed", "cleanup", "full-sdlc-api", "full-sdlc-web", "register-probe"):
-            doc = yaml.safe_load((SETUP.parent / "workflows" / f"{name}.yaml").read_text())
-            with self.subTest(workflow=name):
-                self.assertIs(doc.get("hardened", {}).get("required"), True)
+    def test_no_shipped_workflow_requires_container_isolation(self):
+        """Inverse of the assertion 229090a introduced.
+
+        That checkpoint set hardened.required on every shipped lane, which binds
+        the run to the archon-engine fork's hardened execution context. Hardened
+        seeding refuses any source root containing a nested repository, and the
+        Goodword root is a multi-repo folder project, so the hardened path can
+        never admit a run here. Reintroducing hardened.required must therefore be
+        a deliberate act that also implements controller-declared pinned repo
+        inputs in hardened-controller.ts.
+        """
+        for path in sorted((SETUP.parent / "workflows").glob("*.yaml")):
+            doc = yaml.safe_load(path.read_text())
+            with self.subTest(workflow=path.stem):
+                self.assertNotIn("hardened", doc)
 
     def test_environment_bypass_cannot_skip_missing_tools(self):
         with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {"CODEX_LITE_SKIP_ENV_CHECKS": "1"}), patch.object(launcher.shutil, "which", return_value=None):

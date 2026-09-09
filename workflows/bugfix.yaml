@@ -1,8 +1,6 @@
 name: bugfix
 description: Red->Green root-cause bug pipeline (intake -> evidence -> RCA + blind chain-verify -> live experiment on disputes -> FIRST human gate (RCA packet) -> bind repo -> failing test (RED) -> fix loop (GREEN) -> negative control -> review loop -> second negcontrol -> exit gate (+ search-eval replay when the fix touches search paths) -> in-app smoke matrix -> SECOND human gate (matrix) -> draft PR). Run message = ABSOLUTE path to the bug report .md; empty fails preflight. The home repo (api or web-app) is a FINDING of the RCA, so the worktree binds AFTER the first approval gate. Smoke ports are allocated PER RUN by preflight from bases 4124 (api) and 3124 (web) via setup/port-alloc.sh at stride 10, so two runs of this lane never collide and neither can sweep the other's server. The smoke-matrix stack additionally holds the machine-global 54322/8001 e2e mutex, enforced by setup/e2e-mutex.sh. Invoke with DISABLE_OMC=1.
 provider: claude
-hardened:
-  required: true
 interactive: true
 nodes:
   - id: codex-control-guard
@@ -2871,11 +2869,11 @@ nodes:
       fi
 
   - id: rca-approval
-    depends_on: [rca-freeze]
+    depends_on: [rca-render-gate]
     approval:
-      message: "RCA review packet ready (gate 1 of 2): open <this run's ARTIFACTS_DIR>/rca-review.html. Controller planning freeze binding: $rca-freeze.output.binding_id. Frozen oracle digest: $rca-freeze.output.oracle_digest. Controller freeze receipt: $rca-freeze.output.receipt. The HTML packet is reviewer-facing context; the controller receipt and frozen snapshot are the approval authority. Approval covers exactly the rendered and attested diagnosis and plan bound by that controller freeze; do not edit artifacts at the gate. Any alternative or diagnosis change requires a fresh guarded successor so proof, criticism, freeze and approval rerun. Approving starts unattended red-test -> fix -> negative-control -> review; the run pauses once more at the smoke matrix. Reject records feedback only and terminates this guarded run; start a fresh guarded successor using the rejection reason."
+      message: "RCA review packet ready (gate 1 of 2): open <this run's ARTIFACTS_DIR>/rca-review.html. Approval covers exactly the rendered and attested diagnosis and plan; do not edit artifacts at the gate. Any alternative or diagnosis change requires a scope-preserving successor so proof and criticism rerun. Approving starts unattended red-test -> fix -> negative-control -> review; the run pauses once more at the smoke matrix. Reject records feedback only and does not mutate or re-attest this run; abandon it and start the guarded successor named in the rejection receipt."
       on_reject:
-        max_attempts: 1
+        max_attempts: 3
         prompt: |
           The human rejected this RCA at gate 1. Their reason, verbatim:
 
@@ -2883,25 +2881,22 @@ nodes:
 
           Resolve the artifacts directory first with: echo "$ARTIFACTS_DIR".
           Do not revise any diagnosis, proof, plan, manifest, attestation, or
-          rendered packet in this run. The controller has frozen the approval
-          oracle; same-run mutation would stale the blind verifier, critic and
-          controller binding. This rejection is terminal for the guarded run.
-          Preserve artifacts as evidence and start a fresh guarded run as a scope-preserving successor
-          with the same bug report plus the rejection reason, so all proof and
-          criticism rerun. End with: RCA_REJECTION_REQUIRES_FRESH_GUARDED_RUN
-
-  - id: rca-freeze
-    depends_on: [rca-render-gate]
-    controller_action: finalize-evidence
-    phase: planning-freeze
-
-  - id: rca-approval-verify
-    depends_on: [rca-approval]
-    controller_action: verify-approval
-    phase: planning-approval
+          rendered packet in this run. Write rejection-receipt.json ONLY inside
+          that exact artifacts directory, containing
+          the verbatim reason, current run id, and
+          {"required_transition":"GUARDED_SUCCESSOR"}. Read provider from
+          bugfix-chain.json and include this exact seed command with the literal
+          run id and provider filled in:
+          python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/archon-run.py bugfix-successor-seed <run-id> --provider <provider> --transition-type human-rejection
+          If that directory is not writable, fail without writing anywhere;
+          never fall back to the repository, current directory, /tmp, or another
+          run. Explain that mutation
+          would stale the blind verifier and critic. The operator must abandon
+          this run and create a scope-preserving guarded successor, where all
+          proof and criticism rerun. End with: RCA_REJECTION_RECORDED
 
   - id: post-approval-integrity
-    depends_on: [rca-approval-verify]
+    depends_on: [rca-approval]
     timeout: 120000
     bash: |
       set -euo pipefail
@@ -4970,22 +4965,38 @@ nodes:
       signal, say exactly: "No additional operational monitoring required."
       No co-author or attribution lines. End with the single line: PRBODY_WRITTEN
 
-  - id: candidate-export
+  - id: ship
     depends_on: [prbody]
-    timeout: 120000
+    timeout: 900000
     bash: |
       set -euo pipefail
-      python3 "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/export-candidate.py" --artifacts "$ARTIFACTS_DIR"
-
-  - id: candidate-import
-    depends_on: [candidate-export]
-    controller_action: finalize-evidence
-    phase: candidate-import
-
-  - id: ship
-    depends_on: [candidate-import]
-    controller_action: publish
-    phase: publication
+      if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-ship.out") 2> >(tee -a "$ARTIFACTS_DIR/node-ship.out" >&2); fi
+      ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
+      eval "$(bash "$ROOT/.archon/setup/params-env.sh" "$ARTIFACTS_DIR/params.json")"
+      REPO=$(cat "$ARTIFACTS_DIR/repo.txt")
+      test "$(git -C "$WT" rev-parse --abbrev-ref HEAD)" = "$BR"
+      test -s "$ARTIFACTS_DIR/pr-body.md"
+      grep -q '^## Root Cause' "$ARTIFACTS_DIR/pr-body.md"
+      grep -q '^## Known Residuals' "$ARTIFACTS_DIR/pr-body.md"
+      grep -q '^## Post-Deploy Monitoring & Validation' "$ARTIFACTS_DIR/pr-body.md"
+      TITLE=$(head -1 "$ARTIFACTS_DIR/commit-msg.txt" 2>/dev/null || true)
+      test -n "$TITLE" || TITLE="fix($REPO): $SLUG"
+      python3 "$ROOT/.archon/setup/bugfix-contract.py" validate-smoke-readiness --artifacts "$ARTIFACTS_DIR" \
+        || { echo "SHIP=FAIL smoke readiness"; exit 1; }
+      # exit-gate already ran typecheck/suites/repro; hook re-run skipped by explicit choice.
+      git -C "$WT" push -u origin "$BR" --no-verify
+      cd "$WT"
+      EXISTING=$(gh pr list --head "$BR" --state open --json url --jq '.[0].url' 2>/dev/null || true)
+      if [ -n "$EXISTING" ]; then
+        printf '%s\n' "$EXISTING" > "$ARTIFACTS_DIR/pr-url.txt"
+        echo "SHIP=ADOPTED existing PR"
+      else
+        gh pr create --draft --base main --head "$BR" \
+          --title "$TITLE [archon]" \
+          --body-file "$ARTIFACTS_DIR/pr-body.md" > "$ARTIFACTS_DIR/pr-url.txt"
+      fi
+      echo "PR_URL=$(cat "$ARTIFACTS_DIR/pr-url.txt")"
+      echo "SHIP=OK"
 
   - id: run-report
     depends_on: [ship]

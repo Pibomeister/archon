@@ -1,8 +1,7 @@
 name: bugfix-smoke-deployed
 description: Post-merge deployed smoke for a bugfix run. Run message = ABSOLUTE path to that run's artifacts directory (the one holding smoke-matrix.json). Re-runs the matrix's auto rows that need no controlled fixture data against staging (staging-app.goodword.com), re-renders the matrix with staging results, pauses for a human to record DEPLOYED_SMOKE, then posts the matrix summary as a comment on the run's PR. Run it manually after merge + staging deploy. Invoke with DISABLE_OMC=1.
 provider: claude
-hardened:
-  required: true
+interactive: true
 nodes:
   - id: preflight
     timeout: 300000
