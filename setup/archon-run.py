@@ -1607,16 +1607,39 @@ def maybe_finalize_feature_receipt(args: argparse.Namespace, row: dict, result: 
     if not isinstance(chain_id, str):
         fail("completed feature web run has malformed private chain state")
     state = read_feature_chain(args.control_dir, chain_id)
+    provider = state.get("provider")
+    expected_web_lane = FEATURE_LANES.get(provider, {}).get("web")
+    feature_scope = state.get("scope", "fullstack")
+    binding_checks = {
+        "control_provider": feature.get("provider") == provider,
+        "control_lane": feature.get("lane") == expected_web_lane,
+        "control_scope": feature.get("scope", "fullstack") == feature_scope,
+        "row_lane": row.get("workflow_name") == expected_web_lane,
+        "web_run_id": state.get("web_run_id") == row.get("id"),
+    }
+    failed_bindings = [name for name, ok in binding_checks.items() if not ok]
+    if failed_bindings:
+        fail("completed feature web run is not bound to private chain: " + ",".join(failed_bindings))
     if state.get("feature_receipt_sha256"):
         existing = artifact_dir(row) / "feature-chain-receipt.json"
         verify_feature_chain_receipt(args.control_dir, existing)
         return existing
+    if feature_scope == "web":
+        return write_standalone_web_receipt(args.control_dir, state, row, args.db)
+    if feature_scope != "fullstack":
+        fail("completed feature web run has invalid private feature scope")
     api_id = state.get("api_run_id")
     if not isinstance(api_id, str):
         fail("completed feature web run has no API run in private chain state")
     api_row = run_row_by_id(args.db, api_id)
     if not api_row:
         fail("completed feature web run cannot find API run for receipt")
+    verified_handoff = verify_feature_handoff(args.control_dir, handoff, provider, expected_web_lane)
+    if (
+        verified_handoff.get("logical_chain_id") != state["logical_chain_id"]
+        or verified_handoff.get("handoff_sha256") != state.get("api_handoff_sha256")
+    ):
+        fail("completed feature web run handoff is not bound to current private chain")
     return write_chain_receipt(args.control_dir, state, api_row, row, handoff, args.db)
 
 
@@ -2021,6 +2044,7 @@ def verify_feature_handoff(
         "logical_chain_id": chain_id,
         "api_run_id": data.get("api_run_id"),
         "api_head_sha": data.get("api_head_sha"),
+        "api_handoff_sha256": data.get("handoff_sha256"),
         "shared_plan_sha256": data.get("shared_plan_sha256"),
         "checks": comparisons | {"shared_plan": True, "api_artifacts": True},
     }
