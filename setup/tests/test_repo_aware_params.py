@@ -632,5 +632,121 @@ class BrowserPolicyIsRepoGated(unittest.TestCase):
                         "a populated policy must still be accepted")
 
 
+class EnvSeedingStaysMandatoryForApi(unittest.TestCase):
+    """bootstrap's .env copy was made conditional. The condition must be the repo's
+    DECLARED env source, never 'the file happens to exist' -- keyed on existence, a
+    missing api .env would stop failing the run and an adopted worktree would
+    silently keep a stale one.
+
+    bootstrap hardcodes an absolute REPO_DIR, so this lifts its env branch verbatim
+    from the YAML and runs it against a controlled directory. Soften the branch
+    (`|| true`, an `-f` guard) and the extraction stops matching, so the test fails
+    on its anchor rather than passing quietly.
+    """
+
+    BRANCH = (
+        '      if [ -n "$ENV_SRC" ]; then\n'
+        '        cp "$REPO_DIR/$ENV_SRC" "$WT/$ENV_SRC"\n'
+        '      fi'
+    )
+
+    def test_the_branch_is_still_the_one_in_the_lane(self):
+        self.assertIn(self.BRANCH, node_bash("bootstrap"),
+                      "bootstrap's env branch changed; re-derive this test")
+
+    def _run(self, env_src, seed):
+        with tempfile.TemporaryDirectory() as td:
+            repo_dir, wt = Path(td) / "repo", Path(td) / "wt"
+            repo_dir.mkdir()
+            wt.mkdir()
+            if seed:
+                (repo_dir / ".env").write_text("KEY=value\n", encoding="utf-8")
+            script = ("set -euo pipefail\n"
+                      f"REPO_DIR={repo_dir}\nWT={wt}\nENV_SRC='{env_src}'\n"
+                      + self.BRANCH)
+            r = subprocess.run(["bash", "-c", script], capture_output=True,
+                               encoding="utf-8")
+            return r.returncode, (wt / ".env").exists()
+
+    def test_p5_api_with_a_missing_env_still_fails(self):
+        rc, copied = self._run(".env", seed=False)
+        self.assertNotEqual(0, rc, "a missing api .env must still fail bootstrap")
+        self.assertFalse(copied)
+
+    def test_p5b_api_with_the_env_present_succeeds(self):
+        """The control: without it, the case above passes for any broken branch."""
+        rc, copied = self._run(".env", seed=True)
+        self.assertEqual(0, rc)
+        self.assertTrue(copied, "api must still get its .env seeded")
+
+    def test_a5_a_repo_declaring_no_env_source_skips_without_failing(self):
+        rc, copied = self._run("", seed=False)
+        self.assertEqual(0, rc)
+        self.assertFalse(copied)
+
+
+MCP_PROBE = (Path("/Users/eduardopicazo/Documents/Workspace/Goodword")
+             / "goodword-mcp/.worktrees/phase1-probe")
+
+
+@unittest.skipUnless((MCP_PROBE / "node_modules").is_dir(),
+                     "needs an installed goodword-mcp worktree")
+class McpGateActuallyRuns(unittest.TestCase):
+    """Selection AND execution against the real repo. An earlier draft of this
+    command failed every suite with an ESM error, which a naive negative control
+    reads as success -- so each exclusion has a positive control beside it."""
+
+    def _jest(self, *args):
+        prof = profile("goodword-mcp")
+        return subprocess.run(list(prof["CMD_TEST"]) + list(args),
+                              cwd=MCP_PROBE, capture_output=True, encoding="utf-8")
+
+    def test_a7_a_real_unit_suite_passes(self):
+        r = self._jest("delete-group")
+        self.assertEqual(0, r.returncode, (r.stdout + r.stderr)[-2000:])
+        self.assertIn("Tests:", r.stdout + r.stderr)
+
+    def test_a2_e2e_suites_are_never_selected(self):
+        r = self._jest("tools", "--listTests")
+        self.assertNotIn("e2e.test.ts", r.stdout,
+                         "a live-API e2e suite reached the gate")
+        self.assertEqual("", r.stdout.strip())
+
+    def test_a2b_smoke_suites_are_never_selected(self):
+        """Separate from A2 on purpose: `tools` names only an e2e file, so dropping
+        `smoke` from the ignore regex still passes A2 and its control."""
+        r = self._jest("search-timeout", "--listTests")
+        self.assertNotIn("smoke.test.ts", r.stdout)
+        self.assertEqual("", r.stdout.strip())
+
+    def test_a2c_unit_suites_are_still_selected(self):
+        """Control for both exclusions: a regex matching everything would pass A2
+        and A2b and be worthless."""
+        r = self._jest("delete-group", "--listTests")
+        self.assertIn("delete-group.unit.test.ts", r.stdout)
+
+    def test_m2_a_zero_match_selector_is_not_a_silent_pass(self):
+        r = self._jest("no-such-spec-anywhere-xyz")
+        self.assertNotEqual(0, r.returncode,
+                            "a selector matching nothing reported success")
+
+    def test_m3_the_typecheck_catches_a_real_type_error(self):
+        prof = profile("goodword-mcp")
+        control = subprocess.run(prof["CMD_TYPECHECK"], cwd=MCP_PROBE,
+                                 capture_output=True, encoding="utf-8")
+        self.assertEqual(0, control.returncode,
+                         "control failed: the probe worktree is not clean")
+        target = MCP_PROBE / "src" / "index.ts"
+        original = target.read_text(encoding="utf-8")
+        try:
+            target.write_text(original + '\nconst _bad: number = "nope";\n',
+                              encoding="utf-8")
+            r = subprocess.run(prof["CMD_TYPECHECK"], cwd=MCP_PROBE,
+                               capture_output=True, encoding="utf-8")
+            self.assertNotEqual(0, r.returncode, "the typecheck gate cannot fail")
+        finally:
+            target.write_text(original, encoding="utf-8")
+
+
 if __name__ == "__main__":
     unittest.main()
