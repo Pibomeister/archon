@@ -147,11 +147,16 @@ def make_plan_converge_fixture(tmp, critique_verdict_baseline):
     (ad / "files-allowlist.json").write_text(json.dumps(["apps/api/src/app/x.ts"]), encoding="utf-8")
     (ad / "web-files-allowlist.json").write_text(json.dumps(["app/routes/feature.tsx"]), encoding="utf-8")
     (ad / "reader-audit.json").write_text(json.dumps({"columns": []}), encoding="utf-8")
+    (ad / "web-reader-audit.json").write_text(json.dumps({"columns": []}), encoding="utf-8")
+    (ad / "web-premises.json").write_text(json.dumps([]), encoding="utf-8")
+    browser_policy = {"required": [{"id": "browser-1", "criterion": "Feature is visible.", "path": "/feature", "assertions": [{"type": "text", "value": "Feature"}]}]}
+    (ad / "browser-evidence.json").write_text(json.dumps(browser_policy), encoding="utf-8")
+    (ad / "browser-evidence.sha256").write_text(__import__("hashlib").sha256(json.dumps(browser_policy, sort_keys=True, separators=(",", ":")).encode()).hexdigest() + "\n", encoding="utf-8")
     (ad / "plan-round.txt").write_text("1\n", encoding="utf-8")
     rd = ad / "plan-round-1"
     rd.mkdir()
     (rd / "plan.pre.md").write_text(PLAN_MD, encoding="utf-8")
-    for f in ("verify.json", "files-allowlist.json", "web-files-allowlist.json", "reader-audit.json"):
+    for f in ("verify.json", "files-allowlist.json", "web-files-allowlist.json", "reader-audit.json", "web-reader-audit.json", "web-premises.json", "browser-evidence.json", "browser-evidence.sha256"):
         shutil.copyfile(ad / f, rd / f"pre-{f}")
     if critique_verdict_baseline == "REVISE":
         (rd / "critique.json").write_text(json.dumps({"verdict": "REVISE", "findings": []}), encoding="utf-8")

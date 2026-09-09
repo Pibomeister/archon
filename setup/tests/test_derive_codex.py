@@ -5,12 +5,12 @@ negative control (tamper a twin, the gate must fail)."""
 import copy
 import importlib.util
 import os
-import pwd
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import yaml
 
@@ -133,6 +133,37 @@ class TransformStats(unittest.TestCase):
             _, _, stats = dc.derive(t)
             self.assertEqual(stats["guard_swaps"], 0, t)
 
+    def test_guarded_target_rejects_missing_billing_transform(self):
+        parent = copy.deepcopy(load(ARCHON / "workflows" / "bugfix-lite.yaml"))
+        preflight = next(n for n in walk(parent["nodes"]) if n["id"] == "preflight")
+        preflight["bash"], removed = dc.GUARD_RE.subn("", preflight["bash"], count=1)
+        self.assertEqual(removed, 1, "fixture parent no longer has a billing guard")
+
+        with mock.patch.object(dc, "load_yaml", return_value=parent), \
+             self.assertRaisesRegex(dc.CodexError, "expected one billing guard"):
+            dc.derive("bugfix-lite")
+
+    def test_guarded_target_rejects_missing_staged_skill_transform(self):
+        parent = copy.deepcopy(load(ARCHON / "workflows" / "bugfix-lite.yaml"))
+        preflight = next(n for n in walk(parent["nodes"]) if n["id"] == "preflight")
+        preflight["bash"], removed = dc.SK_CODE_ASSERT_RE.subn("", preflight["bash"], count=1)
+        self.assertEqual(removed, 1, "fixture parent no longer has a staged-skill assertion")
+
+        with mock.patch.object(dc, "load_yaml", return_value=parent), \
+             self.assertRaisesRegex(dc.CodexError, "one staged-skill guard"):
+            dc.derive("bugfix-lite")
+
+    def test_guarded_target_rejects_duplicated_required_transform(self):
+        for pattern, message in ((dc.GUARD_RE, "expected one billing guard"),
+                                 (dc.SK_CODE_ASSERT_RE, "one staged-skill guard")):
+            parent = copy.deepcopy(load(ARCHON / "workflows" / "bugfix-lite.yaml"))
+            preflight = next(n for n in walk(parent["nodes"]) if n["id"] == "preflight")
+            matched = pattern.search(preflight["bash"])
+            self.assertIsNotNone(matched)
+            preflight["bash"] += "\n" + matched.group(0)
+            with self.subTest(message=message), mock.patch.object(dc, "load_yaml", return_value=parent), self.assertRaisesRegex(dc.CodexError, message):
+                dc.derive("bugfix-lite")
+
 
 class PinReviewClaude(unittest.TestCase):
     def test_hybrid_pins_skills_nodes(self):
@@ -216,9 +247,13 @@ class GuardTextProperties(unittest.TestCase):
     def test_lite_control_guard_consumes_one_time_file(self):
         _, text, _ = dc.derive("bugfix-lite")
         guard = next(n for n in yaml.safe_load(text)["nodes"] if n["id"] == "codex-control-guard")
+        guard["bash"] = guard["bash"].replace(
+            "pathlib.Path(pwd.getpwuid(os.getuid()).pw_dir)",
+            "pathlib.Path(os.environ['HOME'])",
+        )
         with tempfile.TemporaryDirectory() as td:
             nonce = "a" * 64
-            control_dir = Path(pwd.getpwuid(os.getuid()).pw_dir) / ".archon/control/codex-lite"
+            control_dir = Path(td) / ".archon/control/codex-lite"
             control_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
             marker = control_dir / f"guard-{nonce}"
             if marker.exists():

@@ -58,10 +58,28 @@ class SetupScriptsArePackagedTest(unittest.TestCase):
     def test_round_reclaim_is_shipped(self):
         self.assertIn("round-reclaim.sh", manifest_entries())
 
+    def test_canonical_test_runner_is_shipped_and_used_by_package(self):
+        package = MANIFEST.read_text(encoding="utf-8")
+        self.assertIn("setup/run-tests.py", package)
+        self.assertIn('setup/run-tests.py" --start-directory "$ARCHON/setup/tests"', package)
+        self.assertIn('--pattern "test_controller_attest.py"', package)
+
     def test_setup_to_setup_references_are_seen(self):
         # Negative control for the setup/*.sh scan above.
         self.assertIn("port-alloc.sh", referenced())
         self.assertIn("resolve-params.sh", referenced()["port-alloc.sh"])
+
+    def test_package_reference_scanner_ignores_trailing_prose_punctuation(self):
+        package = MANIFEST.read_text(encoding="utf-8")
+        match = re.search(r"GREP\" -ohE '([^']+)'", package)
+        self.assertIsNotNone(match, "package.sh reverse-check grep pattern moved")
+        ref_pattern = match.group(1)
+        text = "Run $SETUP/params-env.sh. Then call setup/round-reclaim.sh, safely."
+        refs = {
+            re.sub(r"^\$\{?SETUP\}?/", "setup/", m.group(0))
+            for m in re.finditer(ref_pattern, text)
+        }
+        self.assertEqual(refs, {"setup/params-env.sh", "setup/round-reclaim.sh"})
 
 
 if __name__ == "__main__":

@@ -41,10 +41,10 @@ class CitationResolution(unittest.TestCase):
         self.ad.mkdir()
         # a fake api repo whose origin/main carries a file the checkout lacks
         remote = self.tmp / "remote.git"
-        sh(f"git init -q --bare {remote}", self.tmp)
+        sh(f"git init -q --bare --initial-branch=main {remote}", self.tmp)
         api = self.root / "api"
         api.mkdir(parents=True)
-        sh("git init -q && git config user.email t@t && git config user.name t", api)
+        sh("git init -q -b main && git config user.email t@t && git config user.name t", api)
         (api / "on-disk.ts").write_text("export const onDisk = 'quote-on-disk';\n")
         sh("git add . && git commit -qm 'base commit for citation tests'", api)
         sh(f"git remote add origin {remote} && git push -q origin HEAD:main", api)

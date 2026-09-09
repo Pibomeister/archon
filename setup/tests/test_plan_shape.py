@@ -66,6 +66,12 @@ class PlanShapeTest(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("reader-audit.json missing or malformed", r.stdout)
 
+    def test_browser_policy_digest_mismatch_fails(self):
+        (self.ad / "browser-evidence.sha256").write_text("0" * 64 + "\n", encoding="utf-8")
+        r = run(self.ad, self.wt, self.spec)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("browser-evidence.json/.sha256 missing or malformed", r.stdout)
+
 
 class PlanShapeWithPremisesTest(unittest.TestCase):
     def setUp(self):

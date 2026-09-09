@@ -3,6 +3,7 @@
 via the WATCHDOG_KILL_CMD test seam), non-running run pass-through."""
 import json
 import os
+import select
 import sqlite3
 import subprocess
 import tempfile
@@ -99,9 +100,16 @@ class Watchdog(Base):
                               "--wall-minutes", "60", "--max-total-tokens", "1"],
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              encoding="utf-8", env=env)
-        time.sleep(0.3)
+        readable, _, _ = select.select([p.stdout], [], [], 10)
+        if not readable:
+            p.terminate()
+            out, err = p.communicate(timeout=5)
+            self.fail(f"watchdog did not emit accounting warning: {out}{err}")
+        warning = p.stdout.readline()
+        self.assertIn("WATCHDOG=WARN token accounting unavailable", warning)
         con = sq.connect(self.db); con.execute("UPDATE remote_agent_workflow_runs SET status='paused'"); con.commit(); con.close()
         out, err = p.communicate(timeout=5)
+        out = warning + out
         self.assertEqual(p.returncode, 0, out + err)
         self.assertIn("WATCHDOG=WARN token accounting unavailable", out)
         self.assertIn("WATCHDOG=RUN_PAUSED", out)

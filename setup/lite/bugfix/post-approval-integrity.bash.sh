@@ -1,5 +1,5 @@
 set -euo pipefail
-ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
 RID="$(basename "$ARTIFACTS_DIR")"
 test -n "${ARCHON_BUGFIX_CHAIN_STATE-}" || { echo "POST_APPROVAL=FAIL no chain state"; exit 1; }
 test -n "${ARCHON_ATTESTATION_DIR-}" || { echo "POST_APPROVAL=FAIL no attestation dir"; exit 1; }

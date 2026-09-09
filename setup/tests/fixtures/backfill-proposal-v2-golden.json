@@ -1,0 +1,79 @@
+{
+  "bounds": {
+    "chunk_size": 1,
+    "max_rows": 2
+  },
+  "instrument": {
+    "commit": "1111111111111111111111111111111111111111",
+    "repo": "api",
+    "source_files": [
+      "tools/backfills/widgets.ts"
+    ],
+    "tree": "2222222222222222222222222222222222222222",
+    "version": "instrument-v1"
+  },
+  "mutations": [
+    {
+      "key": {
+        "id": 1
+      },
+      "operation_key": "op-1",
+      "preconditions": {
+        "status": "old"
+      },
+      "set": {
+        "status": "Café 東京"
+      },
+      "table": "widgets"
+    }
+  ],
+  "proposal_digest": "sha256:6ed08c6ade6a3cb58b381727cf3dc7d1c31c948fab2dd6aad1cbd80f302f5944",
+  "run_id": "run-unicode-1",
+  "target": {
+    "database_identity": {
+      "cluster": "cluster-α",
+      "database": "archon_test",
+      "environment": "local",
+      "role": "postgres"
+    },
+    "key_columns": [
+      "id"
+    ],
+    "schema_metadata": {
+      "widgets": {
+        "column_types": {
+          "id": "integer",
+          "note": "text",
+          "status": "text"
+        },
+        "columns": [
+          "id",
+          "status",
+          "note"
+        ]
+      }
+    },
+    "tables": [
+      "widgets"
+    ]
+  },
+  "undo": {
+    "definition": {
+      "mode": "restore-before-values",
+      "reason": "Café 東京"
+    },
+    "definition_digest": "sha256:2397f123591d0c0daa72c956b0a10856bc52b042033bd54e7e6655160ac51ff1"
+  },
+  "verification": {
+    "postconditions": [
+      {
+        "decimal": "1.25",
+        "expect": {
+          "status": "Café 東京"
+        },
+        "operation_key": "op-1"
+      }
+    ]
+  },
+  "version": "backfill.proposal.v2"
+}

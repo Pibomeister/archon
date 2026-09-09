@@ -1,6 +1,8 @@
 name: babysit
 description: M2.9 back half - babysit both toy-feature PRs to MERGE-READY. Per repo - watch CI to conclusion, run the mechanical thread lane (proven-addressed threads only; everything else needs-human), flip draft to ready. Loop is transient-retry only; CI red is a hard CI_RED failure.
 provider: claude
+hardened:
+  required: true
 nodes:
   - id: babysit-api
     loop_group:
@@ -11,7 +13,7 @@ nodes:
           timeout: 2400000
           bash: |
             set -uo pipefail
-            REPO=/Users/eduardopicazo/Documents/Workspace/Goodword/api
+            REPO="/Users/eduardopicazo/Documents/Workspace/Goodword/api"
             BR=archon/health-archon
             cd "$REPO"
             PR=$(gh pr list --head "$BR" --state open --json number --jq '.[0].number' 2>/dev/null)
@@ -46,7 +48,7 @@ nodes:
           timeout: 2400000
           bash: |
             set -uo pipefail
-            REPO=/Users/eduardopicazo/Documents/Workspace/Goodword/web-app
+            REPO="/Users/eduardopicazo/Documents/Workspace/Goodword/web-app"
             BR=archon/health-archon-web
             cd "$REPO"
             PR=$(gh pr list --head "$BR" --state open --json number --jq '.[0].number' 2>/dev/null)

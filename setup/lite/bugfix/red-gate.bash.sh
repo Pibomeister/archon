@@ -1,5 +1,5 @@
 set -euo pipefail
-ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
 SETUP="$ROOT/.archon/setup"
 python3 "$SETUP/repo-policy.py" validate-plan --root "$ROOT" --artifacts "$ARTIFACTS_DIR" \
   || { echo "RED_GATE=FAIL repository policy"; exit 1; }

@@ -1,6 +1,8 @@
 name: wrap-ship
-description: W9 ship lane (ce-commit-push-pr Tier-3 replacement per effects-table 8b) — PR-body prompt node + mechanical bash. Smoke pushes to a local bare remote; gh pr create is deferred to M3.1 (needs a real GitHub remote).
+description: PR narrative fixture; publication requires the same protected controller action as delivery workflows.
 provider: claude
+hardened:
+  required: true
 nodes:
   - id: prbody
     model: sonnet
@@ -28,31 +30,5 @@ nodes:
   - id: ship
     depends_on: [prbody]
     timeout: 900000
-    bash: |
-      set -euo pipefail
-      REPO=/private/tmp/claude-501/-Users-eduardopicazo-Documents-Workspace-Goodword/88bb31f2-0094-41b2-bd3f-8409f1264538/scratchpad/m1-fixture/repo
-      BRANCH=feature
-      BODY_FILE="$ARTIFACTS_DIR/pr-body.md"
-      GH_SMOKE=1   # smoke: local bare remote only; production template runs gh pr create
-
-      # 0. Assert we are where we think we are — never infer the repo from cwd.
-      test "$(git -C "$REPO" rev-parse --abbrev-ref HEAD)" = "$BRANCH"
-
-      # PR body must exist and carry the residual sink before anything ships.
-      test -s "$BODY_FILE"
-      grep -q '^## Known Residuals' "$BODY_FILE"
-      grep -q '^## Post-Deploy Monitoring & Validation' "$BODY_FILE"
-
-      # 4. Push (staging/commit is W7's job; ship only pushes what is committed).
-      git -C "$REPO" push -u origin "$BRANCH"
-
-      # 5. PR against the repo's real default branch — resolved, not hard-coded.
-      BASE=$(git -C "$REPO" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@') || true
-      BASE="${BASE:-main}"
-      if [ "$GH_SMOKE" = "1" ]; then
-        echo "GH_DEFERRED=M3.1 base=$BASE head=$BRANCH"
-      else
-        gh -R "$(gh repo view --json nameWithOwner -q .nameWithOwner)" pr create \
-          --base "$BASE" --head "$BRANCH" --title "fix(fixture): m1 smoke" --body-file "$BODY_FILE"
-      fi
-      echo "W9_GATE=PASS"
+    controller_action: publish
+    phase: publication

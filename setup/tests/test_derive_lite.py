@@ -123,7 +123,8 @@ class LiteSafetyNodes(unittest.TestCase):
                 self.assertLess(m["nodes"].index("prbody"), m["nodes"].index("prbody-gate"))
                 self.assertLess(m["nodes"].index("prbody-gate"), m["nodes"].index("ship"))
                 self.assertEqual(m["depends_on"]["prbody-gate"], ["prbody"])
-                self.assertEqual(m["depends_on"]["ship"], ["prbody-gate"])
+                self.assertEqual(m["depends_on"]["candidate-export"], ["prbody-gate"])
+                self.assertEqual(m["depends_on"]["ship"], ["candidate-import"])
 
     def test_impact_overlays_require_successful_query_provenance(self):
         for lane in LANES:

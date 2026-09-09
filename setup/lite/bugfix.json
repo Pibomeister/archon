@@ -19,7 +19,9 @@
     "lite-envelope",
     "rca-render",
     "rca-render-gate",
+    "rca-freeze",
     "rca-approval",
+    "rca-approval-verify",
     "post-approval-integrity",
     "lite-impact-post",
     "lite-envelope-post",
@@ -37,6 +39,8 @@
     "sibling-sweep",
     "prbody",
     "prbody-gate",
+    "candidate-export",
+    "candidate-import",
     "ship",
     "run-report",
     "kb-capture",
@@ -101,16 +105,22 @@
       "prbody"
     ],
     "ship": [
-      "prbody-gate"
+      "candidate-import"
     ],
     "post-approval-integrity": [
-      "rca-approval"
+      "rca-approval-verify"
     ],
     "intake": [
       "preflight"
     ],
     "rca-gate": [
       "rca"
+    ],
+    "rca-approval": [
+      "rca-freeze"
+    ],
+    "candidate-export": [
+      "prbody-gate"
     ]
   },
   "loops": {},
@@ -658,6 +668,48 @@
       "produces": [],
       "consumes": [
         "lite-approval-manifest.json"
+      ]
+    },
+    "rca-freeze": {
+      "produces": [],
+      "consumes": [
+        "rca-review.html",
+        "rca.md",
+        "causal-chain.json",
+        "fix-plan.json",
+        "files-allowlist.json",
+        "failing-test.json",
+        "verify.json",
+        "lite-approval-manifest.json"
+      ]
+    },
+    "rca-approval-verify": {
+      "produces": [],
+      "consumes": [
+        "rca-review.html",
+        "rca.md",
+        "causal-chain.json",
+        "fix-plan.json",
+        "files-allowlist.json",
+        "failing-test.json",
+        "verify.json",
+        "lite-approval-manifest.json"
+      ]
+    },
+    "candidate-export": {
+      "produces": [
+        "candidate.bundle",
+        "candidate.json"
+      ],
+      "consumes": [
+        "params.json"
+      ]
+    },
+    "candidate-import": {
+      "produces": [],
+      "consumes": [
+        "candidate.bundle",
+        "candidate.json"
       ]
     }
   }

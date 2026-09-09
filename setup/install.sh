@@ -7,6 +7,9 @@
 # merges allowlist.json into <root>/.claude/settings.json (diff shown first).
 set -uo pipefail
 
+echo "INSTALL=DISABLED hardened runtime/image/workflow certification is incomplete; existing installation unchanged"
+exit 1
+
 SRC="$(cd "$(dirname "$0")" && pwd)"
 # Split literal: this file ships inside the payload it renders, and must not
 # contain the contiguous placeholder or the render would rewrite this line.

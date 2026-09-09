@@ -16,6 +16,10 @@ GIST_ID_FILE="$ARCHON/.gist-id"
 PLACEHOLDER='{{GOODWORD''_ROOT}}'
 PUBLISH=no
 [ "${1:-}" = "--publish" ] && PUBLISH=yes
+if [ "$PUBLISH" = yes ]; then
+  echo "PACKAGE=FAIL hardened runtime/image/workflow certification is incomplete; publication disabled"
+  exit 1
+fi
 
 # Absolute grep/head (see install.sh for the shadowing workaround this preserves).
 # The secret gate runs grep inside `if` conditions, where `set -e` does NOT fire —
@@ -51,6 +55,8 @@ MANIFEST=(
   workflows/full-sdlc-api-lite.yaml
   workflows/bugfix-lite.yaml
   setup/allowlist.json
+  setup/run-tests.py
+  setup/export-candidate.py
   setup/bind-repo.py
   setup/check-fixer-result.py
   setup/change-context.py
@@ -65,6 +71,7 @@ MANIFEST=(
   setup/negcontrol.sh
   setup/package.sh
   setup/params-env.sh
+  setup/repo-profile.sh
   setup/parse-critique.py
   setup/parse-review-envelope.py
   setup/plan-shape.sh
@@ -73,6 +80,8 @@ MANIFEST=(
   setup/round-reclaim.sh
   setup/armed-exec.sh
   setup/census-runner.py
+  setup/backfill-transactional-executor.py
+  setup/browser-verifier.py
   setup/occurrence-logs.py
   setup/occurrence-window.py
   setup/assert-ro.sh
@@ -126,6 +135,7 @@ MANIFEST=(
   setup/bugfix-contract.py
   setup/control_contract.py
   setup/controller-attest.py
+  setup/release-controller.py
   setup/evidence-provenance.py
   setup/experiment-runner.py
   setup/eval-quality-differential.sh
@@ -190,6 +200,14 @@ for f in "${MANIFEST[@]}"; do
 done
 test -f "$FIXTURE" || { echo "PACKAGE=FAIL toy fixture missing: $FIXTURE"; exit 1; }
 
+# --- Test-discovery gate: controller tests must execute, not merely discover. --
+# F-TEST-01: a test class helper named `run` shadowed unittest.TestCase.run, so
+# discovery found tests but TextTestRunner executed zero and still exited green.
+# Package verification runs the canonical gate over the controller suite.
+echo "--- test discovery gate ---"
+python3 "$ARCHON/setup/run-tests.py" --start-directory "$ARCHON/setup/tests" --pattern "test_controller_attest.py" \
+  || { echo "PACKAGE=FAIL test discovery/execution gate"; exit 1; }
+
 # --- Reverse check: every setup/ script a manifest workflow references must ---
 # itself be in MANIFEST, or a teammate's install ships a workflow that calls a
 # script that never arrived. Only manifest workflow YAMLs are scanned.
@@ -206,7 +224,7 @@ echo "--- reverse check (workflow -> setup script coverage) ---"
 REVERSE_FAIL=0
 for f in "${MANIFEST[@]}"; do
   case "$f" in workflows/*.yaml) ;; *) continue ;; esac
-  REFS="$("$GREP" -ohE '(setup|\$\{?SETUP\}?)/[A-Za-z0-9_./-]+' "$ARCHON/$f" | sed -E 's#^\$\{?SETUP\}?/#setup/#' | sort -u)" && grc=0 || grc=$?
+  REFS="$("$GREP" -ohE '(setup|\$\{?SETUP\}?)/[A-Za-z0-9_./-]*[A-Za-z0-9_/-]' "$ARCHON/$f" | sed -E 's#^\$\{?SETUP\}?/#setup/#' | sort -u)" && grc=0 || grc=$?
   if [ "$grc" -ge 2 ]; then
     echo "PACKAGE=FAIL grep errored scanning $f for setup/ references (fail-closed)"
     REVERSE_FAIL=1
@@ -369,7 +387,7 @@ done
 echo "ROUNDTRIP=OK (${#MANIFEST[@]} files)"
 
 echo "PACKAGE=OK dist ready at $DIST/gist"
-[ "$PUBLISH" = yes ] || { echo "Dry build only — re-run with --publish to push the gist."; exit 0; }
+[ "$PUBLISH" = yes ] || { echo "Dry build only — publication disabled pending hardening certification."; exit 0; }
 
 # --- Publish: create once, then update via the gist's git remote ---------------
 if [ ! -f "$GIST_ID_FILE" ]; then

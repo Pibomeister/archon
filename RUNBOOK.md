@@ -1,5 +1,79 @@
 # Archon SDLC Runbook
 
+> **Hardening rollout: not admitted.** This working distribution requires the
+> controller-action runtime fork; the installed v0.8.0 runtime is incompatible.
+> Container seeds, restricted transport, and protected resume budgets have
+> isolated regression coverage. Trusted verification/publication handlers,
+> cross-stage evidence binding, and an end-to-end admitted installation remain
+> incomplete.
+> Package dry-build success is not release certification. Do not install or
+> launch these workflows as a production replacement. Workflow publication and
+> both legacy and proposal-v2 backfill apply entrypoints fail closed; package
+> publication and installation are also disabled. Existing human approvals are not upgraded or
+> fabricated. The recipes below describe the prior admitted operator surface.
+
+Backfill proposal v2 must declare the PostgreSQL type of every key, precondition,
+and changed column. The guarded executor currently supports only `smallint`,
+`integer`, `boolean`, `text`, `character varying[(n)]`, and canonical lowercase
+`uuid` values. It rejects temporal, JSON, array, binary, floating-point, bigint,
+and numeric mutations until lossless comparison and recovery contracts are
+implemented and database-tested. Do not expand the type allowlist without those
+checks. This restriction does not enable production backfills.
+
+## Portable checkpoint: 2026-09-09
+
+This is an unadmitted hardening checkpoint. It is useful for moving the current work to another machine, not for installing or publishing a fully hardened SDLC. Root owns the commits and pushes; do not write commit SHAs into this note until those pushes exist.
+
+Cloneable sources after the checkpoint pushes:
+
+| Part | Source branch | Purpose |
+|------|---------------|---------|
+| Workflow layer | `git@github.com:GoodwordTeam/archon.git` branch `checkpoint/archon-hardening-20260909` | `.archon` workflows, guards, runbook, and tests |
+| Runtime | `git@github.com:Pibomeister/archon-engine.git` branch `hardening/controller-boundary` | controller-boundary Archon runtime fork |
+| API counterpart | `git@github.com:GoodwordTeam/api.git` branch `checkpoint/archon-backfill-ledger-20260909` | backfill ledger/entity/test counterpart |
+
+Minimal arbitrary-path checkout shape:
+
+```bash
+mkdir Goodword-checkpoint
+cd Goodword-checkpoint
+git clone --branch checkpoint/archon-hardening-20260909 git@github.com:GoodwordTeam/archon.git .archon
+git clone --branch checkpoint/archon-backfill-ledger-20260909 git@github.com:GoodwordTeam/api.git api
+git clone --branch hardening/controller-boundary git@github.com:Pibomeister/archon-engine.git archon-engine
+```
+
+Bootstrap and local gates, using existing repo dependencies only:
+
+```bash
+# Runtime fork
+cd archon-engine
+bun install --frozen-lockfile
+bun run type-check
+bun run test
+
+# Workflow layer
+cd ../.archon
+python3 setup/run-tests.py --start-directory setup/tests
+for f in setup/package.sh setup/install.sh setup/codex-watchdog.sh setup/codex-workspace-wrapper.sh; do bash -n "$f"; done
+python3 setup/derive-lite.py api --check
+python3 setup/derive-lite.py bugfix --check
+python3 setup/derive-codex.py --all --check
+python3 setup/lane-doctrine.py check
+
+# API counterpart
+cd ../api
+bun install --frozen-lockfile
+bun run typecheck
+bun run test -- --runTestsByPath libs/data-access/src/lib/rds/backfills/__tests__/trusted-backfill-executor.spec.ts libs/data-access/src/lib/rds/backfills/__tests__/trusted-backfill-executor.db.spec.ts
+bun run test:integration -- --runTestsByPath apps/api-e2e/src/data-access/billing-subscription.repo.int.spec.ts
+```
+
+Checkpoint evidence supplied for this handoff: the Python workflow gate reached 1007 executed tests after the migration test moved into the correct suite; counterpart tests cover the workflow controller/release/backfill guards against the API backfill ledger and trusted executor; native runtime/controller tests, API unit gates, and the owned-DB matrix are the proof set. Prefer the commands above over copying stale counts.
+
+Not synced by Git: credentials, private controller state, `.omx` evidence, screenshots/images, local Archon DB rows, and runner images. Build and pin runner images per machine.
+
+Still incomplete by design: `setup/install.sh`, `setup/package.sh --publish`, legacy backfill apply, proposal-v2 production apply, and package publication are disabled/fail-closed; strict subscription token-cap proof and full API/SPA/production wiring remain incomplete. Do not bypass guards or claim this checkpoint is fully hardened.
+
 Operator guide for the Goodword two-lane Archon pipeline (`full-sdlc-api` → `full-sdlc-web` → `babysit` → `cleanup`). Every entry here is an **observed** failure or behavior from the M0–M3 build, not a hypothetical. Format: symptom → verbatim discriminator → action.
 
 Platform note: macOS or desktop Linux. The workflows surface human packets through a browser opener (`xdg-open`, else `open`) and always print the `file://` path, so a host without an opener degrades to "read the path" rather than failing. §6 has the Linux-specific traps.

@@ -1,6 +1,8 @@
 name: register-probe
 description: One-time folder-project registration + node-env sanity (gist setup step; free)
 provider: claude
+hardened:
+  required: true
 nodes:
   - id: probe
     timeout: 120000

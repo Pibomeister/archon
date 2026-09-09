@@ -1,5 +1,5 @@
 set -euo pipefail
-ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
 python3 "$ROOT/.archon/setup/bugfix-contract.py" write-lite-approval-manifest --artifacts "$ARTIFACTS_DIR"
 RID="$(basename "$ARTIFACTS_DIR")"
 test -n "${ARCHON_BUGFIX_CHAIN_STATE-}" || { echo "LITE_ATTESTATION=FAIL no chain state"; exit 1; }
