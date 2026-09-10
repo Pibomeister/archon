@@ -18,6 +18,7 @@ Two kinds of test, deliberately not mixed:
 Expected command strings come from the workflow YAML itself, not from
 repo-profile.sh, so this cannot pass by both sides agreeing on the same bug.
 """
+import contextlib
 import json
 import os
 import shutil
@@ -79,16 +80,18 @@ def profile(repo, setup_dir=SETUP):
     return out
 
 
-# The recheck.json writer, lifted verbatim from the deslop-recheck node so this
-# test executes the real logic instead of grepping the YAML for it.
-RECHECK_WRITER = """
-import json, sys
-path, tc, lt, ut, sc, sl, lint_applicable = sys.argv[1:8]
-json.dump({"typecheck": int(tc), "lint": int(lt), "tests": int(ut),
-           "scope": int(sc), "slop": int(sl),
-           "lint_applicable": lint_applicable == "true"},
-          open(path, "w"), indent=2)
-"""
+def recheck_writer():
+    """The production recheck.json writer, EXTRACTED FROM THE LANE at test time.
+
+    An earlier version was a copy pasted into this file, so breaking the real
+    writer could not fail the test -- the exact defect this suite is supposed to
+    catch elsewhere.
+    """
+    body = node_bash("deslop-recheck")
+    start = body.index('python3 - "$RD/recheck.json"')
+    start = body.index("\n", start) + 1
+    end = body.index("\nPY\n", start)
+    return body[start:end]
 
 
 def _walk(nodes):
@@ -124,6 +127,14 @@ def node_prompt_containing(lane_text, needle):
         if n.get("prompt") and needle in n["prompt"]:
             return n["prompt"]
     raise AssertionError(f"no prompt contains {needle!r}")
+
+
+def shim(bin_dir, name, body):
+    """A fake executable on PATH that records what it was asked to do."""
+    path = bin_dir / name
+    path.write_text("#!/usr/bin/env bash\n" + body, encoding="utf-8")
+    path.chmod(0o755)
+    return path
 
 
 def run_node(body, fake, env=None, timeout=None):
@@ -235,6 +246,34 @@ class Preservation(unittest.TestCase):
         self.assertEqual(".env", s["ENV_SRC"])
         self.assertEqual("mono", s["IMPACT_INDEX"])
 
+    def test_p6_api_port_allocation_failure_still_fails_and_is_not_a_smoke_skip(self):
+        """The relaxation this change introduced is keyed on the repo's declared
+        capability, so a repo that DOES declare a smoke stack must still die when
+        its port cannot be allocated -- it must never fall through to the
+        'no smoke' path."""
+        with FakeRoot() as f:
+            control = f.resolve()
+            self.assertEqual(0, control.returncode, "control must pass")
+            (f.ad / "params.json").unlink()
+            (f.setup / "port-alloc.sh").write_text(
+                "echo 'no free port' >&2\nexit 1\n", encoding="utf-8")
+            r = f.resolve()
+            self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+            self.assertIn("cannot allocate api port", r.stdout + r.stderr)
+            self.assertNotIn("NOT_APPLICABLE", r.stdout + r.stderr)
+            self.assertFalse((f.ad / "params.json").exists())
+
+    def test_p6b_a_repo_with_no_smoke_never_touches_the_allocator(self):
+        """Control for the case above: mcp must succeed even with a broken
+        allocator, which is what proves the skip is capability-driven rather than
+        failure-driven."""
+        with FakeRoot() as f:
+            (f.setup / "port-alloc.sh").write_text(
+                "echo 'no free port' >&2\nexit 1\n", encoding="utf-8")
+            r = f.resolve("--allow", "api,goodword-mcp", repo="goodword-mcp")
+            self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+            self.assertNotIn("api_port", f.params())
+
     def test_p8a_params_env_still_exports_the_original_six_for_a_web_bound_run(self):
         with FakeRoot() as f:
             f.write_params(repo="web-app", api_port=4124, web_port=3124,
@@ -345,33 +384,123 @@ class Acceptance(unittest.TestCase):
         self.assertIn("resolve-params.sh", lite)
         self.assertNotIn("--allow", lite)
 
-    def test_a11_the_smoke_node_body_actually_skips_for_a_repo_with_no_smoke(self):
-        """Runs the real node bash, not a grep for it: an earlier version of this
-        test passed while smoke was forced to fail."""
-        body = node_bash("smoke")
-        with FakeRoot() as f:
-            f.write_params(repo="goodword-mcp",
-                           worktree=str(f.root / "goodword-mcp/.worktrees/x"))
-            r = run_node(body, f)
-            self.assertEqual(0, r.returncode, r.stdout + r.stderr)
-            result = (f.ad / "smoke-result.txt").read_text(encoding="utf-8")
-            self.assertIn("SMOKE=NOT_APPLICABLE", result)
-            self.assertIn("goodword-mcp", result)
+    # The smoke node boots a server and its exit trap kills whatever owns the
+    # port it was given. Running it in a test with a real port base could
+    # terminate an unrelated api run, so the branch is extracted and executed
+    # against controlled values instead. The anchor test below is what keeps that
+    # extraction honest -- change the node and this fails rather than drifting.
+    SMOKE_BRANCH = (
+        'if [ -z "$HAS_SMOKE" ]; then\n'
+        '  echo "SMOKE=NOT_APPLICABLE ($REPO declares no boot smoke)" '
+        '| tee "$ARTIFACTS_DIR/smoke-result.txt"\n'
+        '  exit 0\n'
+        'fi'
+    )
 
-    def test_a11b_the_same_body_does_not_skip_for_api(self):
-        """The control that makes the test above meaningful. api has a smoke stack,
-        so the node must get past the skip branch and try to boot (it fails here for
-        want of a real worktree -- what matters is that it did NOT report a skip)."""
-        body = node_bash("smoke")
-        with FakeRoot() as f:
-            f.write_params(repo="api", api_port=4123,
-                           worktree=str(f.root / "api/.worktrees/x"))
-            r = run_node(body, f, timeout=20)
-            written = ""
+    def test_a11_anchor_the_smoke_skip_branch_is_still_the_lane_s(self):
+        self.assertIn(self.SMOKE_BRANCH, node_bash("smoke"),
+                      "smoke's skip branch changed; re-derive this test")
+
+    def test_a11b_the_branch_skips_only_when_the_repo_declares_no_smoke(self):
+        def run(has_smoke, repo):
+            with tempfile.TemporaryDirectory() as td:
+                script = ('set -euo pipefail\n'
+                          f'ARTIFACTS_DIR={td}\nHAS_SMOKE={has_smoke!r}\nREPO={repo!r}\n'
+                          + self.SMOKE_BRANCH + '\necho REACHED_BOOT_PATH')
+                r = subprocess.run(["bash", "-c", script], capture_output=True,
+                                   encoding="utf-8")
+                written = Path(td) / "smoke-result.txt"
+                return r, (written.read_text(encoding="utf-8") if written.exists() else "")
+
+        r, written = run("", "goodword-mcp")
+        self.assertEqual(0, r.returncode)
+        self.assertIn("SMOKE=NOT_APPLICABLE", written)
+        self.assertIn("goodword-mcp", written)
+        self.assertNotIn("REACHED_BOOT_PATH", r.stdout,
+                         "a repo with no smoke must not fall through to the boot")
+
+        # Control: api declares a smoke stack, so the branch must NOT fire and the
+        # node must continue to the real boot path.
+        r, written = run("1", "api")
+        self.assertEqual(0, r.returncode)
+        self.assertEqual("", written, "api must not get a skip artifact")
+        self.assertIn("REACHED_BOOT_PATH", r.stdout)
+
+    def test_p10_the_api_smoke_boots_and_probes_both_endpoints(self):
+        """Runs the REAL smoke node against shimmed bun/curl/lsof.
+
+        Shims, not a live server: the node's exit trap kills whatever owns the
+        port it was handed, so a test that used a real port could terminate an
+        unrelated api run. The shims record their argv, which is what lets this
+        assert the two named probes actually happened -- a source grep for
+        '/api-docs-json' passes even with SMOKE=FAIL injected right after the
+        skip branch, which is how the previous version of this test was useless.
+        """
+        with tempfile.TemporaryDirectory() as td, FakeRoot() as f:
+            bin_dir, trace = Path(td) / "bin", Path(td) / "argv.log"
+            bin_dir.mkdir()
+            wt = Path(td) / "wt"
+            wt.mkdir()
+            shim(bin_dir, "bun", f'echo "bun $*" >> {trace}\nsleep 30\n')
+            # Every probe reports 200; the node distinguishes them by URL, and the
+            # trace is what proves both were requested.
+            # URL-aware on purpose: the node itself uses /info as an AUTH
+            # negative control and requires 401 there, so a blanket 200 shim
+            # fails the node for the wrong reason. Encoding the real contract
+            # is what makes this test evidence rather than theatre.
+            shim(bin_dir, "curl",
+                 f'echo "curl $*" >> {trace}\n'
+                 'case "$*" in\n'
+                 '  */info) printf 401 ;;\n'
+                 '  */api-docs-json) printf 200 ;;\n'
+                 '  *) printf 200 ;;\n'
+                 'esac\n')
+            shim(bin_dir, "lsof", "exit 1\n")   # no listener: nothing to sweep
+            shim(bin_dir, "kill", "true\n")     # never signal a real process
+            shim(bin_dir, "sleep", "true\n")    # collapse the node's 60x3s readiness loop
+            f.write_params(repo="api", api_port=4123, worktree=str(wt))
+            r = run_node(node_bash("smoke"), f,
+                         env={"PATH": f"{bin_dir}:{os.environ['PATH']}"},
+                         timeout=180)
+            recorded = trace.read_text(encoding="utf-8") if trace.exists() else ""
+            result = ""
             if (f.ad / "smoke-result.txt").exists():
-                written = (f.ad / "smoke-result.txt").read_text(encoding="utf-8")
-            self.assertNotIn("NOT_APPLICABLE", written + r.stdout,
+                result = (f.ad / "smoke-result.txt").read_text(encoding="utf-8")
+
+            self.assertNotIn("NOT_APPLICABLE", result,
                              "api must never take the no-smoke path")
+            self.assertIn("bun start", recorded, "the api server was never started")
+            self.assertIn("/api-docs-json", recorded, "the readiness probe never ran")
+            self.assertIn("/info", recorded, "the control probe never ran")
+            self.assertIn("SMOKE=PASS", result + r.stdout,
+                          f"smoke did not pass with healthy probes: {result} {r.stdout[-800:]}")
+            self.assertIn("guarded-control=401", result + r.stdout,
+                          "the auth negative control was not recorded")
+
+    def test_p10b_a_failing_probe_makes_the_api_smoke_fail(self):
+        """The control for the case above: with the probes returning 500 the same
+        node must NOT report PASS. Without this, P10 passes for a node that
+        reports success unconditionally."""
+        with tempfile.TemporaryDirectory() as td, FakeRoot() as f:
+            bin_dir = Path(td) / "bin"
+            bin_dir.mkdir()
+            wt = Path(td) / "wt"
+            wt.mkdir()
+            shim(bin_dir, "bun", "sleep 30\n")
+            # Readiness never comes up; the node must not report PASS.
+            shim(bin_dir, "curl", "printf 500\n")
+            shim(bin_dir, "lsof", "exit 1\n")
+            shim(bin_dir, "kill", "true\n")
+            shim(bin_dir, "sleep", "true\n")
+            f.write_params(repo="api", api_port=4123, worktree=str(wt))
+            r = run_node(node_bash("smoke"), f,
+                         env={"PATH": f"{bin_dir}:{os.environ['PATH']}"},
+                         timeout=180)
+            result = ""
+            if (f.ad / "smoke-result.txt").exists():
+                result = (f.ad / "smoke-result.txt").read_text(encoding="utf-8")
+            self.assertNotIn("SMOKE=PASS", result + r.stdout,
+                             "the smoke gate reported PASS with failing probes")
 
     def test_a12_result_artifacts_report_the_real_repo(self):
         lane = (WORKFLOWS / "full-sdlc-api.yaml").read_text(encoding="utf-8")
@@ -390,7 +519,7 @@ class Acceptance(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as td:
                     out = Path(td) / "recheck.json"
                     subprocess.run(
-                        ["python3", "-c", RECHECK_WRITER, str(out),
+                        ["python3", "-c", recheck_writer(), str(out),
                          "0", "0", "0", "0", "0", applicable],
                         check=True, capture_output=True)
                     got = json.loads(out.read_text(encoding="utf-8"))
@@ -645,9 +774,9 @@ class EnvSeedingStaysMandatoryForApi(unittest.TestCase):
     """
 
     BRANCH = (
-        '      if [ -n "$ENV_SRC" ]; then\n'
-        '        cp "$REPO_DIR/$ENV_SRC" "$WT/$ENV_SRC"\n'
-        '      fi'
+        'if [ -n "$ENV_SRC" ]; then\n'
+        '  cp "$REPO_DIR/$ENV_SRC" "$WT/$ENV_SRC"\n'
+        'fi'
     )
 
     def test_the_branch_is_still_the_one_in_the_lane(self):
@@ -687,6 +816,28 @@ class EnvSeedingStaysMandatoryForApi(unittest.TestCase):
 
 MCP_PROBE = (Path("/Users/eduardopicazo/Documents/Workspace/Goodword")
              / "goodword-mcp/.worktrees/phase1-probe")
+
+
+@contextlib.contextmanager
+def disposable_mcp():
+    """A throwaway copy of the mcp worktree with node_modules SYMLINKED.
+
+    tsconfig.json includes `src/**/*`, so injecting a type error into the shared
+    worktree is visible to every other typecheck running against it -- a unique
+    filename bounds the overwrite risk but not the interference. Copying the
+    source (a few hundred KB) and linking the installed modules gives real
+    isolation for the price of a directory copy.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        dest = Path(td) / "wt"
+        dest.mkdir()
+        for name in ("src", "tests"):
+            shutil.copytree(MCP_PROBE / name, dest / name)
+        for name in ("package.json", "tsconfig.json", "tsconfig.test.json",
+                     "jest.config.mjs"):
+            shutil.copy(MCP_PROBE / name, dest / name)
+        (dest / "node_modules").symlink_to(MCP_PROBE / "node_modules")
+        yield dest
 
 
 @unittest.skipUnless((MCP_PROBE / "node_modules").is_dir(),
@@ -731,21 +882,48 @@ class McpGateActuallyRuns(unittest.TestCase):
                             "a selector matching nothing reported success")
 
     def test_m3_the_typecheck_catches_a_real_type_error(self):
+        """Runs in a disposable copy. Injecting into the shared worktree was
+        visible to every concurrent typecheck (tsconfig includes src/**/*), so a
+        parallel run could fail on another process's error."""
         prof = profile("goodword-mcp")
-        control = subprocess.run(prof["CMD_TYPECHECK"], cwd=MCP_PROBE,
-                                 capture_output=True, encoding="utf-8")
-        self.assertEqual(0, control.returncode,
-                         "control failed: the probe worktree is not clean")
-        target = MCP_PROBE / "src" / "index.ts"
-        original = target.read_text(encoding="utf-8")
-        try:
-            target.write_text(original + '\nconst _bad: number = "nope";\n',
-                              encoding="utf-8")
-            r = subprocess.run(prof["CMD_TYPECHECK"], cwd=MCP_PROBE,
+        with disposable_mcp() as wt:
+            control = subprocess.run(prof["CMD_TYPECHECK"], cwd=wt,
+                                     capture_output=True, encoding="utf-8")
+            self.assertEqual(0, control.returncode,
+                             "control failed: the copy is not clean")
+            probe = wt / "src" / "__archon_typecheck_probe.ts"
+            probe.write_text('export const bad: number = "not a number";\n',
+                             encoding="utf-8")
+            r = subprocess.run(prof["CMD_TYPECHECK"], cwd=wt,
                                capture_output=True, encoding="utf-8")
             self.assertNotEqual(0, r.returncode, "the typecheck gate cannot fail")
-        finally:
-            target.write_text(original, encoding="utf-8")
+            self.assertIn(probe.name, r.stdout + r.stderr,
+                          "the gate failed, but not for the injected reason")
+
+    def test_m1_a_failing_unit_test_fails_the_gate_for_the_right_reason(self):
+        """The mutation the plan names as M1. The 'right reason' assertion is the
+        point: an earlier draft of this command failed EVERY suite with an ESM
+        error, which a bare non-zero check reads as a working gate."""
+        prof = profile("goodword-mcp")
+        with disposable_mcp() as wt:
+            spec = wt / "tests" / "delete-group.unit.test.ts"
+            control = subprocess.run(list(prof["CMD_TEST"]) + ["delete-group"],
+                                     cwd=wt, capture_output=True, encoding="utf-8")
+            self.assertEqual(0, control.returncode,
+                             "control failed: " + (control.stdout + control.stderr)[-1500:])
+            original = spec.read_text(encoding="utf-8")
+            marker = "ARCHON_INJECTED_FAILURE"
+            spec.write_text(
+                original + f'\ndescribe("{marker}", () => {{\n'
+                f'  it("fails on purpose", () => {{ expect(1).toBe(2); }});\n}});\n',
+                encoding="utf-8")
+            r = subprocess.run(list(prof["CMD_TEST"]) + ["delete-group"],
+                               cwd=wt, capture_output=True, encoding="utf-8")
+            out = r.stdout + r.stderr
+            self.assertNotEqual(0, r.returncode, "a failing unit test did not fail the gate")
+            self.assertIn(marker, out, "failed, but not because of the injected test")
+            self.assertNotIn("Cannot use import statement outside a module", out,
+                             "failed for an ESM environment reason, not the test")
 
 
 if __name__ == "__main__":
