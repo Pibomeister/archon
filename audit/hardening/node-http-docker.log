@@ -1,0 +1,19 @@
+bun test v1.3.10 (30e609e0)
+
+packages/isolation/src/browser/browser-observation.test.ts:
+(pass) actual Docker browser observation fixture > starts sealed node API candidate source from a read-only volume without an app Dockerfile [5683.17ms]
+-------------------------------------------------------|---------|---------|-------------------
+File                                                   | % Funcs | % Lines | Uncovered Line #s
+-------------------------------------------------------|---------|---------|-------------------
+All files                                              |   91.24 |   82.17 |
+ packages/core/src/test/setup.ts                       |  100.00 |  100.00 |
+ packages/isolation/src/browser/browser-observation.ts |   94.70 |   98.19 | 608-624,673,682,703-704,951-953
+ packages/isolation/src/container/artifact-snapshot.ts |   95.24 |   94.14 | 117,119,174-179,181,237,252,287
+ packages/isolation/src/container/docker-exec.ts       |   75.00 |   36.36 | 83-123
+-------------------------------------------------------|---------|---------|-------------------
+
+ 1 pass
+ 40 filtered out
+ 0 fail
+ 6 expect() calls
+Ran 1 test across 1 file. [5.71s]

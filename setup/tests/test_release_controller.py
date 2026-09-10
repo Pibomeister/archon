@@ -365,25 +365,40 @@ class ImmutablePublicationTest(ReleaseControllerTest):
 
 
 class PublicationWorkflowTest(unittest.TestCase):
-    def test_all_ship_nodes_publish_from_bash(self):
-        """Inverse of the assertion 229090a introduced.
-
-        release-controller.py is still correct code and stays tested above, but
-        it has no call site: stock Archon has no controller_action node kind, so
-        a ship node declaring one fails validation before the run starts. Ship is
-        a bash node again, as it was for every completed run before 229090a.
-        """
+    def ship_nodes(self):
         ships = {}
         for path in (SETUP.parent / "workflows").glob("*.yaml"):
             doc = yaml.safe_load(path.read_text())
             for node in doc.get("nodes", []):
-                if node.get("id") != "ship":
-                    continue
-                ships[path.stem] = node
-                with self.subTest(workflow=path.stem):
-                    self.assertNotIn("controller_action", node)
-                    self.assertIn("bash", node)
+                if node.get("id") == "ship":
+                    ships[path.stem] = node
+        return ships
+
+    def assert_refuses(self, body):
+        with tempfile.TemporaryDirectory() as td:
+            result = subprocess.run(
+                ["/bin/bash", "-c", body], capture_output=True, text=True,
+                env={"PATH": "/nonexistent", "ARTIFACTS_DIR": td}, timeout=5,
+            )
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("SHIP=DISABLED", result.stdout)
+            self.assertEqual(list(Path(td).iterdir()), [])
+
+    def test_all_ship_nodes_refuse_without_external_tools(self):
+        ships = self.ship_nodes()
         self.assertTrue({"bugfix", "full-sdlc-api", "full-sdlc-web", "wrap-ship"}.issubset(ships))
+        for name, node in ships.items():
+            with self.subTest(workflow=name):
+                self.assertNotIn("controller_action", node)
+                self.assertIn("bash", node)
+                self.assert_refuses(node["bash"])
+                self.assertIs(node.get("always_run"), True)
+                self.assertNotIn("git ", node["bash"])
+                self.assertNotIn("gh ", node["bash"])
+
+    def test_a_successful_disabled_message_is_not_a_refusal(self):
+        with self.assertRaises(AssertionError):
+            self.assert_refuses('echo "SHIP=DISABLED"; exit 0')
 
 
 if __name__ == "__main__":

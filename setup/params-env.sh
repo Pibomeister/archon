@@ -20,22 +20,41 @@
 set -euo pipefail
 P="${1:?usage: params-env.sh <params.json>}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-test -f "$P" || { echo "echo 'PARAMS_ENV=FAIL missing $P'; exit 1"; exit 0; }
-python3 - "$P" <<'PY'
+PARAMS=$(python3 - "$P" <<'PY_PARAMS'
 import json, shlex, sys
-d = json.load(open(sys.argv[1], encoding="utf-8"))
-print(f"SPEC={shlex.quote(d['spec'])}")
-print(f"SLUG={shlex.quote(d['slug'])}")
-print(f"BR={shlex.quote(d['branch'])}")
-print(f"WT={shlex.quote(d['worktree'])}")
-print(f"APIPORT={d.get('api_port', '')}")
-print(f"WEBPORT={d.get('web_port', '')}")
-PY
 
-REPO_NAME=$(python3 -c "
-import json, sys
-print(json.load(open(sys.argv[1], encoding='utf-8')).get('repo') or 'api')
-" "$P")
+try:
+    with open(sys.argv[1], encoding="utf-8") as source:
+        data = json.load(source)
+    if not isinstance(data, dict):
+        raise ValueError("params must be an object")
+    values = {}
+    for name, key in (("SPEC", "spec"), ("SLUG", "slug"), ("BR", "branch"), ("WT", "worktree")):
+        value = data.get(key)
+        if not isinstance(value, str) or not value or "\0" in value:
+            raise ValueError("invalid " + key)
+        values[name] = value
+    for name, key in (("APIPORT", "api_port"), ("WEBPORT", "web_port")):
+        value = data.get(key, "")
+        if value != "" and (type(value) is not int or not 1 <= value <= 65535):
+            raise ValueError("invalid " + key)
+        values[name] = str(value)
+    repo = data["repo"] if "repo" in data else "api"
+    if not isinstance(repo, str) or not repo or "\0" in repo:
+        raise ValueError("invalid repo")
+    values["REPO_NAME"] = repo
+except (OSError, UnicodeError, ValueError) as exc:
+    print("PARAMS_ENV=FAIL " + str(exc), file=sys.stderr)
+    raise SystemExit(1)
+
+for name, value in values.items():
+    print(f"{name}={shlex.quote(value)}")
+PY_PARAMS
+) || {
+  printf '%s\n' "echo 'PARAMS_ENV=FAIL invalid or unreadable params.json' >&2" 'exit 1'
+  exit 0
+}
+eval "$PARAMS"
 PROFILE=$(bash "$HERE/repo-profile.sh" "$REPO_NAME") || {
   # Same rule as repo-profile.sh: the repo name comes from a params.json this
   # script did not write, so it is quoted before it becomes shell, and `exit 1`
@@ -47,4 +66,4 @@ print('exit 1')
 " "$REPO_NAME"
   exit 0
 }
-printf '%s\n' "$PROFILE"
+printf '%s\n' "$PARAMS" "$PROFILE"

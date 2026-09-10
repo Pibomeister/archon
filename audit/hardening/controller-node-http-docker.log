@@ -1,0 +1,242 @@
+bun test v1.3.10 (30e609e0)
+
+packages/core/src/workflows/hardened-controller.container.integration.test.ts:
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"db.connection","dbPath":"<tmp-archon-home>/archon.db","msg":"db.connection_sqlite_selected"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"db.sqlite","msg":"db.sqlite_schema_initialized"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"isolation.container","codebaseId":"cb-docker","resourceId":"<resource-id>","image":"sha256:5aca5c641d029214b9dd9d330ffe2c6b7be810aafa51c25f73f4dd2f24b47a4c","hostRoot":"/workspace","msg":"isolation.container_prepare_started"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"isolation.container","envId":"<env-id>","containerId":"<container-id>","resourceId":"<resource-id>","msg":"isolation.container_prepare_completed"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.executor","workflowName":"hardened-controller-docker-e2e","provider":"hardened-controller-docker-mtvu02qo","providerSource":"config","msg":"workflow_provider_resolved"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.executor","workflowName":"hardened-controller-docker-e2e","workflowRunId":"<run-id>","hasIssueContext":false,"issueContextLength":0,"msg":"workflow_starting"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","workflowName":"hardened-controller-docker-e2e","nodeCount":7,"layerCount":7,"hasIssueContext":false,"issueContextLength":0,"msg":"dag_workflow_starting"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","nodeId":"write-oracle","type":"bash","msg":"dag_node_started"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","nodeId":"write-oracle","durationMs":37,"msg":"dag_node_completed"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"isolation.container","envId":"<env-id>","handle":"archon-<owned-resource>","msg":"isolation.container_suspended"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","workflowRunId":"<run-id>","layerIdx":2,"totalLayers":7,"status":"paused","msg":"dag.stop_detected_between_layers"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"isolation.container","envId":"<env-id>","handle":"archon-<owned-resource>","msg":"isolation.container_suspended"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"isolation.container","envId":"<env-id>","handle":"archon-<owned-resource>","msg":"isolation.container_suspended"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","runId":"0d62ebbc3dec4a308b6a09790c69535d","envId":"<env-id>","msg":"dag.container_suspended_on_pause"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"isolation.container","envId":"<env-id>","containerName":"archon-<owned-resource>","msg":"isolation.container_resume_restarted"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.executor","workflowRunId":"<run-id>","priorCompletedCount":3,"msg":"workflow.dag_resuming"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.executor","workflowName":"hardened-controller-docker-e2e","provider":"hardened-controller-docker-mtvu02qo","providerSource":"config","msg":"workflow_provider_resolved"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.executor","workflowName":"hardened-controller-docker-e2e","workflowRunId":"<run-id>","hasIssueContext":false,"issueContextLength":0,"msg":"workflow_starting"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","workflowRunId":"<run-id>","priorCompletedCount":3,"prepopulatedCount":3,"alwaysRunResumedCount":0,"msg":"dag.workflow_resume_prepopulated"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","workflowName":"hardened-controller-docker-e2e","nodeCount":7,"layerCount":7,"hasIssueContext":false,"issueContextLength":0,"msg":"dag_workflow_starting"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","nodeId":"write-oracle","msg":"dag.node_skipped_prior_success"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","nodeId":"freeze","msg":"dag.node_skipped_prior_success"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","nodeId":"human-approval","msg":"dag.node_skipped_prior_success"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","nodeId":"export-candidate","type":"bash","msg":"dag_node_started"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","nodeId":"export-candidate","durationMs":49,"msg":"dag_node_completed"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"isolation.container","envId":"<env-id>","handle":"archon-<owned-resource>","msg":"isolation.container_suspended"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"isolation.container","envId":"<env-id>","handle":"archon-<owned-resource>","msg":"isolation.container_suspended"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","nodeCount":7,"anyCompleted":true,"anyFailed":false,"msg":"dag_workflow_finished"}
+{"level":50,"time":0,"pid":0,"hostname":"<host>","module":"workflow.executor","err":{"type":"Error","message":"Cannot finalize container env '<env-id>': hardened container write-back is not implemented. The live worktree was never mounted into the agent container; preserve the named volumes for controller-owned publication/write-back support.","stack":"Error: Cannot finalize container env '<env-id>': hardened container write-back is not implemented. The live worktree was never mounted into the agent container; preserve the named volumes for controller-owned publication/write-back support.\n    at finalize (<archon-engine>/packages/isolation/src/backends/container.ts:563:15)\n    at async runContainerWriteBackGate (<archon-engine>/packages/workflows/src/dag-executor.ts:8566:47)\n    at async executeDagWorkflow (<archon-engine>/packages/workflows/src/dag-executor.ts:9226:24)\n    at async executeWorkflow (unknown)\n    at async runControllerScenario (unknown)\n    at processTicksAndRejections (native:7:39)"},"workflowName":"hardened-controller-docker-e2e","workflowId":"<run-id>","msg":"workflow_execution_unhandled_error"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"isolation.container","envId":"<env-id>","containerName":"archon-<owned-resource>","volumes":["archon-<owned-resource>","archon-<owned-resource>","archon-<owned-resource>","archon-<owned-resource>","archon-<owned-resource>-tls","archon-<owned-resource>"],"msg":"isolation.container_destroy_completed"}
+(pass) hardened controller Docker integration > freezes real artifact volume evidence and enforces the human approve operation for static-web-http-v1 [37430.03ms]
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"db.connection","dbPath":"<tmp-archon-home>/archon.db","msg":"db.connection_sqlite_selected"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"db.sqlite","msg":"db.sqlite_schema_initialized"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"isolation.container","codebaseId":"cb-docker","resourceId":"<resource-id>","image":"sha256:5aca5c641d029214b9dd9d330ffe2c6b7be810aafa51c25f73f4dd2f24b47a4c","hostRoot":"/workspace","msg":"isolation.container_prepare_started"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"isolation.container","envId":"<env-id>","containerId":"<container-id>","resourceId":"<resource-id>","msg":"isolation.container_prepare_completed"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.executor","workflowName":"hardened-controller-docker-e2e","provider":"hardened-controller-docker-mtvu02qo","providerSource":"config","msg":"workflow_provider_resolved"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.executor","workflowName":"hardened-controller-docker-e2e","workflowRunId":"<run-id>","hasIssueContext":false,"issueContextLength":0,"msg":"workflow_starting"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","workflowName":"hardened-controller-docker-e2e","nodeCount":7,"layerCount":7,"hasIssueContext":false,"issueContextLength":0,"msg":"dag_workflow_starting"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","nodeId":"write-oracle","type":"bash","msg":"dag_node_started"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","nodeId":"write-oracle","durationMs":48,"msg":"dag_node_completed"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"isolation.container","envId":"<env-id>","handle":"archon-<owned-resource>","msg":"isolation.container_suspended"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","workflowRunId":"<run-id>","layerIdx":2,"totalLayers":7,"status":"paused","msg":"dag.stop_detected_between_layers"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"isolation.container","envId":"<env-id>","handle":"archon-<owned-resource>","msg":"isolation.container_suspended"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"isolation.container","envId":"<env-id>","handle":"archon-<owned-resource>","msg":"isolation.container_suspended"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","runId":"1800c73427e9552c472930ca5ebb2c07","envId":"<env-id>","msg":"dag.container_suspended_on_pause"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"isolation.container","envId":"<env-id>","containerName":"archon-<owned-resource>","volumes":["archon-<owned-resource>","archon-<owned-resource>","archon-<owned-resource>","archon-<owned-resource>","archon-<owned-resource>-tls","archon-<owned-resource>"],"msg":"isolation.container_destroy_completed"}
+(pass) hardened controller Docker integration > freezes real artifact volume evidence and enforces the human reject operation for static-web-http-v1 [16404.13ms]
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"db.connection","dbPath":"<tmp-archon-home>/archon.db","msg":"db.connection_sqlite_selected"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"db.sqlite","msg":"db.sqlite_schema_initialized"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"isolation.container","codebaseId":"cb-docker","resourceId":"<resource-id>","image":"sha256:5aca5c641d029214b9dd9d330ffe2c6b7be810aafa51c25f73f4dd2f24b47a4c","hostRoot":"/workspace","msg":"isolation.container_prepare_started"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"isolation.container","envId":"<env-id>","containerId":"<container-id>","resourceId":"<resource-id>","msg":"isolation.container_prepare_completed"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.executor","workflowName":"hardened-controller-docker-e2e","provider":"hardened-controller-docker-mtvu02qo","providerSource":"config","msg":"workflow_provider_resolved"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.executor","workflowName":"hardened-controller-docker-e2e","workflowRunId":"<run-id>","hasIssueContext":false,"issueContextLength":0,"msg":"workflow_starting"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","workflowName":"hardened-controller-docker-e2e","nodeCount":7,"layerCount":7,"hasIssueContext":false,"issueContextLength":0,"msg":"dag_workflow_starting"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","nodeId":"write-oracle","type":"bash","msg":"dag_node_started"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","nodeId":"write-oracle","durationMs":39,"msg":"dag_node_completed"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"isolation.container","envId":"<env-id>","handle":"archon-<owned-resource>","msg":"isolation.container_suspended"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","workflowRunId":"<run-id>","layerIdx":2,"totalLayers":7,"status":"paused","msg":"dag.stop_detected_between_layers"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"isolation.container","envId":"<env-id>","handle":"archon-<owned-resource>","msg":"isolation.container_suspended"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"isolation.container","envId":"<env-id>","handle":"archon-<owned-resource>","msg":"isolation.container_suspended"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","runId":"b179390cb5b0eae01f5df46b82f4ab37","envId":"<env-id>","msg":"dag.container_suspended_on_pause"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"isolation.container","envId":"<env-id>","containerName":"archon-<owned-resource>","msg":"isolation.container_resume_restarted"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.executor","workflowRunId":"<run-id>","priorCompletedCount":3,"msg":"workflow.dag_resuming"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.executor","workflowName":"hardened-controller-docker-e2e","provider":"hardened-controller-docker-mtvu02qo","providerSource":"config","msg":"workflow_provider_resolved"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.executor","workflowName":"hardened-controller-docker-e2e","workflowRunId":"<run-id>","hasIssueContext":false,"issueContextLength":0,"msg":"workflow_starting"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","workflowRunId":"<run-id>","priorCompletedCount":3,"prepopulatedCount":3,"alwaysRunResumedCount":0,"msg":"dag.workflow_resume_prepopulated"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","workflowName":"hardened-controller-docker-e2e","nodeCount":7,"layerCount":7,"hasIssueContext":false,"issueContextLength":0,"msg":"dag_workflow_starting"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","nodeId":"write-oracle","msg":"dag.node_skipped_prior_success"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","nodeId":"freeze","msg":"dag.node_skipped_prior_success"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","nodeId":"human-approval","msg":"dag.node_skipped_prior_success"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","nodeId":"export-candidate","type":"bash","msg":"dag_node_started"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","nodeId":"export-candidate","durationMs":40,"msg":"dag_node_completed"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"isolation.container","envId":"<env-id>","handle":"archon-<owned-resource>","msg":"isolation.container_suspended"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"isolation.container","envId":"<env-id>","handle":"archon-<owned-resource>","msg":"isolation.container_suspended"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"workflow.dag-executor","nodeCount":7,"anyCompleted":true,"anyFailed":false,"msg":"dag_workflow_finished"}
+{"level":50,"time":0,"pid":0,"hostname":"<host>","module":"workflow.executor","err":{"type":"Error","message":"Cannot finalize container env '<env-id>': hardened container write-back is not implemented. The live worktree was never mounted into the agent container; preserve the named volumes for controller-owned publication/write-back support.","stack":"Error: Cannot finalize container env '<env-id>': hardened container write-back is not implemented. The live worktree was never mounted into the agent container; preserve the named volumes for controller-owned publication/write-back support.\n    at finalize (<archon-engine>/packages/isolation/src/backends/container.ts:563:15)\n    at async runContainerWriteBackGate (<archon-engine>/packages/workflows/src/dag-executor.ts:8566:47)\n    at async executeDagWorkflow (<archon-engine>/packages/workflows/src/dag-executor.ts:9226:24)\n    at async executeWorkflow (unknown)\n    at async runControllerScenario (unknown)\n    at processTicksAndRejections (native:7:39)"},"workflowName":"hardened-controller-docker-e2e","workflowId":"<run-id>","msg":"workflow_execution_unhandled_error"}
+{"level":30,"time":0,"pid":0,"hostname":"<host>","module":"isolation.container","envId":"<env-id>","containerName":"archon-<owned-resource>","volumes":["archon-<owned-resource>","archon-<owned-resource>","archon-<owned-resource>","archon-<owned-resource>","archon-<owned-resource>-tls","archon-<owned-resource>"],"msg":"isolation.container_destroy_completed"}
+(pass) hardened controller Docker integration > freezes real artifact volume evidence and enforces the human approve operation for node-http-app-v1 [36558.79ms]
+----------------------------------------------------------------|---------|---------|-------------------
+File                                                            | % Funcs | % Lines | Uncovered Line #s
+----------------------------------------------------------------|---------|---------|-------------------
+All files                                                       |   32.38 |   39.20 |
+ packages/core/src/config/config-loader.ts                      |    0.00 |    5.05 | 20,24-28,70,80-84,92-96,100-122,149-166,172-173,180,230-238,246-255,264-284,294-310,318-341,349-388,395-460,467-517,524-601,611-632,639,646-652,661-742,753-770,779-797
+ packages/core/src/credentials/config.ts                        |    0.00 |   50.00 | 21
+ packages/core/src/credentials/delivery.ts                      |    0.00 |   11.63 | 38,112-123,135-214,237-257
+ packages/core/src/credentials/oauth-providers.ts               |    0.00 |   91.67 |
+ packages/core/src/credentials/openai-oauth.ts                  |    0.00 |    5.91 | 70,75-91,101-123,127-135,141-144,155-214,224-260,269-284,294-308,323-331
+ packages/core/src/db/adapters/postgres.ts                      |    0.00 |    7.20 | 33-34,47-270,280,284,288,292,296
+ packages/core/src/db/adapters/sqlite.ts                        |   88.57 |   98.72 | 820-822
+ packages/core/src/db/bundled-schema.generated.ts               |  100.00 |  100.00 |
+ packages/core/src/db/bundled-schema.ts                         |    0.00 |   40.00 | 17-22
+ packages/core/src/db/codebases.ts                              |   13.33 |   12.57 | 11-12,16-42,53-60,64-86,90-96,100-104,108-112,128-137,141-145,155-156,161-195,199-202,206-218
+ packages/core/src/db/connection.ts                             |   66.67 |   71.01 | 37-39,49-55,68,72-73,75,94,99,108-110
+ packages/core/src/db/env-vars.ts                               |    0.00 |   19.35 | 9-10,17-21,26-38,43-47
+ packages/core/src/db/isolation-environments.ts                 |   47.62 |   31.70 | 39-40,62-72,79-87,130,150-152,160-172,179-192,199-204,211-215,223-244,253-265,272-289,297-316,327-342
+ packages/core/src/db/schema-version.ts                         |    0.00 |   15.79 | 53-54,66-79
+ packages/core/src/db/user-ai-prefs-store.ts                    |    0.00 |    8.08 | 25-26,48-54,60-81,86-104,109,114-124,137-139,147-149,160-180,185-186
+ packages/core/src/db/user-github-token-store.ts                |    0.00 |    8.39 | 25-26,41-43,47-79,83-91,95-96,104-106,118-122,126-210
+ packages/core/src/db/user-provider-key-store.ts                |    0.00 |    6.67 | 35-36,55-82,87-94,102-115,120-124,146-181,193-265,280-323
+ packages/core/src/db/workflow-events.ts                        |   81.48 |   50.25 | 18-19,33-35,44-52,122,139,142,149,155,165-168,179,203-204,212-234,254-280,311-315,322-339
+ packages/core/src/db/workflow-node-sessions.ts                 |    0.00 |    6.38 | 22-23,27-34,38-83,88-119
+ packages/core/src/db/workflows.ts                              |   50.00 |   36.18 | 21-26,51-52,245-252,352-368,380-393,412-424,434-446,474-549,560-569,588-602,606-619,624-640,645-667,687-710,842-857,931-960,985-1013,1096-1112,1124-1130,1144-1173,1181-1183,1192-1295,1303-1355,1364-1374,1385-1389,1399-1417,1426-1460,1469-1492
+ packages/core/src/github-auth/config.ts                        |    0.00 |   20.00 | 25,34-41,50-52
+ packages/core/src/github-auth/device-flow.ts                   |    0.00 |    0.56 | 15-193
+ packages/core/src/operations/workflow-operations.ts            |   60.00 |   38.76 | 25-26,85-128,139-151,160-162,166,178-182,196,224-277,296-298,305,314-318,326-328,352-362,367,372-376,383-389,422,453-455,466-471,477-479,488-511,542-549,553,604-616
+ packages/core/src/test/setup.ts                                |  100.00 |  100.00 |
+ packages/core/src/utils/token-crypto.ts                        |    0.00 |   20.25 | 14-15,27-28,37-39,47-52,60-67,77-107,122-132
+ packages/core/src/workflows/hardened-controller.ts             |   94.92 |   86.11 | 287-289,318-320,333-337,479,482,644-652,659,722-737,771-776,852-857,946-948,951,992,995,1021,1033-1036,1039,1044,1056,1061-1072,1076-1097,1103,1109,1117,1121,1147,1151,1154-1156,1160-1164,1174-1178,1189,1200,1207,1211,1291-1293,1305,1308,1316,1323-1324,1361-1365,1377-1386,1401,1404-1406,1428,1449,1486,1516,1535,1541,1544,1547,1554,1568,1581,1595,1599,1610,1621,1632-1633,1636-1654,1722,1726-1732,1742-1744,1750-1752,1755,1759-1761,1776-1778,1845,1858-1859,1877-1891,1895,1899-1902,1910,1926,1940,1945,1978,1982,1986-1988,1994,1997,2043-2045,2052-2056,2061,2066,2098,2107,2128,2158,2161,2165,2183,2195,2207,2217,2222,2229,2246,2250,2253,2259,2262,2286,2315,2441-2444,2450-2451,2460,2468,2492,2575,2578-2580,2592,2600-2601,2615-2616,2624-2625,2635-2638,2706-2707,2710,2713,2716,2719,2722,2725,2728,2731,2734,2737,2774,2780,2783,2786,2789,2800,2803,2806,2809,2820,2823,2826,2829,2832,2841,2844,2847,2850,2853,2918,2921,2924,2950,2972,2975,2978,2983,2989,2992,2995,3004,3044,3050,3057-3062,3078,3081-3084,3087,3090,3124,3130-3131,3154,3196,3201,3209,3236,3404,3415,3422,3436,3449,3454,3461,3471,3485,3495,3503,3535,3570,3575-3577,3634,3656,3669,3696,3701-3704,3710,3725,3728,3743,3766,3774,3792,3795,3807,3810,3813,3818,3821,3824,3839,3842,3851,3862-3863,3873-3874,3884-3885,3907,3925,3932,3946,3949,3952,3955,3966,3969,3972,3975,3979,3982,3985,3995,3998,4001,4004,4025-4026,4031-4032,4038,4042,4051,4060-4061,4070,4087-4088,4096,4115-4116,4153,4158,4161,4164,4167,4170,4173,4197-4198,4207,4210,4213,4216,4230,4233,4236,4239,4251,4254,4257,4260,4263,4267-4305,4316,4330,4388,4396-4397,4440-4442,4486-4487,4495-4497,4499,4512-4513,4523,4544,4583-4584,4615,4624,4627,4645,4658,4666,4697,4703,4706,4711,4742,4746,4753,4812,4818,4832-4833,4837,4850,4856,4859,4868-4870,4883-4884,4887,4905,4908,4978,4983-4984,4995,5007-5009,5014-5024,5028,5038,5042,5048,5052-5054,5082,5085,5088,5095-5096,5099,5109,5112,5117,5120-5122,5128,5144,5147,5152-5155,5166,5169,5181-5183,5204-5205,5220,5257-5258
+ packages/core/src/workflows/store-adapter.ts                   |   57.14 |   34.57 | 42-43,73,76-78,109,123-221
+ packages/git/src/branch.ts                                     |    0.00 |    4.39 | 8-9,27-81,93-133,141-164,176-196,206-233,244-276,294-326,339-367,379-393,406-422,433-461
+ packages/git/src/exec.ts                                       |   60.00 |   51.11 | 14-24,44-46,50-52,55-57,62
+ packages/git/src/forge.ts                                      |    0.00 |    3.70 | 22-29,40-49,70-103
+ packages/git/src/index.ts                                      |  100.00 |  100.00 |
+ packages/git/src/repo.ts                                       |    0.00 |    4.53 | 19-20,28-46,61-73,89-98,106-125,153-248,252-265,269-278,283-286,290-299,304-309,313-334,339-360,373-412,430-470,478-485
+ packages/git/src/types.ts                                      |    0.00 |   25.00 | 11-12,17-18,23-24
+ packages/git/src/worktree.ts                                   |    0.00 |    6.38 | 16-17,65-94,110-121,138,150-175,187-226,239-255,266-279,288-293,301-320,345-396
+ packages/isolation/src/backend-router.ts                       |    0.00 |    6.90 | 58-84
+ packages/isolation/src/backends/container.ts                   |   95.87 |   96.92 | 337,567-578,1414-1439,1472-1482
+ packages/isolation/src/backends/in-place.ts                    |    0.00 |   16.67 | 13-27
+ packages/isolation/src/browser/browser-observation.ts          |   96.03 |   98.19 | 608-624,673,682,703-704,1021-1024
+ packages/isolation/src/container/artifact-snapshot.ts          |   95.24 |   94.14 | 117,119,174-179,181,237,252,287
+ packages/isolation/src/container/docker-exec.ts                |  100.00 |   70.91 | 91-92,97-100,102-104,116,119-123
+ packages/isolation/src/egress/connect-proxy.ts                 |    0.00 |    3.49 | 44-62,66-69,73-95,99-129,133-167,172-181,186-190,194-203,207-240,244-247,251-254,258-271,275-281,285-291,295-302,306-319,323-331,336,340,344-366,370-380,384,388,392-394,398,402-407,411-413,417-419,423-427,431,435-438,442-448,452,456-460,464-465,469-483
+ packages/isolation/src/egress/policy.ts                        |   34.38 |   60.49 | 81,102-107,111-112,116-119,123,127-130,154,157,165,182,188,198,206,211-213,217-224,229,233,237,241,245-250,254,258-262,266,270-273,277-285,289-293,297-301,305-306,310-312
+ packages/isolation/src/egress/provider-budget-contract.ts      |    8.91 |    0.43 | 59-1208,1218,1222-1225,1229,1233-1235,1239,1243-1245
+ packages/isolation/src/egress/proxy-budget-client.ts           |    0.00 |   11.57 | 87-96,100-102,121-144,148-206,210-228,233-290,294-319,323-333,337-351,355-366,370-375,379-389,393-410,414-419,423-425,429-440,444-448,452-461,465-467,471-480,484-488,492,497-500,504-505,509-512,516-527,531-532,536-539,543-545,549-552,556-559,563-564,568-569,573-580,584-586
+ packages/isolation/src/egress/strict-https-proxy.ts            |   13.04 |    9.73 | 155-173,245-248,252-276,280-301,305-343,348-355,360-376,380-394,398-402,407-439,443-472,483-489,493-503,514,528-533,537-543,548-561,566,570-571,575-612,616-633,637-641,645-686,690-731,735-748,752-757,761,765-768,773,777-778,782-786,790-800,804-806,810-813,817-821,825,829-873,877-888,892-898,902-913,917-980,984,988-1001,1005-1010,1014-1025,1029-1031,1035-1039,1043-1058,1062-1073,1077-1082,1086-1097,1101-1128,1132-1159,1164-1171,1175-1187,1191-1209,1214-1228,1232-1233,1237-1245,1249-1256,1261,1265-1269,1273-1280,1284-1292,1296-1308,1312,1316-1320,1325,1329-1331,1336-1343,1347-1350,1354-1355,1359-1363,1367-1376,1380-1382,1386-1391,1395-1396,1400,1404-1410,1415-1421,1425-1426
+ packages/isolation/src/egress/strict-policy.ts                 |  100.00 |   86.00 | 29,33,40,44,51,63
+ packages/isolation/src/egress/strict-proxy-launcher.ts         |   42.86 |   14.10 | 39-78,82-120,124-132,137-171,206,210,214-238,243-293
+ packages/isolation/src/egress/tls-material.ts                  |   92.86 |   97.79 | 338-342
+ packages/isolation/src/errors.ts                               |    0.00 |   86.72 | 12-14,160-169,180-183
+ packages/isolation/src/factory.ts                              |    0.00 |   50.00 | 19-20,28-29
+ packages/isolation/src/index.ts                                |  100.00 |  100.00 |
+ packages/isolation/src/pr-state.ts                             |    0.00 |    5.97 | 14-15,31-91
+ packages/isolation/src/providers/worktree.ts                   |    0.00 |    1.71 | 47-48,72-112,119-301,309-545,558-573,592-673,677-1314,1323-1324,1331-1335
+ packages/isolation/src/resolver.ts                             |    0.00 |    1.87 | 37-38,74-595
+ packages/isolation/src/types.ts                                |    0.00 |   87.50 |
+ packages/isolation/src/worktree-copy.ts                        |    0.00 |    6.72 | 14-15,32-38,50-63,78-144,157-177
+ packages/paths/src/archon-paths.ts                             |   19.30 |   26.92 | 33-34,43-44,71-81,97,108,114-115,118,121,137-139,148,155,160,173,183,193,203,211,223,238-249,257,272-276,280,284-302,306-311,316-382,393-397,404,411,419,435-441,463-470,478,486,494,502,510,518,526,538-539,555-564,627-632,658-659,664-665,715,776,784,792,801-802,811-819,827-834,843-880,887-892,900-910,919-929
+ packages/paths/src/bundled-build.ts                            |  100.00 |  100.00 |
+ packages/paths/src/env-loader.ts                               |    0.00 |   13.64 | 36-41,46-48,63-91
+ packages/paths/src/index.ts                                    |  100.00 |  100.00 |
+ packages/paths/src/logger.ts                                   |   60.00 |   41.86 | 39-41,43-46,68-76,80-82,113-117
+ packages/paths/src/telemetry.ts                                |   60.00 |   53.79 | 90-91,108-110,191,257-280,298-299,301,309,327-336,350-355,380-385,388-390,394-399,402-405,448-459,470-471,474-476,496,504,508-510,660,711-723,736-749,765-777,789-808,840-850,895-904,913-916
+ packages/paths/src/tier-notice.ts                              |    0.00 |   36.36 | 24,29-36,42-46
+ packages/paths/src/update-check.ts                             |    0.00 |   13.00 | 26,30-43,48-53,62-70,78-85,94-134,143-150
+ packages/providers/src/claude/binary-resolver.ts               |    0.00 |   15.56 | 27,48-58,70-85,91-92,135-138,150-191
+ packages/providers/src/claude/capabilities.ts                  |  100.00 |  100.00 |
+ packages/providers/src/claude/config.ts                        |    0.00 |    0.00 | 14-33
+ packages/providers/src/claude/container-spawn.ts               |    0.00 |   13.25 | 42-43,53,68-70,74-90,94-104,108-114,126-146,155-173,188-237
+ packages/providers/src/claude/native-tools.ts                  |    0.00 |    7.27 | 24-57,61,70-85
+ packages/providers/src/claude/provider.ts                      |    0.00 |   11.80 | 64-65,80-93,114-131,142-151,161,190-192,196-212,216-229,233-241,245-249,254-256,260-281,295-314,369-376,398-400,412-423,428-433,437-451,461-496,503,534-554,576-577,581-594,598-606,610-618,622-633,637-658,662-676,680-693,697,706-717,765-766,774-779,784-796,800-802,806-813,818-825,829-840,848-881,885-910,920-976,1013-1023,1027-1037,1041-1053,1057-1060,1064-1079,1083-1092,1096-1099,1103-1116,1120-1128,1132-1138,1142-1145,1149-1157,1161-1185,1190-1211,1215-1232,1236-1269,1273-1275,1283-1314,1324-1383,1401-1402,1423-1436,1440-1450,1455-1469,1473-1481,1485-1489,1493-1507,1511-1540,1545-1576,1580-1591,1595-1598,1602-1625,1640,1644-1654,1658-1685
+ packages/providers/src/codex/binary-resolver.ts                |    0.00 |   10.19 | 24,38-39,51-53,63-66,76-143,169-187
+ packages/providers/src/codex/capabilities.ts                   |  100.00 |  100.00 |
+ packages/providers/src/codex/config.ts                         |    0.00 |    0.00 | 14-44
+ packages/providers/src/codex/provider.ts                       |    0.00 |   11.38 | 39-40,81-94,98-107,111-114,118,122-132,136-167,171-183,187-189,193,197-217,221-231,235-242,251-262,270-293,302-303,310-323,330-345,349-353,357-359,363-373,377-388,417-439,443-446,450-465,469-489,501-505,509-521,538-545,549-558,562-569,579-613,640-657,673-676,684-732,741-765,770-776,780-791,795-802,806-808,812-814,818-829,833-845,849-859,863-869,873-888,892-919,924-930,934-951,955-957,961,965-978,982-998,1002-1016,1020-1025,1029-1037,1041-1042,1046-1056,1060-1074,1078-1090,1094-1106,1110-1122,1126-1145,1155-1177,1197-1242,1247-1351,1355-1379,1384-1422,1426-1479
+ packages/providers/src/community/copilot/binary-resolver.ts    |    0.00 |   12.23 | 37-48,54,67-76,82-83,90-92,102-176,185-203
+ packages/providers/src/community/copilot/capabilities.ts       |  100.00 |  100.00 |
+ packages/providers/src/community/copilot/config.ts             |    0.00 |    0.00 | 13-58
+ packages/providers/src/community/copilot/event-bridge.ts       |    0.00 |    5.44 | 27-28,55-58,68-99,111-122,159-225,272-432
+ packages/providers/src/community/copilot/index.ts              |  100.00 |  100.00 |
+ packages/providers/src/community/copilot/provider.ts           |    0.00 |    3.91 | 61-62,90-93,97-98,102-106,112-114,127-162,168-177,189-198,208-226,235-254,269-304,315-350,357-366,370-376,386-414,430,434-621
+ packages/providers/src/community/copilot/registration.ts       |    0.00 |   14.29 | 15-32
+ packages/providers/src/community/opencode/agent-config.ts      |    0.00 |   13.08 | 17-18,24-31,35,39,43-54,58-85,89-96,103-104,111-123,127-130,134-147
+ packages/providers/src/community/opencode/agent-fs.ts          |    0.00 |    7.14 | 11-12,18-62,66-96
+ packages/providers/src/community/opencode/capabilities.ts      |  100.00 |  100.00 |
+ packages/providers/src/community/opencode/config.ts            |    0.00 |    4.00 | 5-12,22-37
+ packages/providers/src/community/opencode/errors.ts            |    0.00 |   33.33 | 26,30-35,39-62,66-72
+ packages/providers/src/community/opencode/index.ts             |  100.00 |  100.00 |
+ packages/providers/src/community/opencode/introspection.ts     |    0.00 |    8.16 | 25-26,73-115
+ packages/providers/src/community/opencode/multi-agent.ts       |    0.00 |    1.99 | 32-33,37,41-59,63-79,83-105,109-111,115-394
+ packages/providers/src/community/opencode/provider.ts          |    0.00 |   11.27 | 34-35,39,46-221,225
+ packages/providers/src/community/opencode/registration.ts      |    0.00 |   20.00 | 11-22
+ packages/providers/src/community/opencode/runtime.ts           |    0.00 |    6.16 | 8,12-18,22-45,80-81,85-90,95-113,118-125,130-131,135-151,156-157,161-231,235-255,264-278,292-293
+ packages/providers/src/community/opencode/session.ts           |    0.00 |    3.32 | 17-18,22,26-51,55-78,82-91,95-115,119-293,298-329
+ packages/providers/src/community/opencode/tokens.ts            |    0.00 |    6.25 | 3,7-20
+ packages/providers/src/community/pi/capabilities.ts            |  100.00 |  100.00 |
+ packages/providers/src/community/pi/config.ts                  |    0.00 |    1.10 | 50-71,80-102,107-108,118-160
+ packages/providers/src/community/pi/index.ts                   |  100.00 |  100.00 |
+ packages/providers/src/community/pi/model-catalog.ts           |    0.00 |   18.52 | 15-16,41-60
+ packages/providers/src/community/pi/model-ref.ts               |    0.00 |    0.00 | 21-30
+ packages/providers/src/community/pi/pi-vendor-map.generated.ts |  100.00 |  100.00 |
+ packages/providers/src/community/pi/provider.ts                |    0.00 |    5.22 | 56,60-66,70-75,95-117,158-162,182-191,196,220-221,237,288-865,870
+ packages/providers/src/community/pi/registration.ts            |    0.00 |   28.57 | 16-25
+ packages/providers/src/errors.ts                               |    0.00 |   28.57 | 7-11
+ packages/providers/src/index.ts                                |  100.00 |  100.00 |
+ packages/providers/src/mcp/config.ts                           |    0.00 |    2.27 | 12-14,22-46,50-97,101-120,127-159
+ packages/providers/src/oauth.ts                                |  100.00 |  100.00 |
+ packages/providers/src/registry.ts                             |   45.45 |   34.02 | 41,51-56,67,83,90-95,110-154,178-180
+ packages/providers/src/shared/resumed.ts                       |    0.00 |    5.56 | 17-26,37-43
+ packages/providers/src/shared/skills.ts                        |    0.00 |    7.27 | 28-37,49-89
+ packages/providers/src/shared/structured-output.ts             |    0.00 |    6.25 | 35-45,68-119,131-136,147-149,176-178,188-203,217-231,278-296,306-315
+ packages/providers/src/types.ts                                |  100.00 |  100.00 |
+ packages/workflows/src/artifacts-index.ts                      |    0.00 |   10.99 | 8-9,21,31-35,52-85,95-122,131-141
+ packages/workflows/src/budget.ts                               |   94.12 |   77.45 | 53-55,60,64-66,74-76,78-81,115-117,146-157,169,176,180,187-189,192-194,197-199,214,229-230,255-258,281,287,298,301
+ packages/workflows/src/command-file.ts                         |    0.00 |   25.00 | 5-7
+ packages/workflows/src/command-validation.ts                   |    0.00 |    9.52 | 5-13,34-43
+ packages/workflows/src/condition-evaluator.ts                  |    0.00 |    4.29 | 34-35,50-88,96-113,138-208,220-245
+ packages/workflows/src/container-context.ts                    |   61.76 |   68.55 | 128,147,152,215,219-226,230-231,242-244,250-251,263-264,270-271,274-281,285-286,290-293,299,308-311,316-317,324,332,336-337,341-342
+ packages/workflows/src/controller-actions.ts                   |   92.86 |   95.08 | 57,119
+ packages/workflows/src/dag-executor.ts                         |   43.50 |   15.74 | 155-163,172-183,219-226,248-287,298-309,326-340,448-471,515,559-587,594-609,638-651,662-663,667-669,710-724,728-732,748,752,770-771,787,790,793,796,799,813-814,818,831-834,838-846,850-867,879-969,993-998,1005,1013-1033,1068-1077,1080-1082,1099,1102-1103,1120-1127,1165-1230,1245-1484,1510-1517,1564-1566,1577-2845,2919-2923,2934-2937,2949,2951-2953,2957-2965,2967-2971,3015-3018,3086-3092,3111-3113,3119-3122,3135-3138,3142-3148,3151-3154,3157-3161,3163-3173,3175,3177-3183,3207-3230,3239-3544,3561-3574,3587-3603,3625-3673,3702-4265,4289-4387,4399-5538,5568-5572,5574,5576-5580,5596,5652-5653,5656-5668,5670-5680,5683-5695,5710-5715,5717-5736,5738-5774,5776-5778,5799-5800,5833-6089,6123-6125,6137-6143,6169,6180-6193,6198-6199,6201,6206-6207,6209,6213-6215,6226-6228,6257-6261,6314,6354-6355,6360-6361,6366-6367,6376-6378,6389-6397,6408-6419,6431-6437,6460-6476,6496-6504,6513-6523,6558-7074,7085-7088,7101-7120,7276,7293-7294,7296,7304-7315,7317,7322,7336-7343,7365-7367,7370-7381,7383-7392,7397-7416,7418-7429,7431-7445,7448-7459,7461-7474,7514-7533,7535-7564,7568,7578-7591,7593-7623,7663-7679,7681-7688,7690,7696,7701-7726,7729-7731,7739-7742,7745-7764,7774-7786,7793,7795,7800-7815,7820-7835,7837-7839,7844-7859,7861-7862,7867-7911,7913-7925,7928,7938-7942,7950-7952,7955-7971,7975-7986,7991-7996,7998,8002-8017,8019,8021-8033,8035-8051,8072-8076,8094-8098,8101-8109,8116-8123,8125,8131-8134,8137-8140,8143-8149,8155,8174-8179,8183,8185-8187,8206-8207,8225-8227,8231,8234-8236,8239-8241,8244-8246,8274-8276,8283,8285,8318,8368-8377,8379,8394-8397,8401-8436,8468,8481,8492-8506,8508-8509,8511-8547,8550-8562,8569-8571,8574,8582-8603,8606-8615,8624-8662,8734-8736,8751-8753,8756,8778-8798,8800-8801,8819-8828,8993-8996,9004,9028-9037,9041-9054,9057,9059-9063,9065-9076,9078,9082-9087,9089-9103,9105-9109,9111-9122,9124,9143-9150,9152-9164,9168-9182,9184-9185,9187,9189-9197,9199-9210,9212-9214,9235,9241-9245,9248-9250,9252,9255-9256,9260-9272,9274-9282,9284-9305,9307-9308
+ packages/workflows/src/defaults/bundled-defaults.generated.ts  |  100.00 |  100.00 |
+ packages/workflows/src/defaults/bundled-defaults.ts            |    0.00 |   66.67 |
+ packages/workflows/src/event-emitter.ts                        |   50.00 |   56.00 | 18-19,268,286-297,305-310
+ packages/workflows/src/executor-shared.ts                      |   44.44 |   31.26 | 20-21,90,93,96,107-109,113,116-117,153-196,218-219,235-248,263-399,416,419,472-473,475,483-484,487,506-511,519-528,554-583,592,610-626,637-646,655,694-696,698-709,714-716,719-721,724-731
+ packages/workflows/src/executor.ts                             |   44.19 |   32.54 | 77,97-99,101-113,116-118,121-123,125,128-131,133,145-151,165-184,196-209,224-249,264-273,330-334,369-372,376-387,581-585,608-624,642-899,931-1084,1129-1138,1140-1141,1154-1155,1157-1162,1164-1166,1211,1214-1216,1220-1224,1227-1230,1243-1246,1250-1258,1268,1272-1275,1287-1316,1321-1326,1342,1362-1368,1373-1404,1419,1432-1443,1445-1454,1456-1464,1470-1475,1477,1479-1481,1486-1501,1503-1519,1526-1531,1533-1539,1567-1570,1607-1618,1620-1629,1707-1708,1727-1730,1742-1754,1756,1763-1772,1787,1789-1813,1841-1844,1877,1893-1899,1904-1912,1914,1917,1920-1924,1938-1941,1948-1951,1982-1985,1997-2000,2019-2022
+ packages/workflows/src/include-expander.ts                     |    0.00 |    5.56 | 61,104-107,111-114,125-133,138,171-204,231-285,303-372,402-428,452-493,511-620
+ packages/workflows/src/loader.ts                               |    0.00 |    1.28 | 60-61,79-90,97,104-105,123-127,142-154,166-177,186-221,235-271,280-331,344-530,541-1081,1096-1118
+ packages/workflows/src/logger.ts                               |   68.42 |   60.14 | 11-12,76-78,81-83,108-115,122-131,138-153,174-176,226-235
+ packages/workflows/src/model-validation.ts                     |    7.69 |   30.83 | 74,78-82,86-90,94-99,103-105,109-114,147-156,161-165,170-175,188-197,207-219,224,252-258,269-271,280-281
+ packages/workflows/src/output-ref.ts                           |   50.00 |   56.07 | 60-67,71-96,109,136-147
+ packages/workflows/src/router.ts                               |    0.00 |    3.61 | 9-10,38-64,73-111,153-199,206-209,223-263
+ packages/workflows/src/schemas/dag-node.ts                     |   61.90 |   38.52 | 57-62,197-205,786-1082,1085-1234,1244,1294,1306-1315
+ packages/workflows/src/schemas/hooks.ts                        |  100.00 |  100.00 |
+ packages/workflows/src/schemas/index.ts                        |  100.00 |  100.00 |
+ packages/workflows/src/schemas/loop.ts                         |    0.00 |   37.25 | 40-46,70-94
+ packages/workflows/src/schemas/node-artifact.ts                |  100.00 |  100.00 |
+ packages/workflows/src/schemas/retry.ts                        |  100.00 |  100.00 |
+ packages/workflows/src/schemas/workflow-node-session.ts        |  100.00 |  100.00 |
+ packages/workflows/src/schemas/workflow-run.ts                 |   50.00 |   80.91 | 167-178,348-356
+ packages/workflows/src/schemas/workflow.ts                     |  100.00 |  100.00 |
+ packages/workflows/src/script-discovery.ts                     |    0.00 |   16.84 | 12,18-19,44,63-120,130-133,149-160
+ packages/workflows/src/state-migration.ts                      |   80.00 |   67.71 | 22-23,47-48,146-148,153,158-162,165-168,187-189,193,195-198,200-205
+ packages/workflows/src/utils/duration.ts                       |    0.00 |    4.55 | 9-13,30-45
+ packages/workflows/src/utils/fuzzy-match.ts                    |    0.00 |    3.85 | 10-24,29-38
+ packages/workflows/src/utils/github-token-policy.ts            |    0.00 |   11.90 | 30-31,47-69,78-89
+ packages/workflows/src/utils/idle-timeout.ts                   |    0.00 |    3.03 | 47-110
+ packages/workflows/src/utils/keep-awake.ts                     |   57.14 |   50.00 | 54-55,87-89,91-95,103-104,110-112,116-120,124,139-148
+ packages/workflows/src/utils/map-with-limit.ts                 |    0.00 |    0.00 | 15-44
+ packages/workflows/src/utils/output-truncation.ts              |    0.00 |   50.00 | 20
+ packages/workflows/src/utils/tool-formatter.ts                 |    0.00 |    1.56 | 15-26,37-82,92-96
+ packages/workflows/src/workflow-discovery.ts                   |    0.00 |    3.30 | 39-40,54,58-77,116-173,184-203,226-268,278-306,328-568,583-608
+ packages/workflows/src/workflow-pinning.ts                     |  100.00 |   76.61 | 50-52,55-57,60-62,65-67,78-80,85,93-94,109,113,133,136-138,148-149,152-154
+----------------------------------------------------------------|---------|---------|-------------------
+
+ 3 pass
+ 0 fail
+ 147 expect() calls
+Ran 3 tests across 1 file. [90.81s]

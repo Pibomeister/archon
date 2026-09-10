@@ -1,16 +1,20 @@
 # Archon SDLC Runbook
 
-> **Hardening rollout: not admitted.** This working distribution requires the
-> controller-action runtime fork; the installed v0.8.0 runtime is incompatible.
-> Container seeds, restricted transport, and protected resume budgets have
-> isolated regression coverage. Trusted verification/publication handlers,
-> cross-stage evidence binding, and an end-to-end admitted installation remain
-> incomplete.
-> Package dry-build success is not release certification. Do not install or
-> launch these workflows as a production replacement. Workflow publication and
-> both legacy and proposal-v2 backfill apply entrypoints fail closed; package
-> publication and installation are also disabled. Existing human approvals are not upgraded or
-> fabricated. The recipes below describe the prior admitted operator surface.
+> **Hardening rollout: not admitted.** The top-level legacy preparation workflows retain stock-compatible bash
+> node shapes, but their ship nodes refuse publication before invoking
+> external tools, including on resume. Stock compatibility is not hardened
+> execution: ordinary agent sessions are not an established authority boundary.
+> The separate controller-action runtime fork has isolated seed, transport,
+> budget, planning and static-web verification coverage; trusted publication,
+> general application verification and backfill dispatch remain incomplete.
+> Installation, package publication and production backfill execution remain
+> disabled. Do not install or launch this distribution as a production
+> replacement. Existing human approvals are never upgraded or fabricated.
+> This boundary repair does not certify the separately permissioned portable
+> workflow or stock parser execution. The recipes below describe the prior
+> operator surface, not release admission.
+
+Current source revisions and testing limits: [testing checkpoint](audit/hardening/testing-checkpoint.md).
 
 Backfill proposal v2 must declare the PostgreSQL type of every key, precondition,
 and changed column. The guarded executor currently supports only `smallint`,

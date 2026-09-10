@@ -1,0 +1,71 @@
+ARCHON_BACKFILL_API_ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword/api-archon-backfill-checkpoint
+ARCHON_BACKFILL_API_HEAD=73d7b4679109ca420d31f5d6190ad958dea569e2
+ARCHON_BACKFILL_API_BRANCH=checkpoint/archon-backfill-ledger-20260909
+ARCHON_BACKFILL_API_STATUS=clean
+ARCHON_BACKFILL_SOURCE_SHA256 libs/data-access/src/lib/rds/backfills/__tests__/trusted-backfill-executor.db.spec.ts=ee167bdc6da719595393739a726d9e282097c47d56ac7d184d4ea857a6960f26
+ARCHON_BACKFILL_SOURCE_SHA256 libs/data-access/src/lib/rds/backfills/trusted-backfill-executor.ts=b9d9bcfb538af2f2b697c80eabe3007e0ed10ca5352f13fcff01d0491310fe78
+ARCHON_BACKFILL_SOURCE_SHA256 libs/data-access/src/lib/rds/migrations/1791980000001-archon-backfill-ledger.ts=74cc4c36fda1338aaaabf104adbe10045235bd6687fabbd02f852964c8a89547
+NEGATIVE_CONTROL=assertion-helper-rejects-success
+DB_CLUSTER_SOURCE=pg_control_system
+MUTATION=disabled-type-and-returned-guards
+NEGATIVE_CONTROL=guard-disabled-float-loss-accepted
+NEGATIVE_CONTROL=assertion-helper-rejects-success
+DB_CLUSTER_SOURCE=pg_control_system
+LEDGER_MIGRATION=preexisting-refused
+TYPEORM_RETURNING_SHAPE=rows-count-tuple
+SCALAR_FIDELITY=timestamp-refused
+SCALAR_FIDELITY=jsonb-refused
+SCALAR_FIDELITY=float-refused
+SCALAR_FIDELITY=date-scalar-refused
+READ_PHASE_GUARD=primary-refused
+READ_PHASE_GUARD=standby-ok
+READ_PHASE_GUARD=write-role-refused
+READ_PHASE_GUARD=builtin-execute-refused
+READ_PHASE_GUARD=unsafe-routine-refused
+NEGATIVE_CONTROL=old-routine-guard-missed-core-namespace
+READ_PHASE_GUARD=core-namespace-routine-refused
+NEGATIVE_CONTROL=unqualified-shadow-called
+READ_PHASE_GUARD=shadow-routine-refused
+READ_PHASE_GUARD=global-write-refused
+READ_PHASE_GUARD=admin-role-refused
+READ_ONLY_PROPOSER_WRITE=refused
+TX_BOUNDARY=outer-transaction-refused
+KEY_ADMISSION=nonprimary-refused
+KEY_ADMISSION=composite-pk-ok
+SCHEMA_PROVENANCE=catalog-enum-refused
+SCHEMA_PROVENANCE=catalog-opclass-refused
+CANCELLATION=row-lock-timeout-rolled-back
+CANCELLATION=active-row-lock-canceled
+CANCELLATION=active-poisoned-connection-not-reused
+CANCELLATION=active-cancel-sibling-unaffected
+CANCELLATION=active-partial-chunk-preserved
+CANCELLATION=active-finalization-canceled
+CANCELLATION=ledger-lock-timeout-rolled-back
+CANCELLATION=finalization-lock-timeout-preserved-chunk
+CANCELLATION=late-cancel-preserved-chunk
+CANCELLATION=post-complete-update-rolled-back
+CANCELLATION=wrong-cluster-not-mutated
+CANCELLATION=initial-callback-persisted
+CANCELLATION=between-chunks-persisted
+DB_MATRIX=PASS
+psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed: No such file or directory
+	Is the server running locally and accepting connections on that socket?
+psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed: No such file or directory
+	Is the server running locally and accepting connections on that socket?
+psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed: No such file or directory
+	Is the server running locally and accepting connections on that socket?
+psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed: FATAL:  the database system is shutting down
+psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed: FATAL:  the database system is starting up
+psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed: FATAL:  the database system is starting up
+psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed: FATAL:  the database system is starting up
+(node:1) DeprecationWarning: Client.activeQuery is deprecated and will be removed in pg@9.0
+(Use `node --trace-deprecation ...` to show where the warning was created)
+PASS libs/data-access/src/lib/rds/backfills/__tests__/trusted-backfill-executor.db.spec.ts (20.801 s)
+  TrustedBackfillExecutor real TypeORM/Postgres matrix
+    ✓ applies and rejects the failure matrix through real TypeORM QueryRunner (12898 ms)
+
+Test Suites: 1 passed, 1 total
+Tests:       1 passed, 1 total
+Snapshots:   0 total
+Time:        21.053 s, estimated 34 s
+Ran all test suites matching /libs\/data-access\/src\/lib\/rds\/backfills\/__tests__\/trusted-backfill-executor.db.spec.ts/i.

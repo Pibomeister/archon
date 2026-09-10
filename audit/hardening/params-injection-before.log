@@ -1,0 +1,222 @@
+FFFFFF...FFFFFFFFF
+======================================================================
+FAIL: test_invalid_params_make_eval_caller_stop (test_repo_aware_params.ShellSafety.test_invalid_params_make_eval_caller_stop) (contents='{')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/tests/test_repo_aware_params.py", line 695, in test_invalid_params_make_eval_caller_stop
+    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 0 != 1 : REACHED
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "/opt/homebrew/Cellar/python@3.14/3.14.3_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/json/__init__.py", line 298, in load
+    return loads(fp.read(),
+        cls=cls, object_hook=object_hook,
+        parse_float=parse_float, parse_int=parse_int,
+        parse_constant=parse_constant, object_pairs_hook=object_pairs_hook, **kw)
+  File "/opt/homebrew/Cellar/python@3.14/3.14.3_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/json/__init__.py", line 352, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.3_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/json/decoder.py", line 345, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.3_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/json/decoder.py", line 361, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+
+
+======================================================================
+FAIL: test_invalid_params_make_eval_caller_stop (test_repo_aware_params.ShellSafety.test_invalid_params_make_eval_caller_stop) (contents='null')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/tests/test_repo_aware_params.py", line 695, in test_invalid_params_make_eval_caller_stop
+    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 0 != 1 : REACHED
+Traceback (most recent call last):
+  File "<stdin>", line 3, in <module>
+TypeError: 'NoneType' object is not subscriptable
+
+
+======================================================================
+FAIL: test_invalid_params_make_eval_caller_stop (test_repo_aware_params.ShellSafety.test_invalid_params_make_eval_caller_stop) (contents='[]')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/tests/test_repo_aware_params.py", line 695, in test_invalid_params_make_eval_caller_stop
+    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 0 != 1 : REACHED
+Traceback (most recent call last):
+  File "<stdin>", line 3, in <module>
+TypeError: list indices must be integers or slices, not str
+
+
+======================================================================
+FAIL: test_invalid_params_make_eval_caller_stop (test_repo_aware_params.ShellSafety.test_invalid_params_make_eval_caller_stop) (contents='{}')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/tests/test_repo_aware_params.py", line 695, in test_invalid_params_make_eval_caller_stop
+    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 0 != 1 : REACHED
+Traceback (most recent call last):
+  File "<stdin>", line 3, in <module>
+KeyError: 'spec'
+
+
+======================================================================
+FAIL: test_invalid_params_make_eval_caller_stop (test_repo_aware_params.ShellSafety.test_invalid_params_make_eval_caller_stop) (contents='{"spec": "/x", "slug": "s", "branch": "b", "worktree": "/w", "api_port": true}')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/tests/test_repo_aware_params.py", line 695, in test_invalid_params_make_eval_caller_stop
+    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 0 != 1 : REACHED
+
+
+======================================================================
+FAIL: test_invalid_params_make_eval_caller_stop (test_repo_aware_params.ShellSafety.test_invalid_params_make_eval_caller_stop) (contents='{"spec": "/x", "slug": "s", "branch": "b", "worktree": "/w", "api_port": 65536}')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/tests/test_repo_aware_params.py", line 695, in test_invalid_params_make_eval_caller_stop
+    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 0 != 1 : REACHED
+
+
+======================================================================
+FAIL: test_missing_params_filename_is_not_evaluated_as_shell (test_repo_aware_params.ShellSafety.test_missing_params_filename_is_not_evaluated_as_shell)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/tests/test_repo_aware_params.py", line 705, in test_missing_params_filename_is_not_evaluated_as_shell
+    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 0 != 1 : PARAMS_ENV=FAIL missing /var/folders/pp/067w2xf11l3fl2qq_nmfn5_m0000gn/T/tmpbao4hjkb/missing
+REACHED
+
+
+======================================================================
+FAIL: test_params_ports_cannot_execute_shell_or_continue_after_invalid_input (test_repo_aware_params.ShellSafety.test_params_ports_cannot_execute_shell_or_continue_after_invalid_input) (field='api_port', payload='command_substitution')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/tests/test_repo_aware_params.py", line 682, in test_params_ports_cannot_execute_shell_or_continue_after_invalid_input
+    self._assert_inert(build, label)
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/tests/test_repo_aware_params.py", line 641, in _assert_inert
+    self.assertFalse(marker.exists(),
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+                     f"{label}: payload EXECUTED -- {r.stdout}{r.stderr}")
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: True is not false : command_substitution: payload EXECUTED -- REACHED
+
+
+======================================================================
+FAIL: test_params_ports_cannot_execute_shell_or_continue_after_invalid_input (test_repo_aware_params.ShellSafety.test_params_ports_cannot_execute_shell_or_continue_after_invalid_input) (field='api_port', payload='backtick')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/tests/test_repo_aware_params.py", line 682, in test_params_ports_cannot_execute_shell_or_continue_after_invalid_input
+    self._assert_inert(build, label)
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/tests/test_repo_aware_params.py", line 641, in _assert_inert
+    self.assertFalse(marker.exists(),
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+                     f"{label}: payload EXECUTED -- {r.stdout}{r.stderr}")
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: True is not false : backtick: payload EXECUTED -- REACHED
+
+
+======================================================================
+FAIL: test_params_ports_cannot_execute_shell_or_continue_after_invalid_input (test_repo_aware_params.ShellSafety.test_params_ports_cannot_execute_shell_or_continue_after_invalid_input) (field='api_port', payload='newline')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/tests/test_repo_aware_params.py", line 682, in test_params_ports_cannot_execute_shell_or_continue_after_invalid_input
+    self._assert_inert(build, label)
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/tests/test_repo_aware_params.py", line 641, in _assert_inert
+    self.assertFalse(marker.exists(),
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+                     f"{label}: payload EXECUTED -- {r.stdout}{r.stderr}")
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: True is not false : newline: payload EXECUTED -- REACHED
+
+
+======================================================================
+FAIL: test_params_ports_cannot_execute_shell_or_continue_after_invalid_input (test_repo_aware_params.ShellSafety.test_params_ports_cannot_execute_shell_or_continue_after_invalid_input) (field='api_port', payload='semicolon')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/tests/test_repo_aware_params.py", line 682, in test_params_ports_cannot_execute_shell_or_continue_after_invalid_input
+    self._assert_inert(build, label)
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/tests/test_repo_aware_params.py", line 641, in _assert_inert
+    self.assertFalse(marker.exists(),
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+                     f"{label}: payload EXECUTED -- {r.stdout}{r.stderr}")
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: True is not false : semicolon: payload EXECUTED -- REACHED
+
+
+======================================================================
+FAIL: test_params_ports_cannot_execute_shell_or_continue_after_invalid_input (test_repo_aware_params.ShellSafety.test_params_ports_cannot_execute_shell_or_continue_after_invalid_input) (field='web_port', payload='command_substitution')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/tests/test_repo_aware_params.py", line 682, in test_params_ports_cannot_execute_shell_or_continue_after_invalid_input
+    self._assert_inert(build, label)
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/tests/test_repo_aware_params.py", line 641, in _assert_inert
+    self.assertFalse(marker.exists(),
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+                     f"{label}: payload EXECUTED -- {r.stdout}{r.stderr}")
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: True is not false : command_substitution: payload EXECUTED -- REACHED
+
+
+======================================================================
+FAIL: test_params_ports_cannot_execute_shell_or_continue_after_invalid_input (test_repo_aware_params.ShellSafety.test_params_ports_cannot_execute_shell_or_continue_after_invalid_input) (field='web_port', payload='backtick')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/tests/test_repo_aware_params.py", line 682, in test_params_ports_cannot_execute_shell_or_continue_after_invalid_input
+    self._assert_inert(build, label)
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/tests/test_repo_aware_params.py", line 641, in _assert_inert
+    self.assertFalse(marker.exists(),
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+                     f"{label}: payload EXECUTED -- {r.stdout}{r.stderr}")
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: True is not false : backtick: payload EXECUTED -- REACHED
+
+
+======================================================================
+FAIL: test_params_ports_cannot_execute_shell_or_continue_after_invalid_input (test_repo_aware_params.ShellSafety.test_params_ports_cannot_execute_shell_or_continue_after_invalid_input) (field='web_port', payload='newline')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/tests/test_repo_aware_params.py", line 682, in test_params_ports_cannot_execute_shell_or_continue_after_invalid_input
+    self._assert_inert(build, label)
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/tests/test_repo_aware_params.py", line 641, in _assert_inert
+    self.assertFalse(marker.exists(),
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+                     f"{label}: payload EXECUTED -- {r.stdout}{r.stderr}")
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: True is not false : newline: payload EXECUTED -- REACHED
+
+
+======================================================================
+FAIL: test_params_ports_cannot_execute_shell_or_continue_after_invalid_input (test_repo_aware_params.ShellSafety.test_params_ports_cannot_execute_shell_or_continue_after_invalid_input) (field='web_port', payload='semicolon')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/tests/test_repo_aware_params.py", line 682, in test_params_ports_cannot_execute_shell_or_continue_after_invalid_input
+    self._assert_inert(build, label)
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/tests/test_repo_aware_params.py", line 641, in _assert_inert
+    self.assertFalse(marker.exists(),
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+                     f"{label}: payload EXECUTED -- {r.stdout}{r.stderr}")
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: True is not false : semicolon: payload EXECUTED -- REACHED
+
+
+----------------------------------------------------------------------
+Ran 6 tests in 2.521s
+
+FAILED (failures=15)

@@ -669,6 +669,45 @@ class ShellSafety(unittest.TestCase):
             with self.subTest(payload=label):
                 self._assert_inert(build, label)
 
+    def test_params_ports_cannot_execute_shell_or_continue_after_invalid_input(self):
+        for field in ("api_port", "web_port"):
+            for label in self.PAYLOADS:
+                with self.subTest(field=field, payload=label):
+                    def build(payload, td):
+                        params = Path(td) / "params.json"
+                        params.write_text(json.dumps({
+                            "spec": "/x", "slug": "s", "branch": "b",
+                            "worktree": "/w", "repo": "api", field: payload}), encoding="utf-8")
+                        return (f'set -euo pipefail\neval "$(bash {SETUP}/params-env.sh {params})"\necho REACHED'), None
+                    self._assert_inert(build, label)
+
+    def test_invalid_params_make_eval_caller_stop(self):
+        invalid = ["{", "null", "[]", '{}',
+                   json.dumps({"spec": "/x", "slug": "s", "branch": "b", "worktree": "/w", "api_port": True}),
+                   json.dumps({"spec": "/x", "slug": "s", "branch": "b", "worktree": "/w", "api_port": 65536})]
+        for repo in (None, False, 0, [], ""):
+            invalid.append(json.dumps({"spec": "/x", "slug": "s", "branch": "b", "worktree": "/w", "repo": repo}))
+        for contents in invalid:
+            with self.subTest(contents=contents), tempfile.TemporaryDirectory() as td:
+                params = Path(td) / "params.json"
+                params.write_text(contents)
+                result = subprocess.run(
+                    ["bash", "-c", 'set -euo pipefail; eval "$(bash "$1" "$2")"; echo REACHED',
+                     "bash", str(SETUP / "params-env.sh"), str(params)], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertNotIn("REACHED", result.stdout)
+
+    def test_missing_params_filename_is_not_evaluated_as_shell(self):
+        with tempfile.TemporaryDirectory() as td:
+            marker = Path(td) / "pwned"
+            missing = Path(td) / ("missing'; touch " + str(marker) + "; #")
+            result = subprocess.run(
+                ["bash", "-c", 'set -euo pipefail; eval "$(bash "$1" "$2")"; echo REACHED',
+                 "bash", str(SETUP / "params-env.sh"), str(missing)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertFalse(marker.exists())
+            self.assertNotIn("REACHED", result.stdout)
+
     def test_m12_a_valid_repo_still_resolves(self):
         """The control: the quoting fix must not break the normal path."""
         r = subprocess.run(
