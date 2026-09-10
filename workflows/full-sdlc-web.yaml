@@ -1,6 +1,7 @@
 name: full-sdlc-web
-description: Parameterized web prong for a feature API handoff produced by archon-run.py feature --scope fullstack. Run message = ABSOLUTE path to feature-api-handoff.json; validates spec/plan/API lineage, syncs generated API contract, implements web work in a derived worktree, review loop, SSR smoke, agent-browser UAT, draft PR. Smoke ports are allocated PER RUN by preflight from bases 4127 (api) and 3127 (web) via setup/port-alloc.sh at stride 10. Those bases used to be 4123/3123, the same literals full-sdlc-api binds, so a concurrent api run could answer this lane's smoke check and fabricate a pass against the wrong build. Invoke through archon-run.py for Codex lanes.
+description: Parameterized web prong for a feature API handoff produced by archon-run.py feature --scope fullstack, or a standalone web feature launched by archon-run.py feature --scope web with its own web-only plan approval. Run message = ABSOLUTE path to feature-api-handoff.json; validates spec/plan/API lineage, syncs generated API contract, implements web work in a derived worktree, review loop, SSR smoke, agent-browser UAT, draft PR. Smoke ports are allocated PER RUN by preflight from bases 4127 (api) and 3127 (web) via setup/port-alloc.sh at stride 10. Those bases used to be 4123/3123, the same literals full-sdlc-api binds, so a concurrent api run could answer this lane's smoke check and fabricate a pass against the wrong build. Invoke through archon-run.py for Codex lanes.
 provider: claude
+interactive: true
 nodes:
   - id: codex-control-guard
     always_run: true
@@ -18,7 +19,7 @@ nodes:
     bash: |
       set -euo pipefail
       if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-preflight.out") 2> >(tee -a "$ARTIFACTS_DIR/node-preflight.out" >&2); fi
-      SK=/Users/eduardopicazo/Documents/Workspace/Goodword/.claude/skills
+      SK="/Users/eduardopicazo/Documents/Workspace/Goodword/.claude/skills"
       test -f "$SK/ce-code-review/SKILL.md" || { echo "PREFLIGHT=FAIL staged ce-code-review missing"; exit 1; }
       # Dual contract: CE 3.2.0 carries the markers in SKILL.md; newer CE moved
       # mode:headless (now an alias for mode:agent) into references/modes-and-output.md
@@ -79,7 +80,7 @@ nodes:
     bash: |
       set -euo pipefail
       if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-bootstrap.out") 2> >(tee -a "$ARTIFACTS_DIR/node-bootstrap.out" >&2); fi
-      WEB=/Users/eduardopicazo/Documents/Workspace/Goodword/web-app
+      WEB="/Users/eduardopicazo/Documents/Workspace/Goodword/web-app"
       eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
       git -C "$WEB" fetch origin main
       if [ -d "$WT" ]; then
@@ -97,17 +98,331 @@ nodes:
       printf '{"web_worktree":"%s","branch":"%s"}\n' "$WT" "$BR" > "$ARTIFACTS_DIR/worktrees.json"
       echo "WORKTREE=$WT BRANCH=$BR HEAD=$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")"
 
+  - id: web-scope
+    depends_on: [preflight]
+    timeout: 120000
+    bash: |
+      set -euo pipefail
+      if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-web-scope.out") 2> >(tee -a "$ARTIFACTS_DIR/node-web-scope.out" >&2); fi
+      SCOPE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('feature_scope','fullstack'))" "$ARTIFACTS_DIR/params.json")
+      case "$SCOPE" in
+        fullstack|web) printf '{"scope":"%s"}\n' "$SCOPE" ;;
+        *) echo "WEB_SCOPE=FAIL unsupported scope=$SCOPE"; exit 1 ;;
+      esac
+
+  - id: web-plan
+    depends_on: [bootstrap, web-scope]
+    when: "$web-scope.scope == 'web'"
+    model: sonnet
+    maxBudgetUsd: 5
+    timeout: 1200000
+    prompt: |
+      You are the standalone-web planning node. This run was launched with
+      feature --scope web, so there is no API implementation prong and no API
+      PR. Ask no questions and do not edit the web worktree.
+
+      Resolve ARTIFACTS_DIR via: echo "$ARTIFACTS_DIR"
+      Read params.json and the spec path named by params.json. The web worktree
+      is the "worktree" field. The API counterpart is a controller-pinned,
+      read-only baseline identified by params.json api_head_sha. If the spec
+      requires an API behavior, schema, or data-contract change, write
+      feature-result.json with:
+        {"outcome":"NEEDS_CLARIFICATION","reason":"<why API scope is required>"}
+      and scope-escalation.json with:
+        {"status":"SCOPE_ESCALATION","outcome":"NEEDS_CLARIFICATION","from":"web","to":"fullstack","reason":"<same reason>"}
+      then end with WEB_PLAN_SCOPE_ESCALATION.
+
+      Otherwise write these approved-candidate planning artifacts under
+      ARTIFACTS_DIR:
+      - plan.md: a web-only plan with Scope, Files, Verification, Risks, and
+        No-change disposition sections.
+      - files-allowlist.json: JSON array of repo-relative web-app paths the
+        implementation may modify. Empty is allowed only when the plan says the
+        pinned baseline already satisfies every acceptance check.
+      - web-files-allowlist.json: byte-for-byte same contents as
+        files-allowlist.json.
+      - verify.json: JSON object with "acceptance" array of concrete checks and
+        optional "test_patterns" array.
+      - premises.json: JSON array of scoped premise answers, each with id,
+        question, answer and at least one cited evidence string, or [] when no
+        premise is needed.
+      - reader-audit.json: {"columns": []} unless the plan changes presentation
+        semantics for API/database fields already present in the pinned API
+        baseline.
+      - browser-evidence.json: the controller-owned browser verifier policy:
+        {"required":[{"id":"browser-1","criterion":"<human text>",
+          "path":"/<same-origin path>",
+          "assertions":[{"type":"text|selector|url|title|testid|click|fill",
+                         "value":"<expected value>","text":"<fill text when type=fill>"}]}]}
+        Use stable criterion ids, same-origin paths only, and executable
+        assertions.
+      - browser-evidence.sha256: lowercase SHA-256 of browser-evidence.json's
+        canonical JSON bytes (sort keys, separators ',', ':').
+
+      The plan is not approved by you. It will pause at a human approval gate
+      after deterministic schema and hash validation. End with WEB_PLAN_DONE.
+
+  - id: web-plan-oracle
+    depends_on: [web-plan]
+    when: "$web-scope.scope == 'web'"
+    timeout: 120000
+    bash: |
+      set -euo pipefail
+      if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-web-plan-oracle.out") 2> >(tee -a "$ARTIFACTS_DIR/node-web-plan-oracle.out" >&2); fi
+      python3 - "$ARTIFACTS_DIR" <<'PY'
+      import hashlib, json, re, subprocess, sys
+      from pathlib import Path
+      ad = Path(sys.argv[1])
+      params = json.loads((ad / "params.json").read_text(encoding="utf-8"))
+      if params.get("feature_scope") != "web":
+          raise SystemExit("WEB_PLAN_ORACLE=FAIL not standalone web scope")
+      escalation = ad / "scope-escalation.json"
+      result = ad / "feature-result.json"
+      if escalation.exists() or result.exists():
+          raise SystemExit("WEB_PLAN_ORACLE=FAIL scope escalation requires renewed fullstack approval")
+      required = ["plan.md", "files-allowlist.json", "web-files-allowlist.json", "verify.json", "premises.json", "reader-audit.json", "browser-evidence.json", "browser-evidence.sha256"]
+      for name in required:
+          if not (ad / name).is_file() or (ad / name).stat().st_size == 0:
+              raise SystemExit(f"WEB_PLAN_ORACLE=FAIL missing {name}")
+      files = json.loads((ad / "files-allowlist.json").read_text(encoding="utf-8"))
+      web_files = json.loads((ad / "web-files-allowlist.json").read_text(encoding="utf-8"))
+      if files != web_files:
+          raise SystemExit("WEB_PLAN_ORACLE=FAIL web allowlists differ")
+      if not isinstance(files, list) or not all(isinstance(p, str) and p.strip() and not p.startswith(("/", "../")) and "/../" not in p for p in files):
+          raise SystemExit("WEB_PLAN_ORACLE=FAIL malformed files-allowlist.json")
+      verify = json.loads((ad / "verify.json").read_text(encoding="utf-8"))
+      if not isinstance(verify, dict) or not isinstance(verify.get("acceptance", []), list):
+          raise SystemExit("WEB_PLAN_ORACLE=FAIL malformed verify.json")
+      premises = json.loads((ad / "premises.json").read_text(encoding="utf-8"))
+      if not isinstance(premises, list):
+          raise SystemExit("WEB_PLAN_ORACLE=FAIL malformed premises.json")
+      reader = json.loads((ad / "reader-audit.json").read_text(encoding="utf-8"))
+      if not isinstance(reader, dict) or not isinstance(reader.get("columns"), list):
+          raise SystemExit("WEB_PLAN_ORACLE=FAIL malformed reader-audit.json")
+      browser = json.loads((ad / "browser-evidence.json").read_text(encoding="utf-8"))
+      required_browser = browser.get("required")
+      if not isinstance(required_browser, list) or not required_browser:
+          raise SystemExit("WEB_PLAN_ORACLE=FAIL malformed browser-evidence.json")
+      seen = set()
+      for item in required_browser:
+          if not isinstance(item, dict):
+              raise SystemExit("WEB_PLAN_ORACLE=FAIL browser criterion must be object")
+          cid = item.get("id")
+          if not isinstance(cid, str) or not cid or cid in seen:
+              raise SystemExit("WEB_PLAN_ORACLE=FAIL browser criterion ids malformed")
+          seen.add(cid)
+          path = item.get("path")
+          assertions = item.get("assertions")
+          if not isinstance(item.get("criterion"), str) or not item["criterion"].strip():
+              raise SystemExit("WEB_PLAN_ORACLE=FAIL browser criterion text malformed")
+          if not isinstance(path, str) or not path.startswith("/") or path.startswith("//"):
+              raise SystemExit("WEB_PLAN_ORACLE=FAIL browser criterion path must be same-origin")
+          if not isinstance(assertions, list) or not assertions:
+              raise SystemExit("WEB_PLAN_ORACLE=FAIL browser criterion assertions missing")
+          for assertion in assertions:
+              if not isinstance(assertion, dict) or assertion.get("type") not in {"text", "selector", "url", "title", "testid", "click", "fill"}:
+                  raise SystemExit("WEB_PLAN_ORACLE=FAIL browser assertion type malformed")
+              if not isinstance(assertion.get("value"), str) or not assertion["value"]:
+                  raise SystemExit("WEB_PLAN_ORACLE=FAIL browser assertion value malformed")
+              if assertion.get("type") == "fill" and (not isinstance(assertion.get("text"), str) or not assertion["text"]):
+                  raise SystemExit("WEB_PLAN_ORACLE=FAIL browser fill assertion text missing")
+      browser_digest = hashlib.sha256(json.dumps(browser, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+      try:
+          approved_browser_digest = (ad / "browser-evidence.sha256").read_text(encoding="utf-8").strip().split()[0].lower()
+      except IndexError:
+          approved_browser_digest = ""
+      if not re.fullmatch(r"[0-9a-f]{64}", approved_browser_digest) or approved_browser_digest != browser_digest:
+          raise SystemExit("WEB_PLAN_ORACLE=FAIL browser-evidence.sha256 mismatch")
+      api_head = params.get("api_head_sha")
+      if not isinstance(api_head, str) or not re.fullmatch(r"[0-9a-f]{40}", api_head):
+          raise SystemExit("WEB_PLAN_ORACLE=FAIL missing pinned API baseline")
+      current = subprocess.check_output(["git", "-C", str(Path(params["api_worktree"])), "rev-parse", "HEAD"], text=True).strip()
+      if current != api_head:
+          raise SystemExit("WEB_PLAN_ORACLE=FAIL pinned API baseline moved")
+      spec = Path(params["spec"])
+      oracle = {
+          "scope": "web",
+          "api_head_sha": api_head,
+          "spec_sha256": hashlib.sha256(spec.read_bytes()).hexdigest(),
+          "hashes": {name: hashlib.sha256((ad / name).read_bytes()).hexdigest() for name in required},
+      }
+      (ad / "web-plan-oracle.json").write_text(json.dumps(oracle, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+      print("WEB_PLAN_ORACLE=PASS")
+      PY
+
+  - id: web-plan-render
+    depends_on: [web-plan-oracle]
+    when: "$web-scope.scope == 'web'"
+    timeout: 120000
+    bash: |
+      set -euo pipefail
+      if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-web-plan-render.out") 2> >(tee -a "$ARTIFACTS_DIR/node-web-plan-render.out" >&2); fi
+      python3 - "$ARTIFACTS_DIR" <<'PY'
+      import html, json, sys
+      from pathlib import Path
+      ad = Path(sys.argv[1])
+      params = json.loads((ad / "params.json").read_text(encoding="utf-8"))
+      oracle = json.loads((ad / "web-plan-oracle.json").read_text(encoding="utf-8"))
+      plan = (ad / "plan.md").read_text(encoding="utf-8")
+      body = f"""<!doctype html>
+      <meta charset="utf-8">
+      <title>Standalone web plan review</title>
+      <style>body{{font:16px system-ui;max-width:960px;margin:2rem auto;line-height:1.5}}pre{{white-space:pre-wrap;background:#f6f8fa;padding:1rem}}</style>
+      <h1>Standalone web plan review</h1>
+      <!-- SCOPE --><p>Scope: web only. API baseline: <code>{html.escape(str(params.get('api_head_sha')))}</code>. No API PR will be created.</p>
+      <!-- ORACLE --><pre>{html.escape(json.dumps(oracle, indent=2, sort_keys=True))}</pre>
+      <!-- PLAN --><pre>{html.escape(plan)}</pre>
+      <!-- BROWSER POLICY --><pre>{html.escape((ad / 'browser-evidence.json').read_text(encoding='utf-8'))}</pre>
+      <!-- DECIDE --><p>Approving freezes these exact artifacts for implementation. Rejecting stops; update inputs and rerun web-only planning for renewed approval.</p>
+      """
+      (ad / "web-plan-review.html").write_text(body, encoding="utf-8")
+      print("WEB_PLAN_RENDER=PASS")
+      PY
+
+  - id: web-plan-approval
+    depends_on: [web-plan-render]
+    when: "$web-scope.scope == 'web'"
+    approval:
+      message: "Standalone web plan ready: open <this run's ARTIFACTS_DIR>/web-plan-review.html. The rendered packet and the frozen artifact snapshot are the approval authority. Approve only if the web-only plan, files-allowlist.json, verify.json, premises.json, reader-audit.json, browser-evidence.json/.sha256 and pinned API baseline match that frozen oracle. Reject if API work or changed browser checks are required; this guarded run terminates and planning must restart with renewed approval."
+      on_reject:
+        max_attempts: 1
+        prompt: |
+          The human rejected the standalone web plan:
+
+          $REJECTION_REASON
+
+          Do not implement and do not revise or rehash approved-candidate
+          artifacts in this run. web-plan-freeze seals the approved oracle;
+          same-run mutation would stale that seal. This rejection is terminal
+          for the guarded run. Preserve artifacts as evidence and start a fresh
+          guarded web or fullstack run with renewed approval. End with
+          WEB_PLAN_REJECTION_REQUIRES_FRESH_GUARDED_RUN.
+
+  - id: web-plan-freeze
+    depends_on: [web-plan-approval]
+    when: "$web-scope.scope == 'web'"
+    timeout: 120000
+    bash: |
+      set -euo pipefail
+      if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-web-plan-freeze.out") 2> >(tee -a "$ARTIFACTS_DIR/node-web-plan-freeze.out" >&2); fi
+      test ! -f "$ARTIFACTS_DIR/scope-escalation.json" || { echo "WEB_PLAN_FREEZE=FAIL scope escalation needs fullstack approval"; exit 1; }
+      test ! -f "$ARTIFACTS_DIR/feature-result.json" || { echo "WEB_PLAN_FREEZE=FAIL rejected plan needs renewed approval"; exit 1; }
+      python3 - "$ARTIFACTS_DIR" <<'PY'
+      import hashlib, json, re, subprocess, sys
+      from pathlib import Path
+      ad = Path(sys.argv[1])
+      params = json.loads((ad / "params.json").read_text(encoding="utf-8"))
+      required = ["plan.md", "files-allowlist.json", "web-files-allowlist.json", "verify.json", "premises.json", "reader-audit.json", "browser-evidence.json", "browser-evidence.sha256"]
+      files = json.loads((ad / "files-allowlist.json").read_text(encoding="utf-8"))
+      web_files = json.loads((ad / "web-files-allowlist.json").read_text(encoding="utf-8"))
+      if files != web_files or not isinstance(files, list):
+          raise SystemExit("WEB_PLAN_FREEZE=FAIL malformed or divergent allowlists")
+      verify = json.loads((ad / "verify.json").read_text(encoding="utf-8"))
+      premises = json.loads((ad / "premises.json").read_text(encoding="utf-8"))
+      reader = json.loads((ad / "reader-audit.json").read_text(encoding="utf-8"))
+      if not isinstance(verify, dict) or not isinstance(verify.get("acceptance", []), list):
+          raise SystemExit("WEB_PLAN_FREEZE=FAIL malformed verify.json")
+      if not isinstance(premises, list):
+          raise SystemExit("WEB_PLAN_FREEZE=FAIL malformed premises.json")
+      if not isinstance(reader, dict) or not isinstance(reader.get("columns"), list):
+          raise SystemExit("WEB_PLAN_FREEZE=FAIL malformed reader-audit.json")
+      browser = json.loads((ad / "browser-evidence.json").read_text(encoding="utf-8"))
+      required_browser = browser.get("required")
+      if not isinstance(required_browser, list) or not required_browser:
+          raise SystemExit("WEB_PLAN_FREEZE=FAIL malformed browser-evidence.json")
+      seen = set()
+      for item in required_browser:
+          if not isinstance(item, dict):
+              raise SystemExit("WEB_PLAN_FREEZE=FAIL browser criterion must be object")
+          cid = item.get("id")
+          if not isinstance(cid, str) or not cid or cid in seen:
+              raise SystemExit("WEB_PLAN_FREEZE=FAIL browser criterion ids malformed")
+          seen.add(cid)
+          path = item.get("path")
+          assertions = item.get("assertions")
+          if not isinstance(item.get("criterion"), str) or not item["criterion"].strip():
+              raise SystemExit("WEB_PLAN_FREEZE=FAIL browser criterion text malformed")
+          if not isinstance(path, str) or not path.startswith("/") or path.startswith("//"):
+              raise SystemExit("WEB_PLAN_FREEZE=FAIL browser criterion path must be same-origin")
+          if not isinstance(assertions, list) or not assertions:
+              raise SystemExit("WEB_PLAN_FREEZE=FAIL browser criterion assertions missing")
+          for assertion in assertions:
+              if not isinstance(assertion, dict) or assertion.get("type") not in {"text", "selector", "url", "title", "testid", "click", "fill"}:
+                  raise SystemExit("WEB_PLAN_FREEZE=FAIL browser assertion type malformed")
+              if not isinstance(assertion.get("value"), str) or not assertion["value"]:
+                  raise SystemExit("WEB_PLAN_FREEZE=FAIL browser assertion value malformed")
+              if assertion.get("type") == "fill" and (not isinstance(assertion.get("text"), str) or not assertion["text"]):
+                  raise SystemExit("WEB_PLAN_FREEZE=FAIL browser fill assertion text missing")
+      browser_digest = hashlib.sha256(json.dumps(browser, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+      try:
+          approved_browser_digest = (ad / "browser-evidence.sha256").read_text(encoding="utf-8").strip().split()[0].lower()
+      except IndexError:
+          approved_browser_digest = ""
+      if not re.fullmatch(r"[0-9a-f]{64}", approved_browser_digest) or approved_browser_digest != browser_digest:
+          raise SystemExit("WEB_PLAN_FREEZE=FAIL browser-evidence.sha256 mismatch")
+      api_head = params.get("api_head_sha")
+      if not isinstance(api_head, str) or not re.fullmatch(r"[0-9a-f]{40}", api_head):
+          raise SystemExit("WEB_PLAN_FREEZE=FAIL missing pinned API baseline")
+      current = subprocess.check_output(["git", "-C", str(Path(params["api_worktree"])), "rev-parse", "HEAD"], text=True).strip()
+      if current != api_head:
+          raise SystemExit("WEB_PLAN_FREEZE=FAIL pinned API baseline moved")
+      oracle = json.loads((ad / "web-plan-oracle.json").read_text(encoding="utf-8"))
+      if oracle.get("scope") != "web" or oracle.get("api_head_sha") != api_head:
+          raise SystemExit("WEB_PLAN_FREEZE=FAIL oracle scope or API baseline mismatch")
+      oracle_hashes = oracle.get("hashes")
+      if not isinstance(oracle_hashes, dict):
+          raise SystemExit("WEB_PLAN_FREEZE=FAIL oracle hashes missing")
+      for name in required:
+          expected = oracle_hashes.get(name)
+          actual = hashlib.sha256((ad / name).read_bytes()).hexdigest()
+          if not isinstance(expected, str) or actual != expected:
+              raise SystemExit(f"WEB_PLAN_FREEZE=FAIL approved artifact changed since oracle: {name}")
+      approved = {
+          "scope": "web",
+          "api_head_sha": api_head,
+          "hashes": {name: hashlib.sha256((ad / name).read_bytes()).hexdigest() for name in [*required, "web-plan-oracle.json"]},
+      }
+      (ad / "web-plan-approved.json").write_text(json.dumps(approved, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+      print("WEB_PLAN_FREEZE=PASS")
+      PY
+
+  - id: web-plan-lock-gate
+    depends_on: [web-plan-freeze]
+    when: "$web-scope.scope == 'web'"
+    timeout: 120000
+    bash: |
+      set -euo pipefail
+      if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-web-plan-lock-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-web-plan-lock-gate.out" >&2); fi
+      python3 - "$ARTIFACTS_DIR" <<'PY'
+      import hashlib, json, sys
+      from pathlib import Path
+      ad = Path(sys.argv[1])
+      approved = json.loads((ad / "web-plan-approved.json").read_text(encoding="utf-8"))
+      for name, digest in approved["hashes"].items():
+          if hashlib.sha256((ad / name).read_bytes()).hexdigest() != digest:
+              raise SystemExit(f"WEB_PLAN_LOCK=FAIL approved artifact changed: {name}")
+      print("WEB_PLAN_LOCK=PASS")
+      PY
+
   # Contract parity with the api lane: web consumes the approved API handoff.
   # The existing premise nodes now validate handoff-derived contracts instead of
   # short-circuiting because the old lane had a toy-only premise.
   - id: premise-strip
-    depends_on: [bootstrap]
+    depends_on: [bootstrap, web-plan-freeze]
+    trigger_rule: none_failed_min_one_success
     timeout: 120000
     bash: |
       set -euo pipefail
       if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-premise-strip.out") 2> >(tee -a "$ARTIFACTS_DIR/node-premise-strip.out" >&2); fi
-      test -s "$ARTIFACTS_DIR/handoff-integrity.json" || { echo "PREMISE_STRIP=FAIL no handoff-integrity.json"; exit 1; }
-      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-feature-handoff-integrity.py         "$ARTIFACTS_DIR/handoff-integrity.json"
+      SCOPE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('feature_scope','fullstack'))" "$ARTIFACTS_DIR/params.json")
+      if [ "$SCOPE" = "fullstack" ]; then
+        test -s "$ARTIFACTS_DIR/handoff-integrity.json" || { echo "PREMISE_STRIP=FAIL no handoff-integrity.json"; exit 1; }
+        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-feature-handoff-integrity.py         "$ARTIFACTS_DIR/handoff-integrity.json"
+      elif [ "$SCOPE" = "web" ]; then
+        test -s "$ARTIFACTS_DIR/web-plan-approved.json" || { echo "PREMISE_STRIP=FAIL no approved standalone web plan"; exit 1; }
+      else
+        echo "PREMISE_STRIP=FAIL unsupported scope=$SCOPE"; exit 1
+      fi
       python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/strip-premise-answers.py         "$ARTIFACTS_DIR/premises.json" "$ARTIFACTS_DIR/premises-questions.json"
       echo "PREMISE_STRIP=OK"
 
@@ -178,7 +493,8 @@ nodes:
       echo "PREMISE_GATE=PASS"
 
   - id: gen-api-sync
-    depends_on: [bootstrap]
+    depends_on: [bootstrap, web-plan-freeze]
+    trigger_rule: none_failed_min_one_success
     timeout: 1200000
     bash: |
       set -uo pipefail
@@ -226,19 +542,27 @@ nodes:
       echo "GENAPI=PASS"
 
   - id: implement
-    depends_on: [gen-api-sync, premise-gate]
+    depends_on: [gen-api-sync, premise-gate, web-plan-lock-gate]
+    trigger_rule: none_failed_min_one_success
     model: sonnet
     maxBudgetUsd: 8
     timeout: 1800000
     prompt: |
       Implement the WEB PRONG ONLY of the feature described by params.json in
       ARTIFACTS_DIR. Read params.json, api-handoff.json, the spec, genapi.patch,
-      and the web worktree named by params.json. The API prong is already
-      represented by the immutable handoff; do not modify api/.
+      and the web worktree named by params.json. For fullstack scope, the API
+      prong is represented by the immutable v2 handoff. For standalone web
+      scope, params.json carries a controller-pinned read-only API baseline.
+      Do not modify api/. Do not create a dummy API change or an API PR to make
+      a web-only run look fullstack.
 
-      The approved web scope is files-allowlist.json in ARTIFACTS_DIR, copied
-      byte-for-byte from the API lane's approved web-files-allowlist.json and
-      bound into api-handoff.json. Do not edit or broaden that allowlist.
+      The approved web scope is files-allowlist.json in ARTIFACTS_DIR. In
+      fullstack mode it is copied byte-for-byte from the API lane's approved web-files-allowlist.json and bound into api-handoff.json together with
+      premises_sha256 and reader_audit_sha256. In standalone web mode it must
+      come from the web-only approved plan for this lane. Do not edit or broaden that allowlist. If implementation discovers that an API change is
+      required, write feature-result.json with outcome NEEDS_CLARIFICATION and
+      a scope-escalation reason, then stop without treating the run as
+      successful.
 
       Change only the web-app files listed in files-allowlist.json plus generated
       app/services/api-client.d.ts when it is present in that allowlist. Do not edit pnpm-lock.yaml except for package
@@ -268,7 +592,14 @@ nodes:
       mise x node@20 -- pnpm typecheck || { echo "GATE_TESTS=FAIL typecheck"; exit 1; }
       mise x node@20 -- pnpm lint || { echo "GATE_TESTS=FAIL lint"; exit 1; }
       mise x node@20 -- pnpm test --run || { echo "GATE_TESTS=FAIL vitest"; exit 1; }
-      test -n "$(git status --porcelain)" || { echo "GATE_TESTS=FAIL no changes produced"; exit 1; }
+      BASE=$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")
+      CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$|^ M pnpm-lock\.yaml$|^\?\? pnpm-lock\.yaml$' || true)
+      if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- . ':(exclude)pnpm-lock.yaml'; then
+        printf '{"outcome":"NO_CHANGE","repo":"web-app","basis":"baseline-to-candidate content","baseline":"%s","head":"%s","pr_url":null}\n' "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
+        echo "GATE_TESTS=PASS outcome=NO_CHANGE"
+        exit 0
+      fi
+      printf '{"outcome":"CHANGED","repo":"web-app","basis":"baseline-to-candidate content","baseline":"%s","head":"%s"}\n' "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
       # Scope guard: implementation must declare its intended web diff; empty would reject all real changes.
       ALLOW_COUNT=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))))" "$ARTIFACTS_DIR/files-allowlist.json" 2>/dev/null || echo 0)
       if [ "$ALLOW_COUNT" = 0 ]; then echo "GATE_TESTS=FAIL approved web files-allowlist.json is required"; exit 1; fi
@@ -344,6 +675,13 @@ nodes:
       set -euo pipefail
       if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-commit-impl.out") 2> >(tee -a "$ARTIFACTS_DIR/node-commit-impl.out" >&2); fi
       cd $(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['worktree'])" "$ARTIFACTS_DIR/params.json")
+      BASE=$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")
+      CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$|^ M pnpm-lock\.yaml$|^\?\? pnpm-lock\.yaml$' || true)
+      if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- . ':(exclude)pnpm-lock.yaml'; then
+        printf '{"outcome":"NO_CHANGE","repo":"web-app","basis":"baseline-to-candidate content","baseline":"%s","head":"%s","pr_url":null}\n' "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
+        echo "COMMIT_IMPL=SKIP outcome=NO_CHANGE"
+        exit 0
+      fi
       python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
       if git diff --cached --quiet; then
         # Idempotent re-run: a prior run may have already committed the work.
@@ -693,33 +1031,29 @@ nodes:
 
   - id: uat
     depends_on: [smoke]
-    model: sonnet
-    maxBudgetUsd: 5
     timeout: 1200000
-    prompt: |
-      You are the acceptance-testing node, standing in for a human tester. Ask no
-      questions. The app under test is already running. Its ports are allocated
-      PER RUN, so read them -- never assume: smoke-urls.txt in ARTIFACTS_DIR has
-      a web= line and an api= line, and those two origins are the only ones you
-      may use. Do NOT start, stop, or restart any server.
-
-      Resolve ARTIFACTS_DIR, then read browser-evidence.json, params.json,
-      api-handoff.json, and the shared spec path from params.json. Use the
-      agent-browser CLI (already installed; run `agent-browser --help` if you
-      need the command surface) to act as a user against the application paths
-      implied by the feature spec, not a generic health page.
-
-      For every entry in browser-evidence.json.required:
-        1. Navigate only to safe same-origin paths under the web= origin.
-        2. Exercise the feature behavior needed to verify that criterion.
-        3. Record a passed or failed entry with the exact criterion id.
-      Save at least one screenshot as uat-feature.png inside ARTIFACTS_DIR.
-
-      Write JSON to uat-result.json in that artifacts directory:
-        {"passed": [...], "failed": [...], "evidence": ["<screenshot path>"]}
-      each entry {"criterion": "<id>", "detail": "<what you observed>"}.
-      A criterion you could not verify goes in "failed" — never in "passed".
-      End with the single line: UAT_DONE
+    bash: |
+      set -euo pipefail
+      if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-uat.out") 2> >(tee -a "$ARTIFACTS_DIR/node-uat.out" >&2); fi
+      ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
+      PARAMS="$ARTIFACTS_DIR/params.json"
+      test -s "$ARTIFACTS_DIR/smoke-urls.txt" || { echo "UAT=FAIL no smoke-urls.txt"; exit 1; }
+      test -s "$ARTIFACTS_DIR/browser-evidence.json" || { echo "UAT=FAIL no browser-evidence.json"; exit 1; }
+      test -s "$ARTIFACTS_DIR/browser-evidence.sha256" || { echo "UAT=FAIL no approved browser-evidence.sha256"; exit 1; }
+      test -s "$PARAMS" || { echo "UAT=FAIL no params.json"; exit 1; }
+      WT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("worktree", ""))' "$PARAMS")
+      API_HEAD=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("api_head_sha", ""))' "$PARAMS")
+      test -n "$WT" && test -d "$WT" || { echo "UAT=FAIL web worktree missing"; exit 1; }
+      CANDIDATE=$(git -C "$WT" rev-parse HEAD)
+      TREE=$(git -C "$WT" rev-parse 'HEAD^{tree}')
+      python3 "$ROOT/.archon/setup/browser-verifier.py" run \
+        --artifacts "$ARTIFACTS_DIR" \
+        --web-worktree "$WT" \
+        --playwright-root "$ROOT/web-app" \
+        --candidate-commit "$CANDIDATE" \
+        --candidate-tree "$TREE" \
+        --api-commit "$API_HEAD" \
+        --approved-digest "$ARTIFACTS_DIR/browser-evidence.sha256"
 
   - id: servers-down
     depends_on: [uat]
@@ -780,7 +1114,7 @@ nodes:
       You are the PR-body composition node. Ask no questions.
       Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
       Read round.txt for the final round N, then round-<N>/review-summary.json and
-      round-<N>/fixer-result.json, plus uat-result.json and genapi.patch there.
+      round-<N>/fixer-result.json, plus browser-verifier-receipt.json and genapi.patch there.
       Also read, when present: reader-audit-result.json and accept-residuals.txt.
       Write a pull-request body in markdown to pr-body.md in that directory with
       exactly these sections:
@@ -795,7 +1129,7 @@ nodes:
       it: Residuals human-accepted: <its contents> — and then lists the final
       round's "advisory" AND "incomplete" entries verbatim.
       Mention verification evidence: typecheck, lint, vitest, SSR curl smoke, and
-      agent-browser acceptance run (screenshot in run artifacts).
+      controller Playwright browser receipt (screenshot and trace digests in run artifacts).
       If no runtime impact beyond the web feature, the monitoring section must say exactly:
       "No additional operational monitoring required."
       No co-author or attribution lines. End with the single line: PRBODY_WRITTEN
@@ -827,10 +1161,12 @@ nodes:
     maxBudgetUsd: 2
     timeout: 600000
     prompt: |
+      If feature-result.json declares NO_CHANGE, report verified baseline acceptance
+      with no PR. Do not fabricate a PR URL, commit, deployment, or shipped change.
       You are the final-report node: the last thing a human sees from this run,
       so show, do not tell. Ask no questions.
       Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
-      Read there: pr-url.txt, worktrees.json, genapi.patch, uat-result.json,
+      Read there: pr-url.txt, worktrees.json, genapi.patch, browser-verifier-receipt.json,
       round.txt, and each round-<N>/review-summary.json and
       round-<N>/fixer-result.json.
       Write a single self-contained run-report.html to that directory with these
@@ -844,7 +1180,7 @@ nodes:
       on the api PR, and a two-sentence plain-language summary.
       <!-- EVIDENCE --> Proof, not claims: embed the acceptance screenshot with
       <img src="uat-feature.png"> (same directory, relative path) captioned with
-      the three passed criteria from uat-result.json; beside it, a labeled chip
+      the passed criteria from browser-verifier-receipt.json; beside it, a labeled chip
       for the SSR smoke and one for the selective contract patch (accepted vs
       rejected hunk counts from the patch context if visible, else describe it).
       <!-- ROUNDS --> The review story: one row per round with its verdict and
@@ -865,10 +1201,12 @@ nodes:
     maxBudgetUsd: 2
     timeout: 600000
     prompt: |
+      If feature-result.json declares NO_CHANGE, report verified baseline acceptance
+      with no PR. Do not fabricate a PR URL, commit, deployment, or shipped change.
       You are the knowledge-capture node: compound what this run learned so the
       next feature build starts smarter. Ask no questions.
       Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
-      Read there: pr-url.txt, genapi.patch, uat-result.json, round.txt, and each
+      Read there: pr-url.txt, genapi.patch, browser-verifier-receipt.json, round.txt, and each
       round-<N>/review-summary.json and round-<N>/fixer-result.json.
 
       Write EXACTLY ONE new markdown file into
@@ -896,7 +1234,7 @@ nodes:
     bash: |
       set -euo pipefail
       if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-kb-capture-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-kb-capture-gate.out" >&2); fi
-      KB=/Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb
+      KB="/Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb"
       git -C "$KB" status --porcelain | sort > "$ARTIFACTS_DIR/kb-post-capture.txt"
       NEW=$(comm -13 "$ARTIFACTS_DIR/kb-pre-porcelain.txt" "$ARTIFACTS_DIR/kb-post-capture.txt" || true)
       OTHER=$(printf '%s\n' "$NEW" | grep -v "^?? wiki/change-history/" | grep -c . || true)
@@ -929,7 +1267,7 @@ nodes:
       echo "ARTIFACTS_DIR=$ARTIFACTS_DIR"
       cat "$ARTIFACTS_DIR/worktrees.json" 2>/dev/null || echo "no worktrees.json"
       cat "$ARTIFACTS_DIR/pr-url.txt" 2>/dev/null || echo "PR=NOT_CREATED"
-      cat "$ARTIFACTS_DIR/uat-result.json" 2>/dev/null || echo "no uat result"
+      cat "$ARTIFACTS_DIR/browser-verifier-receipt.json" 2>/dev/null || echo "no browser verifier receipt"
       # show-me: open the evidence report for the human when it exists. Print the
       # path either way — xdg-open/open may be absent (or be openvt(1) on Linux).
       if [ -s "$ARTIFACTS_DIR/run-report.html" ]; then

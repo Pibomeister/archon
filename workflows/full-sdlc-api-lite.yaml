@@ -15,7 +15,7 @@ nodes:
   timeout: 300000
   bash: |
     set -euo pipefail
-    SK=/Users/eduardopicazo/Documents/Workspace/Goodword/.claude/skills
+    SK="/Users/eduardopicazo/Documents/Workspace/Goodword/.claude/skills"
     test -f "$SK/ce-code-review/SKILL.md" || { echo "PREFLIGHT=FAIL staged ce-code-review missing"; exit 1; }
     test -f "$SK/ce-doc-review/SKILL.md"  || { echo "PREFLIGHT=FAIL staged ce-doc-review missing"; exit 1; }
     # Dual contract: CE 3.2.0 carries the markers in SKILL.md; newer CE moved
@@ -144,20 +144,29 @@ nodes:
   bash: |
     set -euo pipefail
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-bootstrap.out") 2> >(tee -a "$ARTIFACTS_DIR/node-bootstrap.out" >&2); fi
-    API=/Users/eduardopicazo/Documents/Workspace/Goodword/api
+    # REPO_DIR must come AFTER params-env: $REPO does not exist before it.
     eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
-    git -C "$API" fetch origin main
+    REPO_DIR="/Users/eduardopicazo/Documents/Workspace/Goodword/$REPO"
+    git -C "$REPO_DIR" fetch origin main
     if [ -d "$WT" ]; then
       test "$(git -C "$WT" branch --show-current)" = "$BR" || { echo "BOOTSTRAP=FAIL existing worktree on wrong branch"; exit 1; }
       echo "BOOTSTRAP=ADOPTED"
     else
-      git -C "$API" worktree add "$WT" -b "$BR" origin/main
+      git -C "$REPO_DIR" worktree add "$WT" -b "$BR" origin/main
       echo "BOOTSTRAP=CREATED"
     fi
-    cp "$API/.env" "$WT/.env"
-    cd "$WT" && bun install --frozen-lockfile >/dev/null
+    # Seeding the worktree's env is REQUIRED for a repo that declares a source
+    # and skipped only for one that declares none. Keyed on the profile, not on
+    # whether the file happens to exist: `cp` failing for api must stay fatal.
+    if [ -n "$ENV_SRC" ]; then
+      cp "$REPO_DIR/$ENV_SRC" "$WT/$ENV_SRC"
+    fi
+    cd "$WT" && "${CMD_INSTALL[@]}" >/dev/null
     git -C "$WT" rev-parse HEAD > "$ARTIFACTS_DIR/bootstrap-head.txt"
-    printf '{"api_worktree":"%s","branch":"%s"}\n' "$WT" "$BR" > "$ARTIFACTS_DIR/worktrees.json"
+    # api_worktree is the key archon-run.py:2054 and resolve-web-params.sh:75
+    # read; it keeps its name. "repo" is additive so the artifact stops
+    # implying every run targets api.
+    printf '{"api_worktree":"%s","branch":"%s","repo":"%s"}\n' "$WT" "$BR" "$REPO" > "$ARTIFACTS_DIR/worktrees.json"
     echo "WORKTREE=$WT BRANCH=$BR HEAD=$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")"
 - id: ralplan
   depends_on:
@@ -615,6 +624,10 @@ nodes:
     directory (you are NOT cwd'd there; cd for every command).
 
     Scope: change only API files listed in files-allowlist.json. Do not refactor adjacent code or touch web-app.
+    SINGLE-REPO RUNS: when params.json's "repo" is not "api", the two sentences
+    above are scoped to api runs. files-allowlist.json is then the entire scope,
+    its paths are relative to that repository's root, and there is no web-app
+    prong to avoid. Use that repository's own commands, listed below.
     Do not edit the plan file. Do not create commits — a later node commits.
     Do not create branches or worktrees — you are already on the correct branch.
     If the unit's work already exists and satisfies Verification, say so and stop;
@@ -632,12 +645,35 @@ nodes:
     schemas. TypeScript strict; no `any`; unit specs live in `__tests__/` dirs.
     </repo-conventions>
 
+    <repo-conventions repo="goodword-mcp">
+    Use this block INSTEAD of the api one when params.json's "repo" is
+    "goodword-mcp". params.json is authoritative; do not mix the two.
+    Package manager: pnpm@10.12.1 (never bun). Node 20 — the system default is
+    newer, so prefix every command with `mise x node@20 --`.
+    Typecheck: `mise x node@20 -- pnpm exec tsc --noEmit`. There is NO `typecheck`
+    script; `build` is `tsc && copy-static-assets`, so --noEmit IS the typecheck.
+    Lint: THERE IS NONE. Do not invent one, and do not list one under Verification.
+    Unit tests: `mise x node@20 -- pnpm test:unit` for the whole suite. For a
+    pattern, the gate runs the full form with NODE_OPTIONS: jest is configured as
+    ts-jest/presets/default-esm, and without
+    `NODE_OPTIONS=--experimental-vm-modules` every suite dies with "Cannot use
+    import statement outside a module" — a failure that looks like a broken test.
+    Test files are `*.unit.test.ts` under `tests/` or `src/**/__tests__/`.
+    `*.e2e.test.ts` and `*.smoke.test.ts` need a live API and a token; the gate
+    excludes them and this node must not run them.
+    Transport is httpStream at /mcp with WorkOS bearer auth. TypeScript strict.
+    </repo-conventions>
+
     Before finishing, write a ONE-LINE conventional commit message for this
     change (feat|fix(scope): description — no body, no attribution) to
     commit-msg.txt in the artifacts directory. A later node commits with it.
 
     Done when: every item under Verification is satisfied and the three Verification
-    commands exit 0 in the working tree, and commit-msg.txt exists. Report the
+    commands exit 0 in the working tree, and commit-msg.txt exists.
+    "Three" is the api count. For any other repo the count is whatever the plan's
+    Verification section lists for that repository — two where there is no lint —
+    and the requirement is that EVERY listed command exits 0, not that there are
+    three of them. Report the
     exact commands you ran and their exit status. This is an unattended
     pipeline invocation; ask no questions.
 - id: gate-tests
@@ -650,8 +686,15 @@ nodes:
     eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
     cd "$WT"
     rm -rf .omc   # runtime-state leakage guard: any .omc here is session contamination, never work product
-    bun run typecheck || { echo "GATE_TESTS=FAIL typecheck"; exit 1; }
-    bun run lint || { echo "GATE_TESTS=FAIL lint"; exit 1; }
+    "${CMD_TYPECHECK[@]}" || { echo "GATE_TESTS=FAIL typecheck"; exit 1; }
+    # A repo with no lint script declares an EMPTY CMD_LINT. Saying so out loud
+    # is the point: a silently skipped lint is indistinguishable from a passing
+    # one, and this gate's PASS would then be claiming evidence it never got.
+    if [ "${#CMD_LINT[@]}" -gt 0 ]; then
+      "${CMD_LINT[@]}" || { echo "GATE_TESTS=FAIL lint"; exit 1; }
+    else
+      echo "GATE_TESTS_LINT=NOT_APPLICABLE ($REPO declares no lint command)"
+    fi
     # Materialize the patterns first (same reason as deslop-recheck): piping the
     # extractor straight into the loop puts it in a subshell whose exit code the
     # loop never sees, so a verify.json that fails to parse — or that carries an
@@ -665,9 +708,16 @@ nodes:
       || { echo "GATE_TESTS=FAIL verify.json yielded no patterns"; exit 1; }
     while IFS= read -r PAT; do
       test -n "$PAT" || continue
-      bun run test -- "$PAT" || { echo "GATE_TESTS=FAIL unit pattern=$PAT"; exit 1; }
+      "${CMD_TEST[@]}" "$PAT" || { echo "GATE_TESTS=FAIL unit pattern=$PAT"; exit 1; }
     done < "$ARTIFACTS_DIR/gate-tests-patterns.txt"
-    test -n "$(git status --porcelain)" || { echo "GATE_TESTS=FAIL no changes produced"; exit 1; }
+    BASE=$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")
+    CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$|^ M pnpm-lock\.yaml$|^\?\? pnpm-lock\.yaml$' || true)
+    if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- . ':(exclude)pnpm-lock.yaml'; then
+      printf '{"outcome":"NO_CHANGE","repo":"%s","basis":"baseline-to-candidate content","baseline":"%s","head":"%s","pr_url":null}\n' "$REPO" "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
+      echo "GATE_TESTS=PASS outcome=NO_CHANGE"
+      exit 0
+    fi
+    printf '{"outcome":"CHANGED","repo":"%s","basis":"baseline-to-candidate content","baseline":"%s","head":"%s"}\n' "$REPO" "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
     test -s "$ARTIFACTS_DIR/commit-msg.txt" || { echo "GATE_TESTS=FAIL no commit-msg.txt from implement"; exit 1; }
     # Scope guard: catch implement-node creep before the first review round.
     python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py \
@@ -685,6 +735,13 @@ nodes:
     cd "$WT"
     MSG=$(head -1 "$ARTIFACTS_DIR/commit-msg.txt" 2>/dev/null || true)
     test -n "$MSG" || MSG="feat(api): $SLUG"
+    BASE=$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")
+    CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$|^ M pnpm-lock\.yaml$|^\?\? pnpm-lock\.yaml$' || true)
+    if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- . ':(exclude)pnpm-lock.yaml'; then
+      printf '{"outcome":"NO_CHANGE","repo":"%s","basis":"baseline-to-candidate content","baseline":"%s","head":"%s","pr_url":null}\n' "$REPO" "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
+      echo "COMMIT_IMPL=SKIP outcome=NO_CHANGE"
+      exit 0
+    fi
     python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
     git diff --cached --name-only
     if git diff --cached --quiet; then echo "COMMIT_IMPL=SKIP already committed"; else git commit -m "$MSG"; fi
@@ -1059,7 +1116,7 @@ nodes:
     test -s "$ARTIFACTS_DIR/exit-patterns.txt" || { echo "EXIT_GATE=FAIL verify.json yielded no patterns"; exit 1; }
     while IFS= read -r PAT; do
       test -n "$PAT" || continue
-      bun run test -- "$PAT" >/dev/null || { echo "EXIT_GATE=FAIL post-fix unit tests pattern=$PAT"; exit 1; }
+      "${CMD_TEST[@]}" "$PAT" >/dev/null || { echo "EXIT_GATE=FAIL post-fix unit tests pattern=$PAT"; exit 1; }
     done < "$ARTIFACTS_DIR/exit-patterns.txt"
     echo "EXIT_GATE=PASS"
 - id: lite-envelope-final
@@ -1083,6 +1140,14 @@ nodes:
     set -uo pipefail
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-smoke.out") 2> >(tee -a "$ARTIFACTS_DIR/node-smoke.out" >&2); fi
     eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+    # Gated on the repo's DECLARED capability, never on an empty $APIPORT: a
+    # port that failed to allocate for a smoke-bearing repo must stay a hard
+    # failure at preflight, not become a silent skip here. prbody reads this
+    # file verbatim, so the typed line is what reaches the PR.
+    if [ -z "$HAS_SMOKE" ]; then
+      echo "SMOKE=NOT_APPLICABLE ($REPO declares no boot smoke)" | tee "$ARTIFACTS_DIR/smoke-result.txt"
+      exit 0
+    fi
     cd "$WT"
     # port_pids: lsof -> ss -> fuser (lsof is often absent on Linux). rc 1 only
     # when no backend exists at all.
@@ -1209,6 +1274,8 @@ nodes:
   maxBudgetUsd: 2
   timeout: 600000
   prompt: |
+    If feature-result.json declares NO_CHANGE, report verified baseline acceptance
+    with no PR. Do not fabricate a PR URL, commit, deployment, or shipped change.
     You are the final-report node: the last thing a human sees from this run,
     so show, do not tell. Ask no questions.
     Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
@@ -1244,6 +1311,8 @@ nodes:
   maxBudgetUsd: 2
   timeout: 600000
   prompt: |
+    If feature-result.json declares NO_CHANGE, report verified baseline acceptance
+    with no PR. Do not fabricate a PR URL, commit, deployment, or shipped change.
     You are the knowledge-capture node: compound what this run learned so the
     next feature build starts smarter. Ask no questions.
     Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
@@ -1275,7 +1344,7 @@ nodes:
   bash: |
     set -euo pipefail
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-kb-capture-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-kb-capture-gate.out" >&2); fi
-    KB=/Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb
+    KB="/Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb"
     git -C "$KB" status --porcelain | sort > "$ARTIFACTS_DIR/kb-post-capture.txt"
     NEW=$(comm -13 "$ARTIFACTS_DIR/kb-pre-porcelain.txt" "$ARTIFACTS_DIR/kb-post-capture.txt" || true)
     OTHER=$(printf '%s\n' "$NEW" | grep -v "^?? wiki/change-history/" | grep -c . || true)

@@ -19,7 +19,7 @@ nodes:
   bash: |
     set -euo pipefail
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-preflight.out") 2> >(tee -a "$ARTIFACTS_DIR/node-preflight.out" >&2); fi
-    ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+    ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
     if [ -n "${ARCHON_BUGFIX_CONTINUATION_SEED:-}" ]; then
       python3 "$ROOT/.archon/setup/archon-run.py" import-continuation --artifacts "$ARTIFACTS_DIR"
     fi
@@ -298,7 +298,7 @@ nodes:
   bash: |
     set -uo pipefail
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-evidence-cheap.out") 2> >(tee -a "$ARTIFACTS_DIR/node-evidence-cheap.out" >&2); fi
-    ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+    ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
     EV="$ARTIFACTS_DIR/evidence"; mkdir -p "$EV"
     EP="$ARTIFACTS_DIR/evidence-plan.json"
     : > "$EV/cheap.status"
@@ -802,7 +802,7 @@ nodes:
   bash: |
     set -euo pipefail
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-rca-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-rca-gate.out" >&2); fi
-    ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+    ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
     AD="$ARTIFACTS_DIR"
     # rca-reassess may revise the ASSESSMENT after retrieval; the DIAGNOSIS is
     # not its to touch. probe-run checkpointed the six frozen artifacts.
@@ -1270,7 +1270,7 @@ nodes:
   timeout: 120000
   bash: |
     set -euo pipefail
-    ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+    ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
     python3 "$ROOT/.archon/setup/bugfix-contract.py" write-lite-approval-manifest --artifacts "$ARTIFACTS_DIR"
     RID="$(basename "$ARTIFACTS_DIR")"
     test -n "${ARCHON_BUGFIX_CHAIN_STATE-}" || { echo "LITE_ATTESTATION=FAIL no chain state"; exit 1; }
@@ -1326,7 +1326,7 @@ nodes:
   timeout: 120000
   bash: |
     set -euo pipefail
-    ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+    ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
     RID="$(basename "$ARTIFACTS_DIR")"
     test -n "${ARCHON_BUGFIX_CHAIN_STATE-}" || { echo "POST_APPROVAL=FAIL no chain state"; exit 1; }
     test -n "${ARCHON_ATTESTATION_DIR-}" || { echo "POST_APPROVAL=FAIL no attestation dir"; exit 1; }
@@ -1431,7 +1431,7 @@ nodes:
   bash: |
     set -euo pipefail
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-bind-repo.out") 2> >(tee -a "$ARTIFACTS_DIR/node-bind-repo.out" >&2); fi
-    ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+    ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
     python3 "$ROOT/.archon/setup/bind-repo.py" \
       "$ARTIFACTS_DIR/params.json" "$ARTIFACTS_DIR/repo.json" "$ROOT"
     # Belt: bind-repo.py already refuses "both"; assert the binding landed.
@@ -1443,7 +1443,7 @@ nodes:
   bash: |
     set -euo pipefail
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-bootstrap.out") 2> >(tee -a "$ARTIFACTS_DIR/node-bootstrap.out" >&2); fi
-    ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+    ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
     REPO=$(cat "$ARTIFACTS_DIR/repo.txt")
     eval "$(bash "$ROOT/.archon/setup/params-env.sh" "$ARTIFACTS_DIR/params.json")"
     BASE="$ROOT/$REPO"
@@ -1523,7 +1523,7 @@ nodes:
   timeout: 1200000
   bash: |
     set -euo pipefail
-    ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+    ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
     SETUP="$ROOT/.archon/setup"
     python3 "$SETUP/repo-policy.py" validate-plan --root "$ROOT" --artifacts "$ARTIFACTS_DIR" \
       || { echo "RED_GATE=FAIL repository policy"; exit 1; }
@@ -1564,7 +1564,7 @@ nodes:
   bash: |
     set -euo pipefail
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-commit-red.out") 2> >(tee -a "$ARTIFACTS_DIR/node-commit-red.out" >&2); fi
-    ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+    ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
     eval "$(bash "$ROOT/.archon/setup/params-env.sh" "$ARTIFACTS_DIR/params.json")"
     REPO=$(cat "$ARTIFACTS_DIR/repo.txt")
     TESTF=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1], encoding='utf-8'))['test_file'])" "$ARTIFACTS_DIR/failing-test.json")
@@ -1667,7 +1667,7 @@ nodes:
         # Exits 0 whatever the tests say: fix-converge owns the verdict. This
         # node only measures and writes attempt-N/green.json. The one exit 1 is
         # a corrupt fix-attempt.txt (GREEN_CHECK=FAIL), which would misroute green.json.
-        ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+        ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
         SETUP="$ROOT/.archon/setup"
         N=$(cat "$ARTIFACTS_DIR/fix-attempt.txt"); ADN="$ARTIFACTS_DIR/attempt-$N"
         case "$N" in ''|*[!0-9]*) echo "GREEN_CHECK=FAIL fix-attempt.txt is not an integer: [$N]"; exit 1 ;; esac
@@ -1742,7 +1742,7 @@ nodes:
       timeout: 300000
       bash: |
         set -uo pipefail
-        ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+        ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
         N=$(cat "$ARTIFACTS_DIR/fix-attempt.txt"); ADN="$ARTIFACTS_DIR/attempt-$N"
         case "$N" in ''|*[!0-9]*) echo "GREEN_GATE=FAIL fix-attempt.txt is not an integer: [$N]"; exit 1 ;; esac
         exec > >(tee "$ADN/converge.txt") 2>&1
@@ -1779,7 +1779,7 @@ nodes:
   timeout: 1200000
   bash: |
     set -euo pipefail
-    ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+    ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
     eval "$(bash "$ROOT/.archon/setup/params-env.sh" "$ARTIFACTS_DIR/params.json")"
     bash "$ROOT/.archon/setup/negcontrol.sh" "$WT" "$(cat "$ARTIFACTS_DIR/red-sha.txt")" "$ARTIFACTS_DIR" postgreen
 - id: review-loop
@@ -2060,7 +2060,7 @@ nodes:
         N=$(cat "$ARTIFACTS_DIR/round.txt"); RD="$ARTIFACTS_DIR/round-$N"
         case "$N" in ''|*[!0-9]*) echo "CONVERGE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
         exec > >(tee "$RD/converge.txt") 2>&1
-        SETUP=/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup
+        SETUP="/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup"
         eval "$(bash "$SETUP/params-env.sh" "$ARTIFACTS_DIR/params.json")"
         cd "$WT"
         # Bugfix-lane hard stop: the repro test is frozen after RED.
@@ -2121,7 +2121,7 @@ nodes:
   bash: |
     set -euo pipefail
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-exit-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-exit-gate.out" >&2); fi
-    ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+    ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
     SETUP="$ROOT/.archon/setup"
     eval "$(bash "$SETUP/params-env.sh" "$ARTIFACTS_DIR/params.json")"
     REPO=$(cat "$ARTIFACTS_DIR/repo.txt")
@@ -2362,7 +2362,7 @@ nodes:
   bash: |
     set -euo pipefail
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-ship.out") 2> >(tee -a "$ARTIFACTS_DIR/node-ship.out" >&2); fi
-    ROOT=/Users/eduardopicazo/Documents/Workspace/Goodword
+    ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
     eval "$(bash "$ROOT/.archon/setup/params-env.sh" "$ARTIFACTS_DIR/params.json")"
     REPO=$(cat "$ARTIFACTS_DIR/repo.txt")
     test "$(git -C "$WT" rev-parse --abbrev-ref HEAD)" = "$BR"

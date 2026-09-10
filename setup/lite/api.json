@@ -250,7 +250,8 @@
     },
     "gate-tests": {
       "produces": [
-        "gate-tests-patterns.txt"
+        "gate-tests-patterns.txt",
+        "feature-result.json"
       ],
       "consumes": [
         "params.json",

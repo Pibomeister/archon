@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from unittest import mock
 
@@ -209,7 +210,9 @@ def _mkrepo(path, files=None):
     """A throwaway one-commit repo, built with ambient git config cut out."""
     path.mkdir(parents=True, exist_ok=True)
     env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null",
-           "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+           "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
+           "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z",
+           "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z"}
 
     def g(*args):
         subprocess.run(["git", "-C", str(path), *args], check=True,
@@ -317,6 +320,15 @@ class AmbientGitConfigIsolation(unittest.TestCase):
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+
+    def test_fixture_commit_does_not_inherit_ambient_dates(self):
+        commits = []
+        for index, date in enumerate(("2010-01-01T00:00:00Z", "2020-01-01T00:00:00Z")):
+            repo = self.fake / f"fixture-{index}"
+            with patch.dict(os.environ, {"GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date}):
+                _mkrepo(repo)
+            commits.append(subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip())
+        self.assertEqual(commits[0], commits[1])
 
     def test_worktree_row_names_a_path_the_ambient_excludes_file_hides(self):
         """The F2 probe proper: content is FIXED, so only the worktree row can

@@ -1,5 +1,5 @@
 set -euo pipefail
-SK=/Users/eduardopicazo/Documents/Workspace/Goodword/.claude/skills
+SK="/Users/eduardopicazo/Documents/Workspace/Goodword/.claude/skills"
 test -f "$SK/ce-code-review/SKILL.md" || { echo "PREFLIGHT=FAIL staged ce-code-review missing"; exit 1; }
 test -f "$SK/ce-doc-review/SKILL.md"  || { echo "PREFLIGHT=FAIL staged ce-doc-review missing"; exit 1; }
 # Dual contract: CE 3.2.0 carries the markers in SKILL.md; newer CE moved

@@ -28,6 +28,7 @@ class BugfixGraphOrderTest(unittest.TestCase):
   self.assertEqual(nodes['rca-plan-loop']['depends_on'],['proof-manifest-gate'])
   self.assertEqual(nodes['approval-manifest-gate']['depends_on'],['rca-plan-shape'])
   self.assertEqual(nodes['rca-render']['depends_on'],['approval-manifest-gate'])
+  self.assertEqual(nodes['rca-approval']['depends_on'],['rca-render-gate'])
   self.assertEqual(nodes['post-approval-integrity']['depends_on'],['rca-approval'])
   self.assertEqual(nodes['bind-repo']['depends_on'],['post-approval-integrity'])
   self.assertNotIn('bash -c',nodes['experiment-run']['bash'])

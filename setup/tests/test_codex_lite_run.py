@@ -275,13 +275,14 @@ class CodexLiteRun(unittest.TestCase):
                 "--control-dir", str(self.root / "control"),
                 "run", "bugfix-lite-codex", str(spec_path)]
         with mock.patch.object(sys, "argv", argv), \
+             mock.patch.object(clr, "DEFAULT_CONTROL_DIR", self.root / "control"), \
              mock.patch.object(clr, "ensure_environment"), \
+             mock.patch.object(clr, "stage_private_codex_skills"), \
              mock.patch.object(clr, "detached", return_value=(123, 456)), \
              mock.patch.object(clr, "process_fingerprint", return_value="launcher-fp"), \
              mock.patch.object(clr, "wait_for_run_id", side_effect=SystemExit(1)), \
              mock.patch.object(clr, "terminate_group") as terminate, \
-             mock.patch.dict(os.environ, {"CODEX_LITE_LOG_DIR": str(self.root / "logs"),
-                                          "CODEX_LITE_SKIP_ENV_CHECKS": "1"}):
+             mock.patch.dict(os.environ, {"CODEX_LITE_LOG_DIR": str(self.root / "logs")}):
             with self.assertRaises(SystemExit):
                 clr.main()
         terminate.assert_called_once_with(456, expected_fingerprint="launcher-fp")
@@ -297,13 +298,14 @@ class CodexLiteRun(unittest.TestCase):
                 "--control-dir", str(control_dir),
                 "approve", "cafebabe99", "--token", "valid-token"]
         with mock.patch.object(sys, "argv", argv), \
+             mock.patch.object(clr, "DEFAULT_CONTROL_DIR", control_dir), \
              mock.patch.object(clr, "ensure_environment"), \
+             mock.patch.object(clr, "stage_private_codex_skills"), \
              mock.patch.object(clr, "detached", side_effect=[(123, 456), (789, 987)]), \
              mock.patch.object(clr, "process_fingerprint", side_effect=["launcher-fp", "watchdog-fp"]), \
              mock.patch.object(clr, "wait_for_watchdog_arm", side_effect=SystemExit(1)), \
              mock.patch.object(clr, "terminate_group") as terminate, \
-             mock.patch.dict(os.environ, {"CODEX_LITE_LOG_DIR": str(self.root / "logs"),
-                                          "CODEX_LITE_SKIP_ENV_CHECKS": "1"}):
+             mock.patch.dict(os.environ, {"CODEX_LITE_LOG_DIR": str(self.root / "logs")}):
             with self.assertRaises(SystemExit):
                 clr.main()
         self.assertEqual(terminate.call_args_list, [
@@ -352,12 +354,16 @@ class CodexLiteRun(unittest.TestCase):
         killpg.assert_not_called()
 
     def test_check_mode_is_available_without_launch(self):
-        env = dict(os.environ, CODEX_LITE_SKIP_ENV_CHECKS="1")
-        r = subprocess.run([sys.executable, str(SCRIPT), "--control-dir",
-                            str(self.root / "control"), "check"],
-                           capture_output=True, encoding="utf-8", env=env)
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("CODEX_LITE_RUN=READY", r.stdout)
+        control_dir = self.root / "control"
+        argv = [str(SCRIPT), "--control-dir", str(control_dir), "check"]
+        out = io.StringIO()
+        with mock.patch.object(sys, "argv", argv), \
+             mock.patch.object(clr, "DEFAULT_CONTROL_DIR", control_dir), \
+             mock.patch.object(clr, "ensure_environment"), \
+             mock.patch.object(clr, "stage_private_codex_skills"), \
+             contextlib.redirect_stdout(out):
+            self.assertIsNone(clr.main())
+        self.assertIn("CODEX_LITE_RUN=READY", out.getvalue())
 
     def test_guarded_run_arms_then_abandon_kills_exact_groups(self):
         fake_archon = self.root / "fake-archon.py"
@@ -405,21 +411,24 @@ else:
             os.environ,
             HOME=str(self.root / "home"),
             ARCHON_BIN=str(fake_archon),
-            CODEX_LITE_SKIP_ENV_CHECKS="1",
             CODEX_LITE_LOG_DIR=str(self.root / "logs"),
             FAKE_OUTPUT=str(self.root / "out"),
         )
         control_dir = self.root / "home/.archon/control/codex-lite"
-        base = [sys.executable, str(SCRIPT), "--db", str(self.db),
+        base = [str(SCRIPT), "--db", str(self.db),
                 "--codex-home", str(self.root / "codex-home"),
                 "--control-dir", str(control_dir)]
-        started = subprocess.run(
-            [*base, "run", "bugfix-lite-codex", str(spec_path)],
-            capture_output=True, encoding="utf-8", env=env, timeout=20,
-        )
-        self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
-        self.assertIn("CODEX_LITE_RUN=STARTED", started.stdout)
-        token = started.stdout.split("control_token=", 1)[1].split()[0]
+        out = io.StringIO()
+        with mock.patch.object(sys, "argv", [*base, "run", "bugfix-lite-codex", str(spec_path)]), \
+             mock.patch.object(clr, "DEFAULT_CONTROL_DIR", control_dir), \
+             mock.patch.object(clr, "ensure_environment"), \
+             mock.patch.object(clr, "stage_private_codex_skills"), \
+             mock.patch.dict(os.environ, env, clear=False), \
+             contextlib.redirect_stdout(out):
+            self.assertIsNone(clr.main())
+        started_stdout = out.getvalue()
+        self.assertIn("CODEX_LITE_RUN=STARTED", started_stdout)
+        token = started_stdout.split("control_token=", 1)[1].split()[0]
         row = clr.resolve_run(self.db, run_id)
         control = clr.read_control_state(row, control_dir)
         state_path = clr.control_state_path(row, control_dir)
@@ -432,12 +441,15 @@ else:
         self.assertNotIn("launcher_pgid", public)
         self.assertNotIn("control_token_hash", public)
 
-        abandoned = subprocess.run(
-            [*base, "abandon", run_id, "--token", token],
-            capture_output=True, encoding="utf-8", env=env, timeout=20,
-        )
-        self.assertEqual(abandoned.returncode, 0, abandoned.stdout + abandoned.stderr)
-        self.assertIn("CODEX_LITE_RUN=ABANDONED", abandoned.stdout)
+        out = io.StringIO()
+        with mock.patch.object(sys, "argv", [*base, "abandon", run_id, "--token", token]), \
+             mock.patch.object(clr, "DEFAULT_CONTROL_DIR", control_dir), \
+             mock.patch.object(clr, "ensure_environment"), \
+             mock.patch.object(clr, "stage_private_codex_skills"), \
+             mock.patch.dict(os.environ, env, clear=False), \
+             contextlib.redirect_stdout(out):
+            self.assertIsNone(clr.main())
+        self.assertIn("CODEX_LITE_RUN=ABANDONED", out.getvalue())
         self.assertEqual(clr.status_for_run(self.db, run_id), "cancelled")
         for pgid in (control["watchdog_pgid"], control["launcher_pgid"]):
             self.assertFalse(self._pgid_exists(pgid), f"process group {pgid} survived abandon")

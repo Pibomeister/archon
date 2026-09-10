@@ -1,0 +1,15 @@
+{
+  "required": [
+    {
+      "assertions": [
+        {
+          "type": "text",
+          "value": "Feature"
+        }
+      ],
+      "criterion": "Feature is visible on the target page.",
+      "id": "browser-1",
+      "path": "/feature"
+    }
+  ]
+}

@@ -386,8 +386,6 @@ def write_capabilities(artifacts: Path, caps: dict) -> Path:
 def ensure_environment(root: Path, codex_home: Path, registry_path: Path,
                        lane: str | None = None, baseline: dict | None = None,
                        *, check_ports: bool = True) -> None:
-    if os.environ.get("CODEX_LITE_SKIP_ENV_CHECKS") == "1":
-        return
     for tool in (os.environ.get("ARCHON_BIN", "archon"), "codex", "sqlite3", "git", "gh", "bun", "node", "pnpm", "mise"):
         if not (Path(tool).is_file() if "/" in tool else shutil.which(tool)):
             fail(f"required tool not found: {tool}")
@@ -561,18 +559,16 @@ def ensure_control_dir(control_dir: Path) -> None:
         fail(f"private control path is not a real directory: {control_dir}")
     if info.st_uid != os.getuid() or info.st_mode & 0o077:
         fail(f"private control directory must be owned by this user and mode 0700: {control_dir}")
-    if os.environ.get("CODEX_LITE_SKIP_ENV_CHECKS") != "1":
-        try:
-            control_dir.resolve().relative_to(ROOT.resolve())
-        except ValueError:
-            pass
-        else:
-            fail("private control directory must be outside the AI-writable workspace")
+    try:
+        control_dir.resolve().relative_to(ROOT.resolve())
+    except ValueError:
+        pass
+    else:
+        fail("private control directory must be outside the AI-writable workspace")
 
 
 def validate_control_location(control_dir: Path) -> None:
-    if (os.environ.get("CODEX_LITE_SKIP_ENV_CHECKS") != "1"
-            and control_dir.resolve() != DEFAULT_CONTROL_DIR.resolve()):
+    if control_dir.resolve() != DEFAULT_CONTROL_DIR.resolve():
         fail(f"production control state is fixed at {DEFAULT_CONTROL_DIR}")
     ensure_control_dir(control_dir)
 
@@ -1092,6 +1088,7 @@ def write_control_records(row: dict, control_dir: Path, control_token: str,
     feature_chain_id = os.environ.get("ARCHON_FEATURE_CHAIN_ID")
     feature_provider = os.environ.get("ARCHON_FEATURE_PROVIDER")
     feature_lane = os.environ.get("ARCHON_FEATURE_LANE")
+    feature_scope = os.environ.get("ARCHON_FEATURE_SCOPE", "fullstack")
     if feature_chain_id or feature_provider or feature_lane:
         if not (feature_chain_id and feature_provider and feature_lane):
             fail("feature control environment is incomplete")
@@ -1099,6 +1096,7 @@ def write_control_records(row: dict, control_dir: Path, control_token: str,
             "logical_chain_id": feature_chain_id,
             "provider": feature_provider,
             "lane": feature_lane,
+            "scope": feature_scope,
             "handoff": row.get("user_message"),
             "chain_state_path": str(feature_state_path(control_dir, feature_chain_id)),
         }
@@ -1648,16 +1646,39 @@ def maybe_finalize_feature_receipt(args: argparse.Namespace, row: dict, result: 
     if not isinstance(chain_id, str):
         fail("completed feature web run has malformed private chain state")
     state = read_feature_chain(args.control_dir, chain_id)
+    provider = state.get("provider")
+    expected_web_lane = FEATURE_LANES.get(provider, {}).get("web")
+    feature_scope = state.get("scope", "fullstack")
+    binding_checks = {
+        "control_provider": feature.get("provider") == provider,
+        "control_lane": feature.get("lane") == expected_web_lane,
+        "control_scope": feature.get("scope", "fullstack") == feature_scope,
+        "row_lane": row.get("workflow_name") == expected_web_lane,
+        "web_run_id": state.get("web_run_id") == row.get("id"),
+    }
+    failed_bindings = [name for name, ok in binding_checks.items() if not ok]
+    if failed_bindings:
+        fail("completed feature web run is not bound to private chain: " + ",".join(failed_bindings))
     if state.get("feature_receipt_sha256"):
         existing = artifact_dir(row) / "feature-chain-receipt.json"
         verify_feature_chain_receipt(args.control_dir, existing)
         return existing
+    if feature_scope == "web":
+        return write_standalone_web_receipt(args.control_dir, state, row, args.db)
+    if feature_scope != "fullstack":
+        fail("completed feature web run has invalid private feature scope")
     api_id = state.get("api_run_id")
     if not isinstance(api_id, str):
         fail("completed feature web run has no API run in private chain state")
     api_row = run_row_by_id(args.db, api_id)
     if not api_row:
         fail("completed feature web run cannot find API run for receipt")
+    verified_handoff = verify_feature_handoff(args.control_dir, handoff, provider, expected_web_lane)
+    if (
+        verified_handoff.get("logical_chain_id") != state["logical_chain_id"]
+        or verified_handoff.get("handoff_sha256") != state.get("api_handoff_sha256")
+    ):
+        fail("completed feature web run handoff is not bound to current private chain")
     return write_chain_receipt(args.control_dir, state, api_row, row, handoff, args.db)
 
 
@@ -1785,12 +1806,13 @@ def feature_state_path(control_dir: Path, chain_id: str) -> Path:
     return path / f"{chain_id}.json"
 
 
-def start_feature_chain(control_dir: Path, provider: str, spec: Path, baseline: dict) -> dict:
+def start_feature_chain(control_dir: Path, provider: str, spec: Path, baseline: dict, scope: str = "fullstack") -> dict:
     state = {
         "logical_chain_id": secrets.token_hex(16),
         "chain_secret": secrets.token_urlsafe(48),
         "kind": "feature",
         "provider": provider,
+        "scope": scope,
         "spec": str(spec),
         "spec_sha256": hashlib.sha256(spec.read_bytes()).hexdigest(),
         "api_run_id": None,
@@ -1853,6 +1875,101 @@ def sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def required_artifact_sha(ad: Path, name: str, label: str) -> str:
+    path = ad / name
+    if not path.is_file():
+        fail(f"{label} missing required approved artifact: {name}")
+    return sha256_file(path)
+
+
+def canonical_json_file_sha(path: Path, label: str) -> str:
+    if not path.is_file():
+        fail(f"{label} missing required approved artifact: {path.name}")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        fail(f"{label} {path.name} is not canonical JSON-readable: {exc}")
+    return hashlib.sha256(_canonical_json_bytes(data)).hexdigest()
+
+
+def required_browser_policy_sha(ad: Path, label: str) -> str:
+    policy = ad / "browser-evidence.json"
+    digest = canonical_json_file_sha(policy, label)
+    digest_path = ad / "browser-evidence.sha256"
+    if not digest_path.is_file():
+        fail(f"{label} missing required approved artifact: browser-evidence.sha256")
+    approved_text = digest_path.read_text(encoding="utf-8").strip()
+    approved = approved_text.split()[0] if approved_text else ""
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", approved) or approved.lower() != digest:
+        fail(f"{label} browser evidence policy digest mismatch")
+    return digest
+
+
+def repo_head(worktree: Path, label: str) -> str:
+    head = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+        capture_output=True,
+        encoding="utf-8",
+    )
+    if head.returncode != 0 or not COMMIT_RE.fullmatch(head.stdout.strip()):
+        fail(f"cannot capture {label} lane head SHA for feature receipt")
+    return head.stdout.strip()
+
+
+IGNORED_FEATURE_STATUS = ("?? .env", " M pnpm-lock.yaml", "?? pnpm-lock.yaml")
+
+
+def has_untracked_or_dirty_content(worktree: Path) -> bool:
+    status = subprocess.run(
+        ["git", "-C", str(worktree), "status", "--porcelain", "--untracked-files=all"],
+        capture_output=True,
+        encoding="utf-8",
+    )
+    if status.returncode != 0:
+        fail(f"cannot inspect feature worktree status: {status.stderr.strip()}")
+    lines = [line for line in status.stdout.splitlines() if line not in IGNORED_FEATURE_STATUS]
+    return bool(lines)
+
+
+def content_changed_since(worktree: Path, baseline: str | None, label: str) -> bool:
+    if not isinstance(baseline, str) or not COMMIT_RE.fullmatch(baseline):
+        fail(f"{label} lane missing baseline commit for content outcome")
+    result = subprocess.run(
+        ["git", "-C", str(worktree), "diff", "--quiet", baseline, "HEAD", "--", ".", ":(exclude)pnpm-lock.yaml"],
+        capture_output=True,
+        encoding="utf-8",
+    )
+    if result.returncode == 0:
+        return has_untracked_or_dirty_content(worktree)
+    if result.returncode == 1:
+        return True
+    fail(f"cannot compare {label} lane baseline-to-candidate content: {result.stderr.strip()}")
+
+
+def feature_outcome_for_worktree(worktree: Path, baseline: str | None, label: str) -> str:
+    return "CHANGED" if content_changed_since(worktree, baseline, label) else "NO_CHANGE"
+
+
+def read_bootstrap_head(ad: Path, label: str) -> str:
+    path = ad / "bootstrap-head.txt"
+    if not path.is_file():
+        fail(f"{label} lane missing bootstrap-head.txt for content outcome")
+    return path.read_text(encoding="utf-8").strip()
+
+
+def feature_scope_escalation(row: dict) -> dict | None:
+    ad = artifact_dir(row)
+    for name in ("feature-result.json", "scope-escalation.json"):
+        path = ad / name
+        if not path.is_file():
+            continue
+        data = read_json_file(path, name)
+        outcome = data.get("outcome") or data.get("status")
+        if outcome in {"NEEDS_CLARIFICATION", "SCOPE_ESCALATION"}:
+            return data
+    return None
+
+
 def signed_public_payload(payload: dict) -> dict:
     payload["handoff_sha256"] = hashlib.sha256(
         _canonical_json_bytes(feature_signed_body(payload))
@@ -1881,7 +1998,7 @@ def verify_public_handoff(
     ).hexdigest()
     if not isinstance(digest, str) or not hmac.compare_digest(digest, expected_digest):
         fail("feature API handoff SHA mismatch")
-    if data.get("kind") != "archon-feature-api-handoff" or data.get("schema_version") != 1:
+    if data.get("kind") != "archon-feature-api-handoff" or data.get("schema_version") not in {1, 2}:
         fail("feature API handoff has unknown schema")
     if expected_provider and data.get("provider") != expected_provider:
         fail("feature API handoff provider does not match requested provider")
@@ -1903,6 +2020,8 @@ def verify_feature_handoff(
     artifacts: Path | None = None,
 ) -> dict:
     data = verify_public_handoff(path, expected_provider)
+    if data.get("schema_version") != 2:
+        fail("feature API handoff v2 is required for web authorization")
     chain_id = data.get("logical_chain_id")
     if not isinstance(chain_id, str):
         fail("feature API handoff is missing logical chain id")
@@ -1937,14 +2056,24 @@ def verify_feature_handoff(
     plan = ad / "plan.md"
     if not plan.is_file() or sha256_file(plan) != data.get("shared_plan_sha256"):
         fail("feature shared plan hash mismatch")
-    for key, name in (
+    required_hashes = (
         ("files_allowlist_sha256", "files-allowlist.json"),
         ("web_files_allowlist_sha256", "web-files-allowlist.json"),
         ("verify_sha256", "verify.json"),
-    ):
+        ("premises_sha256", "premises.json"),
+        ("reader_audit_sha256", "reader-audit.json"),
+        ("web_premises_sha256", "web-premises.json"),
+        ("web_reader_audit_sha256", "web-reader-audit.json"),
+    )
+    browser_expected = data.get("browser_evidence_sha256")
+    if not isinstance(browser_expected, str):
+        fail("feature API handoff missing required artifact hash: browser_evidence_sha256")
+    if required_browser_policy_sha(ad, "feature API artifact") != browser_expected:
+        fail("feature API artifact hash mismatch: browser-evidence.json")
+    for key, name in required_hashes:
         expected_digest = data.get(key)
-        if expected_digest is None:
-            continue
+        if not isinstance(expected_digest, str):
+            fail(f"feature API handoff missing required artifact hash: {key}")
         fp = ad / name
         if not fp.is_file() or sha256_file(fp) != expected_digest:
             fail(f"feature API artifact hash mismatch: {name}")
@@ -1954,6 +2083,7 @@ def verify_feature_handoff(
         "logical_chain_id": chain_id,
         "api_run_id": data.get("api_run_id"),
         "api_head_sha": data.get("api_head_sha"),
+        "api_handoff_sha256": data.get("handoff_sha256"),
         "shared_plan_sha256": data.get("shared_plan_sha256"),
         "checks": comparisons | {"shared_plan": True, "api_artifacts": True},
     }
@@ -1977,6 +2107,13 @@ def api_handoff_from_run(control_dir: Path, state: dict, api_row: dict) -> Path:
         fail("api lane completed without plan.md")
     if not web_allowlist.is_file():
         fail("api lane completed without web-files-allowlist.json")
+    files_allowlist_sha = required_artifact_sha(ad, "files-allowlist.json", "api lane")
+    verify_sha = required_artifact_sha(ad, "verify.json", "api lane")
+    premises_sha = required_artifact_sha(ad, "premises.json", "api lane")
+    reader_audit_sha = required_artifact_sha(ad, "reader-audit.json", "api lane")
+    web_premises_sha = required_artifact_sha(ad, "web-premises.json", "api lane")
+    web_reader_audit_sha = required_artifact_sha(ad, "web-reader-audit.json", "api lane")
+    browser_evidence_sha = required_browser_policy_sha(ad, "api lane")
     api_worktree = Path(str(worktrees.get("api_worktree") or params.get("worktree")))
     head = subprocess.run(
         ["git", "-C", str(api_worktree), "rev-parse", "HEAD"],
@@ -1985,12 +2122,15 @@ def api_handoff_from_run(control_dir: Path, state: dict, api_row: dict) -> Path:
     )
     if head.returncode != 0 or not COMMIT_RE.fullmatch(head.stdout.strip()):
         fail("cannot capture API lane head SHA for feature handoff")
+    outcome = feature_outcome_for_worktree(api_worktree, read_bootstrap_head(ad, "api"), "api")
     pr_url_path = ad / "pr-url.txt"
     pr_url = pr_url_path.read_text(encoding="utf-8").strip() if pr_url_path.is_file() else ""
-    if not pr_url:
-        fail("api lane completed without pr-url.txt")
+    if outcome == "CHANGED" and not pr_url:
+        fail("changed api lane completed without pr-url.txt")
+    if outcome == "NO_CHANGE" and pr_url:
+        fail("no-change api lane must not fabricate pr-url.txt")
     payload = signed_public_payload({
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "archon-feature-api-handoff",
         "logical_chain_id": state["logical_chain_id"],
         "provider": state["provider"],
@@ -2001,19 +2141,19 @@ def api_handoff_from_run(control_dir: Path, state: dict, api_row: dict) -> Path:
         "api_worktree": str(api_worktree),
         "api_branch": params.get("branch"),
         "api_head_sha": head.stdout.strip(),
-        "api_pr_url": pr_url,
+        "api_pr_url": pr_url or None,
         "api_artifacts": str(ad),
+        "api_outcome": outcome,
         "baseline": state["baseline"],
         "shared_plan_sha256": sha256_file(plan),
-        "files_allowlist_sha256": (
-            sha256_file(ad / "files-allowlist.json")
-            if (ad / "files-allowlist.json").is_file()
-            else None
-        ),
+        "files_allowlist_sha256": files_allowlist_sha,
         "web_files_allowlist_sha256": sha256_file(web_allowlist),
-        "verify_sha256": (
-            sha256_file(ad / "verify.json") if (ad / "verify.json").is_file() else None
-        ),
+        "verify_sha256": verify_sha,
+        "premises_sha256": premises_sha,
+        "reader_audit_sha256": reader_audit_sha,
+        "web_premises_sha256": web_premises_sha,
+        "web_reader_audit_sha256": web_reader_audit_sha,
+        "browser_evidence_sha256": browser_evidence_sha,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     })
     payload["handoff_mac"] = feature_handoff_mac(state["chain_secret"], payload)
@@ -2026,7 +2166,8 @@ def api_handoff_from_run(control_dir: Path, state: dict, api_row: dict) -> Path:
         "api_handoff_mac": payload["handoff_mac"],
         "api_run_id": api_row["id"],
         "api_head_sha": payload["api_head_sha"],
-        "api_pr_url": pr_url,
+        "api_pr_url": pr_url or None,
+        "api_outcome": outcome,
     }
     state.update(private)
     write_feature_chain(control_dir, state)
@@ -2037,8 +2178,6 @@ def feature_run_pr_and_head(row: dict, label: str) -> dict:
     ad = artifact_dir(row)
     pr_url_path = ad / "pr-url.txt"
     pr_url = pr_url_path.read_text(encoding="utf-8").strip() if pr_url_path.is_file() else ""
-    if not pr_url:
-        fail(f"{label} lane completed without pr-url.txt")
     params = read_json_file(ad / "params.json", f"{label} params")
     worktrees_path = ad / "worktrees.json"
     worktrees = (
@@ -2054,14 +2193,18 @@ def feature_run_pr_and_head(row: dict, label: str) -> dict:
             or params.get("worktree")
         )
     )
-    head = subprocess.run(
-        ["git", "-C", str(worktree), "rev-parse", "HEAD"],
-        capture_output=True,
-        encoding="utf-8",
-    )
-    if head.returncode != 0 or not COMMIT_RE.fullmatch(head.stdout.strip()):
-        fail(f"cannot capture {label} lane head SHA for feature receipt")
-    return {"pr_url": pr_url, "head_sha": head.stdout.strip(), "worktree": str(worktree)}
+    head_sha = repo_head(worktree, label)
+    outcome = feature_outcome_for_worktree(worktree, read_bootstrap_head(ad, label), label)
+    if outcome == "CHANGED" and not pr_url:
+        fail(f"changed {label} lane completed without pr-url.txt")
+    if outcome == "NO_CHANGE" and pr_url:
+        fail(f"no-change {label} lane must not fabricate pr-url.txt")
+    return {
+        "pr_url": pr_url or None,
+        "head_sha": head_sha,
+        "worktree": str(worktree),
+        "outcome": outcome,
+    }
 
 
 def write_chain_receipt(
@@ -2073,6 +2216,10 @@ def write_chain_receipt(
     current_status = status_for_run(db, web_row["id"])
     if current_status and current_status != "completed":
         fail(f"feature chain receipt requires completed web run, got {current_status}")
+    api_escalation = feature_scope_escalation(api_row)
+    web_escalation = feature_scope_escalation(web_row)
+    if api_escalation or web_escalation:
+        fail("feature chain ended with NEEDS_CLARIFICATION or scope escalation")
     api_info = feature_run_pr_and_head(api_row, "api")
     web_info = feature_run_pr_and_head(web_row, "web")
     if (
@@ -2093,10 +2240,17 @@ def write_chain_receipt(
             "api_lane": api_row["workflow_name"],
             "api_pr_url": api_info["pr_url"],
             "api_head_sha": api_info["head_sha"],
+            "api_outcome": api_info["outcome"],
             "web_run_id": web_row["id"],
             "web_lane": web_row["workflow_name"],
             "web_pr_url": web_info["pr_url"],
             "web_head_sha": web_info["head_sha"],
+            "web_outcome": web_info["outcome"],
+            "overall_outcome": (
+                "NO_CHANGE"
+                if api_info["outcome"] == "NO_CHANGE" and web_info["outcome"] == "NO_CHANGE"
+                else "CHANGED"
+            ),
             "api_handoff": str(handoff),
             "api_handoff_sha256": state.get("api_handoff_sha256"),
             "baseline": state["baseline"],
@@ -2112,6 +2266,8 @@ def write_chain_receipt(
             "web_run_id": web_row["id"],
             "web_head_sha": web_info["head_sha"],
             "web_pr_url": web_info["pr_url"],
+            "api_outcome": api_info["outcome"],
+            "web_outcome": web_info["outcome"],
             "feature_receipt_sha256": receipt["receipt_sha256"],
             "feature_receipt_mac": receipt["receipt_mac"],
         }
@@ -2130,7 +2286,7 @@ def verify_feature_chain_receipt(control_dir: Path, path: Path) -> dict:
         fail("feature chain receipt SHA mismatch")
     if (
         receipt.get("kind") != "archon-feature-chain-receipt"
-        or receipt.get("schema_version") != 1
+        or receipt.get("schema_version") not in {1, 2}
     ):
         fail("feature chain receipt has unknown schema")
     chain_id = receipt.get("logical_chain_id")
@@ -2143,6 +2299,7 @@ def verify_feature_chain_receipt(control_dir: Path, path: Path) -> dict:
         fail("feature chain receipt MAC mismatch")
     comparisons = {
         "provider": receipt.get("provider") == state.get("provider"),
+        "scope": receipt.get("scope", "fullstack") == state.get("scope", "fullstack"),
         "spec": receipt.get("spec") == state.get("spec"),
         "spec_sha256": receipt.get("spec_sha256") == state.get("spec_sha256"),
         "api_run_id": receipt.get("api_run_id") == state.get("api_run_id"),
@@ -2151,6 +2308,8 @@ def verify_feature_chain_receipt(control_dir: Path, path: Path) -> dict:
         "web_run_id": receipt.get("web_run_id") == state.get("web_run_id"),
         "web_pr_url": receipt.get("web_pr_url") == state.get("web_pr_url"),
         "web_head_sha": receipt.get("web_head_sha") == state.get("web_head_sha"),
+        "api_outcome": receipt.get("api_outcome") == state.get("api_outcome"),
+        "web_outcome": receipt.get("web_outcome") == state.get("web_outcome"),
         "receipt_sha256": state.get("feature_receipt_sha256") == receipt.get("receipt_sha256"),
         "receipt_mac": state.get("feature_receipt_mac") == receipt.get("receipt_mac"),
     }
@@ -2158,6 +2317,62 @@ def verify_feature_chain_receipt(control_dir: Path, path: Path) -> dict:
     if failed:
         fail("feature chain receipt is not bound to private chain: " + ",".join(failed))
     return receipt
+
+
+def write_standalone_web_receipt(control_dir: Path, state: dict, web_row: dict, db: Path) -> Path:
+    expected_web_lane = FEATURE_LANES.get(state.get("provider"), {}).get("web")
+    if web_row.get("workflow_name") != expected_web_lane:
+        fail("standalone web run does not match provider lane")
+    current_status = status_for_run(db, web_row["id"])
+    if current_status and current_status != "completed":
+        fail(f"standalone web receipt requires completed web run, got {current_status}")
+    escalation = feature_scope_escalation(web_row)
+    if escalation:
+        fail("standalone web feature ended with NEEDS_CLARIFICATION or scope escalation")
+    web_info = feature_run_pr_and_head(web_row, "web")
+    receipt = signed_feature_receipt(
+        state["chain_secret"],
+        {
+            "schema_version": 2,
+            "kind": "archon-feature-chain-receipt",
+            "logical_chain_id": state["logical_chain_id"],
+            "provider": state["provider"],
+            "scope": "web",
+            "spec": state["spec"],
+            "spec_sha256": state["spec_sha256"],
+            "api_run_id": None,
+            "api_lane": None,
+            "api_pr_url": None,
+            "api_head_sha": state.get("baseline", {}).get("commits", {}).get("api"),
+            "api_outcome": "NO_CHANGE",
+            "web_run_id": web_row["id"],
+            "web_lane": web_row["workflow_name"],
+            "web_pr_url": web_info["pr_url"],
+            "web_head_sha": web_info["head_sha"],
+            "web_outcome": web_info["outcome"],
+            "overall_outcome": web_info["outcome"],
+            "baseline": state["baseline"],
+            "finalized_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        },
+    )
+    target = artifact_dir(web_row) / "feature-chain-receipt.json"
+    tmp = target.with_suffix(f".tmp.{os.getpid()}")
+    tmp.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(target)
+    state.update({
+        "api_run_id": None,
+        "api_head_sha": receipt["api_head_sha"],
+        "api_pr_url": None,
+        "web_run_id": web_row["id"],
+        "web_head_sha": web_info["head_sha"],
+        "web_pr_url": web_info["pr_url"],
+        "api_outcome": "NO_CHANGE",
+        "web_outcome": web_info["outcome"],
+        "feature_receipt_sha256": receipt["receipt_sha256"],
+        "feature_receipt_mac": receipt["receipt_mac"],
+    })
+    write_feature_chain(control_dir, state)
+    return target
 
 
 def run_feature_lane(
@@ -2182,6 +2397,49 @@ def adaptive_feature(args: argparse.Namespace) -> None:
         )
         if args.provider == "codex" and row.get("_control_line"):
             print(row["_control_line"])
+        return
+
+    if args.scope == "web":
+        baseline = capture_feature_baseline(ROOT)
+        state = start_feature_chain(args.control_dir, args.provider, spec, baseline, "web")
+        web_env = {
+            "ARCHON_FEATURE_SCOPE": "web",
+            "ARCHON_FEATURE_CHAIN_ID": state["logical_chain_id"],
+            "ARCHON_FEATURE_PROVIDER": args.provider,
+            "ARCHON_FEATURE_LANE": lane_map["web"],
+            "ARCHON_CONTROL_DIR": str(args.control_dir),
+        }
+        with temporary_env(web_env):
+            web = run_feature_lane(args, args.provider, lane_map["web"], spec)
+        state["web_run_id"] = web["id"]
+        state = write_feature_chain(args.control_dir, state)
+        if args.provider == "codex" and web.get("_control_line"):
+            print(web["_control_line"])
+        print(
+            f"ARCHON_FEATURE_WEB=STARTED provider={args.provider} scope=web "
+            f"lane={web['workflow_name']} run={web['id'][:8]} chain={state['logical_chain_id']}"
+        )
+        if getattr(args, "no_watch", False):
+            return
+        with temporary_env(web_env):
+            web_result = supervise_exact_run(
+                args.db, web["id"], getattr(args, "watch_timeout_seconds", 86400), 2.0
+            )
+        print(
+            "ARCHON_FEATURE_WEB_SUPERVISION="
+            + web_result["state"].upper()
+            + " "
+            + redact_control_tokens(" ".join(f"{k}={v}" for k, v in web_result.items()))
+        )
+        if web_result.get("state") != "terminal" or web_result.get("status") != "completed":
+            return
+        completed_web = run_row_by_id(args.db, web["id"]) or web
+        receipt = write_standalone_web_receipt(args.control_dir, state, completed_web, args.db)
+        verify_feature_chain_receipt(args.control_dir, receipt)
+        print(
+            f"ARCHON_FEATURE_CHAIN=FINALIZED provider={args.provider} scope=web "
+            f"chain={state['logical_chain_id']} web_run={web['id'][:8]} receipt={receipt}"
+        )
         return
 
     baseline = capture_feature_baseline(ROOT)
@@ -2259,16 +2517,26 @@ def restore_feature_control_env(row: dict, control_dir: Path, control: dict | No
     lane = feature.get("lane")
     chain_id = feature.get("logical_chain_id")
     handoff = feature.get("handoff") or row.get("user_message")
+    feature_scope = feature.get("scope", "fullstack")
     if provider != "codex" or lane != "full-sdlc-web-codex" or not isinstance(chain_id, str):
         fail("guarded feature web resume has invalid provider/lane/chain identity")
-    with temporary_env({"ARCHON_FEATURE_CHAIN_ID": chain_id}):
-        verified = verify_feature_handoff(control_dir, Path(str(handoff)), provider, lane)
-    if verified.get("logical_chain_id") != chain_id:
-        fail("guarded feature web resume handoff does not match private chain")
+    if feature_scope == "fullstack":
+        with temporary_env({"ARCHON_FEATURE_CHAIN_ID": chain_id}):
+            verified = verify_feature_handoff(control_dir, Path(str(handoff)), provider, lane)
+        if verified.get("logical_chain_id") != chain_id:
+            fail("guarded feature web resume handoff does not match private chain")
+    elif feature_scope == "web":
+        state = read_feature_chain(control_dir, chain_id)
+        spec = Path(str(handoff))
+        if state.get("scope") != "web" or spec.resolve() != Path(str(state.get("spec"))).resolve():
+            fail("guarded standalone web resume does not match private chain")
+    else:
+        fail("guarded feature web resume has invalid feature scope")
     os.environ.update({
         "ARCHON_CONTROL_DIR": str(control_dir),
         "ARCHON_FEATURE_PROVIDER": provider,
         "ARCHON_FEATURE_LANE": lane,
+        "ARCHON_FEATURE_SCOPE": str(feature_scope),
         "ARCHON_FEATURE_CHAIN_ID": chain_id,
         "ARCHON_FEATURE_HANDOFF": str(handoff),
     })
@@ -2607,7 +2875,7 @@ def parser() -> argparse.ArgumentParser:
     reject.add_argument("--token", required=True)
     feature = sub.add_parser("feature")
     feature.add_argument("--provider", choices=("claude", "codex"), required=True)
-    feature.add_argument("--scope", choices=("api", "fullstack"), required=True)
+    feature.add_argument("--scope", choices=("api", "web", "fullstack"), required=True)
     feature.add_argument("--no-watch", action="store_true")
     feature.add_argument("--watch-timeout-seconds", type=int, default=86400)
     feature.add_argument("spec")
@@ -2728,9 +2996,13 @@ def main() -> None:
         if args.lane == "full-sdlc-web-codex":
             provider = os.environ.get("ARCHON_FEATURE_PROVIDER", "")
             chain_id = os.environ.get("ARCHON_FEATURE_CHAIN_ID", "")
+            feature_scope = os.environ.get("ARCHON_FEATURE_SCOPE", "fullstack")
             if provider != "codex" or not chain_id:
                 fail("guarded web feature lane requires controller feature chain environment")
-            verify_feature_handoff(args.control_dir, raw_spec.resolve(), "codex", args.lane)
+            if feature_scope == "fullstack":
+                verify_feature_handoff(args.control_dir, raw_spec.resolve(), "codex", args.lane)
+            elif feature_scope != "web":
+                fail("guarded web feature lane has invalid feature scope")
         target = f"{args.lane}\0{raw_spec.resolve()}"
     else:
         row = resolve_run(args.db, args.run_id)

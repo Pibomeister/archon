@@ -11,7 +11,7 @@ nodes:
           timeout: 2400000
           bash: |
             set -uo pipefail
-            REPO=/Users/eduardopicazo/Documents/Workspace/Goodword/api
+            REPO="/Users/eduardopicazo/Documents/Workspace/Goodword/api"
             BR=archon/health-archon
             cd "$REPO"
             PR=$(gh pr list --head "$BR" --state open --json number --jq '.[0].number' 2>/dev/null)
@@ -46,7 +46,7 @@ nodes:
           timeout: 2400000
           bash: |
             set -uo pipefail
-            REPO=/Users/eduardopicazo/Documents/Workspace/Goodword/web-app
+            REPO="/Users/eduardopicazo/Documents/Workspace/Goodword/web-app"
             BR=archon/health-archon-web
             cd "$REPO"
             PR=$(gh pr list --head "$BR" --state open --json number --jq '.[0].number' 2>/dev/null)

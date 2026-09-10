@@ -476,7 +476,9 @@ def plan_converge_fixture(verdict, moved, dispute=0, blocking=0):
         (rd / "plan.pre.md").write_text(
             pre.replace("Change foo.", "Change bar.") if moved else pre, encoding="utf-8"
         )
-        for f in ("verify.json", "files-allowlist.json", "web-files-allowlist.json", "reader-audit.json"):
+        for f in ("verify.json", "files-allowlist.json", "web-files-allowlist.json",
+                  "reader-audit.json", "web-reader-audit.json", "web-premises.json",
+                  "browser-evidence.json", "browser-evidence.sha256"):
             shutil.copyfile(art / f, rd / f"pre-{f}")
         jdump(rd / "critique.json", critique(verdict, blocking=blocking))
         jdump(rd / "revision.json", revision(dispute))
@@ -768,42 +770,100 @@ class GateTestsStress(unittest.TestCase):
 # ==========================================================================
 # uat-gate (web feature-derived browser evidence)
 # ==========================================================================
-def uat_gate_fixture(tmp, failed=False, missing=False):
+def uat_gate_fixture(tmp, failed=False, missing=False, stale=False, legacy=False):
     art = tmp / "artifacts"
     required = [
-        {"id": "browser-1", "criterion": "Open the changed Settings path"},
-        {"id": "browser-2", "criterion": "Toggle the feature control"},
+        {"id": "browser-1", "criterion": "Open the changed Settings path",
+         "path": "/settings", "assertions": [{"type": "text", "value": "Settings"}]},
+        {"id": "browser-2", "criterion": "Toggle the feature control",
+         "path": "/settings", "assertions": [{"type": "selector", "value": "[data-testid=feature-toggle]"}]},
     ]
-    jdump(art / "browser-evidence.json", {"required": required})
+    req = {"required": required}
+    jdump(art / "browser-evidence.json", req)
+    import hashlib
+    def cdigest(data):
+        return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    (art / "browser-evidence.sha256").write_text(cdigest(req) + "\n", encoding="utf-8")
+    (art / "smoke-urls.txt").write_text("web=http://localhost:3127\napi=http://localhost:4127\n", encoding="utf-8")
+    ev = art / "browser-evidence"
+    ev.mkdir(parents=True, exist_ok=True)
     if not missing:
-        (art / "uat-feature.png").write_bytes(b"png")
-    jdump(art / "uat-result.json", {
-        "passed": ([] if failed else [
-            {"criterion": "browser-1", "detail": "path loaded"},
-            {"criterion": "browser-2", "detail": "control toggled"},
-        ]),
-        "failed": ([{"criterion": "browser-2", "detail": "missing"}] if failed else []),
-        "evidence": [str(art / "uat-feature.png")],
-    })
+        (ev / "browser-1.png").write_bytes(b"png-1")
+        (ev / "browser-2.png").write_bytes(b"png-2")
+    (ev / "trace.zip").write_bytes(b"trace")
+    if legacy:
+        jdump(art / "browser-verifier-receipt.json", {
+            "passed": [{"criterion": "browser-1", "detail": "path loaded"}],
+            "failed": [],
+            "evidence": [str(ev / "browser-1.png")],
+        })
+        return {}
+    def fdigest(path):
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    criteria = [
+        {"id": "browser-1", "path": "/settings", "status": "passed",
+         "assertions": [{"type": "text", "value": "Settings", "status": "passed"}]},
+        {"id": "browser-2", "path": "/settings", "status": ("failed" if failed else "passed"),
+         "assertions": [{"type": "selector", "value": "[data-testid=feature-toggle]", "status": ("failed" if failed else "passed")}]},
+    ]
+    receipt = {
+        "receipt_version": 1,
+        "authority": "controller-playwright",
+        "authority_state": "unsealed-local-receipt",
+        "controller_action": "finalize-evidence",
+        "runner": "archon-browser-verifier",
+        "status": ("failed" if failed else "passed"),
+        "requirements_digest": ("0" * 64 if stale else cdigest(req)),
+        "origin": "http://localhost:3127",
+        "viewport": {"width": 1280, "height": 720},
+        "candidate": {"commit": "a" * 40, "tree": "d" * 40, "worktree": str(tmp / "wt")},
+        "api": {"commit": "b" * 40, "origin": "http://localhost:4127", "handoff_digest": "c" * 64},
+        "criteria": criteria,
+        "evidence": {
+            "screenshots": [
+                {"criterion": "browser-1", "path": "browser-evidence/browser-1.png", "sha256": (fdigest(ev / "browser-1.png") if not missing else "0" * 64)},
+                {"criterion": "browser-2", "path": "browser-evidence/browser-2.png", "sha256": (fdigest(ev / "browser-2.png") if not missing else "0" * 64)},
+            ],
+            "traces": [{"path": "browser-evidence/trace.zip", "sha256": fdigest(ev / "trace.zip")}],
+        },
+    }
+    jdump(art / "browser-verifier-receipt.json", receipt)
     return {}
 
 
 class UatGateStress(unittest.TestCase):
-    def test_full_sdlc_web_uses_spec_derived_browser_evidence(self):
-        r = run_node("full-sdlc-web", "uat-gate", uat_gate_fixture)
-        self.assertEqual(r["rc"], 0, r["output"])
-        self.assertIn("UAT_PASSED=2", r["output"])
-        self.assertIn("UAT_GATE=PASS", r["output"])
+    def _uat_gate_node(self, workflow="full-sdlc-web"):
+        import yaml
+        doc = yaml.safe_load((ARCHON_ROOT / "workflows" / f"{workflow}.yaml").read_text(encoding="utf-8"))
+        for node in doc["nodes"]:
+            if node.get("id") == "uat-gate":
+                return node
+        raise AssertionError(f"{workflow} uat-gate node missing")
 
-    def test_full_sdlc_web_rejects_failed_browser_evidence(self):
-        r = run_node("full-sdlc-web", "uat-gate", lambda tmp: uat_gate_fixture(tmp, failed=True))
-        self.assertEqual(r["rc"], 1)
-        self.assertIn("UAT_GATE=FAIL failed criteria: browser-2", r["output"])
+    def test_full_sdlc_web_uat_gate_checks_browser_evidence_from_bash(self):
+        # Was controller_action: finalize-evidence until the hardened runtime
+        # was dropped. check-browser-evidence.py is the same seal check the
+        # controller would have delegated to, so the assertion moved to it.
+        node = self._uat_gate_node()
+        self.assertNotIn("controller_action", node)
+        self.assertEqual(node.get("depends_on"), ["servers-down"])
+        self.assertIn("check-browser-evidence.py", node["bash"])
+        for forbidden in ("prompt", "model", "maxBudgetUsd"):
+            self.assertNotIn(forbidden, node)
 
-    def test_full_sdlc_web_requires_feature_screenshot(self):
-        r = run_node("full-sdlc-web", "uat-gate", lambda tmp: uat_gate_fixture(tmp, missing=True))
-        self.assertEqual(r["rc"], 1)
-        self.assertIn("UAT_GATE=FAIL no screenshot", r["output"])
+    def test_full_sdlc_web_codex_uat_gate_checks_browser_evidence_from_bash(self):
+        node = self._uat_gate_node("full-sdlc-web-codex")
+        self.assertNotIn("controller_action", node)
+        self.assertEqual(node.get("depends_on"), ["servers-down"])
+        self.assertIn("check-browser-evidence.py", node["bash"])
+        for forbidden in ("prompt", "model", "maxBudgetUsd"):
+            self.assertNotIn(forbidden, node)
+
+    def test_full_sdlc_web_uat_gate_has_no_env_bypass(self):
+        for workflow in ("full-sdlc-web", "full-sdlc-web-codex"):
+            text = (ARCHON_ROOT / "workflows" / f"{workflow}.yaml").read_text(encoding="utf-8")
+            self.assertNotIn("ARCHON_BROWSER_EVIDENCE_SEAL_REQUIRED", text)
+            self.assertNotIn("UAT_GATE=UNSEALED", text)
 
 
 # ==========================================================================

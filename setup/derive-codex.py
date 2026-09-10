@@ -368,6 +368,11 @@ def derive(target, pin_review_claude=False):
                     "raw archon control is rejected by the one-time always-run guard."
                 )
 
+    if target in GUARDED_TARGETS and (guard_swaps != 1 or agents_inserts != 1):
+        raise CodexError(
+            f"{target}: expected one billing guard and one staged-skill guard, "
+            f"got {guard_swaps} and {agents_inserts}"
+        )
     if target in GUARDED_TARGETS and control_guards != 1:
         raise CodexError(f"{target}: expected exactly one codex-control-guard, got {control_guards}")
     return name, dump_yaml(out), {
