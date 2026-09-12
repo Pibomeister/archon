@@ -58,6 +58,22 @@ class SetupScriptsArePackagedTest(unittest.TestCase):
     def test_round_reclaim_is_shipped(self):
         self.assertIn("round-reclaim.sh", manifest_entries())
 
+    def test_joint_plan_validator_is_shipped(self):
+        self.assertIn("validate-joint-plan.py", manifest_entries())
+
+    def test_joint_integration_runner_is_shipped(self):
+        self.assertIn("run-joint-integration.py", manifest_entries())
+
+    def test_trusted_local_candidate_helpers_are_shipped(self):
+        entries = manifest_entries()
+        self.assertIn("trusted-local-candidate.sh", entries)
+        self.assertIn("write-local-candidate.py", entries)
+
+    def test_feature_budget_helper_is_shipped(self):
+        self.assertIn("feature-budget.py", manifest_entries())
+        self.assertIn("feature_estimate.py", manifest_entries())
+        self.assertIn("feature_chain.py", manifest_entries())
+
     def test_canonical_test_runner_is_shipped_and_used_by_package(self):
         package = MANIFEST.read_text(encoding="utf-8")
         self.assertIn("setup/run-tests.py", package)

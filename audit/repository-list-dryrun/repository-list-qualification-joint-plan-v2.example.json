@@ -1,0 +1,74 @@
+{
+  "schema": "archon.joint-feature-plan.v1",
+  "repositories": [
+    "api",
+    "goodword-mcp"
+  ],
+  "dependency_order": [
+    "api",
+    "goodword-mcp"
+  ],
+  "contracts": [
+    {
+      "producer": "api",
+      "consumer": "goodword-mcp",
+      "artifact": "libs/utils/src/lib/__tests__/fixtures/repository-list-qualification-contract.json",
+      "description": "Local qualification-only interface fixture consumed by the MCP candidate and joint integration."
+    }
+  ],
+  "stages": {
+    "api": {
+      "depends_on": [],
+      "files_allowlist": [
+        "libs/utils/src/lib/__tests__/fixtures/repository-list-qualification-contract.json",
+        "libs/utils/src/lib/__tests__/repository-list-qualification-contract.spec.ts"
+      ],
+      "test_patterns": [
+        "libs/utils/src/lib/__tests__/repository-list-qualification-contract.spec.ts"
+      ],
+      "verification": [
+        "bun run typecheck",
+        "bun run lint",
+        "bun run test -- libs/utils/src/lib/__tests__/repository-list-qualification-contract.spec.ts"
+      ]
+    },
+    "goodword-mcp": {
+      "depends_on": [
+        "api"
+      ],
+      "files_allowlist": [
+        "tests/repository-list-qualification-consumer.unit.test.ts"
+      ],
+      "test_patterns": [
+        "tests/repository-list-qualification-consumer.unit.test.ts"
+      ],
+      "verification": [
+        "mise x node@20 -- pnpm exec tsc --noEmit",
+        "mise x node@20 -- env NODE_OPTIONS=--experimental-vm-modules pnpm exec jest --testPathIgnorePatterns '\\.(e2e|smoke)\\.test\\.ts$' --testPathPatterns tests/repository-list-qualification-consumer.unit.test.ts"
+      ]
+    }
+  },
+  "integration": {
+    "scenarios": [
+      {
+        "name": "local-api-mcp-qualification-contract",
+        "uses": [
+          "api",
+          "goodword-mcp"
+        ],
+        "commands": [
+          "bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/audit/repository-list-dryrun/run-repository-list-qualification-integration-v2.sh"
+        ],
+        "expected_tests": [
+          "API candidate exposes the qualification-only local contract fixture",
+          "MCP candidate reads the actual upstream API contract JSON through ARCHON_REPO_API_WORKTREE",
+          "Integration used detached local candidate worktrees exported by run-joint-integration.py"
+        ],
+        "expected_artifacts": [
+          "repository-list-qualification-integration.json"
+        ],
+        "command_timeout_seconds": 1800
+      }
+    ]
+  }
+}

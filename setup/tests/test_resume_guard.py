@@ -29,6 +29,7 @@ import subprocess
 import tempfile
 import shutil
 import unittest
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -238,6 +239,21 @@ class ResumeGuardTest(unittest.TestCase):
         return row[0]
 
     # ---- (a) named run is older than another failed run of the same lane
+    def test_transient_database_lock_does_not_refuse_resume(self):
+        named = "aaaaaaaa" + "0" * 24
+        self.add(named, "failed", "2026-08-29 21:58:39")
+        connection = sqlite3.connect(self.db, check_same_thread=False)
+        connection.execute("BEGIN EXCLUSIVE")
+        release = threading.Timer(1, connection.commit)
+        release.start()
+        try:
+            result = self.run_guard(named)
+        finally:
+            release.join()
+            connection.close()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("RESUME=OK", self.sole_verdict(result))
+
     def test_older_named_run_refused_with_would_resume(self):
         named = "aaaaaaaa" + "0" * 24
         newer = "bbbbbbbb" + "0" * 24

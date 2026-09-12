@@ -12,7 +12,9 @@ sessions setting up a machine. A node never installs anything.
 
 The setup gist ships the **Archon layer only** - workflows, setup scripts,
 templates, the runbook, the operator skills, provider-neutral feature launcher,
-and a derived permissions allowlist.
+repository-list planning/execution helpers, and a derived permissions allowlist.
+The repository-list feature uses the existing feature workflows and generated
+Codex twins; it does not require a patched stock Archon binary.
 The dev environment is a **precondition**: `install.sh` asserts it and refuses to
 continue if anything is missing. It never installs dev tooling.
 
@@ -65,9 +67,9 @@ Linux specifics:
 - **On x64, the archon binary requires AVX2.** The upstream installer detects the
   CPU and refuses without it. arm64 has no such requirement.
 - Port inspection needs one of `lsof`, `ss` (iproute2), or `fuser` (psmisc).
-- `python3` must be **3.7 or newer** - the helpers use
-  `subprocess.run(capture_output=...)`, which raises `TypeError` on the 3.6 that
-  ships with RHEL 7/8 and Ubuntu 18.04.
+- `python3` must be **3.10 or newer** for the repository-list helpers' type
+  annotations and path APIs. Do not advertise the older 3.7 minimum for this
+  package.
 
 ## 2. Preconditions checklist
 
@@ -79,6 +81,10 @@ $ROOT/web-app/      (.git present, .env present)
 $ROOT/goodword-kb/  (wiki/ present)
 ```
 
+Also clone `$ROOT/goodword-mcp/` when selecting it for feature work. Each selected
+repository must already exist and have a registered `repo-profile.sh` profile;
+the launcher does not clone missing repositories or expand feature scope.
+
 Commands `install.sh` asserts, and how they are normally installed:
 
 | Command | macOS | Linux | Notes |
@@ -87,7 +93,7 @@ Commands `install.sh` asserts, and how they are normally installed:
 | `pnpm` | `brew install pnpm` | `corepack enable pnpm` | web package manager |
 | `mise` | `brew install mise` | `curl https://mise.run \| sh` | then `mise install node@20 node@22` |
 | `gh` | `brew install gh` | distro package | then the user runs `gh auth login` |
-| `python3` | preinstalled | preinstalled | must be >= 3.7 |
+| `python3` | preinstalled | preinstalled | must be >= 3.10 |
 | `agent-browser` | `pnpm add -g agent-browser` | same | web-lane UAT driver |
 | `claude` | Claude Code install | same | logged in via subscription OAuth (`/login`) |
 | `aws` | `brew install awscli` | distro package | SSO configured; creds last ~15 min |
@@ -293,8 +299,11 @@ blocking; rebuild/switch to the named target when graph evidence is wanted.
 `sandbox_mode = "workspace-write"` is mandatory, but Archon v0.8.0 overrides it
 with a danger-full-access CLI flag. The guarded launcher therefore installs a
 private mode-0500 `codex-workspace-wrapper.sh` and points `CODEX_BIN_PATH` at it;
-the wrapper replaces the adapter flag with workspace-write, narrows writable
-code roots to `api`/`web-app`, and adds only the prompt-bound run artifact root.
+the wrapper replaces the adapter flag with restricted workspace permissions,
+uses the private run binding for the assigned worktree, and adds only the
+prompt-bound run artifact root. For repository-list planning, only run artifacts
+are writable. After approval, one selected repository worktree is writable;
+routing files and the approved plan/test/input artifacts remain read-only.
 The nonce, control-token hash, signal targets, and GitNexus runner stay outside
 those roots. Real adapter probes must deny control-code writes and allow the
 single run artifact directory.
@@ -309,3 +318,37 @@ The twins' preflight asserts the project links and ChatGPT auth
 No `archon ai login` is needed; `archon doctor`'s "Codex not configured" line
 is about archon's own store and is expected. RUNBOOK §15 is the operating
 reference.
+
+### Repository-list readiness
+
+The package must contain `feature_chain.py`, `feature-budget.py`,
+`validate-joint-plan.py`, `run-joint-integration.py`,
+`trusted-local-candidate.sh`, and `write-local-candidate.py` under `.archon/setup/`,
+alongside the launcher, watchdog, repository profiles, and generated feature twins.
+Operator skills come from `.archon/skills/`; staging links these packaged sources
+into the provider skill directories. Do not hand-edit `dist/gist` or a generated
+Codex twin to repair a missing capability.
+
+Verify registry discovery and the guarded launcher before starting a feature:
+
+```bash
+bash "$ROOT/.archon/setup/repo-profile.sh" --list
+python3 "$ROOT/.archon/setup/archon-run.py" check
+```
+
+Then hand off to `archon-sdlc` for, for example:
+
+```bash
+python3 "$ROOT/.archon/setup/archon-run.py" feature --provider codex \
+  --scope api,goodword-mcp "/absolute/path/to/spec.md"
+```
+
+Keep the Codex controller and shared-budget ledger outside worker-writable
+roots. New Codex repository-list chains default to 240 active minutes and
+30 million tokens for the whole chain; approval waits are excluded, retries
+share the remaining allowance, and exact sessions include native subagents.
+Missing accounting must fail containment. The endpoint is `locally_verified`
+with publication held, not a push or PR. A successful installation or parsed
+scope list does not qualify the feature: require the supervised two-repository
+trial through human approval, repository stages, and local integration before
+starting deferred ENG-3866 work.

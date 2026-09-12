@@ -1,0 +1,6 @@
+start:
+  output: START
+body:
+  output: "<promise>DONE</promise>"
+after:
+  output: AFTER

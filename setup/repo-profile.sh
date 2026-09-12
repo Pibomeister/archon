@@ -6,6 +6,10 @@
 #   OUT=$(bash <abs>/repo-profile.sh "$REPO") || { echo "..."; exit 1; }
 #   eval "$OUT"
 #
+# Registry discovery for launchers:
+#   bash <abs>/repo-profile.sh --list
+#   bash <abs>/repo-profile.sh --json
+#
 # CAPTURE-AND-CHECK IS MANDATORY, not stylistic. `eval "$(cmd)"` swallows a
 # non-zero exit even under `set -euo pipefail` -- measured: `eval "$(false)"`
 # continues. So this script ALSO emits an eval-able failure for its own known
@@ -26,7 +30,7 @@
 # reached jest as ['\.(e2e|smoke)\.test\.ts$'] and matched nothing, so the
 # e2e suite ran anyway. Arrays are the fix; call sites use "${CMD_TEST[@]}".
 set -euo pipefail
-REPO="${1:?usage: repo-profile.sh <repo>}"
+REPO="${1:?usage: repo-profile.sh <repo>|--list|--json}"
 
 python3 - "$REPO" <<'PY'
 import shlex
@@ -89,6 +93,22 @@ PROFILES = {
 }
 
 profile = PROFILES.get(repo)
+if repo == "--list":
+    for name in sorted(PROFILES):
+        print(name)
+    raise SystemExit(0)
+
+if repo == "--json":
+    import json
+    registry = {
+        "schema": "archon.repo-profiles.v1",
+        "profiles": PROFILES,
+        "aliases": {"web": "web-app"},
+        "shorthands": {"fullstack": ["api", "web-app"]},
+    }
+    print(json.dumps(registry, sort_keys=True))
+    raise SystemExit(0)
+
 if profile is None:
     known = ", ".join(sorted(PROFILES))
     # Emitted as shell for the caller to eval: a bare non-zero exit here would

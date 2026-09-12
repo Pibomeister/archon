@@ -1,0 +1,103 @@
+import contextlib
+import importlib.util
+import io
+from pathlib import Path
+import unittest
+import tempfile
+from argparse import Namespace
+from unittest import mock
+
+
+SETUP = Path(__file__).resolve().parent.parent
+SPEC = importlib.util.spec_from_file_location("scope_launcher", SETUP / "archon-run.py")
+ar = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(ar)
+
+
+class FeatureScope(unittest.TestCase):
+    def parse(self, scope, provider="codex", repo=None):
+        return ar.parse_feature_scope(scope, provider, repo)
+
+    def test_lists_keep_presentation_order_and_canonicalize_web(self):
+        self.assertEqual(self.parse("goodword-mcp,api,web"),
+                         ("repositories", ["goodword-mcp", "api", "web-app"]))
+        self.assertEqual(self.parse("fullstack"), ("repositories", ["api", "web-app"]))
+        self.assertEqual(self.parse("goodword-mcp"), ("repositories", ["goodword-mcp"]))
+
+    def test_legacy_scalar_commands_remain_supported(self):
+        self.assertEqual(self.parse("api"), ("api", ["api"]))
+        self.assertEqual(self.parse("web"), ("web", ["web-app"]))
+        self.assertEqual(self.parse("fullstack", "claude"),
+                         ("fullstack", ["api", "web-app"]))
+
+    def test_legacy_environment_selection_warns(self):
+        with contextlib.redirect_stderr(io.StringIO()) as warnings:
+            self.assertEqual(self.parse("api", repo="goodword-mcp"),
+                             ("api", ["goodword-mcp"]))
+        self.assertIn("deprecated", warnings.getvalue())
+
+    def test_invalid_scope_fails_before_dispatch(self):
+        for value in ("", "api,", ",api", "api,,web", "api,api", "web,web-app",
+                      "fullstack,api", "../api", "/api", "api/", "API", "unknown"):
+            with self.subTest(value=value), contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+                self.parse(value)
+
+    def test_explicit_scope_cannot_be_narrowed_by_environment(self):
+        for value, repo in (("api,goodword-mcp", "api"), ("fullstack", "api"),
+                            ("goodword-mcp", "api"), ("web", "api")):
+            with self.subTest(value=value), contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+                self.parse(value, repo=repo)
+        self.assertEqual(self.parse("goodword-mcp", repo="goodword-mcp"),
+                         ("repositories", ["goodword-mcp"]))
+
+    def test_claude_lists_use_repository_mode(self):
+        self.assertEqual(self.parse("api,goodword-mcp", "claude"),
+                         ("repositories", ["api", "goodword-mcp"]))
+        self.assertEqual(self.parse("goodword-mcp", "claude"),
+                         ("repositories", ["goodword-mcp"]))
+
+    def test_parser_accepts_repository_list(self):
+        args = ar.parser().parse_args(["feature", "--provider", "codex", "--scope",
+                                      "api,goodword-mcp", "/tmp/spec.md"])
+        self.assertEqual(args.scope, "api,goodword-mcp")
+
+    def test_new_codex_fullstack_uses_joint_controller(self):
+        with tempfile.TemporaryDirectory() as directory:
+            spec = Path(directory) / "spec.md"
+            spec.write_text("A joint feature")
+            args = Namespace(spec=str(spec), provider="codex", scope="fullstack")
+            with mock.patch.dict(ar.os.environ, {}, clear=True), \
+                    mock.patch.object(ar, "repository_feature_call") as joint, \
+                    mock.patch.object(ar, "adaptive_legacy_feature") as legacy:
+                ar.adaptive_feature(args)
+            joint.assert_called_once_with("launch", args, ["api", "web-app"])
+            legacy.assert_not_called()
+
+    def test_claude_repository_list_uses_joint_controller_and_reports_pause(self):
+        with tempfile.TemporaryDirectory() as directory:
+            spec = Path(directory) / "spec.md"
+            spec.write_text("A joint feature")
+            args = Namespace(spec=str(spec), provider="claude", scope="api,goodword-mcp")
+            launched = {"state": {"logical_chain_id": "c" * 32}, "row": {}, "result": None}
+            with mock.patch.dict(ar.os.environ, {}, clear=True), \
+                    mock.patch.object(ar, "repository_feature_call", return_value=launched) as joint, \
+                    mock.patch.object(ar, "print_feature_chain_pause") as pause, \
+                    mock.patch.object(ar, "adaptive_legacy_feature") as legacy:
+                ar.adaptive_feature(args)
+            joint.assert_called_once_with("launch", args, ["api", "goodword-mcp"])
+            pause.assert_called_once_with(args, "c" * 32)
+            legacy.assert_not_called()
+
+    def test_parser_accepts_feature_advance(self):
+        args = ar.parser().parse_args(["feature-advance", "--chain", "c" * 32])
+        self.assertEqual(args.action, "feature-advance")
+        self.assertEqual(args.chain, "c" * 32)
+
+    def test_parser_accepts_feature_publish(self):
+        args = ar.parser().parse_args(["feature-publish", "--chain", "c" * 32])
+        self.assertEqual(args.action, "feature-publish")
+        self.assertEqual(args.chain, "c" * 32)
+
+
+if __name__ == "__main__":
+    unittest.main()

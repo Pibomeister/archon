@@ -1,0 +1,17 @@
+codex-control-guard:
+  CODEX_CONTROL_GUARD: PASS
+preflight:
+  PREFLIGHT: PASS
+feature-phase:
+  phase: integration
+  scope: repositories
+  plan: "no"
+  bootstrap: "no"
+  implement: "no"
+  integration: "yes"
+joint-integration:
+  JOINT_INTEGRATION: PASS
+ship:
+  SHIP: DISABLED
+report:
+  REPORT: PASS

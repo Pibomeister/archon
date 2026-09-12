@@ -1,0 +1,50 @@
+codex-control-guard:
+  CODEX_CONTROL_GUARD: PASS
+preflight:
+  PREFLIGHT: PASS
+feature-phase:
+  phase: planning
+  scope: repositories
+  plan: "yes"
+  bootstrap: "no"
+  implement: "no"
+  integration: "no"
+kb-recon:
+  KB_RECON_DONE: true
+kb-recon-gate:
+  KB_RECON_GATE: PASS
+bootstrap:
+  BOOTSTRAP: PASS
+ralplan:
+  PLAN_READY: true
+plan-snapshot:
+  PLAN_SNAPSHOT: PASS
+plan-round-pre:
+  PLAN_ROUND_PRE: PASS
+impact-probe:
+  IMPACT_PROBE: PASS
+plan-critic:
+  PLAN_CRITIC_DONE: true
+plan-critic-gate:
+  PLAN_CRITIC_GATE: PASS
+plan-revise:
+  PLAN_REVISED: true
+plan-converge: PLAN_CONVERGED
+plan-post-snapshot:
+  PLAN_POST_SNAPSHOT: PASS
+premise-strip:
+  PREMISE_STRIP: PASS
+premise-verify:
+  PREMISE_VERIFY_DONE: true
+premise-gate:
+  PREMISE_GATE: PASS
+docreview:
+  DOCREVIEW_DONE: true
+docreview-gate:
+  DOCREVIEW_GATE: PASS
+plan-render:
+  PLAN_RENDER_DONE: true
+plan-render-gate:
+  RENDER_GATE: PASS
+report:
+  REPORT: PASS

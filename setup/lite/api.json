@@ -75,6 +75,19 @@
     ],
     "ship": [
       "prbody-gate"
+    ],
+    "kb-recon": [
+      "preflight"
+    ],
+    "kb-recon-gate": [
+      "kb-recon"
+    ],
+    "bootstrap": [
+      "preflight"
+    ],
+    "ralplan": [
+      "bootstrap",
+      "kb-recon-gate"
     ]
   },
   "loops": {
@@ -399,5 +412,24 @@
         "lite-fixes-unreviewed.txt"
       ]
     }
+  },
+  "remove_fields": {
+    "kb-recon": [
+      "when"
+    ],
+    "kb-recon-gate": [
+      "when"
+    ],
+    "bootstrap": [
+      "when"
+    ],
+    "ralplan": [
+      "when",
+      "trigger_rule"
+    ],
+    "implement": [
+      "when",
+      "trigger_rule"
+    ]
   }
 }

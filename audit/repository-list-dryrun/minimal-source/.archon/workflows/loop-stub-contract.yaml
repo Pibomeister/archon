@@ -1,0 +1,22 @@
+name: loop-stub-contract
+description: Minimal workflow used only to identify Archon dry-run stub completion semantics for deprecated loop_group.until.
+provider: codex
+nodes:
+- id: start
+  bash: |
+    echo START
+- id: loop
+  depends_on:
+  - start
+  loop_group:
+    max_iterations: 2
+    until: DONE
+    nodes:
+    - id: body
+      prompt: |
+        End with DONE.
+- id: after
+  depends_on:
+  - loop
+  bash: |
+    echo AFTER

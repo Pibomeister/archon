@@ -531,7 +531,11 @@ class ParamsCarryTheRunsPorts(unittest.TestCase):
             env = subprocess.run(["bash", str(root / ".archon/setup/params-env.sh"),
                                   str(ad / "params.json")],
                                  capture_output=True, encoding="utf-8")
-            self.assertIn("APIPORT=\n", env.stdout)
+            evaluated = subprocess.run(
+                ["bash", "-c", 'eval "$1"; test -z "$APIPORT" && test -z "$WEBPORT"',
+                 "params-check", env.stdout], capture_output=True, text=True,
+            )
+            self.assertEqual(evaluated.returncode, 0, evaluated.stderr)
 
 
 if __name__ == "__main__":

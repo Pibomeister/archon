@@ -29,6 +29,7 @@ import stat
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 from typing import NoReturn, Any, Iterator
 
@@ -70,8 +71,10 @@ FEATURE_SIGNATURE_FIELDS = {
     "receipt_mac",
 }
 LANES = set(CODEX_LANES)
-ID_RE = re.compile(r"[0-9a-f]{8,32}", re.I)
-RUN_ID_RE = re.compile(r'"workflowRunId"\s*:\s*"([0-9a-f]{32})"')
+RUN_ID_PATTERN = r"(?=.{8,36}\Z)[0-9a-f]+(?:-[0-9a-f]+)*"
+FULL_RUN_ID_PATTERN = r"(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+ID_RE = re.compile(RUN_ID_PATTERN, re.I)
+RUN_ID_RE = re.compile(rf'"workflowRunId"\s*:\s*"({FULL_RUN_ID_PATTERN})"', re.I)
 CONTROL_TOKEN_PLACEHOLDER = "CONTROL_TOKEN_FROM_LAST_LAUNCH"
 COMMIT_RE = re.compile(r"[0-9a-f]{40}", re.I)
 CHAIN_ID_RE = re.compile(r"[0-9a-f]{24,64}", re.I)
@@ -503,6 +506,19 @@ def run_branch(lane: str, spec: str) -> str:
     lane deliberately collide, which is the adopt-if-exists behaviour the rest of
     the layer already assumes) and unique across concurrent tickets.
     """
+    if os.environ.get("ARCHON_FEATURE_SCOPE") == "repositories":
+        chain_id = os.environ.get("ARCHON_FEATURE_CHAIN_ID", "")
+        phase = os.environ.get("ARCHON_FEATURE_PHASE", "")
+        repo = os.environ.get("ARCHON_FEATURE_REPO", "joint")
+        if not CHAIN_ID_RE.fullmatch(chain_id) or phase not in {"planning", "implement", "integration", "verify"}:
+            fail("FEATURE_CHAIN=FAIL invalid branch identity")
+        if not re.fullmatch(r"[a-z][a-z0-9-]*", repo):
+            fail("FEATURE_CHAIN=FAIL invalid branch repository")
+        generation = os.environ.get("ARCHON_FEATURE_PLANNING_GENERATION", "0")
+        if not generation.isdigit():
+            fail("FEATURE_CHAIN=FAIL invalid planning generation")
+        suffix = f"-g{generation}" if phase == "planning" else ""
+        return f"feature-{chain_id}-{phase}-{repo}{suffix}"
     slug = re.sub(r"[^a-z0-9]+", "-", Path(spec).stem.lower()).strip("-")[:48]
     return f"{lane}-{slug}" if slug else lane
 
@@ -525,7 +541,8 @@ def command_for(action: str, target: str, reason: str | None = None) -> list[str
 
 def watchdog_command(run_id: str, pgid: int, fingerprint: str, wall: int,
                      tokens: int, db: Path, codex_home: Path,
-                     arm_file: Path, chain_id: str | None = None) -> list[str]:
+                     arm_file: Path, chain_id: str | None = None,
+                     feature_chain_id: str | None = None, control_dir: Path | None = None) -> list[str]:
     script = Path(os.environ.get("CODEX_LITE_WATCHDOG", SETUP / "codex-watchdog.sh"))
     cmd = [
         "bash", str(script), run_id,
@@ -540,6 +557,10 @@ def watchdog_command(run_id: str, pgid: int, fingerprint: str, wall: int,
     ]
     if chain_id:
         cmd.extend(["--chain-id", chain_id])
+    if feature_chain_id:
+        if control_dir is None:
+            fail("feature watchdog requires private control directory")
+        cmd.extend(["--feature-chain-id", feature_chain_id, "--control-dir", str(control_dir)])
     return cmd
 
 
@@ -547,6 +568,37 @@ def control_artifact_path(row: dict) -> Path:
     ad = Path(row["output_root"]) / "artifacts" / "runs" / row["id"]
     ad.mkdir(parents=True, exist_ok=True)
     return ad / "codex-lite-control.json"
+
+
+def codex_artifacts_base(db: Path, root: Path, row: dict | None = None) -> Path:
+    if row is not None and row.get("output_root"):
+        return Path(row["output_root"]) / "artifacts" / "runs"
+    try:
+        con = sqlite3.connect(db)
+        codebase = con.execute(
+            "SELECT id, name, kind FROM remote_agent_codebases WHERE default_cwd = ? ORDER BY updated_at DESC LIMIT 1",
+            (str(root),),
+        ).fetchone()
+        if not codebase:
+            return fail(f"cannot derive Archon artifacts base: no codebase row for {root}")
+        run = con.execute(
+            "SELECT output_root FROM remote_agent_workflow_runs "
+            "WHERE codebase_id = ? AND COALESCE(output_root, '') != '' "
+            "ORDER BY started_at DESC LIMIT 1",
+            (codebase[0],),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        return fail(f"cannot derive Archon artifacts base from {db}: {exc}")
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+    if not run or not run[0]:
+        if codebase[2] != "repo" or not codebase[1]:
+            fail(f"cannot derive Archon artifacts base: no prior output_root for codebase {codebase[0]}")
+        return USER_HOME / ".archon" / "workspaces" / "_local" / str(codebase[1]) / "artifacts" / "runs"
+    return Path(run[0]) / "artifacts" / "runs"
 
 
 def ensure_control_dir(control_dir: Path) -> None:
@@ -1100,6 +1152,16 @@ def write_control_records(row: dict, control_dir: Path, control_token: str,
             "handoff": row.get("user_message"),
             "chain_state_path": str(feature_state_path(control_dir, feature_chain_id)),
         }
+        if feature_scope == "repositories":
+            controller = feature_repository_controller()
+            try:
+                state = controller.read_state(control_dir, feature_chain_id)
+                private["feature_chain"] = controller.bind_run_control_payload(
+                    control_dir, state, os.environ.get("ARCHON_FEATURE_REPO"), row,
+                    os.environ.get("ARCHON_FEATURE_PHASE"),
+                )
+            except controller.FeatureChainError as exc:
+                fail(f"FEATURE_CHAIN=FAIL {exc}")
     private["authority_mac"] = authority_mac(control_token, private)
     secure_write_json(control_state_path(row, control_dir), private)
     public = {
@@ -1627,6 +1689,25 @@ def reset_failed_worktree(row: dict) -> None:
 
 
 def maybe_finalize_feature_receipt(args: argparse.Namespace, row: dict, result: dict) -> Path | None:
+    if row.get("workflow_name") not in {"full-sdlc-api", "full-sdlc-api-codex", "full-sdlc-web", "full-sdlc-web-codex"}:
+        return None
+    control = read_control_state(row, args.control_dir)
+    feature = control.get("feature_chain") if isinstance(control, dict) else None
+    if isinstance(feature, dict) and feature.get("scope") == "repositories":
+        advanced = repository_feature_call("advance", args, row, dict(
+            result, feature_chain=feature, artifacts=str(artifact_dir(row))
+        ))
+        if isinstance(advanced, dict) and advanced.get("receipt_path"):
+            result["feature_chain_status"] = "locally_verified"
+            return Path(advanced["receipt_path"])
+        current = advanced.get("state", {}).get("current_run") if isinstance(advanced, dict) else None
+        current_row = run_row_by_id(args.db, current["run_id"]) if isinstance(current, dict) else None
+        result["feature_chain_status"] = current_row.get("status", "pending") if current_row else "pending"
+        if current_row:
+            result["feature_chain_run"] = current_row["id"]
+        if result["feature_chain_status"] in {"failed", "cancelled"}:
+            fail(f"FEATURE_CHAIN={result['feature_chain_status'].upper()} run={result['feature_chain_run']}")
+        return None
     if row.get("workflow_name") not in {"full-sdlc-web", "full-sdlc-web-codex"}:
         return None
     if result.get("state") != "terminal" or result.get("status") != "completed":
@@ -2383,11 +2464,224 @@ def run_feature_lane(
     return run_claude_lane(lane, spec_or_handoff, args.db)
 
 
+def feature_repository_controller():
+    import feature_chain
+    return feature_chain
+
+
+def dispatch_feature_phase(args: argparse.Namespace, lane: str, message: Path, env: dict[str, str]) -> dict:
+    """Host hook for feature_chain.dispatch_lane.
+
+    Codex keeps the guarded launcher (control token, guard file, watchdog),
+    which binds the chain from inside its `run` path. A Claude lane is a plain
+    detached `archon workflow run`, so the chain is bound here, right after the
+    run row exists, before the row is handed back to the controller.
+    """
+    if env.get("ARCHON_FEATURE_PROVIDER", getattr(args, "provider", None)) == "codex":
+        return invoke_codex_lane(args, lane, message)
+    row = run_claude_lane(lane, message, args.db)
+    repository_feature_call("before_dispatch_bind", args, row)
+    return row
+
+
+def print_feature_chain_pause(args: argparse.Namespace, chain_id: str) -> None:
+    controller = feature_repository_controller()
+    state = controller.read_state(Path(args.control_dir), chain_id)
+    if state.get("status") == "locally_verified":
+        return
+    current = state.get("current_run") or state.get("dispatch_reservation")
+    run_id = (current or {}).get("run_id") or (current or {}).get("source_run_id")
+    row = run_row_by_id(args.db, run_id) if run_id else None
+    if row is None:
+        fail(f"FEATURE_CHAIN=FAIL chain {chain_id} has no current run to supervise")
+    probe = supervise_exact_run(args.db, row["id"], 0)
+    gate = probe.get("gate") or probe.get("status")
+    advance_command = f"python3 {Path(__file__).resolve()} feature-advance --chain {chain_id}"
+    label = {"gate": "PAUSED", "handoff": "RUNNING"}.get(probe["state"], probe["state"].upper())
+    print(
+        f"ARCHON_FEATURE_REPOSITORY_CHAIN={label} "
+        f"chain={chain_id} phase={(current or {}).get('phase')} run={row['id'][:8]} "
+        f"lane={row['workflow_name']} status={probe.get('status')} gate={gate} "
+        f"next=\"archon workflow approve {row['id'][:8]}\" then=\"{advance_command}\""
+    )
+
+
+def feature_advance_command(args: argparse.Namespace) -> None:
+    validate_control_location(args.control_dir)
+    controller = feature_repository_controller()
+    try:
+        state = controller.read_state(Path(args.control_dir), args.chain)
+    except controller.FeatureChainError as exc:
+        fail(f"FEATURE_CHAIN=FAIL {exc}")
+    if state.get("provider") != "claude":
+        fail("FEATURE_CHAIN=FAIL feature-advance is for claude chains; codex chains advance through guarded approve/resume")
+    if state.get("status") == "locally_verified":
+        print(f"ARCHON_FEATURE_REPOSITORY_CHAIN=LOCALLY_VERIFIED chain={args.chain} receipt=held "
+              f"next=\"{feature_publish_command_line(args.chain)}\"")
+        return
+    current = state.get("current_run") or state.get("dispatch_reservation")
+    run_id = (current or {}).get("run_id") or (current or {}).get("source_run_id")
+    row = run_row_by_id(args.db, run_id) if isinstance(run_id, str) else None
+    if row is None:
+        fail(f"FEATURE_CHAIN=FAIL chain {args.chain} has no current run")
+    result = supervise_exact_run(args.db, row["id"], args.watch_timeout_seconds)
+    if result["state"] != "terminal":
+        print_feature_chain_pause(args, args.chain)
+        return
+    if result["status"] != "completed":
+        fail(f"FEATURE_CHAIN={result['status'].upper()} run={row['id'][:8]}")
+    result["artifacts"] = str(artifact_dir(row))
+    result["feature_chain"] = {
+        "logical_chain_id": args.chain,
+        "phase": current.get("phase"),
+        "repo": current.get("repo"),
+    }
+    advanced = repository_feature_call("advance_unguarded", args, row, result)
+    if isinstance(advanced, dict) and advanced.get("receipt_path"):
+        return
+    print_feature_chain_pause(args, args.chain)
+
+
+def feature_publish_command_line(chain_id: str) -> str:
+    return f"python3 {Path(__file__).resolve()} feature-publish --chain {chain_id}"
+
+
+def feature_publish_command(args: argparse.Namespace) -> None:
+    validate_control_location(args.control_dir)
+    repository_feature_call("publish", args, args.chain)
+
+
+def repository_feature_call(method: str, *args):
+    controller = feature_repository_controller()
+    try:
+        return getattr(controller, method)(types.SimpleNamespace(**globals()), *args)
+    except controller.FeatureChainError as exc:
+        fail(f"FEATURE_CHAIN=FAIL {exc}")
+
+
+def parse_feature_scope(scope: str, provider: str, environment_repo: str | None = None) -> tuple[str, list[str]]:
+    result = subprocess.run(
+        ["bash", str(SETUP / "repo-profile.sh"), "--list"],
+        capture_output=True, text=True,
+    )
+    registered = result.stdout.splitlines()
+    if result.returncode or not registered or any(not re.fullmatch(r"[a-z][a-z0-9-]*", name) for name in registered):
+        fail("FEATURE_SCOPE=FAIL repository profile registry unavailable")
+    names = ["api", "web-app"] if scope == "fullstack" else scope.split(",")
+    repositories = []
+    for name in names:
+        canonical = "web-app" if name == "web" else name
+        if canonical not in registered:
+            fail(f"FEATURE_SCOPE=FAIL unknown or invalid repository: {name!r}")
+        if canonical in repositories:
+            fail(f"FEATURE_SCOPE=FAIL duplicate repository: {canonical}")
+        repositories.append(canonical)
+    if scope == "api" and environment_repo:
+        canonical = "web-app" if environment_repo == "web" else environment_repo
+        if canonical not in registered:
+            fail("FEATURE_SCOPE=FAIL invalid ARCHON_REPO")
+        print("FEATURE_SCOPE=DEPRECATED scalar --scope api with ARCHON_REPO is deprecated; use an explicit repository scope", file=sys.stderr)
+        return "api", [canonical]
+    environment_canonical = "web-app" if environment_repo == "web" else environment_repo
+    if environment_repo and repositories != [environment_canonical]:
+        fail("FEATURE_SCOPE=FAIL ARCHON_REPO conflicts with explicit repository selection; unset it")
+    if scope == "api":
+        return "api", repositories
+    if scope in {"web", "web-app"}:
+        return "web", repositories
+    if scope == "fullstack" and provider == "claude":
+        return "fullstack", repositories
+    return "repositories", repositories
+
+
 def adaptive_feature(args: argparse.Namespace) -> None:
     spec = Path(args.spec)
     if not spec.is_absolute() or not spec.is_file():
         fail("feature spec must be an existing absolute path")
     spec = spec.resolve()
+    mode, repositories = parse_feature_scope(args.scope, args.provider, os.environ.get("ARCHON_REPO"))
+    if mode == "repositories":
+        launched = repository_feature_call("launch", args, repositories)
+        result = launched.get("result") if isinstance(launched, dict) else None
+        if isinstance(result, dict):
+            print("ARCHON_FEATURE_SUPERVISION=" + result["state"].upper() + " " + redact_control_tokens(
+                " ".join(f"{key}={value}" for key, value in result.items())
+            ))
+            if result.get("status") in {"failed", "cancelled", "MISSING"}:
+                fail(f"FEATURE_CHAIN={result['status'].upper()} run={result.get('run')}")
+        if args.provider == "claude":
+            print_feature_chain_pause(args, launched["state"]["logical_chain_id"])
+        return
+    args.scope = mode
+    adaptive_legacy_feature(args)
+
+
+def print_feature_estimate(report: dict, as_json: bool = False) -> None:
+    if as_json:
+        print(json.dumps(report, sort_keys=True))
+        return
+    print(
+        "ARCHON_FEATURE_ESTIMATE="
+        + str(report.get("disposition", "unknown")).upper()
+        + f" allowance={report.get('allowance')}"
+        + f" used={report.get('used_tokens')}"
+        + f" remaining_allowance={report.get('remaining_allowance')}"
+        + f" recommended_total_tokens={report.get('recommended_total_tokens')}"
+        + f" remaining_range={report.get('remaining_range')}"
+        + f" confidence={report.get('confidence')}"
+    )
+    phases = report.get("phases")
+    if isinstance(phases, list):
+        for phase in phases:
+            if not isinstance(phase, dict):
+                continue
+            print(
+                "  phase="
+                + str(phase.get("phase"))
+                + f" range={phase.get('range')}"
+                + f" confidence={phase.get('confidence')}"
+                + f" evidence={phase.get('evidence')}"
+            )
+    diagnostics = report.get("history_diagnostics")
+    if isinstance(diagnostics, list) and diagnostics:
+        print("  history_diagnostics=" + "; ".join(str(item) for item in diagnostics[:5]))
+    for note in report.get("assumptions", []):
+        print("  assumption=" + str(note))
+    if report.get("model_caveat"):
+        print("  limitation=" + str(report["model_caveat"]))
+
+
+def feature_estimate_command(args: argparse.Namespace) -> None:
+    if getattr(args, "chain", None):
+        report = repository_feature_call("estimate_command", args)
+        print_feature_estimate(report, getattr(args, "json", False))
+        return
+    if not getattr(args, "scope", None) or not getattr(args, "spec", None):
+        fail("FEATURE_CHAIN=FAIL feature-estimate requires --scope and spec, or --chain")
+    spec = Path(args.spec)
+    if not spec.is_absolute() or not spec.is_file():
+        fail("feature spec must be an existing absolute path")
+    parse_feature_scope(args.scope, "codex", os.environ.get("ARCHON_REPO"))
+    report = repository_feature_call("estimate_command", args)
+    print_feature_estimate(report, getattr(args, "json", False))
+
+
+def feature_shepherd_command(args: argparse.Namespace) -> None:
+    report = repository_feature_call("shepherd_command", args)
+    if report is None:
+        if getattr(args, "json", False):
+            print(json.dumps({"disposition": "skipped", "chain_id": args.chain, "reason": "legacy-or-non-codex"}))
+        else:
+            print(f"ARCHON_FEATURE_SHEPHERD=SKIPPED chain={args.chain} reason=legacy-or-non-codex")
+        return
+    print_feature_estimate(report, getattr(args, "json", False))
+    if report["disposition"] != "sufficient":
+        if not getattr(args, "json", False):
+            print("BUDGET_SHEPHERD=WARN forecast exceeds allowance; continuing under the unchanged hard cap")
+
+
+def adaptive_legacy_feature(args: argparse.Namespace) -> None:
+    spec = Path(args.spec).resolve()
     lane_map = FEATURE_LANES[args.provider]
     if args.scope == "api":
         row = run_feature_lane(args, args.provider, lane_map["api"], spec)
@@ -2508,6 +2802,11 @@ def adaptive_feature(args: argparse.Namespace) -> None:
 
 
 def restore_feature_control_env(row: dict, control_dir: Path, control: dict | None) -> None:
+    feature = control.get("feature_chain") if isinstance(control, dict) else None
+    if isinstance(feature, dict) and feature.get("scope") == "repositories":
+        repository_feature_call("restore_control", row, control_dir, control)
+        os.environ["ARCHON_FEATURE_LANE"] = row["workflow_name"]
+        return
     if row.get("workflow_name") != "full-sdlc-web-codex":
         return
     feature = control.get("feature_chain") if isinstance(control, dict) else None
@@ -2663,6 +2962,9 @@ def resolve_any_run(db: Path, prefix: str, lanes: set[str]) -> dict:
 
 def invoke_codex_lane(args: argparse.Namespace, lane: str, report: Path) -> dict:
     wall, tokens = CODEX_LANES[lane]
+    if os.environ.get("ARCHON_FEATURE_SCOPE") == "repositories":
+        wall = getattr(args, "wall_minutes", None) or 240
+        tokens = getattr(args, "max_total_tokens", None) or 30_000_000
     command = [
         sys.executable, str(Path(__file__).resolve()),
         "--wall-minutes", str(wall), "--max-total-tokens", str(tokens),
@@ -2670,7 +2972,10 @@ def invoke_codex_lane(args: argparse.Namespace, lane: str, report: Path) -> dict
         "--registry", str(args.registry), "--control-dir", str(args.control_dir),
         "run", lane, str(report),
     ]
-    result = subprocess.run(command, cwd=ROOT, capture_output=True, encoding="utf-8")
+    lane_environment = {}
+    if os.environ.get("ARCHON_FEATURE_SCOPE") == "repositories":
+        lane_environment["env"] = dict(os.environ, ARCHON_FEATURE_LANE=lane)
+    result = subprocess.run(command, cwd=ROOT, capture_output=True, encoding="utf-8", **lane_environment)
     if result.returncode != 0:
         fail((result.stdout + result.stderr).strip())
     control_line = re.search(r"CODEX_LITE_RUN=STARTED[^\n]*", result.stdout)
@@ -2875,10 +3180,29 @@ def parser() -> argparse.ArgumentParser:
     reject.add_argument("--token", required=True)
     feature = sub.add_parser("feature")
     feature.add_argument("--provider", choices=("claude", "codex"), required=True)
-    feature.add_argument("--scope", choices=("api", "web", "fullstack"), required=True)
+    feature.add_argument("--scope", required=True, help="registered repository names separated by commas; web and fullstack aliases supported")
     feature.add_argument("--no-watch", action="store_true")
     feature.add_argument("--watch-timeout-seconds", type=int, default=86400)
     feature.add_argument("spec")
+    estimate_feature = sub.add_parser("feature-estimate", help="estimate Codex repository-list token allowance without launching")
+    estimate_feature.add_argument("--chain")
+    estimate_feature.add_argument("--scope", help="registered repository names separated by commas")
+    estimate_feature.add_argument("--json", action="store_true")
+    estimate_feature.add_argument("--max-total-tokens", type=int, default=argparse.SUPPRESS)
+    estimate_feature.add_argument("spec", nargs="?")
+    shepherd = sub.add_parser("feature-shepherd", help="budget shepherd check for an existing Codex repository-list chain without launching AI")
+    shepherd.add_argument("--chain", required=True)
+    shepherd.add_argument("--json", action="store_true")
+    advance = sub.add_parser("feature-advance", help="claude only: seal the approved joint plan and dispatch the next chain stage")
+    advance.add_argument("--chain", required=True)
+    advance.add_argument("--watch-timeout-seconds", type=int, default=86400)
+    publish = sub.add_parser("feature-publish", help="push each verified candidate branch and open draft PRs in dependency order")
+    publish.add_argument("--chain", required=True)
+    replan = sub.add_parser("feature-replan")
+    replan.add_argument("run_id")
+    replan.add_argument("--token", required=True)
+    replan.add_argument("--no-watch", action="store_true")
+    replan.add_argument("--watch-timeout-seconds", type=int, default=86400)
     bugfix = sub.add_parser("bugfix")
     bugfix.add_argument("--provider", choices=("claude", "codex"), required=True)
     bugfix.add_argument("--no-watch", action="store_true")
@@ -2922,9 +3246,34 @@ def parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = parser().parse_args()
+    if args.action == "feature-replan":
+        validate_control_location(args.control_dir)
+        row = resolve_run(args.db, args.run_id)
+        control = require_control_token(row, args.control_dir, args.token)
+        replanned = repository_feature_call("restart_planning", args, row, control)
+        result = replanned.get("result")
+        if isinstance(result, dict):
+            print("ARCHON_FEATURE_SUPERVISION=" + result["state"].upper() + " " + redact_control_tokens(str(result)))
+            if result.get("status") in {"failed", "cancelled", "MISSING"}:
+                fail(f"FEATURE_CHAIN={result['status'].upper()} run={result.get('run')}")
+        return
     if args.action == "feature":
         validate_control_location(args.control_dir)
         adaptive_feature(args)
+        return
+    if args.action == "feature-estimate":
+        validate_control_location(args.control_dir)
+        feature_estimate_command(args)
+        return
+    if args.action == "feature-shepherd":
+        validate_control_location(args.control_dir)
+        feature_shepherd_command(args)
+        return
+    if args.action == "feature-advance":
+        feature_advance_command(args)
+        return
+    if args.action == "feature-publish":
+        feature_publish_command(args)
         return
     if args.action == "verify-feature-handoff":
         validate_control_location(args.control_dir)
@@ -3001,7 +3350,7 @@ def main() -> None:
                 fail("guarded web feature lane requires controller feature chain environment")
             if feature_scope == "fullstack":
                 verify_feature_handoff(args.control_dir, raw_spec.resolve(), "codex", args.lane)
-            elif feature_scope != "web":
+            elif feature_scope not in {"web", "repositories"}:
                 fail("guarded web feature lane has invalid feature scope")
         target = f"{args.lane}\0{raw_spec.resolve()}"
     else:
@@ -3070,18 +3419,21 @@ def main() -> None:
     env = dict(os.environ)
     env.update({
         "ARCHON_DB": str(args.db),
+        "ARCHON_CONTROL_DIR": str(args.control_dir),
         "DISABLE_OMC": "1",
         "CODEX_HOME": str(args.codex_home),
     })
+    if os.environ.get("ARCHON_FEATURE_SCOPE") == "repositories":
+        env["ARCHON_FEATURE_BUDGET_SCRIPT"] = str(SETUP / "feature-budget.py")
     if guard_file is not None:
         env["ARCHON_CODEX_LITE_GUARD_FILE"] = str(guard_file)
     if private_codex_wrapper is not None:
         env["CODEX_BIN_PATH"] = str(private_codex_wrapper)
         env["CODEX_REAL_BIN"] = str(Path(shutil.which("codex") or "codex").resolve())
         env["CODEX_WORKSPACE_ROOT"] = str(ROOT)
-        env["CODEX_ARTIFACTS_BASE"] = str(
-            USER_HOME / ".archon" / "workspaces" / "_folder" / "goodword" / "artifacts" / "runs"
-        )
+        env["CODEX_ARTIFACTS_BASE"] = str(codex_artifacts_base(args.db, ROOT, row))
+        if row is not None:
+            env["CODEX_RUN_ARTIFACTS"] = str(artifact_dir(row))
     log_dir = Path(os.environ.get("CODEX_LITE_LOG_DIR", Path.home() / ".archon" / "logs"))
     log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     stamp = f"{int(time.time())}-{os.getpid()}"
@@ -3101,6 +3453,18 @@ def main() -> None:
 
     launcher_pid = launcher_pgid = watchdog_pid = watchdog_pgid = None
     launcher_fingerprint = watchdog_fingerprint = None
+    watchdog_log = log_dir / f"codex-watchdog-start-{stamp}.log"
+    arm_file = log_dir / f"codex-watchdog-start-{stamp}.armed"
+    feature_control_claimed = False
+    feature_recoverable = False
+    if previous_control and previous_control.get("feature_chain", {}).get("scope") == "repositories":
+        try:
+            repository_feature_call("before_control", args, row, previous_control)
+            feature_control_claimed = True
+        except BaseException:
+            if guard_file is not None:
+                guard_file.unlink(missing_ok=True)
+            raise
     try:
         launcher_pid, launcher_pgid = detached(workflow_log, command, env)
         launcher_fingerprint = process_fingerprint(launcher_pgid)
@@ -3111,6 +3475,8 @@ def main() -> None:
             row = resolve_run(args.db, run_id)
             if row["workflow_name"] != args.lane or Path(row["user_message"]).resolve() != raw_spec.resolve():
                 fail("created run does not match requested lane/spec")
+            if os.environ.get("ARCHON_FEATURE_SCOPE") == "repositories":
+                repository_feature_call("before_dispatch_bind", args, row)
 
         watchdog_log = log_dir / f"codex-watchdog-{row['id']}-{stamp}.log"
         arm_file = log_dir / f"codex-watchdog-{row['id']}-{stamp}.armed"
@@ -3123,7 +3489,10 @@ def main() -> None:
             watchdog_command(row["id"], launcher_pgid, launcher_fingerprint,
                              args.wall_minutes,
                              args.max_total_tokens, args.db, args.codex_home,
-                             arm_file, os.environ.get("ARCHON_BUGFIX_CHAIN_ID")),
+                             arm_file, os.environ.get("ARCHON_BUGFIX_CHAIN_ID"),
+                             **({"feature_chain_id": os.environ.get("ARCHON_FEATURE_CHAIN_ID"),
+                                 "control_dir": args.control_dir}
+                                if os.environ.get("ARCHON_FEATURE_SCOPE") == "repositories" else {})),
             env,
         )
         watchdog_fingerprint = process_fingerprint(watchdog_pgid)
@@ -3156,6 +3525,9 @@ def main() -> None:
                     pass
             if args.action == "reject":
                 cleanup_after_rejection(row, previous_control, args.db)
+            if feature_control_claimed:
+                repository_feature_call("after_control", args, row)
+                feature_control_claimed = False
             print(
                 f"CODEX_LITE_RUN=FINISHED action={args.action} run={row['id'][:8]} "
                 f"status={arm_status} log={workflow_log} watchdog_log={watchdog_log}"
@@ -3169,39 +3541,68 @@ def main() -> None:
             watchdog_fingerprint, arm_file, True,
             args.wall_minutes, args.max_total_tokens,
         )
-    except BaseException:
-        for label, pgid, fingerprint in (
-            ("watchdog", watchdog_pgid, watchdog_fingerprint),
-            ("launcher", launcher_pgid, launcher_fingerprint),
-        ):
-            if pgid is None:
-                continue
-            try:
-                terminate_group(pgid, expected_fingerprint=fingerprint)
-            except BaseException as cleanup_exc:
-                print(
-                    f"CODEX_LITE_RUN=CLEANUP_FAIL process={label} pgid={pgid} "
-                    f"detail={cleanup_exc}", file=sys.stderr,
+    except BaseException as start_error:
+        try:
+            containment_stopped = True
+            for label, pgid, fingerprint in (
+                ("watchdog", watchdog_pgid, watchdog_fingerprint),
+                ("launcher", launcher_pgid, launcher_fingerprint),
+            ):
+                if pgid is None:
+                    continue
+                try:
+                    terminate_group(pgid, expected_fingerprint=fingerprint)
+                except BaseException as cleanup_exc:
+                    containment_stopped = False
+                    print(
+                        f"CODEX_LITE_RUN=CLEANUP_FAIL process={label} pgid={pgid} "
+                        f"detail={cleanup_exc}", file=sys.stderr,
+                    )
+            if row is not None and os.environ.get("ARCHON_FEATURE_SCOPE") == "repositories":
+                if containment_stopped:
+                    repository_feature_call("prearm_failure", args, row,
+                                            redact_control_tokens(str(start_error))[:500])
+                    feature_recoverable = True
+            else:
+                abandon_if_orphaned(row, args.db, env)
+        finally:
+            # A continuation rotates its token before AI work can begin. If the
+            # arming/guard handshake fails before the replacement token is
+            # printed, restore the last operator-known capability even when
+            # cleanup itself hit a process/DB problem.
+            if previous_control is not None and row is not None:
+                secure_write_json(control_state_path(row, args.control_dir), previous_control)
+            elif feature_recoverable:
+                write_control_records(
+                    row, args.control_dir, next_control_token, args.action,
+                    launcher_pid, launcher_pgid, launcher_fingerprint, workflow_log,
+                    watchdog_log, watchdog_pid, watchdog_pgid, watchdog_fingerprint,
+                    arm_file, False, args.wall_minutes, args.max_total_tokens,
                 )
-        abandon_if_orphaned(row, args.db, env)
-        # A continuation rotates its token before AI work can begin. If the
-        # arming/guard handshake fails before the replacement token is printed,
-        # restore the last operator-known capability instead of stranding the
-        # paused/failed run behind an undisclosed hash.
-        if previous_control is not None:
-            secure_write_json(control_state_path(row, args.control_dir), previous_control)
-        if guard_file is not None:
-            try:
-                guard_file.unlink()
-            except FileNotFoundError:
-                pass
+                print(f"CODEX_LITE_RUN=RECOVERABLE run={row['id']} "
+                      f"control_token={next_control_token} status=failed log={workflow_log}")
+            if feature_control_claimed:
+                repository_feature_call("control_failed", args, row)
+            if guard_file is not None:
+                try:
+                    guard_file.unlink()
+                except FileNotFoundError:
+                    pass
         raise
+    if feature_control_claimed:
+        repository_feature_call("after_control", args, row)
     print(
         f"CODEX_LITE_RUN=STARTED action={args.action} run={row['id'][:8]} "
         f"launcher_pid={launcher_pid} launcher_pgid={launcher_pgid} "
         f"watchdog_pid={watchdog_pid} control_token={next_control_token} "
         f"log={workflow_log} watchdog_log={watchdog_log}"
     )
+    if args.action in {"approve", "resume"} and os.environ.get("ARCHON_FEATURE_SCOPE") == "repositories":
+        result = supervise_exact_run(args.db, row["id"], 86400, 2.0)
+        maybe_finalize_feature_receipt(args, row, result)
+        print("ARCHON_FEATURE_SUPERVISION=" + result["state"].upper() + " " + redact_control_tokens(
+            " ".join(f"{key}={value}" for key, value in result.items())
+        ))
 
 
 if __name__ == "__main__":

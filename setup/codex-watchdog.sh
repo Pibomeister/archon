@@ -8,6 +8,7 @@
 #                          [--launcher-fingerprint STRING]
 #                          [--interval-s S] [--await-running --arm-file PATH]
 #                          [--db PATH] [--codex-home DIR] [--chain-id ID]
+#                          [--feature-chain-id ID --control-dir DIR]
 #
 # Polls the run every S seconds (default 30). While the run is `running`:
 #   - wall clock past N minutes            -> trip
@@ -30,6 +31,7 @@ AWAIT_RUNNING=0; ARM_FILE=""
 DB="$HOME/.archon/archon.db"
 CHOME="${CODEX_HOME:-$HOME/.archon/codex-home}"
 CHAIN_ID=""
+FEATURE_CHAIN_ID=""; CONTROL_DIR=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --wall-minutes) WALL_MIN="$2"; shift 2 ;;
@@ -42,6 +44,8 @@ while [ $# -gt 0 ]; do
     --db) DB="$2"; shift 2 ;;
     --codex-home) CHOME="$2"; shift 2 ;;
     --chain-id) CHAIN_ID="$2"; shift 2 ;;
+    --feature-chain-id) FEATURE_CHAIN_ID="$2"; shift 2 ;;
+    --control-dir) CONTROL_DIR="$2"; shift 2 ;;
     *) echo "WATCHDOG=FAIL unknown arg $1"; exit 1 ;;
   esac
 done
@@ -50,6 +54,10 @@ case "$WALL_MIN" in ''|*[!0-9]*) echo "WATCHDOG=FAIL --wall-minutes must be a no
 case "$INTERVAL" in ''|*[!0-9]*) echo "WATCHDOG=FAIL --interval-s must be a non-negative integer"; exit 1 ;; esac
 if [ -n "$MAX_TOK" ]; then case "$MAX_TOK" in *[!0-9]*|'') echo "WATCHDOG=FAIL --max-total-tokens must be an integer"; exit 1 ;; esac; fi
 if [ -n "$LAUNCHER_PGID" ]; then case "$LAUNCHER_PGID" in *[!0-9]*|'') echo "WATCHDOG=FAIL --launcher-pgid must be an integer"; exit 1 ;; esac; fi
+if [ -n "$FEATURE_CHAIN_ID" ] && [ -z "$CONTROL_DIR" ]; then
+  echo "WATCHDOG=FAIL --feature-chain-id requires --control-dir"
+  exit 1
+fi
 if [ -z "${WATCHDOG_KILL_CMD:-}" ] && { [ -z "$LAUNCHER_PGID" ] || [ -z "$LAUNCHER_FINGERPRINT" ]; }; then
   echo "WATCHDOG=FAIL --launcher-pgid and --launcher-fingerprint are required outside tests (use codex-lite-run.py)"
   exit 1
@@ -62,7 +70,7 @@ fi
 R="$(python3 - "$DB" "$RUN" <<'PY'
 import re, sqlite3, sys
 db, prefix = sys.argv[1:]
-if not re.fullmatch(r"[0-9a-fA-F]{8,32}", prefix):
+if not re.fullmatch(r"(?=.{8,36}\Z)[0-9a-fA-F]+(?:-[0-9a-fA-F]+)*", prefix):
     print(f"WATCHDOG=FAIL bad-id-format [{prefix}]")
     raise SystemExit(1)
 con = sqlite3.connect(db)
@@ -95,6 +103,12 @@ PY
 }
 
 tokens_now() { # prints a number, or ERR when accounting is unavailable
+  if [ -n "$FEATURE_CHAIN_ID" ]; then
+    python3 "$HERE/feature-budget.py" --control-dir "$CONTROL_DIR" --codex-home "$CHOME" \
+      usage --chain-id "$FEATURE_CHAIN_ID" --db "$DB" --require-sessions --json 2>/dev/null \
+      | python3 -c "import json,sys; d=json.load(sys.stdin); print('|'.join(str(d[k]) for k in ('total_tokens','active_seconds','wall_seconds','max_total_tokens','wall_exhausted','tokens_exhausted')))" 2>/dev/null || echo ERR
+    return
+  fi
   python3 "$HERE/codex-usage.py" "$RUN_ID" --db "$DB" --codex-home "$CHOME" --json 2>/dev/null \
     | python3 -c "import json,sys; print(json.load(sys.stdin)['total_tokens'])" 2>/dev/null || echo ERR
 }
@@ -137,8 +151,25 @@ cleanup_orphan() {
   fi
 }
 
+feature_budget_start() {
+  [ -n "$FEATURE_CHAIN_ID" ] || return 0
+  python3 "$HERE/feature-budget.py" --control-dir "$CONTROL_DIR" --codex-home "$CHOME" \
+    active-start --chain-id "$FEATURE_CHAIN_ID" --run-id "$RUN_ID" --db "$DB" >/dev/null
+}
+
+feature_budget_stop() {
+  [ -n "$FEATURE_CHAIN_ID" ] || return 0
+  python3 "$HERE/feature-budget.py" --control-dir "$CONTROL_DIR" --codex-home "$CHOME" \
+    active-stop --chain-id "$FEATURE_CHAIN_ID" --run-id "$RUN_ID" >/dev/null
+}
+
 arm_watchdog() {
   mkdir -p "$(dirname "$ARM_FILE")"
+  if ! feature_budget_start; then
+    rm -f "$ARM_FILE" "${ARM_FILE}.tmp.$$"
+    echo "WATCHDOG=FAIL shared budget interval could not be started chain=$FEATURE_CHAIN_ID run=${RUN_ID:0:8}"
+    exit 1
+  fi
   tmp="${ARM_FILE}.tmp.$$"
   printf 'run=%s\nlauncher_pgid=%s\narmed_at=%s\n' \
     "$RUN_ID" "$LAUNCHER_PGID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp"
@@ -148,6 +179,13 @@ arm_watchdog() {
 
 ARMED=0
 KILL_RESULT="not-needed"
+GROUP_KILL_RESULT="not-needed"
+
+kill_registered_groups() {
+  [ -n "$FEATURE_CHAIN_ID" ] || return 0
+  GROUP_KILL_RESULT="$(python3 "$HERE/feature-budget.py" --control-dir "$CONTROL_DIR" --codex-home "$CHOME" \
+    terminate-groups --chain-id "$FEATURE_CHAIN_ID" --run-id "$RUN_ID" --json 2>/dev/null || echo '{"terminated":"failed"}')"
+}
 
 while true; do
   S="$(status_now)"
@@ -171,34 +209,75 @@ while true; do
     fi
   fi
   if [ "$S" != "running" ]; then
+    if ! feature_budget_stop; then
+      echo "WATCHDOG=FAIL shared budget interval could not be stopped chain=$FEATURE_CHAIN_ID run=${RUN_ID:0:8}"
+      exit 1
+    fi
     echo "WATCHDOG=RUN_$(printf '%s' "$S" | tr '[:lower:]' '[:upper:]') chain=${CHAIN_ID:-none}"
     exit 0
   fi
   if [ "$ARMED" -eq 1 ] && ! launcher_alive; then
+    kill_registered_groups
     cleanup_orphan
-    echo "WATCHDOG=TRIPPED reason=launcher-exited run=${RUN_ID:0:8} chain=${CHAIN_ID:-none} cleanup=$CLEANUP"
+    feature_budget_stop >/dev/null 2>&1 || true
+    echo "WATCHDOG=TRIPPED reason=launcher-exited run=${RUN_ID:0:8} chain=${CHAIN_ID:-none} group_kill=$GROUP_KILL_RESULT cleanup=$CLEANUP"
     exit 2
   fi
   NOW="$(date +%s)"
-  if [ "$NOW" -ge "$DEADLINE" ]; then
+  if [ -z "$FEATURE_CHAIN_ID" ] && [ "$NOW" -ge "$DEADLINE" ]; then
+    kill_registered_groups
     kill_run
     cleanup_orphan
-    echo "WATCHDOG=TRIPPED reason=wall run=${RUN_ID:0:8} chain=${CHAIN_ID:-none} elapsed_s=$(( NOW - START_EPOCH )) budget_min=$WALL_MIN kill=$KILL_RESULT cleanup=$CLEANUP"
+    feature_budget_stop >/dev/null 2>&1 || true
+    echo "WATCHDOG=TRIPPED reason=wall run=${RUN_ID:0:8} chain=${CHAIN_ID:-none} elapsed_s=$(( NOW - START_EPOCH )) budget_min=$WALL_MIN kill=$KILL_RESULT group_kill=$GROUP_KILL_RESULT cleanup=$CLEANUP"
     exit 2
   fi
-  if [ -n "$MAX_TOK" ]; then
+  if [ -n "$MAX_TOK" ] || [ -n "$FEATURE_CHAIN_ID" ]; then
     T="$(tokens_now)"
     if [ "$T" = "ERR" ]; then
+      if [ -n "$FEATURE_CHAIN_ID" ]; then
+        kill_registered_groups
+        kill_run
+        cleanup_orphan
+        feature_budget_stop >/dev/null 2>&1 || true
+        echo "WATCHDOG=TRIPPED reason=accounting-unavailable run=${RUN_ID:0:8} chain=${FEATURE_CHAIN_ID} containment=fail kill=$KILL_RESULT group_kill=$GROUP_KILL_RESULT cleanup=$CLEANUP"
+        exit 2
+      fi
       # Accounting failure must not silently disable the cap (a gate that
       # scanned nothing) nor kill a healthy run: warn once, keep the wall cap.
       if [ -z "${WARNED_TOKENS:-}" ]; then
         echo "WATCHDOG=WARN token accounting unavailable - only the wall budget is enforced"
         WARNED_TOKENS=1
       fi
+    elif [ -n "$FEATURE_CHAIN_ID" ]; then
+      TOTAL="$(printf '%s' "$T" | cut -d'|' -f1)"
+      ACTIVE_S="$(printf '%s' "$T" | cut -d'|' -f2)"
+      WALL_S="$(printf '%s' "$T" | cut -d'|' -f3)"
+      TOKEN_CAP="$(printf '%s' "$T" | cut -d'|' -f4)"
+      WALL_EXHAUSTED="$(printf '%s' "$T" | cut -d'|' -f5)"
+      TOKENS_EXHAUSTED="$(printf '%s' "$T" | cut -d'|' -f6)"
+      if [ "$WALL_EXHAUSTED" = "True" ]; then
+        kill_registered_groups
+        kill_run
+        cleanup_orphan
+        feature_budget_stop >/dev/null 2>&1 || true
+        echo "WATCHDOG=TRIPPED reason=shared-wall run=${RUN_ID:0:8} chain=$FEATURE_CHAIN_ID active_s=$ACTIVE_S budget_s=$WALL_S kill=$KILL_RESULT group_kill=$GROUP_KILL_RESULT cleanup=$CLEANUP"
+        exit 2
+      fi
+      if [ "$TOKENS_EXHAUSTED" = "True" ]; then
+        kill_registered_groups
+        kill_run
+        cleanup_orphan
+        feature_budget_stop >/dev/null 2>&1 || true
+        echo "WATCHDOG=TRIPPED reason=shared-tokens run=${RUN_ID:0:8} tokens=$TOTAL cap=$TOKEN_CAP chain=$FEATURE_CHAIN_ID kill=$KILL_RESULT group_kill=$GROUP_KILL_RESULT cleanup=$CLEANUP"
+        exit 2
+      fi
     elif [ "$T" -ge "$MAX_TOK" ] 2>/dev/null; then
+      kill_registered_groups
       kill_run
       cleanup_orphan
-      echo "WATCHDOG=TRIPPED reason=tokens run=${RUN_ID:0:8} tokens=$T cap=$MAX_TOK chain=${CHAIN_ID:-none} kill=$KILL_RESULT cleanup=$CLEANUP"
+      feature_budget_stop >/dev/null 2>&1 || true
+      echo "WATCHDOG=TRIPPED reason=tokens run=${RUN_ID:0:8} tokens=$T cap=$MAX_TOK chain=${CHAIN_ID:-none} kill=$KILL_RESULT group_kill=$GROUP_KILL_RESULT cleanup=$CLEANUP"
       exit 2
     fi
   fi

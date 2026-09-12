@@ -1,6 +1,6 @@
 ---
 name: archon-sdlc
-description: Use when driving or supervising a Goodword Archon SDLC, bugfix, or backfill run - starting full-sdlc-api on a feature spec, bugfix on a bug report, or backfill on a backfill spec, reading the plan-gate, RCA-gate, or backfill-packet, interpreting loop exits (CONVERGED, NO_PROGRESS, FIXER_BLOCKED, SCOPE_BREACH, ROUND_CAP_REACHED, CHAIN_CONFLICT, FIX_STALLED, ARCHITECTURE_SUSPECT, NEGCONTROL=FAIL, CLAIM_DIVERGED, SAMPLE_SUSPECT, BOUND_BREACH, RECONCILE_FAIL, PLAN_REJECTED, PLAN_NO_PROGRESS, PLAN_SCOPE_DISPUTE, PLAN_ROUND_CAP, RCA_PLAN_REJECTED, RCA_PLAN_SCOPE_DISPUTE, RCA_PLAN_SHAPE=FAIL, CRITIC_GATE=FAIL, IMPACT=UNAVAILABLE, IMPACT=SKIPPED, DESLOP=DIRTY, DESLOP_GATE=FAIL, DESLOP_REVIEW=FAIL, DESLOP_ROUND_CAP, ROUTE=FULL, LITE_FIXES_UNREVIEWED, PROOF_SELF_CONTRADICTED, RCA_PLAN_FINDING_RESTATED, RCA_PLAN_SCOPE_WIDENED, RCA_PLAN_CRITIQUE_ORPHANED, E2E_MUTEX=FAIL), choosing between a lite lane (full-sdlc-api-lite, bugfix-lite) and the full lane, deciding resume vs escalate, or running babysit/cleanup afterwards. Triggers on "archon run", "start the SDLC lane", "archon bugfix", "archon backfill", "the run is stuck", "resume the run", or any mention of a paused/failed archon workflow.
+description: Use when driving or supervising a Goodword Archon SDLC, repository-list feature, bugfix, or backfill run - starting full-sdlc-api on a feature spec, bugfix on a bug report, or backfill on a backfill spec, reading the plan-gate, RCA-gate, or backfill-packet, interpreting loop exits (CONVERGED, NO_PROGRESS, FIXER_BLOCKED, SCOPE_BREACH, ROUND_CAP_REACHED, CHAIN_CONFLICT, FIX_STALLED, ARCHITECTURE_SUSPECT, NEGCONTROL=FAIL, CLAIM_DIVERGED, SAMPLE_SUSPECT, BOUND_BREACH, RECONCILE_FAIL, PLAN_REJECTED, PLAN_NO_PROGRESS, PLAN_SCOPE_DISPUTE, PLAN_ROUND_CAP, RCA_PLAN_REJECTED, RCA_PLAN_SCOPE_DISPUTE, RCA_PLAN_SHAPE=FAIL, CRITIC_GATE=FAIL, IMPACT=UNAVAILABLE, IMPACT=SKIPPED, DESLOP=DIRTY, DESLOP_GATE=FAIL, DESLOP_REVIEW=FAIL, DESLOP_ROUND_CAP, ROUTE=FULL, LITE_FIXES_UNREVIEWED, PROOF_SELF_CONTRADICTED, RCA_PLAN_FINDING_RESTATED, RCA_PLAN_SCOPE_WIDENED, RCA_PLAN_CRITIQUE_ORPHANED, E2E_MUTEX=FAIL), choosing between a lite lane (full-sdlc-api-lite, bugfix-lite) and the full lane, deciding resume vs escalate, or running babysit/cleanup afterwards. Triggers on "archon run", "start the SDLC lane", "archon bugfix", "archon backfill", "the run is stuck", "resume the run", or any mention of a paused/failed archon workflow.
 ---
 
 <WORKFLOW-NODE-STOP>
@@ -83,14 +83,135 @@ Feature runs now use the provider-neutral launcher:
 
 ```bash
 python3 "$ROOT/.archon/setup/archon-run.py" feature --provider claude --scope api "/abs/path/to/spec.md"
-python3 "$ROOT/.archon/setup/archon-run.py" feature --provider codex --scope fullstack "/abs/path/to/spec.md"
+python3 "$ROOT/.archon/setup/archon-run.py" feature --provider codex --scope api,goodword-mcp "/abs/path/to/spec.md"
 ```
 
 Direct shell use must pass both `--provider` and `--scope`. `archon-linear`
-infers them from ticket classification. Cross-repository features run API first
-and web second with the same provider; the web lane accepts only the generated
-`feature-api-handoff.json`, validates its spec bytes, API head, shared plan hash,
-and chain identity, then derives its own web worktree from that handoff.
+infers them from ticket classification. Registered names come from
+`bash "$ROOT/.archon/setup/repo-profile.sh" --list`: initially `api`,
+`goodword-mcp`, and `web-app`. `web` aliases `web-app`. For Codex, standalone
+`fullstack` is shorthand for the joint scope `api,web-app`. Claude's scalar
+`fullstack` retains its legacy API-first/web-second `feature-api-handoff.json`
+chain. Existing persisted API/web chains retain their original schemas.
+
+List order is presentation order; the approved dependencies determine execution
+order, with repository-name ordering for independent stages. Reject empty or
+duplicate entries (including aliases), unknown/path-like names, and `fullstack`
+inside a list. Do not use `ARCHON_REPO` to narrow an explicit list: conflicting
+selection is an error. Scalar `--scope api` with `ARCHON_REPO` remains a deprecated
+compatibility path. Use explicit repository scope for new work.
+
+A comma-separated scope (`--scope api,goodword-mcp`, `--scope api,web-app`)
+runs the joint repository-list chain for either provider: one planning run
+writes `joint-plan.json`, then one stage run per repository in dependency order,
+then one integration run. Codex advances through guarded `approve`/`resume`.
+Claude has no control token; its operator loop after each gate is:
+
+```bash
+archon workflow approve <run>
+python3 "$ROOT/.archon/setup/archon-run.py" feature-advance --chain <chain-id>
+```
+
+`feature-advance` prints `ARCHON_FEATURE_REPOSITORY_CHAIN=PAUSED … gate=…` with
+the next run to hand back, or `DISPATCHED` / `LOCALLY_VERIFIED`. The approve
+step stays with the human (§0); the agent only runs `feature-advance` and renders
+the next packet.
+
+For the guarded Codex path:
+
+- Pin every selected repository's baseline and create separate chain-specific
+  worktrees before planning. Preserve dirty main checkouts and existing
+  worktrees. Use the repository profiles' installation and verification commands.
+- Produce one complete `joint-plan.json`: selected repositories, owned stages,
+  per-repository file allowances and tests, interface artifacts, dependencies,
+  and a local integration matrix. A dependency inside the selected scope is
+  owned work, not an unspecified upstream prerequisite. Outside-scope dependencies,
+  cycles, and blocked plans cannot enter implementation; do not expand scope.
+- Require one human joint approval bound to the exact spec bytes, repository set,
+  baselines, plan/supporting artifacts, contracts, order, and verification plan.
+  Planning workers write only run artifacts. After approval, each worker writes
+  only its assigned worktree and run artifacts; routing and approved-plan files
+  remain read-only. Drift invalidates authorization; return to joint planning.
+- Execute stages sequentially. Consumers use the verified predecessors' exact
+  local commits and hashed interface artifacts from `candidate-inputs.json`.
+  Do not require an upstream PR, merge, deployed API, or package publication.
+  Contract `artifact` is a literal producer-relative file. Generated files use
+  an approved `export: {"argv": [...]}` hook whose candidate-owned script writes
+  that file under `ARCHON_INTERFACE_OUTPUT_DIR` after verification, without
+  changing the worktree. Merely listing an export under `verification` does not
+  execute it. New integration commands use `{"repo": "api", "argv": [...]}`;
+  cwd is that repository's disposable candidate worktree. Arguments may use
+  `${ARCHON_REPO_API_WORKTREE}` and `${ARCHON_REPO_API_COMMIT}` (or
+  `GOODWORD_MCP` / `WEB_APP` for other selected repositories). Scripts belong
+  to the approved candidates. Validate with `setup/validate-joint-plan.py`.
+  Trace response and error transformations through clients before promising
+  consumer behavior; discarded error details cannot support distinct handling.
+- Share **240 active minutes and 30 million tokens across the whole chain**,
+  including planning, retries, all repository stages, and integration. Approval
+  waits do not consume active time. Exact recorded Codex sessions and native
+  subagent ancestry are deduplicated; unrelated concurrent features are excluded.
+  Resumes never replenish the budget. Unavailable accounting is a containment
+  failure, and exhausted budgets prevent dispatch. Do not claim this Codex
+  watchdog/accounting guarantee for the separate Claude path.
+  Before launching a large repository-list Codex feature, run a forecast without
+  launching AI:
+
+  ```bash
+  python3 "$ROOT/.archon/setup/archon-run.py" feature-estimate --scope api,goodword-mcp /absolute/path/to/spec.md
+  python3 "$ROOT/.archon/setup/archon-run.py" --max-total-tokens 60000000 feature-estimate --scope api,goodword-mcp /absolute/path/to/spec.md
+  ```
+
+  For an existing Codex repository-list chain, check the allowance against
+  refreshed private usage without launching AI. The shepherd additionally saves
+  its forecast for chains created with this policy:
+
+  ```bash
+  python3 "$ROOT/.archon/setup/archon-run.py" feature-estimate --chain <chain-id>
+  python3 "$ROOT/.archon/setup/archon-run.py" feature-shepherd --chain <chain-id>
+  ```
+
+  Forecasts are heuristic ranges, not statistical guarantees. They use private
+  chain and budget ledgers when available; unfinished histories are lower bounds.
+  Cold starts rely on explicit priors. The token unit is the enforced Codex
+  total-token count: input, cached input counted once by provider accounting, and
+  output. A forecast never increases, resets, or overrides the controller's
+  enforced budget ceiling.
+  New Codex repository-list chains warn before worktree creation if the allowance
+  is below the forecast upper bound. They recheck at stage/resume boundaries and
+  before each planning review round, saving read-only `budget-forecast.json`.
+  `BUDGET_SHEPHERD=WARN` is advisory: continue under the unchanged hard cap.
+  Actual token/time exhaustion and unavailable accounting still stop execution.
+  Forecasts never accept findings or replenish tokens. Older chains skip this
+  new advisory check. Estimates group
+  history by repository/phase, not semantic task difficulty, and are not calibrated
+  statistical predictions. Fewer than three completed samples retain the explicit
+  cold-start upper bound; incomplete histories never replace successful samples.
+- Guarded `approve`, `resume`, and `supervise` advance the existing chain.
+  Resume the failed stage without repeating verified predecessors. For a terminal,
+  **unapproved planning** run that needs fresh planning, use
+  `feature-replan <run-id> --token CONTROL_TOKEN_FROM_LAST_LAUNCH` after repairing
+  the cause. It preserves the chain, selected worktrees, and shared budget;
+  prior plan and critic/revision evidence are supplied as hashed, read-only
+  `prior-planning-evidence.json` for refinement, without transferring approval.
+  It cannot replace approved or implemented work. A `RECOVERABLE` start supplies
+  usable control authority; retain its operator-held token. Never persist tokens
+  in handoff documents or edit private state to bypass a failed check.
+- Finish only when the approved integration matrix passes against disposable
+  worktrees of all selected candidates and the chain receipt says
+  **`locally_verified` with publication held**. A completed child run, disabled
+  publication, missing artifacts, zero executed tests, failed integration, or
+  skipped required verification is not verified delivery.
+
+Repository-list qualification requires a supervised two-repository Sol/medium
+Codex trial through the human gate, both stages, local integration, and shared
+budget evidence. Until that receipt exists, report qualification as pending;
+ENG-3866 remains deferred. After `LOCALLY_VERIFIED`, publication is the explicit
+human-run `python3 "$ROOT/.archon/setup/archon-run.py" feature-publish --chain <id>`:
+it pushes each candidate branch (`--no-verify`) and opens draft PRs against `main` in
+dependency order, adopting an open PR only on an exact head match and recording
+`NO_CHANGE` repositories without a PR. This feature does not authorize production
+access or Linear writes, and the agent never marks a PR ready, merges, closes, or
+deletes branches; the merge click is the human's.
 
 Before starting anything large, read §6 below - a run spends the operator's Claude
 subscription window.
@@ -194,7 +315,7 @@ Two differences that change supervision (RUNBOOK §15):
   python3 "$ROOT/.archon/setup/archon-run.py" run full-sdlc-api-lite-codex "/abs/path/to/spec.md"
   ```
 
-  Use the same script's `approve`, `reject`, `resume`, and `abandon` subcommands at gates, passing `--token CONTROL_TOKEN_FROM_LAST_LAUNCH` and replacing the placeholder with the token printed by the latest `STARTED` line. It validates ChatGPT auth and dedicated-home skills, checks optional GitNexus health for the pinned `api` index at `$HOME/.archon/gitnexus/api-main`, captures a stable exact launcher PGID/fingerprint, and returns only after the watchdog arms and the workflow consumes a one-time private guard. Lite defaults are 90 active minutes/8M cumulative tokens; full feature and full bugfix defaults are 240/30M per lane. When GitNexus is healthy, its index, token hash, signal authority, and enforced Codex wrapper all live outside the AI-writable API/web roots; when it is absent/stale/missing MCP, the run emits explicit degraded evidence and continues with repo-local investigation. `abandon` and `reject` remain available even when auth, ports, or optional evidence sources are unhealthy.
+  Use the same script's `approve`, `reject`, `resume`, and `abandon` subcommands at gates, passing `--token CONTROL_TOKEN_FROM_LAST_LAUNCH` and replacing the placeholder with the token printed by the latest `STARTED` or `RECOVERABLE` line. It validates ChatGPT auth and dedicated-home skills, checks optional GitNexus health for the pinned `api` index at `$HOME/.archon/gitnexus/api-main`, captures a stable exact launcher PGID/fingerprint, and returns only after the watchdog arms and the workflow consumes a one-time private guard. Lite defaults are 90 active minutes/8M cumulative tokens; scalar full feature and full bugfix defaults are 240/30M per lane. New Codex repository-list features share 240/30M across the entire chain, not per repository. When GitNexus is healthy, its index, token hash, signal authority, and enforced Codex wrapper all live outside the AI-writable repository roots; when it is absent/stale/missing MCP, the run emits explicit degraded evidence and continues with repo-local investigation. `abandon` and `reject` remain available even when auth, ports, or optional evidence sources are unhealthy.
 - `maxBudgetUsd` is unsupported under codex, so generated twins remove the inert fields. AI-node timeouts remain non-lethal; the mandatory external watchdog is the structural brake.
 
 Twins are generated by `setup/derive-codex.py`; never edit one by hand — fix the parent and regenerate.

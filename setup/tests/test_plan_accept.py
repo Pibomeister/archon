@@ -55,6 +55,15 @@ class PlanAccept(unittest.TestCase):
         self.assertNotIn("<promise>PLAN_CONVERGED</promise>", r.stdout)
         self.assertIn("PLAN_ROUND_CAP round=1 cap=1", r.stdout + r.stderr)
 
+    def test_reject_detects_joint_contract_mutation(self):
+        (self.rd / "critique.json").write_text(json.dumps({"verdict": "REJECT", "findings": []}))
+        shutil.copy(self.ad / "plan.md", self.rd / "plan.pre.md")
+        (self.rd / "pre-joint-plan.json").write_text('{"contracts": []}')
+        (self.ad / "joint-plan.json").write_text('{"contracts": [{"artifact": "changed"}]}')
+        result = self.go()
+        self.assertIn("joint-plan.json", result.stdout)
+        self.assertNotIn("PLAN_CONVERGED", result.stdout)
+
     def test_accept_with_only_p1_converges(self):
         self.critique([{"severity": "P1", "kind": "gap", "confidence": 100}])
         (self.ad / "plan-accept.txt").write_text("edy: accepted\n")

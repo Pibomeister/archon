@@ -189,11 +189,15 @@ nodes:
     # REPO_DIR must come AFTER params-env: $REPO does not exist before it.
     eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
     REPO_DIR="/Users/eduardopicazo/Documents/Workspace/Goodword/$REPO"
-    git -C "$REPO_DIR" fetch origin main
-    if [ -d "$WT" ]; then
+    if [ "${ARCHON_FEATURE_SCOPE-}" = repositories ] && [ "${ARCHON_FEATURE_PHASE-}" = implement ]; then
+      git -C "$WT" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "BOOTSTRAP=FAIL controller-pinned worktree missing"; exit 1; }
+      test "$(git -C "$WT" branch --show-current)" = "$BR" || { echo "BOOTSTRAP=FAIL controller worktree on wrong branch"; exit 1; }
+      echo "BOOTSTRAP=ADOPTED_CONTROLLER"
+    elif [ -d "$WT" ]; then
       test "$(git -C "$WT" branch --show-current)" = "$BR" || { echo "BOOTSTRAP=FAIL existing worktree on wrong branch"; exit 1; }
       echo "BOOTSTRAP=ADOPTED"
     else
+      git -C "$REPO_DIR" fetch origin main
       git -C "$REPO_DIR" worktree add "$WT" -b "$BR" origin/main
       echo "BOOTSTRAP=CREATED"
     fi
@@ -656,6 +660,12 @@ nodes:
     directory (you are NOT cwd'd there; cd for every command).
 
     Scope: change only API files listed in files-allowlist.json. Do not refactor adjacent code or touch web-app.
+    JOINT-REPOSITORY RUNS: when candidate-inputs.json exists in ARTIFACTS_DIR,
+    read it before editing. It maps approved direct dependencies to exact local
+    candidate worktrees, candidate heads, artifact directories, and interface
+    artifacts with sha256 hashes. Consume those exact local inputs only; do not
+    require or assume an upstream PR, merge, publication, deployment, or newer
+    repository state.
     SINGLE-REPO RUNS: when params.json's "repo" is not "api", the two sentences
     above are scoped to api runs. files-allowlist.json is then the entire scope,
     its paths are relative to that repository's root, and there is no web-app
@@ -1220,6 +1230,7 @@ nodes:
 - id: prbody
   depends_on:
   - smoke
+  when: $feature-phase.phase == 'legacy'
   timeout: 600000
   prompt: |
     You are the PR-body composition node on the LITE lane. Ask no questions.
@@ -1269,6 +1280,7 @@ nodes:
 - id: ship
   depends_on:
   - prbody-gate
+  when: $feature-phase.phase == 'legacy'
   always_run: true
   timeout: 900000
   bash: |
@@ -1278,6 +1290,7 @@ nodes:
 - id: run-report
   depends_on:
   - ship
+  when: $feature-phase.phase == 'legacy'
   timeout: 600000
   prompt: |
     If feature-result.json declares NO_CHANGE, report verified baseline acceptance
@@ -1313,6 +1326,7 @@ nodes:
 - id: kb-capture
   depends_on:
   - run-report
+  when: $feature-phase.phase == 'legacy'
   timeout: 600000
   prompt: |
     If feature-result.json declares NO_CHANGE, report verified baseline acceptance
@@ -1344,6 +1358,7 @@ nodes:
 - id: kb-capture-gate
   depends_on:
   - kb-capture
+  when: $feature-phase.phase == 'legacy'
   timeout: 120000
   bash: |
     set -euo pipefail
@@ -1372,6 +1387,7 @@ nodes:
 - id: report
   depends_on:
   - kb-capture-gate
+  when: $feature-phase.phase == 'legacy'
   trigger_rule: all_done
   always_run: true
   timeout: 120000

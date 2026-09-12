@@ -103,7 +103,7 @@ short() { printf '%s' "${1:0:8}"; }
 # substitution would otherwise exit silently under set -e.
 qq() {
   local err
-  if ! QOUT="$(sqlite3 -noheader -separator '|' "$ARCHON_DB" "$1" 2>"${TMPDIR:-/tmp}/resume-sqlite-err.$$")"; then
+  if ! QOUT="$(sqlite3 -cmd '.timeout 5000' -noheader -separator '|' "$ARCHON_DB" "$1" 2>"${TMPDIR:-/tmp}/resume-sqlite-err.$$")"; then
     err="$(sanitize "$(head -c 200 "${TMPDIR:-/tmp}/resume-sqlite-err.$$" 2>/dev/null)")"
     rm -f "${TMPDIR:-/tmp}/resume-sqlite-err.$$"
     printf 'sqlite: %s\n' "$err" >&2

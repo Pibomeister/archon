@@ -70,6 +70,8 @@ class RetainedNodesAreParentBytes(unittest.TestCase):
                 exp["depends_on"] = list(m["depends_on"][nid])
             if nid in m.get("loops", {}):
                 exp["loop_group"]["max_iterations"] = m["loops"][nid]["max_iterations"]
+            for field in m.get("remove_fields", {}).get(nid, []):
+                exp.pop(field, None)
             exp = subst_ports(exp, m.get("ports", {}))
             got = gen[nid]
             if nid in overlaid:

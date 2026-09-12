@@ -61,7 +61,7 @@ nodes:
       # an already-bound run (see resolve-params.sh).
       bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/resolve-params.sh \
         /Users/eduardopicazo/Documents/Workspace/Goodword "${ARGUMENTS-}" "$ARTIFACTS_DIR" 4123 \
-        --allow api,goodword-mcp
+        --allow api,goodword-mcp,web-app
       eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
       test -d "/Users/eduardopicazo/Documents/Workspace/Goodword/$REPO/.git" || { echo "PREFLIGHT=FAIL $REPO repo missing"; exit 1; }
       # An empty APIPORT is legal ONLY because the repo declares no smoke stack.
@@ -77,8 +77,29 @@ nodes:
       git -C /Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb status --porcelain | sort > "$ARTIFACTS_DIR/kb-pre-porcelain.txt"
       echo "PREFLIGHT=PASS"
 
-  - id: kb-recon
+  - id: feature-phase
     depends_on: [preflight]
+    timeout: 120000
+    bash: |
+      set -euo pipefail
+      if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-feature-phase.out") 2> >(tee -a "$ARTIFACTS_DIR/node-feature-phase.out" >&2); fi
+      SCOPE="${ARCHON_FEATURE_SCOPE-legacy}"
+      PHASE="${ARCHON_FEATURE_PHASE-legacy}"
+      if [ "$SCOPE" = repositories ]; then
+        case "$PHASE" in
+          planning) PLAN=yes; BOOTSTRAP=no; IMPLEMENT=no; INTEGRATION=no ;;
+          implement) PLAN=no; BOOTSTRAP=yes; IMPLEMENT=yes; INTEGRATION=no ;;
+          integration) PLAN=no; BOOTSTRAP=no; IMPLEMENT=no; INTEGRATION=yes ;;
+          *) echo "FEATURE_PHASE=FAIL unsupported repository phase $PHASE"; exit 1 ;;
+        esac
+      else
+        PHASE=legacy; PLAN=yes; BOOTSTRAP=yes; IMPLEMENT=yes; INTEGRATION=no
+      fi
+      printf '{"phase":"%s","scope":"%s","plan":"%s","bootstrap":"%s","implement":"%s","integration":"%s"}\n'         "$PHASE" "$SCOPE" "$PLAN" "$BOOTSTRAP" "$IMPLEMENT" "$INTEGRATION"
+
+  - id: kb-recon
+    depends_on: [feature-phase]
+    when: "$feature-phase.plan == 'yes'"
     model: sonnet
     maxBudgetUsd: 3
     timeout: 900000
@@ -117,6 +138,7 @@ nodes:
 
   - id: kb-recon-gate
     depends_on: [kb-recon]
+    when: "$feature-phase.plan == 'yes'"
     timeout: 120000
     bash: |
       set -euo pipefail
@@ -143,7 +165,8 @@ nodes:
       echo "KB_RECON_GATE=PASS"
 
   - id: bootstrap
-    depends_on: [preflight]
+    depends_on: [feature-phase]
+    when: "$feature-phase.bootstrap == 'yes'"
     timeout: 900000
     bash: |
       set -euo pipefail
@@ -151,11 +174,15 @@ nodes:
       # REPO_DIR must come AFTER params-env: $REPO does not exist before it.
       eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
       REPO_DIR="/Users/eduardopicazo/Documents/Workspace/Goodword/$REPO"
-      git -C "$REPO_DIR" fetch origin main
-      if [ -d "$WT" ]; then
+      if [ "${ARCHON_FEATURE_SCOPE-}" = repositories ] && [ "${ARCHON_FEATURE_PHASE-}" = implement ]; then
+        git -C "$WT" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "BOOTSTRAP=FAIL controller-pinned worktree missing"; exit 1; }
+        test "$(git -C "$WT" branch --show-current)" = "$BR" || { echo "BOOTSTRAP=FAIL controller worktree on wrong branch"; exit 1; }
+        echo "BOOTSTRAP=ADOPTED_CONTROLLER"
+      elif [ -d "$WT" ]; then
         test "$(git -C "$WT" branch --show-current)" = "$BR" || { echo "BOOTSTRAP=FAIL existing worktree on wrong branch"; exit 1; }
         echo "BOOTSTRAP=ADOPTED"
       else
+        git -C "$REPO_DIR" fetch origin main
         git -C "$REPO_DIR" worktree add "$WT" -b "$BR" origin/main
         echo "BOOTSTRAP=CREATED"
       fi
@@ -175,6 +202,8 @@ nodes:
 
   - id: ralplan
     depends_on: [bootstrap, kb-recon-gate]
+    trigger_rule: none_failed_min_one_success
+    when: "$feature-phase.plan == 'yes'"
     model: sonnet
     maxBudgetUsd: 3
     timeout: 1200000
@@ -188,6 +217,22 @@ nodes:
       to implement against (you are NOT cwd'd there).
       Its "repo" field names the repository this run targets and is authoritative
       for everything below.
+      JOINT-REPOSITORY RUNS: when params.json has "repositories" or
+      "repository_scope", those canonical repository names are the entire
+      approved scope. Treat the scalar "repo" and "worktree" as the current
+      execution context only; read every selected repository worktree named in
+      params.json "worktrees_by_repo" when present, or otherwise from the
+      standard Goodword root. Produce ONE plan for all selected repositories.
+      Any dependency between selected repositories is owned work in this plan,
+      never an external prerequisite. Do not add repositories that are absent
+      from the selected list.
+      If budget-forecast.json exists, read its remaining phase allowances and
+      uncertainty before planning. It is controller-owned evidence, not authority
+      to omit required scope or tests. Review checkpoints reserve downstream work;
+      never edit the forecast or budget to make a plan pass.
+      The scalar API/web instructions below apply only when neither repository
+      list field exists. For joint runs, group file paths and verification by
+      each selected repository; an unselected web-app has empty web artifacts.
       SINGLE-REPO RUNS: when "repo" is anything other than "api", this run has no
       web-app prong at all. Author a SINGLE-REPOSITORY plan, make every path under
       ## Files relative to that repository's root, write web-files-allowlist.json
@@ -235,6 +280,64 @@ nodes:
       Also write verify.json to that directory — the machine-readable mirror the
       shell gate executes: {"test_patterns": ["<pattern>", ...]} with at least
       one pattern, each matching the Verification commands exactly.
+      JOINT-REPOSITORY RUNS must also write joint-plan.json in that directory:
+        {"schema":"archon.joint-feature-plan.v1",
+         "repositories":["<canonical repo>", "..."],
+         "contracts":[{"producer":"<repo>",
+                       "consumer":"<repo>",
+                       "artifact":"<producer-relative committed interface file>",
+                       "description":"<one line>"}],
+         "stages":{"<selected repo>":
+           {"depends_on":["<selected upstream repo>", "..."],
+            "files_allowlist":["<repo-relative path>", "..."],
+            "test_patterns":["<test path or pattern>", "..."],
+            "verification":["<exact local command>", "..."]}},
+         "integration":{"scenarios":[{"name":"<scenario>",
+                                      "uses":["<repo>", "..."],
+                                      "commands":[{"repo":"<selected repo>",
+                                                   "argv":["<executable>", "<candidate-relative script>"]}],
+                                      "expected_tests":["<observable assertion>"]}]}}
+      The controller computes dependency_order from the stage depends_on lists
+      and freezes it into the approval snapshot using repository-name ordering
+      for independent stages. Every depends_on entry and integration uses entry
+      must name a selected repository. Each integration command must print
+      ARCHON_INTEGRATION_TESTS=<n> with a total at least as large as the
+      scenario's expected_tests count. The integration scenarios must run
+      locally against the selected candidate revisions in disposable worktrees
+      or fixtures; do not make PRs, deploy, publish, or rely on an upstream
+      merge.
+      Joint execution contracts are executable, not prose placeholders:
+      - A contract artifact is a literal relative file path. By default it must
+        exist in the final producer candidate. For generated exports, add
+        "export":{"argv":["<executable>","<candidate-owned export script>"]}.
+        The command runs without shell expansion in the producer worktree after
+        verification; its script must write artifact under the environment
+        variable ARCHON_INTERFACE_OUTPUT_DIR. It must not change the worktree.
+        The harness copies and hashes that output for candidate-inputs.json.
+        A command mentioned only in stage verification is NOT an export hook.
+      - Use structured integration commands {"repo":"<selected repo>",
+        "argv":[...]} for new plans. Their cwd is that repo's disposable candidate
+        worktree. Candidate-owned scripts must be included in the owning stage's
+        file allowance and tests. The runner creates worktrees; do not create
+        nested worktrees or use the main checkouts as execution inputs.
+        Arguments may reference ${ARCHON_REPO_API_WORKTREE} and
+        ${ARCHON_REPO_API_COMMIT}; replace API with GOODWORD_MCP or WEB_APP for
+        those selected repos. Only this vocabulary is supported. These are exact
+        candidate inputs, not invented *_CANDIDATE_SHA names. Each command must
+        print its actual assertion count; expected_tests names concrete checks.
+      - Trace each changed interface end to end: producer status/payload, client
+        normalization, generated types, consumer behavior, and observable tests.
+        Cite the existing transformation code. If errors are collapsed by a client,
+        define a distinguishable contract or own changes to that client in the
+        same plan. Do not assume a consumer can recover discarded error details.
+      - If feature-chain-request.json names prior planning evidence, read it as
+        refinement input. Preserve resolved requirements and recheck prior fixes;
+        it is evidence, never approval. The independent critic still judges the
+        current plan from source and the spec.
+      Before finishing a joint plan, run python3
+      /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/validate-joint-plan.py
+      "$ARTIFACTS_DIR" and fix every diagnostic in planning artifacts. Do not
+      change product code, weaken validation, or claim completion on failure.
       If, and only if, the unit adds or changes an UNAUTHENTICATED GET endpoint,
       also write smoke-probe.json there: {"path": "/<route>", "expect": "200"}.
       Authenticated or non-GET behavior gets NO probe file — tests own it.
@@ -342,6 +445,9 @@ nodes:
           bash: |
             set -euo pipefail
             if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-plan-round-pre.out") 2> >(tee -a "$ARTIFACTS_DIR/node-plan-round-pre.out" >&2); fi
+            if [ "${ARCHON_FEATURE_SCOPE-}" = repositories ] && [ -n "${ARCHON_FEATURE_CHAIN_ID-}" ]; then
+              python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/archon-run.py feature-shepherd --chain "$ARCHON_FEATURE_CHAIN_ID"
+            fi
             # The cap is checked BEFORE a round is spent. A body node's non-zero exit
             # fails the whole group, and `archon workflow resume` re-enters the group
             # with a fresh iteration, so a cap enforced only in plan-converge could be
@@ -377,7 +483,7 @@ nodes:
             # An `if` and not `test … && cp`: premises.json and smoke-probe.json are
             # both optional, so on the last iteration a bare AND-list would leave the
             # loop with status 1 and set -e would kill the node.
-            for f in verify.json files-allowlist.json web-files-allowlist.json reader-audit.json premises.json web-reader-audit.json web-premises.json browser-evidence.json browser-evidence.sha256 smoke-probe.json; do
+            for f in joint-plan.json verify.json files-allowlist.json web-files-allowlist.json reader-audit.json premises.json web-reader-audit.json web-premises.json browser-evidence.json browser-evidence.sha256 smoke-probe.json; do
               if [ -f "$ARTIFACTS_DIR/$f" ]; then cp "$ARTIFACTS_DIR/$f" "$RD/pre-$f"; fi
             done
             echo "PLAN_ROUND=$N cap=$CAP"
@@ -465,6 +571,19 @@ nodes:
             reader-audit.json, web-reader-audit.json, premises.json,
             web-premises.json, verify.json, kb-context.md,
             plan-round-N/impact.json, and the repository files the plan names.
+
+            For repository-list runs, also read joint-plan.json and run
+            python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/validate-joint-plan.py
+            "$ARTIFACTS_DIR". Any failure is a blocking P1 correctness finding
+            with the diagnostic as evidence. Check export lifecycle and integration
+            cwd/argv against that contract. The integration runner creates detached
+            candidate worktrees before invoking structured argv; the attached
+            planning worktrees are not evidence of an integration provenance bug.
+            When uncertain, read run-joint-integration.py's create_worktrees and
+            structured_command_details instead of inferring runtime cwd from the
+            planning session. Trace producer responses through client
+            normalization into consumer decisions, including collapsed errors;
+            a consumer cannot distinguish information discarded by its client.
 
             DO NOT READ any earlier round's critique.json or revision.json. You are
             deliberately blind to prior rounds: a critic that reads its own earlier
@@ -581,6 +700,15 @@ nodes:
               {"applied": [], "declined": []}
             and end.
 
+            For repository-list REVISE rounds, keep joint-plan.json synchronized
+            with all plan edits, including files, exports, dependency contracts,
+            and integration argv. Before finishing, run
+            python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/validate-joint-plan.py
+            "$ARTIFACTS_DIR" and repair every diagnostic. Execution uses literal
+            artifact paths, optional export.argv, and integration {repo, argv};
+            prose commands do not add hooks. Trace error normalization in clients
+            before claiming distinct consumer handling.
+
             Otherwise the verdict is REVISE. Read the spec, plan.md,
             files-allowlist.json, web-files-allowlist.json, verify.json,
             reader-audit.json, web-reader-audit.json, premises.json,
@@ -654,7 +782,7 @@ nodes:
               PM=NO
               cmp -s "$ARTIFACTS_DIR/plan.md" "$RD/plan.pre.md" || PM=YES
               AM=""
-              for f in verify.json files-allowlist.json web-files-allowlist.json reader-audit.json premises.json web-reader-audit.json web-premises.json browser-evidence.json browser-evidence.sha256 smoke-probe.json; do
+              for f in joint-plan.json verify.json files-allowlist.json web-files-allowlist.json reader-audit.json premises.json web-reader-audit.json web-premises.json browser-evidence.json browser-evidence.sha256 smoke-probe.json; do
                 CUR="$ARTIFACTS_DIR/$f"; PRE="$RD/pre-$f"
                 if [ -f "$CUR" ] && [ -f "$PRE" ]; then
                   cmp -s "$CUR" "$PRE" || AM="$AM,$f"
@@ -736,7 +864,7 @@ nodes:
             # and re-runs the same round instead of accepting the narrowed contract.
             if cmp -s "$ARTIFACTS_DIR/plan.md" "$RD/plan.pre.md"; then
               OTHER=""
-              for f in verify.json files-allowlist.json web-files-allowlist.json reader-audit.json premises.json web-reader-audit.json web-premises.json browser-evidence.json browser-evidence.sha256 smoke-probe.json; do
+              for f in joint-plan.json verify.json files-allowlist.json web-files-allowlist.json reader-audit.json premises.json web-reader-audit.json web-premises.json browser-evidence.json browser-evidence.sha256 smoke-probe.json; do
                 CUR="$ARTIFACTS_DIR/$f"; PRE="$RD/pre-$f"
                 if [ -f "$CUR" ] && [ -f "$PRE" ]; then
                   cmp -s "$CUR" "$PRE" || OTHER="$OTHER,$f"
@@ -1076,8 +1204,47 @@ nodes:
           Do not touch the worktree or any repository file. Plans only.
           End your reply with the single line: PLAN_REVISED
 
+  - id: implementation-ready
+    depends_on: [bootstrap]
+    when: "$feature-phase.phase == 'implement'"
+    timeout: 120000
+    bash: |
+      set -euo pipefail
+      if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-implementation-ready.out") 2> >(tee -a "$ARTIFACTS_DIR/node-implementation-ready.out" >&2); fi
+      eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+      test "${ARCHON_FEATURE_SCOPE-}" = repositories || { echo "IMPLEMENTATION_READY=FAIL missing repository feature scope"; exit 1; }
+      test "${ARCHON_FEATURE_PHASE-}" = implement || { echo "IMPLEMENTATION_READY=FAIL phase is not implement"; exit 1; }
+      test -n "${ARCHON_FEATURE_REPO-}" || { echo "IMPLEMENTATION_READY=FAIL missing ARCHON_FEATURE_REPO"; exit 1; }
+      test "$REPO" = "$ARCHON_FEATURE_REPO" || { echo "IMPLEMENTATION_READY=FAIL params repo=$REPO env repo=$ARCHON_FEATURE_REPO"; exit 1; }
+      test "$WT" = "${ARCHON_FEATURE_WORKTREE-}" || { echo "IMPLEMENTATION_READY=FAIL params worktree is not controller-pinned"; exit 1; }
+      git -C "$WT" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "IMPLEMENTATION_READY=FAIL pinned worktree missing"; exit 1; }
+      echo "IMPLEMENTATION_READY=PASS repo=$REPO worktree=$WT"
+
+  - id: joint-integration
+    depends_on: [feature-phase]
+    when: "$feature-phase.integration == 'yes'"
+    timeout: 1800000
+    bash: |
+      set -euo pipefail
+      if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-joint-integration.out") 2> >(tee -a "$ARTIFACTS_DIR/node-joint-integration.out" >&2); fi
+      test "${ARCHON_FEATURE_SCOPE-}" = repositories || { echo "JOINT_INTEGRATION=FAIL missing repository feature scope"; exit 1; }
+      test "${ARCHON_FEATURE_PHASE-}" = integration || { echo "JOINT_INTEGRATION=FAIL phase is not integration"; exit 1; }
+      test -s "$ARTIFACTS_DIR/joint-plan.json" || { echo "JOINT_INTEGRATION=FAIL no joint-plan.json"; exit 1; }
+      test -s "$ARTIFACTS_DIR/candidate-revisions.json" || { echo "JOINT_INTEGRATION=FAIL no candidate-revisions.json"; exit 1; }
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/validate-joint-plan.py "$ARTIFACTS_DIR"
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/run-joint-integration.py --artifacts "$ARTIFACTS_DIR"
+      python3 - "$ARTIFACTS_DIR/integration-evidence.json" <<'PY'
+      import json, sys
+      evidence = json.load(open(sys.argv[1], encoding="utf-8"))
+      if evidence.get("status") != "passed" or not evidence.get("tests"):
+          raise SystemExit("JOINT_INTEGRATION=FAIL integration evidence is not passing")
+      PY
+      echo "JOINT_INTEGRATION=PASS evidence=$ARTIFACTS_DIR/integration-evidence.json"
+
   - id: implement
-    depends_on: [plan-gate]
+    depends_on: [plan-gate, implementation-ready]
+    trigger_rule: none_failed_min_one_success
+    when: "$feature-phase.implement == 'yes'"
     model: sonnet
     maxBudgetUsd: 8
     timeout: 1800000
@@ -1091,6 +1258,12 @@ nodes:
       directory (you are NOT cwd'd there; cd for every command).
 
       Scope: change only API files listed in files-allowlist.json. Do not refactor adjacent code or touch web-app.
+      JOINT-REPOSITORY RUNS: when candidate-inputs.json exists in ARTIFACTS_DIR,
+      read it before editing. It maps approved direct dependencies to exact local
+      candidate worktrees, candidate heads, artifact directories, and interface
+      artifacts with sha256 hashes. Consume those exact local inputs only; do not
+      require or assume an upstream PR, merge, publication, deployment, or newer
+      repository state.
       SINGLE-REPO RUNS: when params.json's "repo" is not "api", the two sentences
       above are scoped to api runs. files-allowlist.json is then the entire scope,
       its paths are relative to that repository's root, and there is no web-app
@@ -2152,8 +2325,18 @@ nodes:
       fi
       echo "$RESULT" | tee "$ARTIFACTS_DIR/smoke-result.txt"
 
+  - id: local-candidate
+    depends_on: [smoke]
+    when: "$feature-phase.phase == 'implement'"
+    timeout: 1200000
+    bash: |
+      set -euo pipefail
+      if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-local-candidate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-local-candidate.out" >&2); fi
+      bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/trusted-local-candidate.sh "$ARTIFACTS_DIR"
+
   - id: prbody
     depends_on: [smoke]
+    when: "$feature-phase.phase == 'legacy'"
     model: sonnet
     maxBudgetUsd: 2
     timeout: 600000
@@ -2188,6 +2371,7 @@ nodes:
 
   - id: ship
     depends_on: [prbody]
+    when: "$feature-phase.phase == 'legacy'"
     always_run: true
     timeout: 900000
     bash: |
@@ -2197,6 +2381,7 @@ nodes:
 
   - id: run-report
     depends_on: [ship]
+    when: "$feature-phase.phase == 'legacy'"
     model: sonnet
     maxBudgetUsd: 2
     timeout: 600000
@@ -2234,6 +2419,7 @@ nodes:
 
   - id: kb-capture
     depends_on: [run-report]
+    when: "$feature-phase.phase == 'legacy'"
     model: sonnet
     maxBudgetUsd: 2
     timeout: 600000
@@ -2267,6 +2453,7 @@ nodes:
 
   - id: kb-capture-gate
     depends_on: [kb-capture]
+    when: "$feature-phase.phase == 'legacy'"
     timeout: 120000
     bash: |
       set -euo pipefail
@@ -2295,6 +2482,7 @@ nodes:
 
   - id: report
     depends_on: [kb-capture-gate]
+    when: "$feature-phase.phase == 'legacy'"
     trigger_rule: all_done
     always_run: true
     timeout: 120000

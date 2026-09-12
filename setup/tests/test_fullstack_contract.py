@@ -40,6 +40,82 @@ def init_git_repo(path):
     return subprocess.check_output(["git", "-C", str(path), "rev-parse", "HEAD"], text=True).strip()
 
 
+def make_repo_chain_web_artifacts(tmp):
+    ad = tmp / "artifacts"
+    ad.mkdir()
+    apiwt = tmp / "api-candidate"
+    webwt = tmp / "web-candidate"
+    api_head = init_git_repo(apiwt)
+    web_head = init_git_repo(webwt)
+    spec = tmp / "spec.md"
+    spec.write_text("# Repository chain web feature\n", encoding="utf-8")
+    write_json(ad / "params.json", {
+        "schema_version": 2,
+        "feature_scope": "repositories",
+        "feature_phase": "implement",
+        "repo": "web-app",
+        "repository": "web-app",
+        "repositories": ["api", "web-app"],
+        "repository_scope": ["api", "web-app"],
+        "spec": str(spec),
+        "spec_sha256": hashlib.sha256(spec.read_bytes()).hexdigest(),
+        "slug": "feature-abcd1234-implement-web-app",
+        "branch": "archon/repository-chain-web",
+        "baseline": web_head,
+        "worktree": str(webwt),
+        "worktrees_by_repo": {"api": str(apiwt), "web-app": str(webwt)},
+        "logical_chain_id": "abcd1234abcd1234abcd1234abcd1234",
+        "run_id": "a" * 32,
+    })
+    plan = {
+        "schema": "archon.joint-feature-plan.v1",
+        "repositories": ["api", "web-app"],
+        "dependency_order": ["api", "web-app"],
+        "contracts": [{"producer": "api", "consumer": "web-app", "artifact": "openapi.json", "description": "fixture"}],
+        "integration": {"scenarios": [{"name": "local", "uses": ["api", "web-app"], "commands": ["fixture"], "expected_tests": ["fixture"]}]},
+        "stages": {
+            "api": {"depends_on": [], "files_allowlist": ["src/api.ts"], "test_patterns": ["api.spec.ts"], "verification": ["bun test"]},
+            "web-app": {"depends_on": ["api"], "files_allowlist": ["app/routes/feature.tsx"], "test_patterns": ["feature.spec.ts"], "verification": ["pnpm typecheck", "pnpm lint", "pnpm test --run"]},
+        },
+    }
+    write_json(ad / "joint-plan.json", plan)
+    (ad / "plan.md").write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_json(ad / "files-allowlist.json", ["app/routes/feature.tsx"])
+    write_json(ad / "verify.json", {"test_patterns": ["feature.spec.ts"], "verification": ["pnpm typecheck", "pnpm lint", "pnpm test --run"]})
+    write_json(ad / "candidate-revisions.json", {
+        "schema": "archon.joint-candidates.v1",
+        "repositories": {
+            "api": {"source_worktree": str(apiwt), "commit": api_head},
+            "web-app": {"source_worktree": str(webwt), "commit": web_head},
+        },
+    })
+    policy = {"required": [{"id": "browser-1", "criterion": "Feature renders", "path": "/feature", "assertions": [{"type": "text", "value": "Feature"}]}]}
+    write_json(ad / "browser-evidence.json", policy)
+    (ad / "browser-evidence.sha256").write_text(canonical_digest(policy) + "\n", encoding="utf-8")
+    return ad, api_head
+
+
+def make_repo_chain_web_fixture_only_artifacts(tmp):
+    ad, api_head = make_repo_chain_web_artifacts(tmp)
+    plan = json.loads((ad / "joint-plan.json").read_text(encoding="utf-8"))
+    plan["repositories"] = ["web-app"]
+    plan["dependency_order"] = ["web-app"]
+    plan["contracts"] = []
+    plan["stages"]["web-app"]["depends_on"] = []
+    del plan["stages"]["api"]
+    write_json(ad / "joint-plan.json", plan)
+    (ad / "plan.md").write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    params = json.loads((ad / "params.json").read_text(encoding="utf-8"))
+    fixture = params["worktrees_by_repo"].pop("api")
+    params["repositories"] = ["web-app"]
+    params["repository_scope"] = ["web-app"]
+    params["api_fixture_worktree"] = fixture
+    params["api_fixture_head_sha"] = api_head
+    write_json(ad / "params.json", params)
+    (ad / "candidate-revisions.json").unlink()
+    return ad, api_head
+
+
 def make_web_plan_artifacts(tmp):
     ad = tmp / "artifacts"
     apiwt = tmp / "apiwt"
@@ -138,7 +214,8 @@ class FullstackContractTest(unittest.TestCase):
         self.assertEqual(nodes["plan-gate"]["depends_on"], ["plan-render-gate"])
         self.assertEqual(nodes["plan-gate"]["approval"]["on_reject"]["max_attempts"], 3)
         self.assertIn("PLAN_REVISED", nodes["plan-gate"]["approval"]["on_reject"]["prompt"])
-        self.assertEqual(nodes["implement"]["depends_on"], ["plan-gate"])
+        self.assertEqual(nodes["implement"]["depends_on"], ["plan-gate", "implementation-ready"])
+        self.assertEqual(nodes["implement"].get("trigger_rule"), "none_failed_min_one_success")
 
     def test_bugfix_rca_gate_runs_between_render_gate_and_post_approval_integrity(self):
         """Inverse of the assertion 229090a introduced. controller-attest.py
@@ -268,6 +345,128 @@ class FullstackContractTest(unittest.TestCase):
         self.assertIn("browser-evidence.json", resolver)
         self.assertIn("browser-evidence.sha256", resolver)
         self.assertIn("require_browser_policy(api_artifacts, browser_expected)", resolver)
+
+    def test_repository_chain_web_scope_reuses_controller_bound_artifacts(self):
+        with tempfile.TemporaryDirectory() as td:
+            ad, api_head = make_repo_chain_web_artifacts(Path(td))
+            env = dict(os.environ,
+                       ARCHON_FEATURE_SCOPE="repositories",
+                       ARCHON_FEATURE_PHASE="implement",
+                       ARCHON_FEATURE_REPO="web-app",
+                       ARCHON_FEATURE_CHAIN_ID="abcd1234abcd1234abcd1234abcd1234",
+                       ARCHON_FEATURE_PROVIDER="codex",
+                       ARCHON_FEATURE_LANE="full-sdlc-web-codex")
+            result = subprocess.run([
+                "bash", str(ARCHON / "setup" / "resolve-web-params.sh"),
+                str(ROOT), "", str(ad), "4127", "3127",
+            ], env=env, capture_output=True, text=True)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("WEB_PARAMS=OK scope=repositories", result.stdout)
+
+            params = json.loads((ad / "params.json").read_text(encoding="utf-8"))
+            self.assertEqual("repositories", params["feature_scope"])
+            self.assertEqual("web-app", params["repo"])
+            self.assertEqual(api_head, params["api_head_sha"])
+            self.assertEqual(params["worktrees_by_repo"]["api"], params["api_worktree"])
+            self.assertIsInstance(params["api_port"], int)
+            self.assertIsInstance(params["web_port"], int)
+            self.assertEqual(["app/routes/feature.tsx"], json.loads((ad / "web-files-allowlist.json").read_text(encoding="utf-8")))
+            self.assertEqual([], json.loads((ad / "premises.json").read_text(encoding="utf-8")))
+            self.assertEqual({"columns": []}, json.loads((ad / "reader-audit.json").read_text(encoding="utf-8")))
+            handoff = json.loads((ad / "api-handoff.json").read_text(encoding="utf-8"))
+            self.assertEqual("archon-repository-chain-local-candidates", handoff["kind"])
+            self.assertEqual(api_head, handoff["api_head_sha"])
+            self.assertEqual("candidate-revisions", handoff["api_source"])
+
+    def test_repository_chain_web_rejects_missing_or_mismatched_api_candidate(self):
+        with tempfile.TemporaryDirectory() as td:
+            ad, _api_head = make_repo_chain_web_artifacts(Path(td))
+            env = dict(os.environ,
+                       ARCHON_FEATURE_SCOPE="repositories",
+                       ARCHON_FEATURE_PHASE="implement",
+                       ARCHON_FEATURE_REPO="web-app",
+                       ARCHON_FEATURE_CHAIN_ID="abcd1234abcd1234abcd1234abcd1234",
+                       ARCHON_FEATURE_PROVIDER="codex",
+                       ARCHON_FEATURE_LANE="full-sdlc-web-codex")
+            (ad / "candidate-revisions.json").unlink()
+            result = subprocess.run([
+                "bash", str(ARCHON / "setup" / "resolve-web-params.sh"),
+                str(ROOT), "", str(ad), "4127", "3127",
+            ], env=env, capture_output=True, text=True)
+            self.assertEqual(1, result.returncode)
+            self.assertIn("missing candidate-revisions.json for api dependency", result.stdout + result.stderr)
+
+            second = Path(td) / "second"
+            second.mkdir()
+            ad, _api_head = make_repo_chain_web_artifacts(second)
+            candidate = json.loads((ad / "candidate-revisions.json").read_text(encoding="utf-8"))
+            candidate["repositories"]["api"]["commit"] = "0" * 40
+            write_json(ad / "candidate-revisions.json", candidate)
+            result = subprocess.run([
+                "bash", str(ARCHON / "setup" / "resolve-web-params.sh"),
+                str(ROOT), "", str(ad), "4127", "3127",
+            ], env=env, capture_output=True, text=True)
+            self.assertEqual(1, result.returncode)
+            self.assertIn("API candidate head does not match approved revision", result.stdout + result.stderr)
+
+    def test_repository_chain_web_without_api_dependency_uses_only_approved_fixture(self):
+        with tempfile.TemporaryDirectory() as td:
+            ad, api_head = make_repo_chain_web_fixture_only_artifacts(Path(td))
+            env = dict(os.environ,
+                       ARCHON_FEATURE_SCOPE="repositories",
+                       ARCHON_FEATURE_PHASE="implement",
+                       ARCHON_FEATURE_REPO="web-app",
+                       ARCHON_FEATURE_CHAIN_ID="abcd1234abcd1234abcd1234abcd1234",
+                       ARCHON_FEATURE_PROVIDER="codex",
+                       ARCHON_FEATURE_LANE="full-sdlc-web-codex")
+            result = subprocess.run([
+                "bash", str(ARCHON / "setup" / "resolve-web-params.sh"),
+                str(ROOT), "", str(ad), "4127", "3127",
+            ], env=env, capture_output=True, text=True)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            params = json.loads((ad / "params.json").read_text(encoding="utf-8"))
+            self.assertEqual(params["api_fixture_worktree"], params["api_worktree"])
+            self.assertEqual(api_head, params["api_head_sha"])
+            handoff = json.loads((ad / "api-handoff.json").read_text(encoding="utf-8"))
+            self.assertEqual("approved-fixture", handoff["api_source"])
+
+            missing = Path(td) / "missing-fixture"
+            missing.mkdir()
+            ad, _api_head = make_repo_chain_web_fixture_only_artifacts(missing)
+            params = json.loads((ad / "params.json").read_text(encoding="utf-8"))
+            del params["api_fixture_worktree"]
+            write_json(ad / "params.json", params)
+            result = subprocess.run([
+                "bash", str(ARCHON / "setup" / "resolve-web-params.sh"),
+                str(ROOT), "", str(ad), "4127", "3127",
+            ], env=env, capture_output=True, text=True)
+            self.assertEqual(1, result.returncode)
+            self.assertIn("requires approved api fixture", result.stdout + result.stderr)
+
+    def test_repository_chain_web_graph_skips_legacy_plan_and_handoff_gate(self):
+        nodes = {node["id"]: node for node in self.load_workflow("full-sdlc-web")["nodes"]}
+        self.assertIn('${ARCHON_FEATURE_SCOPE-}" != "repositories"', nodes["preflight"]["bash"])
+        self.assertIn("fullstack|web|repositories", nodes["web-scope"]["bash"])
+        for node_id in ("web-plan", "web-plan-oracle", "web-plan-render", "web-plan-approval", "web-plan-freeze", "web-plan-lock-gate"):
+            self.assertEqual(nodes[node_id]["when"], "$web-scope.scope == 'web'")
+        self.assertIn("$SCOPE\" = \"repositories", nodes["premise-strip"]["bash"])
+        self.assertIn("joint-plan.json", nodes["premise-strip"]["bash"])
+        self.assertIn("$SCOPE\" = \"repositories", nodes["premise-gate"]["bash"])
+        self.assertIn("joint-plan.json", nodes["premise-gate"]["bash"])
+        self.assertEqual(nodes["implement"]["trigger_rule"], "none_failed_min_one_success")
+        self.assertIn("repository-chain scope", nodes["implement"]["prompt"])
+        self.assertNotIn("verification_evidence", nodes["uat-gate"]["bash"])
+        self.assertEqual(nodes["local-candidate"]["depends_on"], ["kb-capture-gate"])
+        self.assertNotIn("trigger_rule", nodes["local-candidate"])
+        self.assertNotIn("always_run", nodes["local-candidate"])
+        self.assertEqual(nodes["report"]["depends_on"], ["local-candidate"])
+        self.assertIn("trusted-local-candidate.sh", nodes["local-candidate"]["bash"])
+        self.assertIn("node-smoke.out", nodes["local-candidate"]["bash"])
+        self.assertIn("smoke-result.txt", nodes["local-candidate"]["bash"])
+        self.assertIn("browser-verifier-receipt.json", nodes["local-candidate"]["bash"])
+        self.assertIn("browser receipt candidate does not match current head", nodes["local-candidate"]["bash"])
+        self.assertNotIn("local-candidate-test-$INDEX.json", nodes["local-candidate"]["bash"])
+        self.assertIn("SHIP=HELD repository-chain local candidate only", nodes["ship"]["bash"])
 
 
 if __name__ == "__main__":

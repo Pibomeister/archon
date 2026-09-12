@@ -31,6 +31,11 @@ test -s "$AD/plan.md" || { echo "PLAN_SHAPE=FAIL no plan.md"; exit 1; }
 for h in "## Goal" "## Files" "## Approach" "## Test scenarios" "## Verification"; do
   grep -q "^$h" "$AD/plan.md" || { echo "PLAN_SHAPE=FAIL missing $h"; exit 1; }
 done
+if [ -f "$AD/params.json" ]; then
+  python3 "$HERE_PS/validate-joint-plan.py" "$AD"
+elif [ "${ARCHON_FEATURE_SCOPE-}" = repositories ]; then
+  echo "PLAN_SHAPE=FAIL repository feature run missing params.json"; exit 1
+fi
 python3 -c "import json,sys; p=json.load(open(sys.argv[1]))['test_patterns']; assert isinstance(p,list) and p and all(isinstance(x,str) and x.strip() for x in p)" "$AD/verify.json" || { echo "PLAN_SHAPE=FAIL verify.json missing or empty"; exit 1; }
 python3 -c "import json,sys; a=json.load(open(sys.argv[1])); assert isinstance(a,list) and a and all(isinstance(x,str) and x.strip() for x in a)" "$AD/files-allowlist.json" || { echo "PLAN_SHAPE=FAIL files-allowlist.json missing or empty"; exit 1; }
 python3 -c "import json,sys; a=json.load(open(sys.argv[1])); assert isinstance(a,list) and all(isinstance(x,str) and x.strip() for x in a)" "$AD/web-files-allowlist.json" || { echo "PLAN_SHAPE=FAIL web-files-allowlist.json missing or malformed"; exit 1; }

@@ -28,7 +28,9 @@ nodes:
       command -v pnpm >/dev/null || { echo "PREFLIGHT=FAIL pnpm missing"; exit 1; }
       command -v mise >/dev/null || { echo "PREFLIGHT=FAIL mise missing"; exit 1; }
       mise x node@20 -- node -v | grep -q '^v20' || { echo "PREFLIGHT=FAIL node20 via mise unavailable"; exit 1; }
-      command -v gh >/dev/null && gh auth status >/dev/null 2>&1 || { echo "PREFLIGHT=FAIL gh unauthenticated"; exit 1; }
+      if [ "${ARCHON_FEATURE_SCOPE-}" != "repositories" ]; then
+        command -v gh >/dev/null && gh auth status >/dev/null 2>&1 || { echo "PREFLIGHT=FAIL gh unauthenticated"; exit 1; }
+      fi
       command -v agent-browser >/dev/null || { echo "PREFLIGHT=FAIL agent-browser missing"; exit 1; }
       command -v aws >/dev/null 2>&1 && aws sts get-caller-identity >/dev/null 2>&1 \
         || echo "PREFLIGHT_WARN aws unavailable or expired - AWS evidence/runtime integrations may degrade; workflow control continues"
@@ -106,7 +108,7 @@ nodes:
       if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-web-scope.out") 2> >(tee -a "$ARTIFACTS_DIR/node-web-scope.out" >&2); fi
       SCOPE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('feature_scope','fullstack'))" "$ARTIFACTS_DIR/params.json")
       case "$SCOPE" in
-        fullstack|web) printf '{"scope":"%s"}\n' "$SCOPE" ;;
+        fullstack|web|repositories) printf '{"scope":"%s"}\n' "$SCOPE" ;;
         *) echo "WEB_SCOPE=FAIL unsupported scope=$SCOPE"; exit 1 ;;
       esac
 
@@ -420,6 +422,9 @@ nodes:
         python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-feature-handoff-integrity.py         "$ARTIFACTS_DIR/handoff-integrity.json"
       elif [ "$SCOPE" = "web" ]; then
         test -s "$ARTIFACTS_DIR/web-plan-approved.json" || { echo "PREMISE_STRIP=FAIL no approved standalone web plan"; exit 1; }
+      elif [ "$SCOPE" = "repositories" ]; then
+        test -s "$ARTIFACTS_DIR/joint-plan.json" || { echo "PREMISE_STRIP=FAIL no approved joint-plan.json"; exit 1; }
+        test -s "$ARTIFACTS_DIR/plan.md" || { echo "PREMISE_STRIP=FAIL no approved plan.md"; exit 1; }
       else
         echo "PREMISE_STRIP=FAIL unsupported scope=$SCOPE"; exit 1
       fi
@@ -472,8 +477,17 @@ nodes:
       Q="$ARTIFACTS_DIR/premises-questions.json"
       V="$ARTIFACTS_DIR/premise-verify.json"
       NQ=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))))" "$Q")
-      test -s "$ARTIFACTS_DIR/handoff-integrity.json" || { echo "PREMISE_GATE=FAIL no handoff integrity"; exit 1; }
-      if [ "$NQ" = 0 ]; then echo "PREMISE_GATE=PASS (handoff integrity checked; no extra premises declared)"; exit 0; fi
+      SCOPE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('feature_scope','fullstack'))" "$ARTIFACTS_DIR/params.json")
+      if [ "$SCOPE" = "fullstack" ]; then
+        test -s "$ARTIFACTS_DIR/handoff-integrity.json" || { echo "PREMISE_GATE=FAIL no handoff integrity"; exit 1; }
+      elif [ "$SCOPE" = "repositories" ]; then
+        test -s "$ARTIFACTS_DIR/joint-plan.json" || { echo "PREMISE_GATE=FAIL no joint plan"; exit 1; }
+      elif [ "$SCOPE" = "web" ]; then
+        test -s "$ARTIFACTS_DIR/web-plan-approved.json" || { echo "PREMISE_GATE=FAIL no approved standalone web plan"; exit 1; }
+      else
+        echo "PREMISE_GATE=FAIL unsupported scope=$SCOPE"; exit 1
+      fi
+      if [ "$NQ" = 0 ]; then echo "PREMISE_GATE=PASS (approved scope checked; no extra premises declared)"; exit 0; fi
       test -s "$V" || { echo "PREMISE_GATE=FAIL no premise-verify.json"; exit 1; }
       python3 - "$Q" "$V" <<'PY'
       import json, sys
@@ -553,13 +567,18 @@ nodes:
       and the web worktree named by params.json. For fullstack scope, the API
       prong is represented by the immutable v2 handoff. For standalone web
       scope, params.json carries a controller-pinned read-only API baseline.
+      For repository-chain scope, params.json and api-handoff.json carry the
+      exact local upstream candidate worktrees selected by the controller; use
+      those local candidates and do not require an upstream PR, merge,
+      publication, or deployed API before implementation.
       Do not modify api/. Do not create a dummy API change or an API PR to make
       a web-only run look fullstack.
 
       The approved web scope is files-allowlist.json in ARTIFACTS_DIR. In
       fullstack mode it is copied byte-for-byte from the API lane's approved web-files-allowlist.json and bound into api-handoff.json together with
       premises_sha256 and reader_audit_sha256. In standalone web mode it must
-      come from the web-only approved plan for this lane. Do not edit or broaden that allowlist. If implementation discovers that an API change is
+      come from the web-only approved plan for this lane. In repository-chain
+      mode it comes from the controller-approved joint plan. Do not edit or broaden that allowlist. If implementation discovers that an API change is
       required, write feature-result.json with outcome NEEDS_CLARIFICATION and
       a scope-escalation reason, then stop without treating the run as
       successful.
@@ -1140,6 +1159,11 @@ nodes:
     timeout: 900000
     bash: |
       set -euo pipefail
+      SCOPE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('feature_scope','fullstack'))" "$ARTIFACTS_DIR/params.json" 2>/dev/null || echo fullstack)
+      if [ "$SCOPE" = "repositories" ]; then
+        echo "SHIP=HELD repository-chain local candidate only; trusted publication disabled"
+        exit 0
+      fi
       echo "SHIP=DISABLED trusted controller publication is not admitted; no remote changes made"
       exit 1
 
@@ -1244,8 +1268,39 @@ nodes:
       grep -qi "Promotion candidates" "$F" || { echo "KB_CAPTURE_GATE=FAIL missing promotion candidates"; exit 1; }
       echo "KB_CAPTURE_GATE=PASS file=$F"
 
-  - id: report
+  - id: local-candidate
     depends_on: [kb-capture-gate]
+    timeout: 1200000
+    bash: |
+      set -euo pipefail
+      if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-local-candidate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-local-candidate.out" >&2); fi
+      eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+      if [ "${ARCHON_FEATURE_SCOPE-}" != "repositories" ]; then
+        echo "LOCAL_CANDIDATE=SKIP scope=${ARCHON_FEATURE_SCOPE-fullstack}"
+        exit 0
+      fi
+      test "${ARCHON_FEATURE_PHASE-}" = implement || { echo "LOCAL_CANDIDATE=FAIL phase is not implement"; exit 1; }
+      test "$REPO" = "web-app" || { echo "LOCAL_CANDIDATE=FAIL repo is not web-app"; exit 1; }
+      cd "$WT"
+      HEAD=$(git rev-parse HEAD)
+      test -s "$ARTIFACTS_DIR/smoke-urls.txt" || { echo "LOCAL_CANDIDATE=FAIL missing smoke urls"; exit 1; }
+      awk '/^SMOKE=PASS /{line=$0} END{if (line) print line; else exit 1}' "$ARTIFACTS_DIR/node-smoke.out" > "$ARTIFACTS_DIR/smoke-result.txt" \
+        || { echo "LOCAL_CANDIDATE=FAIL no successful smoke result recorded"; exit 1; }
+      test -s "$ARTIFACTS_DIR/browser-verifier-receipt.json" || { echo "LOCAL_CANDIDATE=FAIL missing browser receipt"; exit 1; }
+      python3 - "$ARTIFACTS_DIR/browser-verifier-receipt.json" "$HEAD" <<'PY_BROWSER_RECEIPT'
+      import json, sys
+      path, head = sys.argv[1:3]
+      receipt = json.load(open(path, encoding="utf-8"))
+      candidate = receipt.get("candidate") if isinstance(receipt, dict) else None
+      if receipt.get("status") != "passed":
+          raise SystemExit("LOCAL_CANDIDATE=FAIL browser receipt did not pass")
+      if not isinstance(candidate, dict) or candidate.get("commit") != head:
+          raise SystemExit("LOCAL_CANDIDATE=FAIL browser receipt candidate does not match current head")
+      PY_BROWSER_RECEIPT
+      bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/trusted-local-candidate.sh "$ARTIFACTS_DIR"
+
+  - id: report
+    depends_on: [local-candidate]
     trigger_rule: all_done
     always_run: true
     timeout: 120000

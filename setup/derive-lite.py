@@ -21,8 +21,9 @@ The lite lane is DEFINED by three things and nothing else:
        <id>.node.yaml            a complete node (NEW nodes only)
        <loop>.<id>.bash.sh|.prompt.md   loop-body node fields
   3. workflows/<parent>.yaml  every retained node is the parent's bytes,
-                              except: depends_on overrides, loop caps, and
-                              the port map (a plain string substitution)
+                              except: depends_on overrides, field removals,
+                              loop caps, and the port map (a plain string
+                              substitution)
 
 Hand-editing a generated YAML is forbidden; package.sh regenerates and diffs.
 
@@ -161,11 +162,15 @@ def derive(lane):
             raise LiteError(f"overlay for id not in the manifest node list: {oid}")
 
     dep_over = m.get("depends_on", {})
+    remove_fields = m.get("remove_fields", {})
     loops = m.get("loops", {})
     ports = m.get("ports", {})
-    for oid in list(dep_over) + list(loops):
+    for oid in list(dep_over) + list(remove_fields) + list(loops):
         if oid not in order:
             raise LiteError(f"manifest references id not in the node list: {oid}")
+    for oid, fields in remove_fields.items():
+        if not isinstance(fields, list) or not all(isinstance(field, str) and field for field in fields):
+            raise LiteError(f"{oid}: remove_fields must be a list of field names")
 
     out_nodes = []
     for nid in order:
@@ -198,6 +203,8 @@ def derive(lane):
                 raise LiteError(f"{nid}: a new node takes only its node.yaml")
         if nid in dep_over:
             node["depends_on"] = list(dep_over[nid])
+        for field in remove_fields.get(nid, []):
+            node.pop(field, None)
         # ports apply to retained and new nodes alike (new overlays may quote them too)
         node = substitute_ports(node, ports)
         out_nodes.append(node)

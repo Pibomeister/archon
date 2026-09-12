@@ -1,0 +1,63 @@
+codex-control-guard:
+  CODEX_CONTROL_GUARD: PASS
+preflight:
+  PREFLIGHT: PASS
+feature-phase:
+  phase: implement
+  scope: repositories
+  plan: "no"
+  bootstrap: "yes"
+  implement: "yes"
+  integration: "no"
+bootstrap:
+  BOOTSTRAP: ADOPTED_CONTROLLER
+implementation-ready:
+  IMPLEMENTATION_READY: PASS
+implement:
+  IMPLEMENT_DONE: true
+gate-tests:
+  GATE_TESTS: PASS
+deslop:
+  DESLOP_DONE: true
+deslop-recheck:
+  DESLOP_RECHECK: PASS
+deslop-review:
+  verdict: pass
+deslop-review-gate: DESLOP_CLEAN
+reader-audit:
+  READER_AUDIT_DONE: true
+reader-audit-gate:
+  READER_AUDIT_GATE: PASS
+commit-impl:
+  COMMIT_IMPL: PASS
+round-pre:
+  ROUND_PRE: PASS
+review:
+  verdict: pass
+review-gate:
+  REVIEW_GATE: PASS
+commit-fixes:
+  COMMIT_FIXES: SKIP
+fixer:
+  FIXER_DONE: true
+commit-fixer:
+  COMMIT_FIXER: SKIP
+converge: REVIEW_CONVERGED
+exit-gate:
+  EXIT_GATE: PASS
+smoke:
+  SMOKE: PASS
+prbody:
+  PRBODY_WRITTEN: true
+ship:
+  SHIP: DISABLED
+run-report:
+  RUN_REPORT_DONE: true
+kb-capture:
+  KB_CAPTURE_DONE: true
+kb-capture-gate:
+  KB_CAPTURE_GATE: PASS
+report:
+  REPORT: PASS
+local-candidate:
+  LOCAL_CANDIDATE: PASS

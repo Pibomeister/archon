@@ -2,7 +2,10 @@
 
 > **Hardening rollout: not admitted.** The top-level legacy preparation workflows retain stock-compatible bash
 > node shapes, but their ship nodes refuse publication before invoking
-> external tools, including on resume. Stock compatibility is not hardened
+> external tools, including on resume. The one admitted publication path is
+> the repository-list chain's explicit `feature-publish --chain <id>` command
+> (below), which pushes verified candidate branches and opens draft PRs only
+> after a `LOCALLY_VERIFIED` receipt. Stock compatibility is not hardened
 > execution: ordinary agent sessions are not an established authority boundary.
 > The separate controller-action runtime fork has isolated seed, transport,
 > budget, planning and static-web verification coverage; trusted publication,
@@ -1047,4 +1050,138 @@ plausible new diagnosis or a PR title alone.
 
 ## Feature launcher
 
-Direct feature runs use `python3 .archon/setup/archon-run.py feature --provider claude|codex --scope api|fullstack <absolute-spec>`. Scope `api` starts only the API lane. Scope `fullstack` creates a controller-owned feature chain, waits for the API lane to complete, writes a tamper-checked `feature-api-handoff.json`, and starts the web lane with the same provider against that exact handoff. Codex full API and web lanes are guarded like bugfix lanes with 240 active minutes and 30M cumulative tokens per lane; GitNexus and AWS are optional evidence and never launch/control prerequisites.
+Repository-list features use one joint plan and one shared budget, for either
+provider:
+
+```bash
+python3 .archon/setup/archon-run.py feature --provider claude \
+  --scope api,goodword-mcp /absolute/path/to/spec.md
+python3 .archon/setup/archon-run.py feature --provider codex \
+  --scope api,goodword-mcp /absolute/path/to/spec.md
+```
+
+Repository names come from `setup/repo-profile.sh --list`. `web` aliases
+`web-app`; standalone `fullstack` expands to `api,web-app`. Comma order is
+presentation order. Execution follows the approved dependencies, with repository
+name ordering for independent stages. Empty entries, duplicates (including
+aliases), unknown names, paths, and `fullstack` inside a list are rejected.
+Unset `ARCHON_REPO` for repository-list launches. Scalar `--scope api` still
+supports that environment selector with a deprecation warning.
+
+New repository-list chains use private version-2 state. The controller prepares
+separate worktrees at pinned baselines, then runs the existing feature DAG in
+planning mode. Planning workers can write only run artifacts. The joint plan
+names every selected repository, file allowance, test, interface contract,
+dependency, and integration scenario. With `--provider codex` the human approves
+the exact packet using the guarded `archon-run.py approve <run> --token
+<operator-held-token>` command, which seals the plan at approve time and drives
+the chain forward. With `--provider claude` the lanes are `full-sdlc-api` (api,
+goodword-mcp, planning, integration) and `full-sdlc-web`; the operator loop is:
+
+```bash
+archon workflow approve <run>                                   # at every gate
+python3 .archon/setup/archon-run.py feature-advance --chain <id>  # after each run completes
+```
+
+For `api,goodword-mcp` chains the joint integration scenario command should be
+`bash .archon/setup/joint-api-mcp-e2e.sh '<jest pattern>' <api-port>`: the
+runner's disposable worktrees carry no `node_modules`, `.env`, running api, or
+token, and its test counter only reads `ARCHON_INTEGRATION_TESTS=<n>` lines; the
+harness installs, boots the api candidate against the local dev stack, mints a
+JWT through the whitelisted local OTP flow, runs the goodword-mcp jest pattern,
+and emits that line. Contract `artifact` values must be repository-relative file
+paths (`validate-joint-plan.py` rejects prose), and `expected_tests` entries
+must correspond to real jest tests (the runner requires reported >= declared).
+`feature-advance` waits for the current run, seals the approval from the
+completed planning run's `joint-plan.json`/`plan.md` digests, dispatches the next
+stage, and prints `ARCHON_FEATURE_REPOSITORY_CHAIN=PAUSED chain=… phase=… run=…
+gate=…` with the next command, or `DISPATCHED` / `LOCALLY_VERIFIED`. The agent
+must not approve its own plan under either provider. In repository scope every
+lane waits up to 60 s for the controller's `params.json` and stops with
+`PARAMS=FAIL missing controller params` instead of deriving its own binding.
+
+After approval, repository stages run sequentially. Each verified candidate is
+handed to consumers by its exact local commit and interface artifacts. The
+integration matrix runs against disposable worktrees of those candidate commits.
+Its terminal result is `locally_verified` with publication held; failed or skipped
+verification is not delivery. No push, PR, merge, deployment, or published API is
+required for a downstream repository stage.
+
+Publication is a separate, explicit human command; reaching `locally_verified`
+never pushes:
+
+```bash
+python3 .archon/setup/archon-run.py feature-publish --chain <id>
+```
+
+`feature-publish` re-verifies the receipt and approval, then, per repository in
+dependency order: `NO_CHANGE` (candidate head == baseline) is recorded and skipped;
+otherwise it checks the chain worktree (HEAD == candidate head, clean, branch is the
+recorded `archon/…` branch), runs `git push -u origin <branch> --no-verify`, and either
+adopts the single open PR whose head is exactly the candidate head or opens a new
+`--draft` PR against `main` (no labels, title = first line of `commit-msg.txt` +
+` [archon]`). Any other open PR on that branch is a typed
+`FEATURE_PUBLISH=FAIL pr head mismatch`; nothing is ever force-pushed. Bodies are
+generated from the stage artifacts (summary, cross-repository chain with sibling PR
+URLs, verification, known residuals, post-deploy monitoring) and re-synced with
+`gh pr edit` only when they differ. It writes a signed
+`feature-chain-publication.json` next to the receipt and mirrors it into chain state,
+so a re-run adopts what is already open and completes what is missing. Known gaps:
+`babysit`/`cleanup` are still hardcoded to two branches (api, web) and run per-PR;
+web-app stacked PRs still get no CI (`pr.yaml` is gated on base `main`/`prod`). Marking
+ready, merging, and deleting branches stay with the human.
+
+The default cap is **240 active minutes and 30 million tokens for the entire
+chain**, including planning and retries. Approval pauses do not consume active
+time. Exact recorded Codex sessions are deduplicated across child runs; resumes
+never reset the allowance. Missing required accounting stops containment. Use
+guarded approval/resume and `supervise` to advance the same chain, preserving
+verified predecessors.
+
+Before launching a large Codex repository-list chain, forecast the allowance
+without launching AI:
+
+```bash
+python3 .archon/setup/archon-run.py feature-estimate --scope api,goodword-mcp /absolute/path/to/spec.md
+python3 .archon/setup/archon-run.py --max-total-tokens 60000000 feature-estimate --scope api,goodword-mcp /absolute/path/to/spec.md
+```
+
+For an existing Codex repository-list chain, `feature-estimate --chain <id>` and
+`feature-shepherd --chain <id>` refresh private usage, compare the remaining
+allowance to the remaining phase forecast without launching AI. The shepherd
+also saves the forecast to private chain state/current artifacts for new chains;
+untouched older chains skip the shepherd gate. The estimate is a
+heuristic interval, not statistical certainty. Historical records are lower
+bounds when their chains did not finish; cold starts use explicit priors. The
+token unit matches enforcement: input tokens, cached input counted once by
+provider accounting, plus output tokens. Forecasting never increases, resets, or
+overrides the enforced cap.
+
+New Codex repository-list launches warn when the allowance is below the forecast
+upper bound, then continue. Stage transitions, resumes, and planning review rounds
+repeat this advisory check with `BUDGET_SHEPHERD=WARN`. Actual token/time caps
+and unavailable-accounting containment remain enforced; forecasts do not increase
+or reset the allowance. `budget-forecast.json` is read-only worker input.
+Remaining estimates subtract consumed phase tokens and reserve unfinished stages
+plus 25% contingency. Sparse history retains conservative cold-start upper bounds;
+missing accounting is excluded with diagnostics. These estimates group repository
+and phase costs, not semantic task difficulty or model/effort cohorts. They need
+more comparable successful runs before their accuracy can be calibrated.
+
+If an unapproved planning run terminates without a usable joint packet, repair
+the planning failure and use `feature-replan <run-id> --token <operator-held-token>`.
+This starts guarded successor planning under the same scope, worktrees, baselines,
+and cumulative budget. It refuses active planning, stale control actions, or
+replacement of approved/implemented work.
+
+Claude chains record the same budget ledger but, like every Claude lane, run
+without the Codex watchdog and control tokens, and no session accounting: the
+ledger's `--require-sessions` check applies to codex chains only, so a claude
+chain is bounded by its per-run gates and the wall ledger, not by tokens. Claude `--scope fullstack` still uses the legacy
+API-to-web handoff chain; `--scope api,web-app` uses the joint chain. Persisted
+legacy API/web chains keep their original schemas, handoff receipts, and
+budgets. GitNexus and AWS remain optional evidence capabilities.
+
+Qualification evidence and outstanding live-trial requirements are recorded in
+`audit/repository-list-qualification.md`. ENG-3866 remains deferred until the
+two-repository trial completes through human approval and local verification.

@@ -83,6 +83,24 @@ class CodexUsage(unittest.TestCase):
         r = self.run_script()
         self.assertIn("CODEX_USAGE run=feedbeef sessions=1 input=10", r.stdout)
 
+    def test_stock_uuid_prefix_selects_exact_run(self):
+        run_id = "21786566-8f16-4be3-904a-f89cb2768fe1"
+        con = sqlite3.connect(self.db)
+        con.execute("DELETE FROM remote_agent_workflow_runs")
+        con.execute("DELETE FROM remote_agent_workflow_events")
+        con.execute("INSERT INTO remote_agent_workflow_runs VALUES (?, '2026-08-31 12:00:00', NULL, NULL)", (run_id,))
+        con.execute("INSERT INTO remote_agent_workflow_events VALUES (?, '2026-08-31 11:00:00')", (run_id,))
+        con.execute("INSERT INTO remote_agent_workflow_events VALUES (?, '2026-08-31 12:30:00')", (run_id,))
+        con.commit(); con.close()
+        self.write_rollout("uuid.jsonl", [tc_line(usage(10, 0, 1), usage(10, 0, 1))])
+
+        r = subprocess.run([sys.executable, str(SCRIPT), "21786566-8f16",
+                            "--codex-home", str(self.home), "--db", str(self.db), "--json"],
+                           capture_output=True, encoding="utf-8")
+
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(json.loads(r.stdout)["run"], run_id)
+
     def test_unknown_run_fails_typed(self):
         r = subprocess.run([sys.executable, str(SCRIPT), "deadbeef", "--codex-home", str(self.home), "--db", str(self.db)],
                            capture_output=True, encoding="utf-8")

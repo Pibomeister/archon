@@ -1,0 +1,6 @@
+start:
+  text: START
+body:
+  text: DONE
+after:
+  text: AFTER

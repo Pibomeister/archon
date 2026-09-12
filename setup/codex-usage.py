@@ -32,7 +32,7 @@ def run_window(db, run_prefix):
     NOT usable: a resume rewrites started_at, so a resumed run's row covers only
     the last process and under-counts every earlier session."""
     con = sqlite3.connect(db)
-    if not re.fullmatch(r"[0-9a-fA-F]{8,32}", run_prefix):
+    if not re.fullmatch(r"(?=.{8,36}\Z)[0-9a-fA-F]+(?:-[0-9a-fA-F]+)*", run_prefix):
         con.close()
         raise SystemExit(f"CODEX_USAGE=FAIL bad-id-format {run_prefix!r}")
     rows = con.execute(

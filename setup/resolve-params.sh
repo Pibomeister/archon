@@ -71,6 +71,23 @@ except Exception:
 " "$AD/params.json")
 fi
 WANT="${ARCHON_REPO-}"
+FEATURE_SCOPE="${ARCHON_FEATURE_SCOPE-}"
+FEATURE_PHASE="${ARCHON_FEATURE_PHASE-}"
+# Repository-list chains: the launcher's controller writes params.json right
+# after the run row exists. A Claude lane starts detached, so its preflight can
+# reach this point first; wait for the binding instead of deriving a rival one.
+if [ "$FEATURE_SCOPE" = repositories ]; then
+  WAIT="${ARCHON_PARAMS_WAIT_SECONDS:-60}"
+  while [ ! -f "$AD/params.json" ] && [ "$WAIT" -gt 0 ]; do
+    sleep 1; WAIT=$((WAIT - 1))
+  done
+  if [ ! -f "$AD/params.json" ]; then
+    echo "PARAMS=FAIL missing controller params for repository-list phase=${FEATURE_PHASE:-unknown} (launch through archon-run.py feature)"
+    exit 1
+  fi
+  echo "PARAMS=OK adopted repository feature params phase=${FEATURE_PHASE:-unknown}"
+  exit 0
+fi
 if [ -n "$BOUND" ]; then
   if [ -n "$WANT" ] && [ "$WANT" != "$BOUND" ]; then
     echo "PARAMS=FAIL REPO_CONFLICT run is bound to $BOUND but ARCHON_REPO=$WANT (rebinding a live run is not supported; start a new run or clear the artifacts dir)"

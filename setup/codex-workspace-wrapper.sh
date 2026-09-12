@@ -8,39 +8,60 @@ REAL="${CODEX_REAL_BIN:?CODEX_REAL_BIN is required}"
 ROOT="${CODEX_WORKSPACE_ROOT:?CODEX_WORKSPACE_ROOT is required}"
 ARTIFACTS_BASE="${CODEX_ARTIFACTS_BASE:?CODEX_ARTIFACTS_BASE is required}"
 [ -x "$REAL" ] || { echo "CODEX_WRAPPER=FAIL real binary is not executable: $REAL" >&2; exit 126; }
-[ -d "$ROOT/api/.git" ] || { echo "CODEX_WRAPPER=FAIL api repo missing under $ROOT" >&2; exit 2; }
-[ -d "$ROOT/web-app/.git" ] || { echo "CODEX_WRAPPER=FAIL web repo missing under $ROOT" >&2; exit 2; }
 
 if [ "${1:-}" = "exec" ]; then
   shift
   PROMPT="$(cat)"
   ARTIFACTS_DIR="$(printf '%s' "$PROMPT" | python3 -c '
-import re, sys
+import os, re, sys
 base = sys.argv[1].rstrip("/")
 text = sys.stdin.read()
-paths = sorted(set(re.findall(re.escape(base) + r"/[0-9a-f]{32}", text)))
+run_id = r"(?:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|[0-9a-f]{32})"
+paths = sorted(set(re.findall(re.escape(base) + "/" + run_id + r"(?![0-9a-f-])", text)))
+bound = os.environ.get("CODEX_RUN_ARTIFACTS")
+if bound:
+    paths = sorted(set(paths + [bound]))
 if len(paths) > 1:
     print("CODEX_WRAPPER=FAIL prompt names multiple run artifact roots", file=sys.stderr)
     raise SystemExit(2)
 print(paths[0] if paths else "")
 ' "$ARTIFACTS_BASE")"
   args=()
+  WORKTREE="$PWD"
+  SKIP_GIT_CHECK=0
   while [ $# -gt 0 ]; do
     case "$1" in
-      --sandbox)
+      --sandbox|-s)
         [ $# -ge 2 ] || { echo "CODEX_WRAPPER=FAIL --sandbox missing value" >&2; exit 2; }
         shift 2 # Archon v0.8.0 forces danger-full-access; replace, never retain.
         ;;
-      --cd|--add-dir)
+      --sandbox=*) shift ;;
+      --cd|-C)
         [ $# -ge 2 ] || { echo "CODEX_WRAPPER=FAIL $1 missing value" >&2; exit 2; }
-        shift 2 # Replace the broad Goodword root with the two writable repos.
+        WORKTREE="$2"
+        shift 2
         ;;
-      --config)
+      --cd=*) WORKTREE="${1#*=}"; shift ;;
+      --add-dir)
+        [ $# -ge 2 ] || { echo "CODEX_WRAPPER=FAIL $1 missing value" >&2; exit 2; }
+        shift 2
+        ;;
+      --add-dir=*) shift ;;
+      --skip-git-repo-check) SKIP_GIT_CHECK=1; shift ;;
+      --config|-c)
         [ $# -ge 2 ] || { echo "CODEX_WRAPPER=FAIL --config missing value" >&2; exit 2; }
         case "$2" in
-          sandbox_workspace_write.network_access=*) shift 2 ;;
+          sandbox_*=*|sandbox_workspace_write.*|default_permissions=*|permissions=*|permissions.*) shift 2 ;;
           *) args+=("$1" "$2"); shift 2 ;;
         esac
+        ;;
+      --config=*|-c?*)
+        echo "CODEX_WRAPPER=FAIL attached config override is unsupported" >&2
+        exit 2
+        ;;
+      --worktree|--ephemeral|--profile|-p|--profile=*)
+        echo "CODEX_WRAPPER=FAIL option conflicts with pinned workspace or session accounting: $1" >&2
+        exit 2
         ;;
       --dangerously-bypass-approvals-and-sandbox)
         echo "CODEX_WRAPPER=FAIL bypass flag from adapter" >&2
@@ -49,8 +70,115 @@ print(paths[0] if paths else "")
       *) args+=("$1"); shift ;;
     esac
   done
-  forced=(exec --sandbox workspace-write --cd "$ROOT/api" --add-dir "$ROOT/web-app"
-    --config sandbox_workspace_write.network_access=false)
+  WORKTREE="$(python3 - "$ROOT" "$WORKTREE" "$ARTIFACTS_DIR" "$ARTIFACTS_BASE" <<'PY_WORKTREE'
+import json
+import hashlib
+import hmac
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+
+def private_feature_worktree(artifacts):
+    chain_id = os.environ.get("ARCHON_FEATURE_CHAIN_ID", "")
+    if not re.fullmatch(r"[0-9a-f]{24,64}", chain_id):
+        raise ValueError("invalid repository chain identity")
+    directory = Path(os.environ["ARCHON_CONTROL_DIR"]) / "feature-chains-v2"
+    path = directory / (chain_id + ".json")
+    for item in (directory.parent, directory, path):
+        info = item.lstat()
+        if stat.S_ISLNK(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise ValueError("repository chain authority is not private")
+    state = json.loads(path.read_text())
+    body = {k: v for k, v in state.items() if k not in {"state_mac", "approval_mac", "receipt_mac"}}
+    expected = hmac.new(state["chain_secret"].encode(), json.dumps(body, sort_keys=True,
+                        separators=(",", ":")).encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, state.get("state_mac", "")):
+        raise ValueError("repository chain authority MAC mismatch")
+    if state.get("schema_version") != 2 or state.get("logical_chain_id") != chain_id:
+        raise ValueError("repository chain authority schema mismatch")
+    current = state["current_run"]
+    if artifacts is None or current["run_id"] != artifacts.name:
+        raise ValueError("repository chain run does not match artifacts")
+    phase = current["phase"]
+    if phase in {"planning", "integration"}:
+        return artifacts
+    if phase not in {"implement", "verify"} or not state.get("approval"):
+        raise ValueError("repository execution has no joint approval")
+    repo = current["repo"]
+    selected = Path(state["worktrees"][repo]["worktree"]).resolve(strict=True)
+    if str(selected) not in current["write_roots"]:
+        raise ValueError("repository execution worktree authority mismatch")
+    return selected
+
+try:
+    root = Path(sys.argv[1]).resolve(strict=True)
+    selected = sys.argv[2]
+    artifacts = None
+    if sys.argv[3]:
+        artifacts = Path(sys.argv[3]).resolve(strict=True)
+        if artifacts.parent != Path(sys.argv[4]).resolve(strict=True):
+            raise ValueError("run artifacts must be directly inside the artifacts base")
+        if os.environ.get("ARCHON_FEATURE_SCOPE") != "repositories":
+            params = json.loads((artifacts / "params.json").read_text())
+            selected = params["worktree"]
+            if not isinstance(selected, str) or not Path(selected).is_absolute():
+                raise ValueError("recorded worktree must be absolute")
+    if os.environ.get("ARCHON_FEATURE_SCOPE") == "repositories":
+        selected = private_feature_worktree(artifacts)
+        if selected == artifacts:
+            print(selected)
+            raise SystemExit(0)
+        selected = str(selected)
+    if not isinstance(selected, str) or not selected or "\n" in selected:
+        raise ValueError("invalid worktree")
+    worktree = Path(selected).resolve()
+    if worktree == root or not worktree.is_relative_to(root):
+        raise ValueError("worktree must be inside the workspace, not its root")
+    if not worktree.exists() and artifacts is not None:
+        if (artifacts / "bootstrap-head.txt").exists():
+            raise ValueError("selected worktree missing after bootstrap")
+        # Research nodes precede bootstrap and write only run evidence.
+        worktree = artifacts
+    elif not worktree.is_dir() or not (worktree / ".git").exists():
+        raise ValueError("selected worktree has no Git metadata")
+    print(worktree)
+except (OSError, ValueError, KeyError, TypeError) as exc:
+    print("CODEX_WRAPPER=FAIL " + str(exc), file=sys.stderr)
+    raise SystemExit(2)
+PY_WORKTREE
+)"
+  PERMISSIONS="$(python3 - "$ARTIFACTS_DIR" <<'PY_PERMISSIONS'
+import json
+import os
+import sys
+from pathlib import Path
+
+home = Path.home()
+control = Path(os.environ.get("ARCHON_CONTROL_DIR", home / ".archon/control/codex-lite"))
+denied = [control, home / ".archon/logs", home / ".archon/archon.db",
+          home / ".archon/archon.db-wal", home / ".archon/archon.db-shm"]
+rules = ",".join(json.dumps(str(path.resolve())) + '= "deny"' for path in denied)
+if os.environ.get("ARCHON_FEATURE_SCOPE") == "repositories":
+    artifacts = Path(sys.argv[1]).resolve()
+    frozen = ["params.json", "worktrees.json", "bootstrap-head.txt", "feature-chain-request.json",
+              "prior-planning-evidence.json", "budget-forecast.json"]
+    if os.environ.get("ARCHON_FEATURE_PHASE") != "planning":
+        frozen += ["joint-plan.json", "plan.md", "files-allowlist.json", "verify.json",
+                   "candidate-inputs.json", "candidate-revisions.json", "premises.json",
+                   "reader-audit.json", "web-premises.json", "web-reader-audit.json",
+                   "browser-evidence.json", "browser-evidence.sha256", "smoke-probe.json"]
+    rules += "," + ",".join(json.dumps(str(artifacts / name)) + '= "read"' for name in frozen)
+print('permissions={archon-worker={extends=":workspace",filesystem={' + rules +
+      '},network={enabled=false}}}')
+PY_PERMISSIONS
+)"
+  forced=(exec --cd "$WORKTREE" --config 'default_permissions="archon-worker"'
+    --config "$PERMISSIONS")
+  if [ "$SKIP_GIT_CHECK" -eq 1 ] || [ ! -e "$WORKTREE/.git" ]; then
+    forced+=(--skip-git-repo-check)
+  fi
   [ -z "$ARTIFACTS_DIR" ] || forced+=(--add-dir "$ARTIFACTS_DIR")
   # Codex launches stdio MCP servers with a core-only environment (HOME, PATH,
   # SHELL, TERM, TMPDIR, USER, LANG, LOGNAME), so the gitnexus dispatcher never
@@ -64,6 +192,46 @@ print(paths[0] if paths else "")
       forced+=(--config "mcp_servers.gitnexus.env.ARCHON_BUGFIX_CHAIN_ID=\"$ARCHON_BUGFIX_CHAIN_ID\""
         --config "mcp_servers.gitnexus.env.ARCHON_BUGFIX_CHAIN_STATE=\"$ARCHON_BUGFIX_CHAIN_STATE\"")
     fi
+  fi
+  if [ "${ARCHON_FEATURE_SCOPE:-}" = repositories ]; then
+    : "${ARCHON_FEATURE_BUDGET_SCRIPT:?repository chains require exact session recording}"
+    exec python3 -c '
+import json, os, subprocess, sys
+
+recorder, run_id, binary = sys.argv[1:4]
+child = subprocess.Popen([binary, *sys.argv[4:]], stdin=sys.stdin, stdout=subprocess.PIPE,
+                         text=True, encoding="utf-8", errors="replace", bufsize=1)
+try:
+    for line in child.stdout:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            event = None
+        if isinstance(event, dict) and event.get("type") == "thread.started":
+            session_id = event.get("thread_id")
+            if not isinstance(session_id, str) or not session_id:
+                raise ValueError("Codex thread.started has no session identity")
+            registered = subprocess.run([
+                sys.executable, recorder, "--control-dir", os.environ["ARCHON_CONTROL_DIR"],
+                "--codex-home", os.environ["CODEX_HOME"], "bind-session",
+                "--chain-id", os.environ["ARCHON_FEATURE_CHAIN_ID"], "--run-id", run_id,
+                "--session-id", session_id,
+            ], capture_output=True, text=True, timeout=30)
+            if registered.returncode:
+                raise ValueError("exact Codex session registration failed: " + registered.stderr.strip())
+        sys.stdout.write(line)
+        sys.stdout.flush()
+    raise SystemExit(child.wait())
+except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+    child.terminate()
+    try:
+        child.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.wait()
+    print("CODEX_WRAPPER=FAIL " + str(exc), file=sys.stderr)
+    raise SystemExit(2)
+' "$ARCHON_FEATURE_BUDGET_SCRIPT" "$(basename "$ARTIFACTS_DIR")" "$REAL" "${forced[@]}" "${args[@]}" <<< "$PROMPT"
   fi
   exec "$REAL" "${forced[@]}" "${args[@]}" <<< "$PROMPT"
 fi

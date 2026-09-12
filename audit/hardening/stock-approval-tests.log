@@ -1,0 +1,7 @@
+Component tests only: no stock runtime, provider, approval or publication executed.
+$ python3 -m unittest tests.test_control_contract_approval_snapshot tests.test_release_controller tests.test_controller_attest
+.......................................................
+----------------------------------------------------------------------
+Ran 55 tests in 10.782s
+
+OK

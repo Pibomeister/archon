@@ -31,13 +31,17 @@ class CodexLiteRun(unittest.TestCase):
         self.db = self.root / "archon.db"
         con = sqlite3.connect(self.db)
         con.execute("CREATE TABLE remote_agent_workflow_runs "
-                    "(id TEXT, workflow_name TEXT, user_message TEXT, status TEXT, output_root TEXT, started_at TEXT)")
+                    "(id TEXT, workflow_name TEXT, user_message TEXT, status TEXT, output_root TEXT, started_at TEXT, codebase_id TEXT)")
+        con.execute("CREATE TABLE remote_agent_codebases "
+                    "(id TEXT, name TEXT, default_cwd TEXT, kind TEXT, updated_at TEXT)")
+        con.execute("INSERT INTO remote_agent_codebases VALUES (?,?,?,?,?)",
+                    ("goodword-codebase", "Goodword", str(clr.ROOT), "repo", "2026-09-10 00:00:00"))
         con.commit(); con.close()
 
     def add_run(self, run_id, lane="bugfix-lite-codex", status="paused", started="2026-08-31 12:00:00"):
         con = sqlite3.connect(self.db)
-        con.execute("INSERT INTO remote_agent_workflow_runs VALUES (?,?,?,?,?,?)",
-                    (run_id, lane, "/tmp/spec.md", status, str(self.root / "out"), started))
+        con.execute("INSERT INTO remote_agent_workflow_runs VALUES (?,?,?,?,?,?,?)",
+                    (run_id, lane, "/tmp/spec.md", status, str(self.root / "out"), started, "goodword-codebase"))
         con.commit(); con.close()
 
     @staticmethod
@@ -72,6 +76,36 @@ class CodexLiteRun(unittest.TestCase):
         row = clr.resolve_run(self.db, "cafebabe99")
         self.assertEqual(row["id"], "cafebabe99")
 
+    def test_resolve_run_accepts_stock_uuid_and_prefixes(self):
+        run_id = "21786566-8f16-4be3-904a-f89cb2768fe1"
+        self.add_run(run_id)
+
+        self.assertEqual(clr.resolve_run(self.db, run_id)["id"], run_id)
+        self.assertEqual(clr.resolve_run(self.db, "21786566-8f16")["id"], run_id)
+
+    def test_wait_for_run_id_reads_stock_uuid_from_log(self):
+        log = self.root / "archon.log"
+        run_id = "21786566-8f16-4be3-904a-f89cb2768fe1"
+        log.write_text(json.dumps({"workflowRunId": run_id}) + "\n", encoding="utf-8")
+
+        self.assertEqual(clr.wait_for_run_id(log, os.getpid(), timeout_s=1), run_id)
+
+    def test_codex_artifacts_base_uses_existing_output_root(self):
+        run_id = "21786566-8f16-4be3-904a-f89cb2768fe1"
+        self.add_run(run_id)
+        row = clr.resolve_run(self.db, run_id)
+
+        self.assertEqual(
+            clr.codex_artifacts_base(self.db, clr.ROOT, row),
+            self.root / "out" / "artifacts" / "runs",
+        )
+
+    def test_codex_artifacts_base_derives_repo_local_root_from_codebase_metadata(self):
+        self.assertEqual(
+            clr.codex_artifacts_base(self.db, clr.ROOT),
+            clr.USER_HOME / ".archon" / "workspaces" / "_local" / "Goodword" / "artifacts" / "runs",
+        )
+
     def test_run_command_does_not_use_archon_detach(self):
         old = os.environ.get("ARCHON_BIN")
         os.environ["ARCHON_BIN"] = "/fake/archon"
@@ -105,15 +139,15 @@ class CodexLiteRun(unittest.TestCase):
         env = dict(os.environ, CODEX_REAL_BIN=str(real), CODEX_WORKSPACE_ROOT=str(self.root),
                    CODEX_ARTIFACTS_BASE=str(self.root / "artifacts/runs"))
         result = subprocess.run(
-            [str(wrapper), "exec", "--experimental-json"],
+            [str(wrapper), "exec", "--cd", str(self.root / "api"), "--experimental-json"],
             capture_output=True, encoding="utf-8", env=env,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(
-            result.stdout.strip(),
-            f"exec --sandbox workspace-write --cd {self.root}/api --add-dir {self.root}/web-app "
-            "--config sandbox_workspace_write.network_access=false --experimental-json",
-        )
+        self.assertIn(f"exec --cd {self.root.resolve()}/api ", result.stdout)
+        self.assertIn('default_permissions="archon-worker"', result.stdout)
+        self.assertIn('extends=":workspace"', result.stdout)
+        self.assertIn('network={enabled=false}', result.stdout)
+        self.assertNotIn("danger-full-access", result.stdout)
 
     def test_private_wrapper_replaces_adapter_sandbox_override(self):
         real = self.root / "real-codex.sh"
@@ -124,16 +158,16 @@ class CodexLiteRun(unittest.TestCase):
         env = dict(os.environ, CODEX_REAL_BIN=str(real), CODEX_WORKSPACE_ROOT=str(self.root),
                    CODEX_ARTIFACTS_BASE=str(self.root / "artifacts/runs"))
         result = subprocess.run(
-            [str(clr.WORKSPACE_WRAPPER), "exec", "--sandbox", "danger-full-access",
+            [str(clr.WORKSPACE_WRAPPER), "exec", "--cd", str(self.root / "api"), "--sandbox", "danger-full-access",
              "--config", "sandbox_workspace_write.network_access=true"],
             capture_output=True, encoding="utf-8", env=env,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(
-            result.stdout.strip(),
-            f"exec --sandbox workspace-write --cd {self.root}/api --add-dir {self.root}/web-app "
-            "--config sandbox_workspace_write.network_access=false",
-        )
+        self.assertIn(f"exec --cd {self.root.resolve()}/api ", result.stdout)
+        self.assertIn('default_permissions="archon-worker"', result.stdout)
+        self.assertIn('extends=":workspace"', result.stdout)
+        self.assertIn('network={enabled=false}', result.stdout)
+        self.assertNotIn("danger-full-access", result.stdout)
 
     def test_private_wrapper_forwards_gitnexus_pin_into_the_mcp_server_env(self):
         real = self.root / "real-codex.sh"
@@ -148,7 +182,7 @@ class CodexLiteRun(unittest.TestCase):
                    ARCHON_GITNEXUS_INDEX=str(index), ARCHON_GITNEXUS_COMMIT="c" * 40,
                    ARCHON_BUGFIX_CHAIN_ID="d" * 32, ARCHON_BUGFIX_CHAIN_STATE=str(chain_state))
         result = subprocess.run(
-            [str(clr.WORKSPACE_WRAPPER), "exec"],
+            [str(clr.WORKSPACE_WRAPPER), "exec", "--cd", str(self.root / "api")],
             capture_output=True, encoding="utf-8", env=env,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -169,7 +203,7 @@ class CodexLiteRun(unittest.TestCase):
         env.update(CODEX_REAL_BIN=str(real), CODEX_WORKSPACE_ROOT=str(self.root),
                    CODEX_ARTIFACTS_BASE=str(self.root / "artifacts/runs"))
         result = subprocess.run(
-            [str(clr.WORKSPACE_WRAPPER), "exec"],
+            [str(clr.WORKSPACE_WRAPPER), "exec", "--cd", str(self.root / "api")],
             capture_output=True, encoding="utf-8", env=env,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -184,10 +218,11 @@ class CodexLiteRun(unittest.TestCase):
         base = self.root / "artifacts/runs"
         run_dir = base / ("a" * 32)
         run_dir.mkdir(parents=True)
+        (run_dir / "params.json").write_text(json.dumps({"worktree": str(self.root / "api")}))
         env = dict(os.environ, CODEX_REAL_BIN=str(real), CODEX_WORKSPACE_ROOT=str(self.root),
                    CODEX_ARTIFACTS_BASE=str(base))
         result = subprocess.run(
-            [str(clr.WORKSPACE_WRAPPER), "exec", "--experimental-json"],
+            [str(clr.WORKSPACE_WRAPPER), "exec", "--cd", str(self.root / "api"), "--experimental-json"],
             input=f"Write evidence to {run_dir}/evidence.json", capture_output=True,
             encoding="utf-8", env=env,
         )
@@ -204,12 +239,149 @@ class CodexLiteRun(unittest.TestCase):
         env = dict(os.environ, CODEX_REAL_BIN=str(real), CODEX_WORKSPACE_ROOT=str(self.root),
                    CODEX_ARTIFACTS_BASE=str(base))
         result = subprocess.run(
-            [str(clr.WORKSPACE_WRAPPER), "exec"],
+            [str(clr.WORKSPACE_WRAPPER), "exec", "--cd", str(self.root / "api")],
             input=f"{base / ('a' * 32)} {base / ('b' * 32)}",
             capture_output=True, encoding="utf-8", env=env,
         )
         self.assertEqual(result.returncode, 2)
         self.assertIn("multiple run artifact roots", result.stderr)
+
+    def test_private_wrapper_uses_recorded_worktree_without_api_or_web(self):
+        worktree = self.root / "arbitrary-repo/.worktrees/ticket with spaces"
+        worktree.mkdir(parents=True)
+        (worktree / ".git").write_text("gitdir: /unused/metadata\n")
+        base = self.root / "artifacts/runs"
+        artifacts = base / "21786566-8f16-4be3-904a-f89cb2768fe1"
+        artifacts.mkdir(parents=True)
+        (artifacts / "params.json").write_text(json.dumps({"worktree": str(worktree)}))
+        real = self.root / "real-codex.py"
+        real.write_text("#!/usr/bin/env python3\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\n")
+        real.chmod(0o755)
+        env = dict(os.environ, CODEX_REAL_BIN=str(real), CODEX_WORKSPACE_ROOT=str(self.root),
+                   CODEX_ARTIFACTS_BASE=str(base))
+        result = subprocess.run(
+            [str(clr.WORKSPACE_WRAPPER), "exec", "--cd", str(self.root),
+             "--add-dir", str(self.root.parent)], input=f"Read {artifacts}/params.json",
+            capture_output=True, text=True, env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = json.loads(result.stdout)
+        self.assertEqual(argv[:5], ["exec", "--cd", str(worktree.resolve()),
+                                  "--config", 'default_permissions="archon-worker"'])
+        self.assertEqual(argv[-2:], ["--add-dir", str(artifacts)])
+        self.assertEqual(argv.count("--add-dir"), 1)
+        self.assertIn('extends=":workspace"', argv[6])
+        self.assertIn('network={enabled=false}', argv[6])
+        resumed = subprocess.run(
+            [str(clr.WORKSPACE_WRAPPER), "exec", "--cd", str(self.root), "resume", "thread-id"],
+            input="", capture_output=True, text=True,
+            env=dict(env, CODEX_RUN_ARTIFACTS=str(artifacts)))
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertEqual(json.loads(resumed.stdout)[1:3], ["--cd", str(worktree.resolve())])
+
+    def test_private_wrapper_before_bootstrap_writes_only_run_artifacts(self):
+        artifacts = self.root / "artifacts/runs" / ("b" * 32)
+        artifacts.mkdir(parents=True)
+        (artifacts / "params.json").write_text(json.dumps({
+            "worktree": str(self.root / "other-repo/.worktrees/not-created")}))
+        real = self.root / "real-codex.py"
+        real.write_text("#!/usr/bin/env python3\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\n")
+        real.chmod(0o755)
+        env = dict(os.environ, CODEX_REAL_BIN=str(real), CODEX_WORKSPACE_ROOT=str(self.root),
+                   CODEX_ARTIFACTS_BASE=str(artifacts.parent))
+        result = subprocess.run([str(clr.WORKSPACE_WRAPPER), "exec"],
+                                input=f"Read {artifacts}/params.json", capture_output=True,
+                                text=True, env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = json.loads(result.stdout)
+        self.assertEqual(argv[:5], ["exec", "--cd", str(artifacts.resolve()),
+                                  "--config", 'default_permissions="archon-worker"'])
+        self.assertEqual(argv[-2:], ["--add-dir", str(artifacts)])
+        self.assertEqual(argv.count("--add-dir"), 1)
+        self.assertIn('extends=":workspace"', argv[6])
+        self.assertIn('network={enabled=false}', argv[6])
+
+        self.assertIn("--skip-git-repo-check", argv)
+
+        (artifacts / "bootstrap-head.txt").write_text("a" * 40)
+        result = subprocess.run([str(clr.WORKSPACE_WRAPPER), "exec"],
+                                input=f"Read {artifacts}/params.json", capture_output=True,
+                                text=True, env=env)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("selected worktree missing after bootstrap", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_private_wrapper_rejects_outside_worktree_and_workspace_root(self):
+        real = self.root / "real-codex.sh"
+        real.write_text("#!/bin/sh\necho SHOULD_NOT_LAUNCH\n")
+        real.chmod(0o755)
+        env = dict(os.environ, CODEX_REAL_BIN=str(real), CODEX_WORKSPACE_ROOT=str(self.root),
+                   CODEX_ARTIFACTS_BASE=str(self.root / "artifacts/runs"))
+        for target in (self.root, self.root.parent):
+            with self.subTest(target=target):
+                result = subprocess.run([str(clr.WORKSPACE_WRAPPER), "exec", "--cd", str(target)],
+                                        input="", capture_output=True, text=True, env=env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("SHOULD_NOT_LAUNCH", result.stdout)
+                self.assertIn("CODEX_WRAPPER=FAIL", result.stderr)
+
+    @unittest.skipUnless(sys.platform == "darwin", "native macOS sandbox probe")
+    def test_private_wrapper_permissions_deny_controller_read_and_signal(self):
+        worktree = self.root / "repo"
+        (worktree / ".git").mkdir(parents=True)
+        control = self.root / "control"
+        control.mkdir(mode=0o700)
+        secret = control / "synthetic.txt"
+        secret.write_text("SYNTHETIC_ONLY")
+        real = self.root / "capture.py"
+        real.write_text("#!/usr/bin/env python3\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\n")
+        real.chmod(0o755)
+        env = dict(os.environ, CODEX_REAL_BIN=str(real), CODEX_WORKSPACE_ROOT=str(self.root),
+                   CODEX_ARTIFACTS_BASE=str(self.root / "runs"), ARCHON_CONTROL_DIR=str(control))
+        captured = subprocess.run([str(clr.WORKSPACE_WRAPPER), "exec", "--cd", str(worktree)],
+                                  input="", text=True, capture_output=True, env=env)
+        self.assertEqual(captured.returncode, 0, captured.stderr)
+        argv = json.loads(captured.stdout)
+        permission_config = argv[6]
+        base = ["codex", "sandbox", "-P", "archon-worker", "-c", permission_config,
+                "-C", str(worktree), "--"]
+        denied = subprocess.run(base + ["/bin/cat", str(secret)], capture_output=True, text=True)
+        self.assertNotEqual(denied.returncode, 0)
+        self.assertIn("Operation not permitted", denied.stderr)
+        allowed = subprocess.run(base + ["/bin/sh", "-c", "echo LOCAL_OK > allowed.txt"],
+                                 capture_output=True, text=True)
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        self.assertEqual((worktree / "allowed.txt").read_text(), "LOCAL_OK\n")
+        child = subprocess.Popen(["/bin/sleep", "30"])
+        try:
+            denied = subprocess.run(base + ["/bin/kill", "-TERM", str(child.pid)],
+                                    capture_output=True, text=True)
+            self.assertNotEqual(denied.returncode, 0)
+            self.assertIn("Operation not permitted", denied.stderr)
+            self.assertIsNone(child.poll())
+        finally:
+            child.terminate()
+            child.wait()
+
+    def test_private_wrapper_rejects_invalid_recorded_worktree(self):
+        artifacts = self.root / "artifacts/runs" / ("c" * 32)
+        artifacts.mkdir(parents=True)
+        escape = self.root / "escape"
+        escape.symlink_to(self.root.parent, target_is_directory=True)
+        real = self.root / "real-codex.sh"
+        real.write_text("#!/bin/sh\necho SHOULD_NOT_LAUNCH\n")
+        real.chmod(0o755)
+        env = dict(os.environ, CODEX_REAL_BIN=str(real), CODEX_WORKSPACE_ROOT=str(self.root),
+                   CODEX_ARTIFACTS_BASE=str(artifacts.parent))
+        for payload in ("not json", "{}", json.dumps({"worktree": str(escape)}),
+                        json.dumps({"worktree": str(self.root)})):
+            with self.subTest(payload=payload):
+                (artifacts / "params.json").write_text(payload)
+                result = subprocess.run([str(clr.WORKSPACE_WRAPPER), "exec"],
+                                        input=f"Read {artifacts}/params.json", capture_output=True,
+                                        text=True, env=env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("SHOULD_NOT_LAUNCH", result.stdout)
+                self.assertIn("CODEX_WRAPPER=FAIL", result.stderr)
 
     def test_detach_reports_exact_process_group(self):
         log = self.root / "detached.log"
@@ -316,6 +488,59 @@ class CodexLiteRun(unittest.TestCase):
         self.assertEqual(restored["control_token_hash"], clr.token_digest("valid-token"))
         self.assertEqual(clr.require_control_token(row, control_dir, "valid-token")["run"], row["id"])
 
+    def test_resume_exports_exact_run_artifacts_without_prompt_binding(self):
+        self.add_run("cafebabe99", status="failed")
+        control_dir = self.root / "control"
+        row = clr.resolve_run(self.db, "cafebabe99")
+        clr.secure_write_json(
+            clr.control_state_path(row, control_dir), self.private_control(row["id"])
+        )
+        argv = [str(SCRIPT), "--db", str(self.db), "--codex-home", str(self.root / "codex-home"),
+                "--control-dir", str(control_dir),
+                "resume", "cafebabe99", "--token", "valid-token"]
+        captured_envs = []
+
+        def capture_detached(_log, _command, env, supervise=True):
+            captured_envs.append(dict(env))
+            raise SystemExit(1)
+
+        with mock.patch.object(sys, "argv", argv), \
+             mock.patch.object(clr, "DEFAULT_CONTROL_DIR", control_dir), \
+             mock.patch.object(clr, "ensure_environment"), \
+             mock.patch.object(clr, "stage_private_codex_skills"), \
+             mock.patch.object(clr, "detached", side_effect=capture_detached), \
+             mock.patch.dict(os.environ, {"CODEX_LITE_LOG_DIR": str(self.root / "logs")}):
+            with self.assertRaises(SystemExit):
+                clr.main()
+
+        self.assertEqual(captured_envs[0]["CODEX_RUN_ARTIFACTS"], str(clr.artifact_dir(row)))
+
+    def test_resume_pre_arm_cleanup_failure_still_restores_prior_control(self):
+        self.add_run("cafebabe99", status="failed")
+        control_dir = self.root / "control"
+        row = clr.resolve_run(self.db, "cafebabe99")
+        prior = self.private_control(row["id"], token="old-token")
+        clr.secure_write_json(clr.control_state_path(row, control_dir), prior)
+        argv = [str(SCRIPT), "--db", str(self.db), "--codex-home", str(self.root / "codex-home"),
+                "--control-dir", str(control_dir),
+                "resume", "cafebabe99", "--token", "old-token"]
+        with mock.patch.object(sys, "argv", argv), \
+             mock.patch.object(clr, "DEFAULT_CONTROL_DIR", control_dir), \
+             mock.patch.object(clr, "ensure_environment"), \
+             mock.patch.object(clr, "stage_private_codex_skills"), \
+             mock.patch.object(clr, "detached", side_effect=[(123, 456), (789, 987)]), \
+             mock.patch.object(clr, "process_fingerprint", side_effect=["launcher-fp", "watchdog-fp"]), \
+             mock.patch.object(clr, "wait_for_watchdog_arm", side_effect=SystemExit(1)), \
+             mock.patch.object(clr, "terminate_group"), \
+             mock.patch.object(clr, "abandon_if_orphaned", side_effect=RuntimeError("sqlite locked")), \
+             mock.patch.dict(os.environ, {"CODEX_LITE_LOG_DIR": str(self.root / "logs")}):
+            with self.assertRaises(RuntimeError):
+                clr.main()
+
+        restored = clr.read_control_state(row, control_dir)
+        self.assertEqual(restored["control_token_hash"], clr.token_digest("old-token"))
+        self.assertEqual(clr.require_control_token(row, control_dir, "old-token")["run"], row["id"])
+
     def test_stop_controlled_processes_uses_only_recorded_exact_groups(self):
         self.add_run("cafebabe99", status="running")
         row = clr.resolve_run(self.db, "cafebabe99")
@@ -388,8 +613,9 @@ if action == "run":
     lane, spec = positional[0], positional[1]
     run_id = "a" * 32
     con = sqlite3.connect(db)
-    con.execute("INSERT INTO remote_agent_workflow_runs VALUES (?,?,?,?,?,?)",
-                (run_id, lane, spec, "running", os.environ["FAKE_OUTPUT"], "2026-08-31 12:00:00"))
+    con.execute("INSERT INTO remote_agent_workflow_runs VALUES (?,?,?,?,?,?,?)",
+                (run_id, lane, spec, "running", os.environ["FAKE_OUTPUT"],
+                 "2026-08-31 12:00:00", "goodword-codebase"))
     con.commit(); con.close()
     os.unlink(os.environ["ARCHON_CODEX_LITE_GUARD_FILE"])
     print(json.dumps({"workflowRunId": run_id}), flush=True)

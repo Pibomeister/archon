@@ -11,9 +11,6 @@ HANDOFF="${2-}"
 AD="${3:?usage: resolve-web-params.sh <root> <handoff> <artifacts-dir> [api-port-base] [web-port-base]}"
 APIBASE="${4-}"
 WEBBASE="${5-}"
-test -n "$HANDOFF" || { echo "WEB_PARAMS=FAIL no API handoff path in run message"; exit 1; }
-case "$HANDOFF" in /*) : ;; *) echo "WEB_PARAMS=FAIL API handoff path must be absolute, got: $HANDOFF"; exit 1 ;; esac
-test -f "$HANDOFF" || { echo "WEB_PARAMS=FAIL API handoff missing: $HANDOFF"; exit 1; }
 PROVIDER="${ARCHON_FEATURE_PROVIDER-}"
 LANE="${ARCHON_FEATURE_LANE-}"
 CHAIN_ID="${ARCHON_FEATURE_CHAIN_ID-}"
@@ -22,13 +19,20 @@ test -n "$PROVIDER" || { echo "WEB_PARAMS=FAIL missing ARCHON_FEATURE_PROVIDER";
 test -n "$LANE" || { echo "WEB_PARAMS=FAIL missing ARCHON_FEATURE_LANE"; exit 1; }
 test -n "$CHAIN_ID" || { echo "WEB_PARAMS=FAIL missing ARCHON_FEATURE_CHAIN_ID"; exit 1; }
 case "$FEATURE_SCOPE" in
-  fullstack) python3 "$ROOT/.archon/setup/archon-run.py" verify-feature-handoff --provider "$PROVIDER" --lane "$LANE" --artifacts "$AD" "$HANDOFF" ;;
+  fullstack)
+    test -n "$HANDOFF" || { echo "WEB_PARAMS=FAIL no API handoff path in run message"; exit 1; }
+    case "$HANDOFF" in /*) : ;; *) echo "WEB_PARAMS=FAIL API handoff path must be absolute, got: $HANDOFF"; exit 1 ;; esac
+    test -f "$HANDOFF" || { echo "WEB_PARAMS=FAIL API handoff missing: $HANDOFF"; exit 1; }
+    python3 "$ROOT/.archon/setup/archon-run.py" verify-feature-handoff --provider "$PROVIDER" --lane "$LANE" --artifacts "$AD" "$HANDOFF"
+    ;;
   web) : ;;
+  repositories) : ;;
   *) echo "WEB_PARAMS=FAIL unsupported feature scope $FEATURE_SCOPE"; exit 1 ;;
 esac
 APIPORT=""; WEBPORT=""
-[ -n "$APIBASE" ] && { APIPORT=$(bash "$ROOT/.archon/setup/port-alloc.sh" "$APIBASE" "$(basename "$HANDOFF")") || { echo "WEB_PARAMS=FAIL cannot allocate api port from base $APIBASE"; exit 1; }; }
-[ -n "$WEBBASE" ] && { WEBPORT=$(bash "$ROOT/.archon/setup/port-alloc.sh" "$WEBBASE" "$(basename "$HANDOFF")") || { echo "WEB_PARAMS=FAIL cannot allocate web port from base $WEBBASE"; exit 1; }; }
+PORT_KEY="$(basename "${HANDOFF:-$CHAIN_ID}")"
+[ -n "$APIBASE" ] && { APIPORT=$(bash "$ROOT/.archon/setup/port-alloc.sh" "$APIBASE" "$PORT_KEY") || { echo "WEB_PARAMS=FAIL cannot allocate api port from base $APIBASE"; exit 1; }; }
+[ -n "$WEBBASE" ] && { WEBPORT=$(bash "$ROOT/.archon/setup/port-alloc.sh" "$WEBBASE" "$PORT_KEY") || { echo "WEB_PARAMS=FAIL cannot allocate web port from base $WEBBASE"; exit 1; }; }
 python3 - "$ROOT" "$HANDOFF" "$AD" "$APIPORT" "$WEBPORT" <<'PY'
 import hashlib, json, os, re, subprocess, sys
 from pathlib import Path
@@ -111,6 +115,107 @@ elif feature_scope == "web":
     if head.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", head.stdout.strip(), re.I):
         raise SystemExit("WEB_PARAMS=FAIL cannot pin standalone API baseline")
     data = {"api_head_sha": head.stdout.strip(), "api_branch": "controller-pinned-read-only-baseline"}
+elif feature_scope == "repositories":
+    phase = os.environ.get("ARCHON_FEATURE_PHASE")
+    repo = os.environ.get("ARCHON_FEATURE_REPO")
+    if phase != "implement" or repo != "web-app":
+        raise SystemExit("WEB_PARAMS=FAIL repository-chain web lane requires PHASE=implement REPO=web-app")
+    params_path = ad / "params.json"
+    if not params_path.is_file():
+        raise SystemExit("WEB_PARAMS=FAIL repository-chain params.json must be prebound by controller")
+    params = json.loads(params_path.read_text(encoding="utf-8"))
+    if params.get("feature_scope") != "repositories" or params.get("repo") != "web-app":
+        raise SystemExit("WEB_PARAMS=FAIL repository-chain params.json has wrong scope or repo")
+    repositories = params.get("repositories")
+    if not isinstance(repositories, list) or "web-app" not in repositories:
+        raise SystemExit("WEB_PARAMS=FAIL repository-chain params.json missing selected web-app")
+    spec = Path(str(params.get("spec", "")))
+    if not spec.is_absolute() or not spec.is_file():
+        raise SystemExit("WEB_PARAMS=FAIL repository-chain spec missing")
+    worktree = Path(str(params.get("worktree", "")))
+    if not worktree.is_absolute() or not (worktree / ".git").exists():
+        raise SystemExit("WEB_PARAMS=FAIL repository-chain web worktree missing")
+    by_repo = params.get("worktrees_by_repo")
+    if not isinstance(by_repo, dict) or by_repo.get("web-app") != str(worktree):
+        raise SystemExit("WEB_PARAMS=FAIL repository-chain worktrees_by_repo does not match web worktree")
+    joint = json.loads((ad / "joint-plan.json").read_text(encoding="utf-8")) if (ad / "joint-plan.json").is_file() else {}
+    stage = joint.get("stages", {}).get("web-app", {}) if isinstance(joint.get("stages"), dict) else {}
+    depends_on = stage.get("depends_on", [])
+    if not isinstance(depends_on, list):
+        raise SystemExit("WEB_PARAMS=FAIL repository-chain web stage dependencies malformed")
+    uses_api = "api" in depends_on
+    required = ["joint-plan.json", "plan.md", "files-allowlist.json", "verify.json"]
+    for name in required:
+        path = ad / name
+        if not path.is_file() or path.stat().st_size == 0:
+            raise SystemExit(f"WEB_PARAMS=FAIL repository-chain missing controller artifact {name}")
+    files = json.loads((ad / "files-allowlist.json").read_text(encoding="utf-8"))
+    verify = json.loads((ad / "verify.json").read_text(encoding="utf-8"))
+    if not isinstance(files, list) or not all(isinstance(p, str) and p.strip() for p in files):
+        raise SystemExit("WEB_PARAMS=FAIL repository-chain files-allowlist.json malformed")
+    if not isinstance(verify, dict) or not isinstance(verify.get("test_patterns"), list) or not isinstance(verify.get("verification"), list):
+        raise SystemExit("WEB_PARAMS=FAIL repository-chain verify.json malformed")
+    api_candidate = None
+    candidates_path = ad / "candidate-revisions.json"
+    if candidates_path.is_file():
+        candidates = json.loads(candidates_path.read_text(encoding="utf-8"))
+        repos_obj = candidates.get("repositories")
+        if not isinstance(repos_obj, dict):
+            raise SystemExit("WEB_PARAMS=FAIL repository-chain candidate-revisions.json malformed")
+        api_candidate = repos_obj.get("api")
+        if uses_api and not isinstance(api_candidate, dict):
+            raise SystemExit("WEB_PARAMS=FAIL repository-chain missing approved api candidate")
+    if uses_api:
+        if "api" not in repositories or "api" not in by_repo:
+            raise SystemExit("WEB_PARAMS=FAIL repository-chain api dependency is outside selected scope")
+        if not isinstance(api_candidate, dict):
+            raise SystemExit("WEB_PARAMS=FAIL repository-chain missing candidate-revisions.json for api dependency")
+        apiwt = Path(str(api_candidate.get("source_worktree", "")))
+        if str(apiwt) != str(by_repo["api"]):
+            raise SystemExit("WEB_PARAMS=FAIL repository-chain api candidate worktree does not match controller params")
+        expected_api_head = api_candidate.get("commit")
+        if not isinstance(expected_api_head, str) or not re.fullmatch(r"[0-9a-f]{40}", expected_api_head, re.I):
+            raise SystemExit("WEB_PARAMS=FAIL repository-chain api candidate commit malformed")
+    else:
+        fixture = params.get("api_fixture_worktree")
+        fixture_head = params.get("api_fixture_head_sha")
+        if not isinstance(fixture, str) or not isinstance(fixture_head, str):
+            raise SystemExit("WEB_PARAMS=FAIL repository-chain web stage without api dependency requires approved api fixture")
+        apiwt = Path(fixture)
+        expected_api_head = fixture_head
+    if not apiwt.is_absolute() or not (apiwt / ".git").exists():
+        raise SystemExit("WEB_PARAMS=FAIL repository-chain API candidate worktree missing")
+    head = subprocess.run(["git", "-C", str(apiwt), "rev-parse", "HEAD"], capture_output=True, encoding="utf-8")
+    if head.returncode != 0 or head.stdout.strip() != expected_api_head:
+        raise SystemExit("WEB_PARAMS=FAIL repository-chain API candidate head does not match approved revision")
+    data = {
+        "kind": "archon-repository-chain-local-candidates",
+        "schema_version": 1,
+        "logical_chain_id": os.environ.get("ARCHON_FEATURE_CHAIN_ID"),
+        "api_head_sha": expected_api_head,
+        "api_branch": subprocess.run(["git", "-C", str(apiwt), "branch", "--show-current"], capture_output=True, encoding="utf-8").stdout.strip(),
+        "api_worktree": str(apiwt),
+        "api_source": "candidate-revisions" if uses_api else "approved-fixture",
+        "repositories": repositories,
+    }
+    params["api_worktree"] = str(apiwt)
+    params["api_head_sha"] = expected_api_head
+    params["api_branch"] = data["api_branch"] or "detached-local-candidate"
+    params["logical_chain_id"] = data["logical_chain_id"]
+    if api_port:
+        params["api_port"] = int(api_port)
+    if web_port:
+        params["web_port"] = int(web_port)
+    params_path.write_text(json.dumps(params, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (ad / "api-handoff.json").write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if not (ad / "web-files-allowlist.json").exists():
+        (ad / "web-files-allowlist.json").write_bytes((ad / "files-allowlist.json").read_bytes())
+    if not (ad / "premises.json").exists():
+        (ad / "premises.json").write_text("[]\n", encoding="utf-8")
+    if not (ad / "reader-audit.json").exists():
+        (ad / "reader-audit.json").write_text('{"columns": []}\n', encoding="utf-8")
+    print(f"WEB_PARAMS=OK scope=repositories spec={spec} slug={params.get('slug')} api_candidate={data['api_head_sha']} api_port={params.get('api_port', 'none')} web_port={params.get('web_port', 'none')}")
+    raise SystemExit(0)
 else:
     raise SystemExit(f"WEB_PARAMS=FAIL unsupported feature scope {feature_scope}")
 slug = re.sub(r"[^a-z0-9]+", "-", spec.stem.lower()).strip("-")[:55]

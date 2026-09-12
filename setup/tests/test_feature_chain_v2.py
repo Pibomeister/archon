@@ -1,0 +1,916 @@
+#!/usr/bin/env python3
+import importlib.util
+import json
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import unittest
+from argparse import Namespace
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+
+SETUP = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(SETUP))
+spec = importlib.util.spec_from_file_location("feature_chain", SETUP / "feature_chain.py")
+assert spec and spec.loader
+fc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(fc)
+
+
+def git(repo: Path, *argv: str) -> str:
+    result = subprocess.run(["git", "-C", str(repo), *argv], capture_output=True, encoding="utf-8")
+    if result.returncode != 0:
+        raise AssertionError(result.stderr or result.stdout)
+    return result.stdout.strip()
+
+
+class FeatureChainV2(unittest.TestCase):
+    def setUp(self):
+        env_patch = mock.patch.dict(fc.os.environ, {}, clear=False)
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.control = self.root / "private-control"
+        self.spec = self.root / "feature.md"
+        self.spec.write_text("# Feature\n", encoding="utf-8")
+        for repo in ("api", "goodword-mcp", "web-app"):
+            self.init_repo(repo)
+        self.host = SimpleNamespace(ROOT=self.root)
+        self.host.calls = []
+        def invoke(args, lane, message):
+            run_id = f"{len(self.host.calls) + 1:032x}"
+            row = {
+                "id": run_id,
+                "workflow_name": lane,
+                "user_message": str(message),
+                "output_root": str(self.root / "artifacts" / run_id),
+            }
+            Path(row["output_root"]).mkdir(parents=True)
+            if fc.os.environ.get("ARCHON_FEATURE_SCOPE") == "repositories":
+                fc.before_dispatch_bind(self.host, args, row)
+            self.host.calls.append((lane, str(message), dict(fc.os.environ), row))
+            return row
+        self.host.invoke_codex_lane = invoke
+        self.host.artifact_dir = lambda row: Path(row["output_root"])
+        self.args = Namespace(
+            spec=str(self.spec),
+            provider="codex",
+            control_dir=self.control,
+            db=self.root / "archon.db",
+            codex_home=self.root / "codex-home",
+            wall_minutes=240,
+            max_total_tokens=30_000_000,
+            budget_shepherd=False,
+            no_watch=True,
+        )
+        with sqlite3.connect(self.args.db) as con:
+            con.execute(
+                "CREATE TABLE remote_agent_workflow_run_node_sessions "
+                "(workflow_run_id TEXT, provider TEXT, node_id TEXT, provider_session_id TEXT)"
+            )
+            con.execute(
+                "CREATE TABLE remote_agent_workflow_events "
+                "(workflow_run_id TEXT, created_at TEXT, event_type TEXT, node_name TEXT, payload TEXT)"
+            )
+
+    def init_repo(self, name):
+        repo = self.root / name
+        repo.mkdir(parents=True)
+        git(repo, "init", "-q")
+        git(repo, "config", "user.email", "test@example.com")
+        git(repo, "config", "user.name", "Test")
+        git(repo, "remote", "add", "origin", f"git@github.com:Owner/{name}.git")
+        (repo / "README.md").write_text(name + "\n", encoding="utf-8")
+        git(repo, "add", ".")
+        git(repo, "commit", "-qm", "initial")
+
+    def plan(self, deps=None):
+        deps = deps or {"api": [], "goodword-mcp": ["api"]}
+        return {
+            "schema": "archon.joint-feature-plan.v1",
+            "repositories": ["api", "goodword-mcp"],
+            "dependency_order": ["api", "goodword-mcp"] if not deps["api"] else ["goodword-mcp", "api"],
+            "contracts": [{"producer": "api", "consumer": "goodword-mcp", "artifact": "openapi.json", "description": "fixture"}],
+            "integration": {"scenarios": [{"name": "local-api-mcp", "uses": ["api", "goodword-mcp"], "commands": [{"repo": "api", "argv": ["fixture"]}], "expected_tests": ["local api mcp"]}]},
+            "stages": {
+                "api": {
+                    "depends_on": deps["api"],
+                    "files_allowlist": ["src/api.ts"],
+                    "test_patterns": ["api.spec.ts"],
+                    "verification": ["bun test"],
+                },
+                "goodword-mcp": {
+                    "depends_on": deps["goodword-mcp"],
+                    "files_allowlist": ["src/tool.ts"],
+                    "test_patterns": ["tool.spec.ts"],
+                    "verification": ["pnpm test"],
+                },
+            },
+        }
+
+    def row(self, run_id, lane="full-sdlc-api-codex"):
+        return {"id": run_id, "workflow_name": lane, "user_message": str(self.spec), "output_root": str(self.root / f"out-{run_id[:4]}")}
+
+    def result_artifacts(self, row, repo, head=None):
+        ad = Path(row["output_root"])
+        ad.mkdir(parents=True)
+        payload = {
+            "outcome": "CHANGED",
+            "head": head or git(self.root / repo, "rev-parse", "HEAD"),
+            "verification_evidence": [{"command": "unit", "status": "passed", "log": "verify.log", "tests_passed": 1}],
+            "interface_artifacts": [{"path": "contract.json", "source_path": "openapi.json", "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"}],
+        }
+        (ad / "verify.log").write_text("Tests: 1 passed\n", encoding="utf-8")
+        (ad / "contract.json").write_text("{}\n", encoding="utf-8")
+        worktree = next((self.root / repo / ".worktrees").iterdir())
+        (ad / "params.json").write_text(json.dumps({"worktree": str(worktree)}), encoding="utf-8")
+        (ad / "verify.json").write_text(json.dumps({"test_patterns": self.plan()["stages"][repo]["test_patterns"]}), encoding="utf-8")
+        (ad / "feature-result.json").write_text(json.dumps(payload), encoding="utf-8")
+        return ad
+
+    def test_launch_prepares_repository_keyed_state_and_private_worktrees(self):
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        state = fc.read_state(self.control, launched["state"]["logical_chain_id"])
+
+        self.assertEqual(state["schema_version"], 2)
+        self.assertEqual(state["scope"], "repositories")
+        self.assertEqual(state["executable_plan_contract"], 1)
+        self.assertEqual(state["repositories"], ["api", "goodword-mcp"])
+        self.assertEqual(self.host.calls[0][0], "full-sdlc-api-codex")
+        self.assertEqual(state["current_run"]["phase"], "planning")
+        self.assertTrue((Path(state["current_run"]["artifacts_dir"]) / fc.PLANNING_REQUEST_ARTIFACT).is_file())
+        for repo in state["repositories"]:
+            self.assertTrue(Path(state["worktrees"][repo]["worktree"]).is_dir())
+            self.assertEqual(state["stages"][repo]["status"], "pending")
+
+    def test_approval_binds_exact_plan_and_topological_order(self):
+        state = fc.launch(self.host, self.args, ["api", "goodword-mcp"])["state"]
+        approved = fc.approve_plan(self.control, state["logical_chain_id"], self.plan())
+
+        self.assertEqual(approved["dependency_order"], ["api", "goodword-mcp"])
+        self.assertEqual(fc.next_stage(approved), "api")
+        approved["approved_plan"]["contracts"][0]["artifact"] = "other.json"
+        with self.assertRaisesRegex(fc.FeatureChainError, "approval"):
+            fc.verify_approval(approved)
+
+    def test_plan_rejects_cycles_and_outside_scope_dependencies(self):
+        state = fc.launch(self.host, self.args, ["api", "goodword-mcp"])["state"]
+        with self.assertRaisesRegex(fc.FeatureChainError, "cycle"):
+            fc.approve_plan(self.control, state["logical_chain_id"], self.plan({"api": ["goodword-mcp"], "goodword-mcp": ["api"]}))
+        outside = self.plan({"api": [], "goodword-mcp": ["web-app"]})
+        with self.assertRaisesRegex(fc.FeatureChainError, "outside-scope"):
+            fc.approve_plan(self.control, state["logical_chain_id"], outside)
+
+    def test_new_chain_rejects_shell_integration_commands(self):
+        state = fc.launch(self.host, self.args, ["api", "goodword-mcp"])["state"]
+        plan = self.plan()
+        plan["integration"]["scenarios"][0]["commands"] = ["legacy shell"]
+
+        with self.assertRaisesRegex(fc.FeatureChainError, r"must be \{repo, argv\}"):
+            fc.approve_plan(self.control, state["logical_chain_id"], plan)
+
+    def test_planning_artifact_params_cannot_downgrade_executable_contract(self):
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        state = launched["state"]
+        row = launched["row"]
+        artifacts = Path(row["output_root"])
+        plan = self.plan()
+        plan["integration"]["scenarios"][0]["commands"] = ["legacy shell"]
+        (artifacts / fc.JOINT_PLAN_ARTIFACT).write_text(json.dumps(plan), encoding="utf-8")
+        (artifacts / "params.json").write_text(json.dumps({"repositories": state["repositories"]}), encoding="utf-8")
+        control = fc.bind_run_control_payload(self.control, state, None, row, "planning")
+
+        with self.assertRaisesRegex(fc.FeatureChainError, r"must be \{repo, argv\}"):
+            fc.before_control(self.host, Namespace(**vars(self.args), action="approve", token="token"), row, {"feature_chain": control})
+
+    def test_legacy_state_allows_shell_integration_commands_without_contract_flag(self):
+        state = fc.launch(self.host, self.args, ["api", "goodword-mcp"])["state"]
+        state.pop("executable_plan_contract", None)
+        fc.write_state(self.control, state)
+        plan = self.plan()
+        plan["integration"]["scenarios"][0]["commands"] = ["legacy shell"]
+
+        approved = fc.approve_plan(self.control, state["logical_chain_id"], plan)
+
+        self.assertNotIn("executable_plan_contract", approved)
+        self.assertEqual(approved["approval"]["plan_digest"], fc.digest(plan))
+        fc.verify_approval(approved)
+
+    def test_controller_consumes_list_stage_plan_without_rewriting_approved_plan(self):
+        state = fc.launch(self.host, self.args, ["api", "goodword-mcp"])["state"]
+        plan = self.plan()
+        plan["stages"] = [
+            dict({"repo": repo}, **body)
+            for repo, body in plan["stages"].items()
+        ]
+
+        approved = fc.approve_plan(self.control, state["logical_chain_id"], plan)
+
+        self.assertIsInstance(approved["approved_plan"]["stages"], list)
+        self.assertEqual(approved["approval"]["plan_digest"], fc.digest(plan))
+        self.assertEqual(approved["stages"]["api"]["plan"]["files_allowlist"], ["src/api.ts"])
+        self.assertEqual(approved["stages"]["goodword-mcp"]["plan"]["depends_on"], ["api"])
+
+    def test_bind_phase_records_wrapper_write_authority(self):
+        state = fc.launch(self.host, self.args, ["api", "goodword-mcp"])["state"]
+        planning_row = self.row("a" * 32)
+        artifacts = self.root / "planning-artifacts"
+        planned = fc.bind_phase_run(self.control, state["logical_chain_id"], phase="planning", row=planning_row, artifacts_dir=artifacts)
+        self.assertEqual(planned["current_run"]["write_roots"], [str(artifacts)])
+        fc.assert_write_allowed(self.control, state["logical_chain_id"], artifacts / "plan.json")
+        with self.assertRaises(fc.FeatureChainError):
+            fc.assert_write_allowed(self.control, state["logical_chain_id"], self.root / "api" / "src.ts")
+
+        approved = fc.approve_plan(self.control, state["logical_chain_id"], self.plan())
+        api_row = self.row("b" * 32)
+        running = fc.bind_phase_run(self.control, approved["logical_chain_id"], phase="implement", repo="api", row=api_row)
+        api_worktree = Path(running["worktrees"]["api"]["worktree"])
+        fc.assert_write_allowed(self.control, running["logical_chain_id"], api_worktree / "src.ts")
+        with self.assertRaises(fc.FeatureChainError):
+            fc.assert_write_allowed(self.control, running["logical_chain_id"], Path(running["worktrees"]["goodword-mcp"]["worktree"]) / "src.ts")
+
+    def test_advance_records_candidate_and_honors_dependency_order(self):
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        state = fc.approve_plan(self.control, launched["state"]["logical_chain_id"], self.plan())
+        api_row = self.row("c" * 32)
+        fc.bind_phase_run(self.control, state["logical_chain_id"], phase="implement", repo="api", row=api_row)
+        artifacts = self.result_artifacts(api_row, "api")
+
+        advanced = fc.advance(self.host, self.args, dict(api_row, artifacts=str(artifacts)), {
+            "state": "terminal",
+            "status": "completed",
+            "artifacts": str(artifacts),
+            "feature_chain": {"logical_chain_id": state["logical_chain_id"], "repo": "api"},
+        })
+
+        self.assertEqual(advanced["candidate"]["repo"], "api")
+        self.assertEqual(advanced["next_repo"], "goodword-mcp")
+        latest = fc.read_state(self.control, state["logical_chain_id"])
+        self.assertEqual(latest["stages"]["api"]["status"], "verified")
+
+    def test_restore_and_before_control_reject_stale_run(self):
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        state = fc.approve_plan(self.control, launched["state"]["logical_chain_id"], self.plan())
+        row = self.row("d" * 32)
+        running = fc.bind_phase_run(self.control, state["logical_chain_id"], phase="implement", repo="api", row=row)
+        control = fc.bind_run_control_payload(self.control, running, "api", row, "implement")
+
+        env = fc.restore_control(self.host, row, self.control, {"feature_chain": control})
+        self.assertEqual(env["ARCHON_FEATURE_SCOPE"], "repositories")
+        self.assertEqual(env["ARCHON_FEATURE_REPO"], "api")
+        self.assertEqual(fc.before_control(self.host, self.args, row, {"feature_chain": control})["logical_chain_id"], state["logical_chain_id"])
+        stale = dict(row, id="e" * 32)
+        with self.assertRaisesRegex(fc.FeatureChainError, "stale"):
+            fc.before_control(self.host, self.args, stale, {"feature_chain": control})
+
+    def test_integration_requires_verified_candidates_and_passing_tests(self):
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        state = fc.approve_plan(self.control, launched["state"]["logical_chain_id"], self.plan())
+        for run_id, repo in (("1" * 32, "api"), ("2" * 32, "goodword-mcp")):
+            row = self.row(run_id)
+            fc.bind_phase_run(self.control, state["logical_chain_id"], phase="implement", repo=repo, row=row)
+            artifacts = self.result_artifacts(row, repo)
+            state = fc.advance(self.host, self.args, dict(row, artifacts=str(artifacts)), {
+                "state": "terminal",
+                "status": "completed",
+                "artifacts": str(artifacts),
+                "feature_chain": {"logical_chain_id": state["logical_chain_id"], "repo": repo},
+            })["state"]
+
+        with self.assertRaisesRegex(fc.FeatureChainError, "did not pass"):
+            fc.finalize_integration(self.control, state["logical_chain_id"], {"status": "failed", "tests": ["fixture"]})
+        latest = fc.read_state(self.control, state["logical_chain_id"])
+        evidence = {
+            "status": "passed",
+            "tests": [{"name": "fixture"}],
+            "counters": {"tests_passed": 1},
+            "plan_digest": latest["approval"]["plan_digest"],
+            "approved_plan_digest": latest["approval"]["plan_digest"],
+            "candidate_heads": {repo: latest["candidate_handoffs"][repo]["candidate_head"] for repo in latest["repositories"]},
+        }
+        final = fc.finalize_integration(self.control, state["logical_chain_id"], evidence)
+
+        self.assertEqual(final["status"], "locally_verified")
+        self.assertEqual(final["integration"]["publication"], "held")
+
+    def locally_verified_chain(self, api_changed=True):
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        state = fc.approve_plan(self.control, launched["state"]["logical_chain_id"], self.plan())
+        for run_id, repo in (("1" * 32, "api"), ("2" * 32, "goodword-mcp")):
+            worktree = next((self.root / repo / ".worktrees").iterdir())
+            if repo == "goodword-mcp" or api_changed:
+                (worktree / "src").mkdir(exist_ok=True)
+                (worktree / "src" / ("api.ts" if repo == "api" else "tool.ts")).write_text("x\n", encoding="utf-8")
+                git(worktree, "add", "."); git(worktree, "commit", "-qm", f"feat({repo}): change")
+            row = self.row(run_id)
+            fc.bind_phase_run(self.control, state["logical_chain_id"], phase="implement", repo=repo, row=row)
+            artifacts = self.result_artifacts(row, repo, head=git(worktree, "rev-parse", "HEAD"))
+            (artifacts / "commit-msg.txt").write_text(f"feat({repo}): change\n\nbody\n", encoding="utf-8")
+            state = fc.advance(self.host, self.args, dict(row, artifacts=str(artifacts)), {
+                "state": "terminal", "status": "completed", "artifacts": str(artifacts),
+                "feature_chain": {"logical_chain_id": state["logical_chain_id"], "repo": repo},
+            })["state"]
+        latest = fc.read_state(self.control, state["logical_chain_id"])
+        evidence = {
+            "status": "passed", "tests": [{"name": "fixture"}], "counters": {"tests_passed": 1, "scenarios": 1},
+            "commands": [{"scenario": "local api mcp"}],
+            "plan_digest": latest["approval"]["plan_digest"], "approved_plan_digest": latest["approval"]["plan_digest"],
+            "candidate_heads": {repo: latest["candidate_handoffs"][repo]["candidate_head"] for repo in latest["repositories"]},
+        }
+        state = fc.finalize_integration(self.control, state["logical_chain_id"], evidence)
+        integration_dir = self.root / "integration-artifacts"
+        integration_dir.mkdir()
+        with fc.chain_lock(self.control, state["logical_chain_id"]):
+            state = fc.read_state(self.control, state["logical_chain_id"])
+            state["current_run"] = {"phase": "integration", "run_id": "3" * 32, "artifacts_dir": str(integration_dir)}
+            state = fc.write_state(self.control, state)
+        return state
+
+    def fake_gh(self, open_prs=None, fail_on=None):
+        """Recording fake for subprocess.run: answers git push / gh pr list|create|view|edit."""
+        calls, prs = [], dict(open_prs or {})
+        bodies = {}
+        counter = {"n": 100}
+
+        def run(argv, capture_output=True, encoding="utf-8"):
+            calls.append(list(argv))
+            if fail_on and fail_on(argv):
+                return SimpleNamespace(returncode=1, stdout="", stderr="injected failure")
+            if argv[0] == "git" and "push" in argv:
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            slug, branch = argv[argv.index("--repo") + 1], None
+            if "--head" in argv:
+                branch = argv[argv.index("--head") + 1]
+            if argv[:3] == ["gh", "pr", "list"]:
+                found = [dict(url=u, headRefOid=h, isDraft=True) for (s, b), (u, h) in prs.items() if s == slug and b == branch]
+                return SimpleNamespace(returncode=0, stdout=json.dumps(found), stderr="")
+            if argv[:3] == ["gh", "pr", "create"]:
+                counter["n"] += 1
+                url = f"https://github.com/{slug}/pull/{counter['n']}"
+                prs[(slug, branch)] = (url, "created")
+                bodies[url] = Path(argv[argv.index("--body-file") + 1]).read_text(encoding="utf-8")
+                return SimpleNamespace(returncode=0, stdout=url + "\n", stderr="")
+            if argv[:3] == ["gh", "pr", "view"]:
+                return SimpleNamespace(returncode=0, stdout=bodies.get(argv[3], ""), stderr="")
+            if argv[:3] == ["gh", "pr", "edit"]:
+                bodies[argv[3]] = Path(argv[argv.index("--body-file") + 1]).read_text(encoding="utf-8")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            raise AssertionError(f"unexpected command {argv}")
+
+        run.calls, run.prs, run.bodies = calls, prs, bodies
+        return run
+
+    def test_publish_opens_draft_prs_in_dependency_order_and_cross_links(self):
+        state = self.locally_verified_chain()
+        run = self.fake_gh()
+        with mock.patch("builtins.print"):
+            out = fc.publish(self.host, self.args, state["logical_chain_id"], run=run)
+        creates = [c for c in run.calls if c[:3] == ["gh", "pr", "create"]]
+        self.assertEqual([c[c.index("--head") + 1].rsplit("-", 1)[1] for c in creates], ["api", "mcp"])
+        for c in creates:
+            self.assertIn("--draft", c); self.assertEqual(c[c.index("--base") + 1], "main"); self.assertNotIn("--label", c)
+        self.assertEqual(creates[0][creates[0].index("--title") + 1], "feat(api): change [archon]")
+        api_url, mcp_url = out["publications"]["api"]["pr_url"], out["publications"]["goodword-mcp"]["pr_url"]
+        self.assertIn(api_url, run.bodies[mcp_url])
+        self.assertIn(mcp_url, run.bodies[api_url])
+        self.assertIn("Depends on: api", run.bodies[mcp_url])
+        self.assertEqual(out["edited"], ["api"])
+        record = json.loads((self.root / "integration-artifacts" / fc.PUBLICATION_ARTIFACT).read_text(encoding="utf-8"))
+        latest = fc.read_state(self.control, state["logical_chain_id"])
+        fc.verify_publication_record(latest, record)
+        self.assertEqual(latest["publication"], record)
+        self.assertEqual(latest["integration"]["publication"], "held")
+        fc.verify_receipt(latest)
+
+    def test_publish_no_change_repo_skips_push_and_pr(self):
+        state = self.locally_verified_chain(api_changed=False)
+        run = self.fake_gh()
+        with mock.patch("builtins.print"):
+            out = fc.publish(self.host, self.args, state["logical_chain_id"], run=run)
+        self.assertEqual(out["publications"]["api"]["outcome"], "NO_CHANGE")
+        self.assertIsNone(out["publications"]["api"]["pr_url"])
+        self.assertFalse([c for c in run.calls if "push" in c and "-api" in c[-2]])
+        self.assertEqual(len([c for c in run.calls if c[:3] == ["gh", "pr", "create"]]), 1)
+        self.assertIn("no change, no PR", run.bodies[out["publications"]["goodword-mcp"]["pr_url"]])
+
+    def test_publish_adopts_open_pr_on_exact_head_and_refuses_mismatch(self):
+        state = self.locally_verified_chain()
+        api_meta = state["worktrees"]["api"]
+        head = state["candidate_handoffs"]["api"]["candidate_head"]
+        run = self.fake_gh(open_prs={("Owner/api", api_meta["branch"]): ("https://github.com/Owner/api/pull/7", head)})
+        with mock.patch("builtins.print"):
+            out = fc.publish(self.host, self.args, state["logical_chain_id"], run=run)
+        self.assertEqual(out["publications"]["api"]["pr_url"], "https://github.com/Owner/api/pull/7")
+        self.assertEqual(len([c for c in run.calls if c[:3] == ["gh", "pr", "create"]]), 1)
+
+        stale = fc.read_state(self.control, state["logical_chain_id"])
+        with fc.chain_lock(self.control, state["logical_chain_id"]):
+            stale.pop("publication"); fc.write_state(self.control, stale)
+        run = self.fake_gh(open_prs={("Owner/api", api_meta["branch"]): ("https://github.com/Owner/api/pull/8", "f" * 40)})
+        with self.assertRaisesRegex(fc.FeatureChainError, "pr head mismatch repo=api"):
+            fc.publish(self.host, self.args, state["logical_chain_id"], run=run)
+        self.assertFalse([c for c in run.calls if c[:3] == ["gh", "pr", "create"]])
+        self.assertIsNone(fc.read_state(self.control, state["logical_chain_id"]).get("publication"))
+
+    def test_publish_refuses_unverified_dirty_or_drifted_chains_without_pushing(self):
+        state = self.locally_verified_chain()
+        run = self.fake_gh()
+        with fc.chain_lock(self.control, state["logical_chain_id"]):
+            fc.write_state(self.control, dict(fc.read_state(self.control, state["logical_chain_id"]), status="implementing"))
+        with self.assertRaisesRegex(fc.FeatureChainError, "not locally_verified"):
+            fc.publish(self.host, self.args, state["logical_chain_id"], run=run)
+        with fc.chain_lock(self.control, state["logical_chain_id"]):
+            fc.write_state(self.control, dict(fc.read_state(self.control, state["logical_chain_id"]), status="locally_verified"))
+        self.assertEqual(run.calls, [])
+
+        worktree = Path(state["worktrees"]["api"]["worktree"])
+        (worktree / "dirty.txt").write_text("x\n", encoding="utf-8")
+        with self.assertRaisesRegex(fc.FeatureChainError, "dirty"):
+            fc.publish(self.host, self.args, state["logical_chain_id"], run=run)
+        (worktree / "dirty.txt").unlink()
+        git(worktree, "commit", "-q", "--allow-empty", "-m", "drift")
+        with self.assertRaisesRegex(fc.FeatureChainError, "drifted"):
+            fc.publish(self.host, self.args, state["logical_chain_id"], run=run)
+        self.assertEqual(run.calls, [])
+
+    def test_publish_resumes_after_partial_failure_by_adopting_first_pr(self):
+        state = self.locally_verified_chain()
+        mcp_branch = state["worktrees"]["goodword-mcp"]["branch"]
+        run = self.fake_gh(fail_on=lambda argv: argv[:3] == ["gh", "pr", "create"] and argv[argv.index("--head") + 1] == mcp_branch)
+        with self.assertRaisesRegex(fc.FeatureChainError, "gh pr create goodword-mcp failed"):
+            fc.publish(self.host, self.args, state["logical_chain_id"], run=run)
+        self.assertIsNone(fc.read_state(self.control, state["logical_chain_id"]).get("publication"))
+        api_url = next(iter(run.prs.values()))[0]
+
+        head = state["candidate_handoffs"]["api"]["candidate_head"]
+        run2 = self.fake_gh(open_prs={("Owner/api", state["worktrees"]["api"]["branch"]): (api_url, head)})
+        run2.bodies[api_url] = run.bodies[api_url]
+        with mock.patch("builtins.print"):
+            out = fc.publish(self.host, self.args, state["logical_chain_id"], run=run2)
+        self.assertEqual(out["publications"]["api"]["pr_url"], api_url)
+        self.assertEqual(len([c for c in run2.calls if c[:3] == ["gh", "pr", "create"]]), 1)
+        self.assertIn(out["publications"]["goodword-mcp"]["pr_url"], run2.bodies[api_url])
+
+        run3 = self.fake_gh(open_prs={(k[0], k[1]): v for k, v in run2.prs.items()})
+        run3.bodies.update(run2.bodies)
+        with mock.patch("builtins.print"):
+            again = fc.publish(self.host, self.args, state["logical_chain_id"], run=run3)
+        self.assertEqual(again["publications"], out["publications"])
+        self.assertEqual([c for c in run3.calls if c[0] == "git" or c[:3] in (["gh", "pr", "create"], ["gh", "pr", "edit"])], [])
+
+    def test_before_control_claim_rejects_duplicate_resume_until_released(self):
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        state = fc.approve_plan(self.control, launched["state"]["logical_chain_id"], self.plan())
+        row = self.row("f" * 32)
+        running = fc.bind_phase_run(self.control, state["logical_chain_id"], phase="implement", repo="api", row=row)
+        control = fc.bind_run_control_payload(self.control, running, "api", row, "implement")
+        args = Namespace(**vars(self.args), action="resume", token="token")
+
+        fc.before_control(self.host, args, row, {"feature_chain": control})
+        with self.assertRaisesRegex(fc.FeatureChainError, "control already in progress"):
+            fc.before_control(self.host, args, row, {"feature_chain": control})
+        with fc.host_env(fc, {"ARCHON_FEATURE_CHAIN_ID": state["logical_chain_id"]}):
+            fc.after_control(self.host, args, row)
+        fc.before_control(self.host, args, row, {"feature_chain": control})
+
+    def test_before_control_recovers_dead_claim_but_never_steals_live_claim(self):
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        state = fc.approve_plan(self.control, launched["state"]["logical_chain_id"], self.plan())
+        row = self.row("7" * 32)
+        running = fc.bind_phase_run(self.control, state["logical_chain_id"], phase="implement", repo="api", row=row)
+        control = fc.bind_run_control_payload(self.control, running, "api", row, "implement")
+        args = Namespace(**vars(self.args), action="resume", token="token")
+
+        running["pending_control"] = {
+            "action": "resume",
+            "run_id": row["id"],
+            "owner_pid": 99999999,
+            "owner_fingerprint": "definitely-dead",
+            "claimed_at": fc.now(),
+        }
+        fc.write_state(self.control, running)
+        recovered = fc.before_control(self.host, args, row, {"feature_chain": control})
+        self.assertEqual(recovered["pending_control"]["run_id"], row["id"])
+
+        recovered["pending_control"] = {
+            "action": "resume",
+            "run_id": row["id"],
+            "owner_pid": fc.os.getpid(),
+            "owner_fingerprint": fc.process_fingerprint(),
+            "claimed_at": fc.now(),
+        }
+        fc.write_state(self.control, recovered)
+        with self.assertRaisesRegex(fc.FeatureChainError, "control already in progress"):
+            fc.before_control(self.host, args, row, {"feature_chain": control})
+
+    def test_before_control_revalidates_token_under_chain_lock(self):
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        state = fc.approve_plan(self.control, launched["state"]["logical_chain_id"], self.plan())
+        row = self.row("8" * 32)
+        running = fc.bind_phase_run(self.control, state["logical_chain_id"], phase="implement", repo="api", row=row)
+        control = fc.bind_run_control_payload(self.control, running, "api", row, "implement")
+        calls = []
+        def require_control_token(row_arg, control_dir, token):
+            calls.append((row_arg["id"], token))
+            if token != "fresh":
+                raise fc.FeatureChainError("stale token")
+        self.host.require_control_token = require_control_token
+
+        with self.assertRaisesRegex(fc.FeatureChainError, "stale token"):
+            fc.before_control(self.host, Namespace(**vars(self.args), action="resume", token="old"), row, {"feature_chain": control})
+        self.assertIsNone(fc.read_state(self.control, state["logical_chain_id"])["pending_control"])
+        fc.before_control(self.host, Namespace(**vars(self.args), action="resume", token="fresh"), row, {"feature_chain": control})
+        self.assertEqual(calls, [(row["id"], "old"), (row["id"], "fresh")])
+
+    def test_failed_approval_validation_does_not_leave_pending_claim(self):
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        state = launched["state"]
+        row = launched["row"]
+        artifacts = Path(row["output_root"])
+        (artifacts / fc.JOINT_PLAN_ARTIFACT).write_text(json.dumps({"schema": "wrong"}), encoding="utf-8")
+        control = fc.bind_run_control_payload(self.control, state, None, row, "planning")
+        args = Namespace(**vars(self.args), action="approve", token="token")
+
+        with self.assertRaises(fc.FeatureChainError):
+            fc.before_control(self.host, args, row, {"feature_chain": control})
+        self.assertIsNone(fc.read_state(self.control, state["logical_chain_id"])["pending_control"])
+
+    def test_dispatch_reservation_retries_same_next_stage_after_invoke_error(self):
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        state = fc.approve_plan(self.control, launched["state"]["logical_chain_id"], self.plan())
+        row = self.row("9" * 32)
+        fc.bind_phase_run(self.control, state["logical_chain_id"], phase="implement", repo="api", row=row)
+        artifacts = self.result_artifacts(row, "api")
+        original_calls = len(self.host.calls)
+        def fail_dispatch(args, lane, message):
+            raise fc.FeatureChainError("dispatch failed")
+        self.host.invoke_codex_lane = fail_dispatch
+        payload = {
+            "state": "terminal",
+            "status": "completed",
+            "artifacts": str(artifacts),
+            "feature_chain": {"logical_chain_id": state["logical_chain_id"], "repo": "api"},
+        }
+
+        with self.assertRaisesRegex(fc.FeatureChainError, "dispatch failed"):
+            fc.advance(self.host, self.args, dict(row, artifacts=str(artifacts)), payload)
+        after_failure = fc.read_state(self.control, state["logical_chain_id"])
+        self.assertEqual(after_failure["stages"]["api"]["status"], "verified")
+        self.assertEqual(after_failure["dispatch_reservation"]["status"], "failed")
+
+        def retry_dispatch(args, lane, message):
+            retry_row = self.row("aa" * 16, lane)
+            Path(retry_row["output_root"]).mkdir(parents=True)
+            fc.before_dispatch_bind(self.host, args, retry_row)
+            self.host.calls.append((lane, str(message), dict(fc.os.environ), retry_row))
+            return retry_row
+        self.host.invoke_codex_lane = retry_dispatch
+        retry = fc.advance(self.host, self.args, dict(row, artifacts=str(artifacts)), payload)
+        latest = fc.read_state(self.control, state["logical_chain_id"])
+        self.assertEqual(retry["next_repo"], "goodword-mcp")
+        self.assertEqual(latest["current_run"]["repo"], "goodword-mcp")
+        self.assertEqual(len(self.host.calls), original_calls + 1)
+
+    def test_dead_owner_dispatch_reservation_is_reclaimed_once(self):
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        state = fc.approve_plan(self.control, launched["state"]["logical_chain_id"], self.plan())
+        row = self.row("b1" * 16)
+        fc.bind_phase_run(self.control, state["logical_chain_id"], phase="implement", repo="api", row=row)
+        artifacts = self.result_artifacts(row, "api")
+        def fail_dispatch(args, lane, message):
+            raise fc.FeatureChainError("dispatch failed")
+        self.host.invoke_codex_lane = fail_dispatch
+        payload = {
+            "state": "terminal",
+            "status": "completed",
+            "artifacts": str(artifacts),
+            "feature_chain": {"logical_chain_id": state["logical_chain_id"], "repo": "api"},
+        }
+        with self.assertRaisesRegex(fc.FeatureChainError, "dispatch failed"):
+            fc.advance(self.host, self.args, dict(row, artifacts=str(artifacts)), payload)
+        reserved = fc.read_state(self.control, state["logical_chain_id"])
+        reserved["dispatch_reservation"].update({
+            "status": "dispatching",
+            "owner_pid": 99999999,
+            "owner_fingerprint": "definitely-dead",
+        })
+        fc.write_state(self.control, reserved)
+
+        def retry_dispatch(args, lane, message):
+            retry_row = self.row("b2" * 16, lane)
+            Path(retry_row["output_root"]).mkdir(parents=True)
+            fc.before_dispatch_bind(self.host, args, retry_row)
+            self.host.calls.append((lane, str(message), dict(fc.os.environ), retry_row))
+            return retry_row
+        self.host.invoke_codex_lane = retry_dispatch
+        retry = fc.advance(self.host, self.args, dict(row, artifacts=str(artifacts)), payload)
+
+        latest = fc.read_state(self.control, state["logical_chain_id"])
+        self.assertEqual(retry["next_repo"], "goodword-mcp")
+        self.assertEqual(latest["current_run"]["run_id"], "b2" * 16)
+
+    def test_exhausted_budget_blocks_dispatch_without_invoking_child_or_resetting_state(self):
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        state = fc.approve_plan(self.control, launched["state"]["logical_chain_id"], self.plan())
+        row = self.row("c1" * 16)
+        fc.bind_phase_run(self.control, state["logical_chain_id"], phase="implement", repo="api", row=row)
+        artifacts = self.result_artifacts(row, "api")
+        original_calls = len(self.host.calls)
+        self.host.invoke_codex_lane = lambda args, lane, message: self.fail("budget-exhausted dispatch must not invoke")
+        payload = {
+            "state": "terminal",
+            "status": "completed",
+            "artifacts": str(artifacts),
+            "feature_chain": {"logical_chain_id": state["logical_chain_id"], "repo": "api"},
+        }
+
+        with mock.patch.object(fc, "budget_require_remaining", side_effect=fc.FeatureChainError("feature shared token budget is exhausted")):
+            with self.assertRaisesRegex(fc.FeatureChainError, "token budget"):
+                fc.advance(self.host, self.args, dict(row, artifacts=str(artifacts)), payload)
+
+        latest = fc.read_state(self.control, state["logical_chain_id"])
+        self.assertEqual(len(self.host.calls), original_calls)
+        self.assertEqual(latest["stages"]["api"]["status"], "verified")
+        self.assertEqual(latest["dispatch_reservation"]["status"], "failed")
+        self.assertEqual(latest["dispatch_reservation"]["repo"], "goodword-mcp")
+        self.assertIsNone(latest.get("current_run"))
+
+    def test_exhausted_budget_blocks_resume_control_without_pending_claim(self):
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        state = fc.approve_plan(self.control, launched["state"]["logical_chain_id"], self.plan())
+        row = self.row("c2" * 16)
+        running = fc.bind_phase_run(self.control, state["logical_chain_id"], phase="implement", repo="api", row=row)
+        control = fc.bind_run_control_payload(self.control, running, "api", row, "implement")
+        args = Namespace(**vars(self.args), action="resume", token="token")
+
+        with mock.patch.object(fc, "budget_require_remaining", side_effect=fc.FeatureChainError("feature shared wall budget is exhausted")):
+            with self.assertRaisesRegex(fc.FeatureChainError, "wall budget"):
+                fc.before_control(self.host, args, row, {"feature_chain": control})
+
+        self.assertIsNone(fc.read_state(self.control, state["logical_chain_id"])["pending_control"])
+
+    def test_prepare_worktrees_rolls_back_only_new_clean_worktrees_on_partial_failure(self):
+        chain_id = "1234567890abcdef1234567890abcdef"
+        slug = "feature"
+        baselines = fc.capture_baselines(self.host, ["api", "goodword-mcp"])
+        existing = self.root / "goodword-mcp" / ".worktrees" / f"{slug}-{chain_id[:8]}"
+        existing.mkdir(parents=True)
+
+        with self.assertRaisesRegex(fc.FeatureChainError, "already exists"):
+            fc.prepare_worktrees(self.host, chain_id, ["api", "goodword-mcp"], baselines, slug)
+
+        api_worktree = self.root / "api" / ".worktrees" / f"{slug}-{chain_id[:8]}"
+        self.assertFalse(api_worktree.exists())
+        self.assertTrue(existing.exists())
+        branch = f"archon/{slug}-{chain_id[:8]}-api"
+        self.assertEqual(git(self.root / "api", "branch", "--list", branch), "")
+
+    def test_failed_stage_preserves_current_run_for_resume(self):
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        state = fc.approve_plan(self.control, launched["state"]["logical_chain_id"], self.plan())
+        row = self.row("a1" * 16)
+        fc.bind_phase_run(self.control, state["logical_chain_id"], phase="implement", repo="api", row=row)
+
+        advanced = fc.advance(self.host, self.args, row, {
+            "state": "terminal",
+            "status": "failed",
+            "feature_chain": {"logical_chain_id": state["logical_chain_id"], "repo": "api"},
+        })
+
+        latest = fc.read_state(self.control, state["logical_chain_id"])
+        self.assertEqual(advanced["repo"], "api")
+        self.assertEqual(latest["stages"]["api"]["status"], "failed")
+        self.assertEqual(latest["current_run"]["run_id"], row["id"])
+
+    def test_approval_rejects_spec_and_planning_artifact_drift(self):
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        state = launched["state"]
+        row = launched["row"]
+        artifacts = Path(row["output_root"])
+        (artifacts / fc.JOINT_PLAN_ARTIFACT).write_text(json.dumps(self.plan()), encoding="utf-8")
+        (artifacts / "plan.md").write_text("approved plan\n", encoding="utf-8")
+        control = fc.bind_run_control_payload(self.control, state, None, row, "planning")
+        approved = fc.before_control(self.host, Namespace(**vars(self.args), action="approve", token="token"), row, {"feature_chain": control})
+
+        self.spec.write_text("# Mutated\n", encoding="utf-8")
+        with self.assertRaisesRegex(fc.FeatureChainError, "spec bytes"):
+            fc.verify_approval(fc.read_state(self.control, approved["logical_chain_id"]))
+
+        self.spec.write_text("# Feature\n", encoding="utf-8")
+        (artifacts / "plan.md").write_text("mutated\n", encoding="utf-8")
+        with self.assertRaisesRegex(fc.FeatureChainError, "planning artifact"):
+            fc.verify_approval(fc.read_state(self.control, approved["logical_chain_id"]))
+
+    def test_prearm_failure_marks_child_failed_without_clearing_chain_authority(self):
+        with sqlite3.connect(self.args.db) as con:
+            con.execute(
+                "CREATE TABLE IF NOT EXISTS remote_agent_workflow_runs "
+                "(id TEXT, workflow_name TEXT, user_message TEXT, status TEXT, output_root TEXT, completed_at TEXT)"
+            )
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        row = launched["row"]
+        with sqlite3.connect(self.args.db) as con:
+            con.execute(
+                "INSERT INTO remote_agent_workflow_runs VALUES (?,?,?,?,?,NULL)",
+                (row["id"], row["workflow_name"], row["user_message"], "running", row["output_root"]),
+            )
+        with fc.host_env(fc, {"ARCHON_FEATURE_CHAIN_ID": launched["state"]["logical_chain_id"]}):
+            recovered = fc.prearm_failure(self.host, self.args, row, "watchdog failed before arm")
+
+        self.assertEqual(recovered["current_run"]["run_id"], row["id"])
+        self.assertEqual(recovered["last_prearm_failure"]["reason"], "watchdog failed before arm")
+        with sqlite3.connect(self.args.db) as con:
+            status = con.execute("SELECT status FROM remote_agent_workflow_runs WHERE id = ?", (row["id"],)).fetchone()[0]
+            event = con.execute("SELECT event_type FROM remote_agent_workflow_events WHERE workflow_run_id = ?", (row["id"],)).fetchone()[0]
+        self.assertEqual(status, "failed")
+        self.assertEqual(event, "workflow_failed")
+
+    def test_prearm_event_matches_stock_required_sqlite_columns(self):
+        db = self.root / "stock-archon.db"
+
+        with sqlite3.connect(db) as con:
+            con.execute("CREATE TABLE remote_agent_workflow_runs (id TEXT PRIMARY KEY, status TEXT)")
+            con.execute("INSERT INTO remote_agent_workflow_runs VALUES ('abcd1234', 'running')")
+            con.execute("CREATE TABLE remote_agent_workflow_events (id TEXT PRIMARY KEY NOT NULL, workflow_run_id TEXT NOT NULL, event_order INTEGER NOT NULL, event_type TEXT NOT NULL, step_name TEXT, step_index INTEGER, data TEXT NOT NULL, created_at TEXT NOT NULL)")
+        fc.mark_run_failed_for_prearm(db, {"id": "abcd1234"}, "arm failure")
+        with sqlite3.connect(db) as con:
+            self.assertEqual(con.execute("SELECT status FROM remote_agent_workflow_runs").fetchone()[0], "failed")
+            event = con.execute("SELECT event_order, event_type, data FROM remote_agent_workflow_events").fetchone()
+        self.assertEqual(event[:2], (1, "workflow_failed"))
+        self.assertEqual(json.loads(event[2])["reason"], "arm failure")
+
+    def test_candidate_evidence_requires_real_logs_and_positive_tests(self):
+        artifacts = self.root / "proof"
+        artifacts.mkdir()
+        (artifacts / "verify.log").write_text("Tests: 1 passed\n", encoding="utf-8")
+        for evidence, reason in (
+            ([{"status": "passed", "tests_passed": 1}], "no log"),
+            ([{"status": "passed", "log": "missing.log", "tests_passed": 1}], "missing"),
+            ([{"status": "passed", "log": "verify.log", "tests_passed": 0}], "zero tests"),
+            ([{"status": "skipped", "log": "verify.log", "tests_passed": 1}], "did not pass"),
+        ):
+            with self.subTest(reason=reason), self.assertRaisesRegex(fc.FeatureChainError, reason):
+                fc.require_verification_evidence(artifacts, "api", evidence)
+
+    def test_interface_artifact_drift_is_rejected(self):
+        artifacts = self.root / "proof"
+        artifacts.mkdir()
+        (artifacts / "contract.json").write_text('{"changed":true}\n', encoding="utf-8")
+        with self.assertRaisesRegex(fc.FeatureChainError, "digest changed"):
+            fc.verify_interface_artifacts(artifacts, [{"path": "contract.json", "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"}])
+
+    def test_terminal_unapproved_planning_restarts_without_new_chain_or_budget(self):
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        state, row = launched["state"], dict(launched["row"], status="completed")
+        legacy_attempt = {"run_id": "f" * 32, "spec_sha256": "legacy-spec"}
+        state["planning_attempts"] = [legacy_attempt]
+        state = fc.write_state(self.control, state)
+        artifacts = Path(row["output_root"])
+        (artifacts / fc.JOINT_PLAN_ARTIFACT).write_text(json.dumps(self.plan()), encoding="utf-8")
+        (artifacts / "plan.md").write_text("initial plan\n", encoding="utf-8")
+        (artifacts / "docreview.diff").write_text("--- old\n+++ new\n", encoding="utf-8")
+        round_dir = artifacts / "plan-round-4"
+        round_dir.mkdir()
+        (round_dir / "critique.json").write_text('{"verdict":"REJECT"}\n', encoding="utf-8")
+        (round_dir / "revision.json").write_text('{"action":"REVISE"}\n', encoding="utf-8")
+        control = {"feature_chain": fc.bind_run_control_payload(self.control, state, None, row, "planning")}
+        restarted = fc.restart_planning(self.host, self.args, row, control)
+        self.assertEqual(restarted["state"]["logical_chain_id"], state["logical_chain_id"])
+        self.assertEqual(restarted["state"]["budget"], state["budget"])
+        self.assertEqual(restarted["state"]["worktrees"], state["worktrees"])
+        self.assertEqual(restarted["state"]["planning_generation"], 1)
+        self.assertIsNone(restarted["state"]["approval"])
+        self.assertIsNone(restarted["state"]["approved_plan"])
+        self.assertEqual(len(restarted["state"]["planning_attempts"]), 2)
+        self.assertEqual(restarted["state"]["planning_attempts"][0], legacy_attempt)
+        attempt = restarted["state"]["planning_attempts"][1]
+        self.assertEqual(attempt["run_id"], row["id"])
+        self.assertEqual(attempt["files"][fc.JOINT_PLAN_ARTIFACT]["content_text"], json.dumps(self.plan()))
+        self.assertEqual(attempt["files"]["plan-round-4/critique.json"]["content_text"], '{"verdict":"REJECT"}\n')
+        new_artifacts = Path(restarted["row"]["output_root"])
+        prior = json.loads((new_artifacts / fc.PRIOR_PLANNING_EVIDENCE_ARTIFACT).read_text(encoding="utf-8"))
+        request = json.loads((new_artifacts / fc.PLANNING_REQUEST_ARTIFACT).read_text(encoding="utf-8"))
+        self.assertEqual(prior["attempts"][0], legacy_attempt)
+        self.assertEqual(prior["attempts"][1]["files"]["plan-round-4/revision.json"]["content_text"], '{"action":"REVISE"}\n')
+        self.assertEqual(request["prior_planning_evidence"]["artifact"], fc.PRIOR_PLANNING_EVIDENCE_ARTIFACT)
+        self.assertEqual(request["prior_planning_evidence"]["sha256"], fc.file_digest(new_artifacts / fc.PRIOR_PLANNING_EVIDENCE_ARTIFACT))
+        self.assertEqual(request["prior_planning_evidence"]["attempts"][0], legacy_attempt)
+        self.assertEqual(request["prior_planning_evidence"]["attempts"][1]["evidence_sha256"], attempt["evidence_sha256"])
+        self.assertNotEqual(restarted["row"]["id"], row["id"])
+        with self.assertRaisesRegex(fc.FeatureChainError, "stale"):
+            fc.restart_planning(self.host, self.args, row, control)
+
+    def test_replan_dispatch_retry_does_not_duplicate_attempt_or_budget_generation(self):
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        state, row = launched["state"], dict(launched["row"], status="failed")
+        artifacts = Path(row["output_root"])
+        (artifacts / fc.JOINT_PLAN_ARTIFACT).write_text(json.dumps(self.plan()), encoding="utf-8")
+        control = {"feature_chain": fc.bind_run_control_payload(self.control, state, None, row, "planning")}
+        original_budget = state["budget"]
+        original_invoke = self.host.invoke_codex_lane
+        self.host.invoke_codex_lane = mock.Mock(side_effect=fc.FeatureChainError("pre-arm dispatch failed"))
+
+        with self.assertRaisesRegex(fc.FeatureChainError, "pre-arm dispatch failed"):
+            fc.restart_planning(self.host, self.args, row, control)
+
+        failed = fc.read_state(self.control, state["logical_chain_id"])
+        self.assertEqual(failed["planning_generation"], 1)
+        self.assertEqual(len(failed["planning_attempts"]), 1)
+        self.assertEqual(failed["budget"], original_budget)
+        self.assertEqual(failed["dispatch_reservation"]["status"], "failed")
+        self.assertIsNone(failed.get("current_run"))
+
+        self.host.invoke_codex_lane = original_invoke
+        retried = fc.restart_planning(self.host, self.args, row, control)
+
+        self.assertEqual(retried["state"]["planning_generation"], 1)
+        self.assertEqual(len(retried["state"]["planning_attempts"]), 1)
+        self.assertEqual(retried["state"]["budget"], original_budget)
+
+    def claude_args(self):
+        return Namespace(**dict(vars(self.args), provider="claude"))
+
+    def test_claude_state_and_lane_defaults(self):
+        launched = fc.launch(self.host, self.claude_args(), ["api", "goodword-mcp"])
+        state = fc.read_state(self.control, launched["state"]["logical_chain_id"])
+        self.assertEqual(state["provider"], "claude")
+        self.assertEqual(self.host.calls[0][0], "full-sdlc-api")
+        self.assertEqual(self.host.calls[0][2]["ARCHON_FEATURE_PROVIDER"], "claude")
+        self.assertEqual(fc.planning_lane(self.args, state), "full-sdlc-api")
+        self.assertEqual(fc.repository_lane(self.args, state, "goodword-mcp"), "full-sdlc-api")
+        self.assertEqual(fc.repository_lane(self.args, state, "web-app"), "full-sdlc-web")
+        self.assertEqual(fc.integration_lane(self.args, state), "full-sdlc-api")
+        codex_state = dict(state, provider="codex")
+        self.assertEqual(fc.planning_lane(self.args, codex_state), "full-sdlc-api-codex")
+        self.assertEqual(fc.repository_lane(self.args, codex_state, "web-app"), "full-sdlc-web-codex")
+
+    def test_unknown_provider_is_rejected_before_worktrees(self):
+        with self.assertRaisesRegex(fc.FeatureChainError, "unsupported for provider=gemini"):
+            fc.make_initial_state(self.host, Namespace(**dict(vars(self.args), provider="gemini")), ["api", "goodword-mcp"])
+        self.assertFalse((self.root / "api" / ".worktrees").exists())
+
+    def test_advance_unguarded_seals_completed_planning_from_artifacts_then_dispatches(self):
+        args = self.claude_args()
+        launched = fc.launch(self.host, args, ["api", "goodword-mcp"])
+        state, row = launched["state"], launched["row"]
+        artifacts = Path(row["output_root"])
+        (artifacts / fc.JOINT_PLAN_ARTIFACT).write_text(json.dumps(self.plan()), encoding="utf-8")
+        (artifacts / "plan.md").write_text("approved plan\n", encoding="utf-8")
+        result = {"state": "terminal", "status": "completed", "artifacts": str(artifacts),
+                  "feature_chain": {"logical_chain_id": state["logical_chain_id"], "phase": "planning"}}
+
+        advanced = fc.advance_unguarded(self.host, args, row, result)
+
+        sealed = fc.read_state(self.control, state["logical_chain_id"])
+        self.assertEqual(sealed["approval"]["source_artifacts"]["root"], str(artifacts))
+        self.assertIn("plan.md", sealed["approval"]["source_artifacts"]["files"])
+        self.assertEqual(sealed["dependency_order"], ["api", "goodword-mcp"])
+        self.assertEqual(advanced["next_repo"], "api")
+        self.assertEqual(self.host.calls[-1][0], "full-sdlc-api")
+        self.assertEqual(self.host.calls[-1][2]["ARCHON_FEATURE_PHASE"], "implement")
+        self.assertEqual(self.host.calls[-1][2]["ARCHON_FEATURE_REPO"], "api")
+        self.assertEqual(sealed["current_run"]["repo"], "api")
+
+    def test_advance_unguarded_rejects_non_terminal_planning_and_seals_nothing(self):
+        args = self.claude_args()
+        launched = fc.launch(self.host, args, ["api", "goodword-mcp"])
+        state, row = launched["state"], launched["row"]
+        artifacts = Path(row["output_root"])
+        (artifacts / fc.JOINT_PLAN_ARTIFACT).write_text(json.dumps(self.plan()), encoding="utf-8")
+        calls_before = len(self.host.calls)
+        for result in ({"state": "gate", "status": "paused"}, {"state": "terminal", "status": "failed"}):
+            with self.subTest(result=result), self.assertRaisesRegex(fc.FeatureChainError, "must complete"):
+                fc.advance_unguarded(self.host, args, row, dict(
+                    result, feature_chain={"logical_chain_id": state["logical_chain_id"], "phase": "planning"}))
+        self.assertIsNone(fc.read_state(self.control, state["logical_chain_id"])["approval"])
+        self.assertEqual(len(self.host.calls), calls_before)
+
+    def test_budget_usage_requires_sessions_only_for_codex(self):
+        seen = {}
+        def fake_run_budget(args, *argv):
+            seen[args.provider] = argv
+            return "{}"
+        with mock.patch.object(fc, "run_budget", fake_run_budget):
+            for provider in ("codex", "claude"):
+                args = Namespace(**dict(vars(self.args), provider=provider))
+                state = fc.write_state(self.control, fc.make_initial_state(self.host, args, ["api", "goodword-mcp"]))
+                fc.budget_usage(args, state["logical_chain_id"])
+        self.assertIn("--require-sessions", seen["codex"])
+        self.assertNotIn("--require-sessions", seen["claude"])
+
+    def test_advance_unguarded_refuses_codex_chains(self):
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        state, row = launched["state"], launched["row"]
+        with self.assertRaisesRegex(fc.FeatureChainError, "only for claude"):
+            fc.advance_unguarded(self.host, self.args, row, {
+                "state": "terminal", "status": "completed",
+                "feature_chain": {"logical_chain_id": state["logical_chain_id"], "phase": "planning"}})
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -917,7 +917,7 @@ class FeatureFlow(unittest.TestCase):
                          handoff_file=None, control_dir=self.control_dir)
         return state, api, web, handoff, args
 
-    def test_adaptive_feature_finalizes_receipt_only_after_terminal_web_success(self):
+    def test_legacy_feature_finalizes_receipt_only_after_terminal_web_success(self):
         chain = "b" * 32
         state = {"logical_chain_id": chain, "provider": "codex", "spec": str(self.spec),
                  "spec_sha256": ar.sha256_file(self.spec), "baseline": self.baseline, "chain_secret": "secret"}
@@ -936,10 +936,10 @@ class FeatureFlow(unittest.TestCase):
              mock.patch.object(ar, "write_chain_receipt", return_value=self.root / "receipt.json") as write_receipt, \
              mock.patch.object(ar, "verify_feature_chain_receipt"), \
              contextlib.redirect_stdout(io.StringIO()):
-            ar.adaptive_feature(self.feature_args())
+            ar.adaptive_legacy_feature(self.feature_args())
         write_receipt.assert_called_once()
 
-    def test_adaptive_feature_does_not_finalize_receipt_for_paused_or_failed_web(self):
+    def test_legacy_feature_does_not_finalize_receipt_for_paused_or_failed_web(self):
         for web_result in ({"state": "gate", "status": "paused", "run": "8" * 32}, {"state": "terminal", "status": "failed", "run": "8" * 32}):
             chain = "c" * 32
             state = {"logical_chain_id": chain, "provider": "codex", "spec": str(self.spec),
@@ -958,7 +958,7 @@ class FeatureFlow(unittest.TestCase):
                  mock.patch.object(ar, "verify_public_handoff", return_value={"logical_chain_id": chain}), \
                  mock.patch.object(ar, "write_chain_receipt") as write_receipt, \
                  contextlib.redirect_stdout(io.StringIO()):
-                ar.adaptive_feature(self.feature_args())
+                ar.adaptive_legacy_feature(self.feature_args())
             write_receipt.assert_not_called()
 
 

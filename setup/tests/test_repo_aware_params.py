@@ -24,6 +24,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -188,6 +189,15 @@ class FakeRoot:
              str(self.spec), str(self.ad), *bases, *extra],
             capture_output=True, encoding="utf-8", env=env)
 
+    def resolve_with_env(self, env_updates, *extra, bases=("4123",)):
+        env = dict(os.environ)
+        env.pop("ARCHON_REPO", None)
+        env.update(env_updates)
+        return subprocess.run(
+            ["bash", str(self.setup / "resolve-params.sh"), str(self.root),
+             str(self.spec), str(self.ad), *bases, *extra],
+            capture_output=True, encoding="utf-8", env=env)
+
     def params(self):
         return json.loads((self.ad / "params.json").read_text(encoding="utf-8"))
 
@@ -316,6 +326,19 @@ class Acceptance(unittest.TestCase):
         got = profile("web-app")
         self.assertEqual(["mise", "x", "node@20", "--", "pnpm", "lint"], got["CMD_LINT"])
         self.assertEqual("1", got["_scalars"]["HAS_SMOKE"])
+
+    def test_a1b_profile_registry_is_machine_readable_for_feature_scope_parsing(self):
+        raw = subprocess.check_output(
+            ["bash", str(SETUP / "repo-profile.sh"), "--json"], encoding="utf-8")
+        registry = json.loads(raw)
+        self.assertEqual("archon.repo-profiles.v1", registry["schema"])
+        self.assertEqual(["api", "goodword-mcp", "web-app"], sorted(registry["profiles"]))
+        self.assertEqual("web-app", registry["aliases"]["web"])
+        self.assertEqual(["api", "web-app"], registry["shorthands"]["fullstack"])
+        listed = subprocess.check_output(
+            ["bash", str(SETUP / "repo-profile.sh"), "--list"], encoding="utf-8"
+        ).splitlines()
+        self.assertEqual(["api", "goodword-mcp", "web-app"], listed)
 
     def test_a3_mcp_declares_no_lint_no_smoke_no_browser_no_impact_index(self):
         s = profile("goodword-mcp")["_scalars"]
@@ -535,6 +558,272 @@ class Acceptance(unittest.TestCase):
         prbody = node_prompt_containing(lane, "PR-body composition node")
         self.assertIn("deslop-round.txt", prbody)
         self.assertIn("lint_applicable", prbody)
+
+    def test_a14_joint_plan_contract_is_prompted_and_gated(self):
+        lane = (WORKFLOWS / "full-sdlc-api.yaml").read_text(encoding="utf-8")
+        prompt = node_prompt_containing(lane, "archon.joint-feature-plan.v1")
+        self.assertIn('"repositories"', prompt)
+        self.assertIn('"stages"', prompt)
+        self.assertIn('"integration"', prompt)
+        self.assertIn('"scenarios"', prompt)
+        self.assertIn("disposable", prompt)
+        self.assertIn("validate-joint-plan.py", (SETUP / "plan-shape.sh").read_text(encoding="utf-8"))
+
+    def test_a15_repository_feature_phases_route_the_existing_dag(self):
+        import yaml
+        doc = yaml.safe_load((WORKFLOWS / "full-sdlc-api.yaml").read_text(encoding="utf-8"))
+        nodes = {node["id"]: node for node in doc["nodes"]}
+        self.assertIn("feature-phase", nodes)
+        self.assertEqual(nodes["feature-phase"]["depends_on"], ["preflight"])
+        self.assertEqual(nodes["kb-recon"]["when"], "$feature-phase.plan == 'yes'")
+        self.assertEqual(nodes["bootstrap"]["when"], "$feature-phase.bootstrap == 'yes'")
+        self.assertEqual(nodes["ralplan"]["depends_on"], ["bootstrap", "kb-recon-gate"])
+        self.assertEqual(nodes["ralplan"]["trigger_rule"], "none_failed_min_one_success")
+        self.assertEqual(nodes["implement"]["depends_on"], ["plan-gate", "implementation-ready"])
+        self.assertEqual(nodes["implement"]["trigger_rule"], "none_failed_min_one_success")
+        self.assertEqual(nodes["implement"]["when"], "$feature-phase.implement == 'yes'")
+        self.assertEqual(nodes["joint-integration"]["when"], "$feature-phase.integration == 'yes'")
+        self.assertIn("run-joint-integration.py", nodes["joint-integration"]["bash"])
+
+
+    def test_a15b_feature_phase_bash_routes_repository_planning_without_bootstrap(self):
+        import yaml
+        doc = yaml.safe_load((WORKFLOWS / "full-sdlc-api.yaml").read_text(encoding="utf-8"))
+        node = next(node for node in doc["nodes"] if node["id"] == "feature-phase")
+        with tempfile.TemporaryDirectory() as td:
+            env = dict(os.environ,
+                       ARTIFACTS_DIR=td,
+                       ARCHON_FEATURE_SCOPE="repositories",
+                       ARCHON_FEATURE_PHASE="planning")
+            result = subprocess.run(["bash", "-c", node["bash"]], capture_output=True, encoding="utf-8", env=env)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        payload = json.loads(result.stdout.strip().splitlines()[-1])
+        self.assertEqual("yes", payload["plan"])
+        self.assertEqual("no", payload["bootstrap"])
+        self.assertEqual("no", payload["implement"])
+        self.assertEqual("no", payload["integration"])
+
+    REPOSITORY_ENV = {
+        "ARCHON_FEATURE_SCOPE": "repositories",
+        "ARCHON_FEATURE_PHASE": "implement",
+        "ARCHON_FEATURE_REPOSITORIES": "api,goodword-mcp",
+        "ARCHON_FEATURE_REPO": "goodword-mcp",
+        "ARCHON_FEATURE_CHAIN_ID": "c" * 32,
+        "ARCHON_PARAMS_WAIT_SECONDS": "1",
+    }
+
+    def test_a16_repository_phase_never_self_provisions(self):
+        with FakeRoot() as f:
+            r = f.resolve_with_env(self.REPOSITORY_ENV, "--allow", "api,goodword-mcp,web-app")
+            self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+            self.assertIn("PARAMS=FAIL missing controller params", r.stdout)
+            self.assertIn("phase=implement", r.stdout)
+            self.assertFalse((f.ad / "params.json").exists())
+
+    def test_a16b_repository_phase_adopts_controller_params_untouched(self):
+        with FakeRoot() as f:
+            controller = {"repo": "goodword-mcp", "worktree": "/controller/prepared/path",
+                          "branch": "archon/pinned", "repositories": ["api", "goodword-mcp"]}
+            (f.ad / "params.json").write_text(json.dumps(controller), encoding="utf-8")
+            r = f.resolve_with_env(self.REPOSITORY_ENV, "--allow", "api,goodword-mcp,web-app")
+            self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+            self.assertIn("PARAMS=OK adopted repository feature params phase=implement", r.stdout)
+            self.assertEqual(controller, f.params())
+
+    def test_a16c_repository_phase_waits_for_late_controller_params(self):
+        with FakeRoot() as f:
+            controller = {"repo": "api", "worktree": "/controller/late", "branch": "archon/late"}
+            env = dict(self.REPOSITORY_ENV, ARCHON_PARAMS_WAIT_SECONDS="5")
+            proc_env = dict(os.environ); proc_env.pop("ARCHON_REPO", None); proc_env.update(env)
+            proc = subprocess.Popen(
+                ["bash", str(f.setup / "resolve-params.sh"), str(f.root), str(f.spec), str(f.ad), "4123"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8", env=proc_env)
+            time.sleep(2)
+            (f.ad / "params.json").write_text(json.dumps(controller), encoding="utf-8")
+            out, err = proc.communicate(timeout=10)
+            self.assertEqual(0, proc.returncode, out + err)
+            self.assertIn("PARAMS=OK adopted", out)
+            self.assertEqual(controller, f.params())
+
+
+class JointPlanValidation(unittest.TestCase):
+    def test_new_planning_contract_rejects_legacy_shell_commands(self):
+        plan = self.valid_joint_plan()
+        result = self.run_validator({"repositories": plan["repositories"], "executable_plan_contract": 1}, plan)
+        self.assertEqual(1, result.returncode)
+        self.assertIn("repo, argv", result.stdout)
+        plan["integration"]["scenarios"][0]["commands"] = [{"repo": "api", "argv": ["node", "scripts/check.mjs"]}]
+        result = self.run_validator({"repositories": plan["repositories"], "executable_plan_contract": 1}, plan)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("JOINT_EXECUTION=structured argv runs in its repo's disposable detached candidate worktree", result.stdout)
+
+    def test_structured_execution_contract(self):
+        plan = self.valid_joint_plan()
+        plan["contracts"][0]["export"] = {"argv": ["bun", "run", "export-interface"]}
+        plan["integration"]["scenarios"][0]["commands"] = [{
+            "repo": "goodword-mcp", "argv": ["node", "scripts/check.mjs",
+                "${ARCHON_REPO_API_WORKTREE}", "${ARCHON_REPO_API_COMMIT}"]}]
+        result = self.run_validator({"repositories": plan["repositories"]}, plan)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        plan["integration"]["scenarios"][0]["commands"][0]["argv"][-1] = "${ARCHON_API_CANDIDATE_SHA}"
+        result = self.run_validator({"repositories": plan["repositories"]}, plan)
+        self.assertEqual(1, result.returncode)
+        self.assertIn("unknown environment reference", result.stdout)
+        plan["integration"]["scenarios"][0]["commands"][0]["argv"][-1] = "$ARCHON_REPO_API_COMMIT"
+        result = self.run_validator({"repositories": plan["repositories"]}, plan)
+        self.assertEqual(1, result.returncode)
+        self.assertIn("bare environment reference", result.stdout)
+
+    def test_export_requires_executable_argv(self):
+        plan = self.valid_joint_plan()
+        plan["contracts"][0]["export"] = {"argv": []}
+        result = self.run_validator({"repositories": plan["repositories"]}, plan)
+        self.assertEqual(1, result.returncode)
+        self.assertIn("export.argv", result.stdout)
+
+    def test_list_stages_validate_owned_contract(self):
+        plan = self.valid_joint_plan()
+        plan["stages"] = [dict(repo=repo, **stage) for repo, stage in plan["stages"].items()]
+        result = self.run_validator({"repositories": plan["repositories"]}, plan)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def run_validator(self, params, plan=None):
+        with tempfile.TemporaryDirectory() as td:
+            ad = Path(td)
+            (ad / "params.json").write_text(json.dumps(params), encoding="utf-8")
+            if plan is not None:
+                (ad / "joint-plan.json").write_text(json.dumps(plan), encoding="utf-8")
+            return subprocess.run(
+                ["python3", str(SETUP / "validate-joint-plan.py"), str(ad)],
+                capture_output=True, encoding="utf-8")
+
+    def test_contract_artifact_must_be_a_file_path_not_prose(self):
+        plan = self.valid_joint_plan()
+        plan["contracts"][0]["artifact"] = "GET /group/{groupId}/share-link -> { url, expiresAt }"
+        result = self.run_validator({"repositories": plan["repositories"]}, plan)
+        self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+        self.assertIn("file path, not prose", result.stdout + result.stderr)
+        plan["contracts"][0]["artifact"] = "apps/api/src/group/group.dto.ts"
+        result = self.run_validator({"repositories": plan["repositories"]}, plan)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def valid_joint_plan(self):
+        return {
+            "schema": "archon.joint-feature-plan.v1",
+            "repositories": ["api", "goodword-mcp"],
+            "dependency_order": ["api", "goodword-mcp"],
+            "stages": {
+                "api": {
+                    "depends_on": [],
+                    "files_allowlist": ["src/contracts/mcp.ts"],
+                    "test_patterns": ["contracts.spec.ts"],
+                    "verification": [
+                        "bun run typecheck",
+                        "bun run lint",
+                        "bun run test -- contracts.spec.ts",
+                    ],
+                },
+                "goodword-mcp": {
+                    "depends_on": ["api"],
+                    "files_allowlist": ["src/tools/groups.ts"],
+                    "test_patterns": ["groups.unit.test.ts"],
+                    "verification": [
+                        "mise x node@20 -- pnpm exec tsc --noEmit",
+                        "mise x node@20 -- env NODE_OPTIONS=--experimental-vm-modules pnpm exec jest --testPathIgnorePatterns '\\.(e2e|smoke)\\.test\\.ts$' --testPathPatterns groups.unit.test.ts",
+                    ],
+                },
+            },
+            "contracts": [
+                {
+                    "producer": "api",
+                    "consumer": "goodword-mcp",
+                    "artifact": "artifacts/api-contract.json",
+                    "description": "MCP consumes the local API contract candidate",
+                },
+            ],
+            "integration": {
+                "scenarios": [{
+                    "name": "mcp consumes local api candidate",
+                    "uses": ["api", "goodword-mcp"],
+                    "commands": ["./fixtures/run-local-integration.sh"],
+                    "expected_tests": ["mcp consumes api candidate"],
+                }],
+            },
+        }
+
+    def test_valid_joint_plan_passes_and_legacy_params_skip(self):
+        legacy = self.run_validator({"repo": "api", "worktree": "/tmp/wt"})
+        self.assertEqual(0, legacy.returncode, legacy.stdout + legacy.stderr)
+        self.assertIn("JOINT_PLAN=SKIPPED", legacy.stdout)
+
+        single = self.run_validator({"repositories": ["goodword-mcp"]}, {
+            **self.valid_joint_plan(),
+            "repositories": ["goodword-mcp"],
+            "dependency_order": ["goodword-mcp"],
+            "stages": {
+                "goodword-mcp": {
+                    "depends_on": [],
+                    "files_allowlist": ["src/tools/groups.ts"],
+                    "test_patterns": ["groups.test.ts"],
+                    "verification": ["pnpm test"],
+                }
+            },
+            "contracts": [],
+            "integration": {"scenarios": [{"name": "mcp local", "uses": ["goodword-mcp"], "commands": ["pnpm test"], "expected_tests": ["mcp local"]}]},
+        })
+        self.assertEqual(0, single.returncode, single.stdout + single.stderr)
+
+        params = {"repositories": ["api", "goodword-mcp"]}
+        result = self.run_validator(params, self.valid_joint_plan())
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("order=api,goodword-mcp", result.stdout)
+
+    def test_rejects_outside_dependency_before_implementation(self):
+        plan = self.valid_joint_plan()
+        plan["stages"]["api"]["depends_on"] = ["web-app"]
+        result = self.run_validator({"repositories": ["api", "goodword-mcp"]}, plan)
+        self.assertEqual(1, result.returncode)
+        self.assertIn("outside-scope", result.stdout)
+
+    def test_contracts_require_selected_owners_and_owned_dependencies(self):
+        for key, value in (("producer", "web-app"), ("consumer", "../api")):
+            plan = self.valid_joint_plan()
+            plan["contracts"][0][key] = value
+            with self.subTest(key=key):
+                result = self.run_validator({"repositories": ["api", "goodword-mcp"]}, plan)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("contracts[0]", result.stdout)
+        plan = self.valid_joint_plan()
+        plan["stages"]["goodword-mcp"]["depends_on"] = []
+        result = self.run_validator({"repositories": ["api", "goodword-mcp"]}, plan)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("owned dependency", result.stdout)
+
+    def test_rejects_cycle_and_wrong_topological_order(self):
+        plan = self.valid_joint_plan()
+        plan["stages"]["api"]["depends_on"] = ["goodword-mcp"]
+        result = self.run_validator({"repositories": ["api", "goodword-mcp"]}, plan)
+        self.assertEqual(1, result.returncode)
+        self.assertIn("dependency cycle", result.stdout)
+
+        plan = self.valid_joint_plan()
+        plan["dependency_order"] = ["goodword-mcp", "api"]
+        result = self.run_validator({"repositories": ["api", "goodword-mcp"]}, plan)
+        self.assertEqual(1, result.returncode)
+        self.assertIn("stable topological order", result.stdout)
+
+    def test_rejects_path_like_unknown_and_duplicate_selected_repos(self):
+        plan = self.valid_joint_plan()
+        cases = (
+            ({"repositories": ["api", "../goodword-mcp"]}, "canonical repository name"),
+            ({"repositories": ["api", "api"]}, "duplicates repository api"),
+            ({"repositories": ["api", "unknown"]}, "unknown"),
+        )
+        for params, needle in cases:
+            with self.subTest(needle=needle):
+                result = self.run_validator(params, plan)
+                self.assertEqual(1, result.returncode)
+                self.assertIn(needle, result.stdout)
 
 
 class Mutation(unittest.TestCase):

@@ -77,6 +77,10 @@ MANIFEST=(
   workflows/bugfix-lite.yaml
   setup/allowlist.json
   setup/run-tests.py
+  setup/joint-api-mcp-e2e.sh
+  setup/run-joint-integration.py
+  setup/trusted-local-candidate.sh
+  setup/write-local-candidate.py
   setup/export-candidate.py
   setup/bind-repo.py
   setup/check-fixer-result.py
@@ -97,6 +101,7 @@ MANIFEST=(
   setup/parse-critique.py
   setup/parse-review-envelope.py
   setup/plan-shape.sh
+  setup/validate-joint-plan.py
   setup/rca-shape.sh
   setup/probe-shape.py
   setup/round-reclaim.sh
@@ -149,6 +154,9 @@ MANIFEST=(
   setup/critic-converging.py
   setup/reproduction-attribution.py
   setup/lane-doctrine.lock.json
+  setup/feature-budget.py
+  setup/feature_estimate.py
+  setup/feature_chain.py
   setup/codex-usage.py
   setup/codex-watchdog.sh
   setup/codex-workspace-wrapper.sh

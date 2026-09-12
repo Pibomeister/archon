@@ -1,6 +1,6 @@
 ---
 name: archon-linear
-description: Fetch a Linear issue into an immutable evidence snapshot and route supported Goodword defects, API features, or cross-repo features into the current provider's Archon lane. Use for `/archon-linear ENG-1234`, a Linear issue URL, or when selecting a Linear ticket as Archon input.
+description: Fetch a Linear issue into an immutable evidence snapshot and route supported Goodword defects, single-repo features, or repository-list features into the current provider's Archon lane. Use for `/archon-linear ENG-1234`, a Linear issue URL, or when selecting a Linear ticket as Archon input.
 ---
 
 <WORKFLOW-NODE-STOP>
@@ -107,15 +107,28 @@ Classify from the ticket's requested outcome, not labels alone.
 - **API-only feature:** launch the provider-neutral feature command and infer
   scope `api`:
   `python3 <Goodword>/.archon/setup/archon-run.py feature --provider <provider> --scope api <absolute-snapshot>`.
-- **Cross-repository feature:** launch the same provider through the generic
-  full-stack chain:
-  `python3 <Goodword>/.archon/setup/archon-run.py feature --provider <provider> --scope fullstack <absolute-snapshot>`.
-  It creates one immutable spec/plan baseline, runs API first, then starts the
-  web lane only from the tamper-checked API handoff. Never change provider
-  between the API and web lanes.
-- **Web-only feature:** classify explicitly and stop with
-  `ARCHON_LINEAR=UNSUPPORTED kind=web-feature` until a standalone web feature
-  chain exists.
+- **API + web cross-repository feature:** for Codex, launch one joint plan with
+  `python3 <Goodword>/.archon/setup/archon-run.py feature --provider codex --scope api,web-app <absolute-snapshot>`.
+  Codex `--scope fullstack` is the same shorthand. Claude's scalar
+  `--scope fullstack` retains the legacy API-first/web-second handoff chain.
+  Never change provider between stages.
+- **API + goodword-mcp cross-repository feature:** launch the joint
+  repository-list chain (`cross-repo-feature` does not imply web):
+  `python3 <Goodword>/.archon/setup/archon-run.py feature --provider <provider> --scope api,goodword-mcp <absolute-snapshot>`.
+  Claude advances it with `feature-advance --chain <id>` after each human
+  `archon workflow approve`; Codex uses guarded `approve`/`resume`.
+- **Other supported repository combinations:** infer the smallest complete
+  selected set from the requested feature and its interface dependencies. Read
+  `repo-profile.sh --list`; registered names initially include `api`,
+  `goodword-mcp`, and `web-app`. Pass canonical comma-separated names to
+  `feature --provider <provider> --scope <repositories> <absolute-snapshot>`.
+  A selected dependency must become an owned stage in the joint plan; do not
+  silently omit it or expand scope beyond the ticket. List order is not execution
+  order. Do not narrow an explicit list with `ARCHON_REPO`.
+- **Web-only feature:** use the existing standalone route:
+  `python3 <Goodword>/.archon/setup/archon-run.py feature --provider <provider> --scope web <absolute-snapshot>`.
+- For unsupported repositories or requested work outside these lanes, stop with
+  `ARCHON_LINEAR=UNSUPPORTED` and state the missing capability.
 - Missing evidence does not make a defect unsupported; thin reports belong in
   the full bugfix graph.
 - Keep the ticket occurrence separate from incidental code-class findings. A
@@ -133,9 +146,11 @@ the operator turn.
 **Concurrent launches are supported.** `archon-run.py` passes `--branch`, derived
 from the snapshot's slug, so every run gets its own worktree, path lock and smoke
 ports — several tickets can be in flight at once and `archon workflow runs` will
-show distinct `working_path`s. Two consequences for this skill: a snapshot filename
-must be unique per ticket (it is, being `<KEY>-<uuid>.md`), and relaunching the SAME
-ticket deliberately reuses that ticket's worktree rather than making a second one.
+show distinct `working_path`s. A snapshot filename must be unique per ticket
+(it is, being `<KEY>-<uuid>.md`). Legacy scalar launches reuse their slug-derived
+worktree; each new repository-list chain creates separate chain-specific
+worktrees at pinned baselines. Recover the existing chain rather than starting
+a fresh chain to replace its worktrees or reset its budget.
 What still serializes is the e2e docker stack, which surfaces as a typed
 `E2E_MUTEX=FAIL` naming the owning run — see `archon-sdlc` §5a.
 
@@ -152,10 +167,28 @@ abandon the remaining symptom. The v2 graph and launcher own recovery: a proof c
 same-provider continuation seed carries the immutable ledger, evidence baseline,
 and lineage. Never hand-author a narrowed replacement that drops source symptoms.
 Use the default watched launch; `STARTED` is not the end of the operator turn.
-If implementation fails, do not patch repeatedly in the same worktree. The
+For bugfix runs, if implementation fails, do not patch repeatedly in the same worktree. The
 controller preserves the failed diff and launches a pristine-baseline,
 same-provider investigation successor. Proactively surface the third-failure
 `ARCHITECTURE_SUSPECT` stop and its required protected architecture review.
+
+For Codex repository-list features, use `archon-sdlc`'s joint-plan procedure:
+one human approval binds the exact spec, repository set, baselines, contracts,
+dependencies, file allowances, and verification plan. Guarded approval/resume
+and supervision advance repository stages in approved dependency order, using
+exact local candidate commits and interface artifacts without an upstream PR,
+merge, deployment, or publication. Resume a failed stage without repeating
+verified predecessors. `feature-replan` is only for terminal, unapproved planning
+and preserves the existing chain/worktrees/budget; it is not a way around a gate.
+
+The Codex chain shares 240 active minutes and 30 million tokens across planning,
+all repositories, retries, and integration. Human approval waits do not consume
+active time; resumes do not replenish the allowance. Read the final joint
+receipt: only `locally_verified` with publication held is successful local
+delivery. A completed child, missing proof, zero tests, failed/skipped required
+verification, or disabled publication is not success. Do not claim the separate
+Claude path has this Codex watchdog/accounting guarantee. ENG-3866 remains
+deferred until the supervised two-repository qualification trial has passed.
 AWS CLI/session availability is not a launch, approval, rejection, or resume
 prerequisite for code workflows. Surface typed degraded AWS evidence; request
 login only when a specific downstream operation genuinely requires AWS.
