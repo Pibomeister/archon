@@ -733,3 +733,24 @@ with about3.63M tokens left. The earlier Swagger failure was again identified as
 sandbox EPERM rather than application failure. No MCP candidate/integration/PR
 exists at this checkpoint. This supplies direct evidence for future delta-review
 and exact-environment evidence reuse; neither policy was silently changed here.
+
+
+###350M stop checkpoint
+
+The watchdog contained API review round7 at actual shared token exhaustion.
+Final refreshed usage:350,394,151 tokens /33,166 active seconds (552m46s).
+Ceilings remain350M /600m;394,151 tokens were recorded beyond the ceiling
+between usage sampling and process containment. Both process groups are gone.
+No counter, usage, worktree, approval, or limit was reset. API is clean at
+c99b307a9506202d86c82ebac4f895f59efa0d0a; MCP, exact joint integration and PRs
+remain pending. Round7 did not finish, so no candidate approval is inferred.
+Checkpoint: API operator-350m-exhaustion-checkpoint.json.
+
+Recommendation before another allowance: review the repeat-review policy using
+these measurements. Preserve one full initial review and critical-boundary
+escalation, but consider validating each repair plus unresolved neighboring
+findings instead of rereading the entire growing branch. Retain immutable
+per-lens outputs and validation state across interruption; carry required tests
+in fix authority; reuse exact-commit sandbox-independent verification; enforce
+provider/model/accounting before dispatch. These are proposed improvements,
+not changes made to this captured workflow or authorization to spend more.
