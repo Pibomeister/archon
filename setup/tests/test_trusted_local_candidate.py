@@ -7,8 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[3]
-SETUP = ROOT / ".archon" / "setup"
+SETUP = Path(__file__).resolve().parents[1]
 HELPER = SETUP / "trusted-local-candidate.sh"
 WRITER = SETUP / "write-local-candidate.py"
 
@@ -307,6 +306,54 @@ sys.exit(2)
         result = self.run_writer()
         self.assertEqual(1, result.returncode)
         self.assertIn("interface source escapes", result.stdout + result.stderr)
+
+    def seed_review_commits(self, subject="feat(api): candidate change"):
+        for index in range(4):
+            (self.repo / "src/api.ts").write_text(f"export const x = {index + 2};\n", encoding="utf-8")
+            run(["git", "-C", str(self.repo), "add", "src/api.ts"])
+            run(["git", "-C", str(self.repo), "commit", "-qm", "feat" if index == 0 else f"fix(review): {index}"])
+        (self.artifacts / "commit-msg.txt").write_text(f"{subject}\n\nBody line.\n", encoding="utf-8")
+        return subject
+
+    def git(self, *args):
+        return run(["git", "-C", str(self.repo), *args]).stdout.strip()
+
+    def test_squash_collapses_review_commits_into_one(self):
+        subject = self.seed_review_commits()
+        tree_before = self.git("rev-parse", "HEAD^{tree}")
+        result = self.run_helper()
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("CANDIDATE_SQUASH=OK commits=1 head=", result.stdout)
+        self.assertEqual("1", self.git("rev-list", "--count", f"{self.head}..HEAD"))
+        self.assertEqual(tree_before, self.git("rev-parse", "HEAD^{tree}"))
+        self.assertEqual(subject, self.git("log", "-1", "--format=%s"))
+
+    def test_second_run_leaves_head_byte_identical(self):
+        self.seed_review_commits()
+        first = self.run_helper()
+        self.assertEqual(0, first.returncode, first.stdout + first.stderr)
+        squashed = self.git("rev-parse", "HEAD")
+        second = self.run_helper()
+        self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+        self.assertIn("CANDIDATE_SQUASH=SKIP already squashed", second.stdout)
+        self.assertEqual(squashed, self.git("rev-parse", "HEAD"))
+
+    def test_missing_commit_message_leaves_history_intact(self):
+        self.seed_review_commits()
+        (self.artifacts / "commit-msg.txt").unlink()
+        result = self.run_helper()
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("CANDIDATE_SQUASH=SKIP no commit-msg.txt", result.stdout)
+        self.assertEqual("4", self.git("rev-list", "--count", f"{self.head}..HEAD"))
+
+    def test_squash_that_changes_the_tree_is_rejected(self):
+        self.seed_review_commits()
+        hook = self.repo / ".git/hooks/pre-commit"
+        hook.write_text("#!/bin/sh\necho smuggled > smuggled.txt\ngit add smuggled.txt\n", encoding="utf-8")
+        hook.chmod(0o755)
+        result = self.run_helper()
+        self.assertEqual(1, result.returncode)
+        self.assertIn("CANDIDATE_SQUASH=FAIL tree changed", result.stdout)
 
     def test_mcp_smoke_not_applicable_is_recorded_not_passed(self):
         write_json(self.artifacts / "params.json", {
