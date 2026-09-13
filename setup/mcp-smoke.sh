@@ -16,11 +16,8 @@
 # tree after `pnpm build` writes dist/. Do not drop the build: `node
 # dist/index.js` has no entrypoint without it, and the favicon assertion also
 # needs copy-static-assets.mjs to have placed dist/assets/favicon.ico.
-#
-# MCP_SMOKE_START_CMD, when set, replaces the build-and-start pair with that one
-# command, run in the worktree under the same synthetic env. It exists so
-# setup/tests/test_mcp_smoke.py can substitute a stub HTTP server; no lane sets
-# it.
+# setup/tests/test_mcp_smoke.py substitutes a stub server by shimming `mise` on
+# PATH; this script carries no test hook.
 set -uo pipefail
 WT="${1:?SMOKE=FAIL no worktree}"
 AD="${2:?SMOKE=FAIL no artifacts dir}"
