@@ -2763,6 +2763,18 @@ def feature_budget_update_command(args: argparse.Namespace) -> None:
     )
 
 
+def feature_scope_amend_command(args: argparse.Namespace) -> None:
+    validate_control_location(args.control_dir)
+    row = resolve_run(args.db, args.run_id)
+    result = repository_feature_call("scope_amend_command", args, row)
+    status = "UNCHANGED" if result.get("already_applied") else "APPLIED"
+    print(
+        f"ARCHON_FEATURE_SCOPE_AMEND={status} "
+        f"chain={result['chain']} run={row['id'][:8]} repo={result['repo']} "
+        f"add_file={result['add_file']} amendment={result['amendment_id']}"
+    )
+
+
 def feature_account_provider_usage_command(args: argparse.Namespace) -> None:
     validate_control_location(args.control_dir)
     row = resolve_run(args.db, args.run_id)
@@ -3299,6 +3311,11 @@ def parser() -> argparse.ArgumentParser:
     budget_update.add_argument("--total-active-minutes", type=int)
     budget_update.add_argument("--enable-shepherd", action="store_true")
     budget_update.add_argument("--reason", required=True)
+    scope_amend = sub.add_parser("feature-scope-amend", help="guarded allowlist-only scope amendment for a stopped repository-list feature chain")
+    scope_amend.add_argument("run_id")
+    scope_amend.add_argument("--token", required=True)
+    scope_amend.add_argument("--add-file", required=True)
+    scope_amend.add_argument("--reason", required=True)
     account_usage = sub.add_parser("feature-account-provider-usage", help="guarded provider transcript usage accounting for a stopped Codex repository-list feature run")
     account_usage.add_argument("run_id")
     account_usage.add_argument("--token", required=True)
@@ -3382,6 +3399,9 @@ def main() -> None:
         return
     if args.action == "feature-budget-update":
         feature_budget_update_command(args)
+        return
+    if args.action == "feature-scope-amend":
+        feature_scope_amend_command(args)
         return
     if args.action == "feature-account-provider-usage":
         feature_account_provider_usage_command(args)

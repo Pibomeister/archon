@@ -4,6 +4,13 @@ set -euo pipefail
 AD="${1:?usage: trusted-local-candidate.sh <artifacts-dir>}"
 SETUP="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 eval "$(bash "$SETUP/params-env.sh" "$AD/params.json")"
+# A plain `archon workflow resume` does not carry the launcher's ARCHON_FEATURE_* env
+# (observed 2026-09-13, run ffd88016); params.json is the durable copy of both values.
+if [ -z "${ARCHON_FEATURE_SCOPE-}" ]; then
+  ARCHON_FEATURE_SCOPE=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("feature_scope",""))' "$AD/params.json")
+  ARCHON_FEATURE_PHASE=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("feature_phase",""))' "$AD/params.json")
+  export ARCHON_FEATURE_SCOPE ARCHON_FEATURE_PHASE
+fi
 test "${ARCHON_FEATURE_SCOPE-}" = repositories || { echo "LOCAL_CANDIDATE=FAIL missing repository feature scope"; exit 1; }
 test "${ARCHON_FEATURE_PHASE-}" = implement || { echo "LOCAL_CANDIDATE=FAIL phase is not implement"; exit 1; }
 cd "$WT"

@@ -177,6 +177,12 @@ def require_no_incomplete_amendment(state: dict) -> None:
         raise FeatureChainError("budget amendment is incomplete; retry feature-budget-update before dispatch")
 
 
+def require_no_incomplete_scope_amendment(state: dict) -> None:
+    amendment = state.get("scope_amendment")
+    if isinstance(amendment, dict) and amendment.get("status") == "in_progress":
+        raise FeatureChainError("scope amendment is incomplete; retry feature-scope-amend before dispatch")
+
+
 def _root(host: Any) -> Path:
     return Path(getattr(host, "ROOT"))
 
@@ -839,7 +845,9 @@ def dispatch_lane(host: Any, args: Any, lane: str, message: Path, env: dict[str,
     with host_env(host, env):
         try:
             if env.get("ARCHON_FEATURE_SCOPE") == "repositories" and env.get("ARCHON_FEATURE_CHAIN_ID"):
-                require_no_incomplete_amendment(read_state(Path(args.control_dir), env["ARCHON_FEATURE_CHAIN_ID"]))
+                dispatch_state = read_state(Path(args.control_dir), env["ARCHON_FEATURE_CHAIN_ID"])
+                require_no_incomplete_amendment(dispatch_state)
+                require_no_incomplete_scope_amendment(dispatch_state)
                 shepherd_checkpoint(args, env["ARCHON_FEATURE_CHAIN_ID"])
                 budget_require_remaining(args, env["ARCHON_FEATURE_CHAIN_ID"])
             if hasattr(host, "dispatch_feature_phase"):
@@ -1231,6 +1239,352 @@ def update_run_control_allowance(host: Any, args: Any, row: dict, control: dict,
         if wall_minutes is not None:
             public["wall_minutes"] = wall_minutes
         write_json_atomic(artifact, public)
+
+
+
+def current_implementation_repo(state: dict, row: dict) -> str:
+    current = state.get("current_run")
+    if not isinstance(current, dict) or current.get("run_id") != row.get("id"):
+        raise FeatureChainError("feature-scope-amend is stale for this chain")
+    if current.get("phase") not in {"implement", "verify"}:
+        raise FeatureChainError("feature-scope-amend requires a current implementation run")
+    repo = current.get("repo")
+    if not isinstance(repo, str) or repo not in state.get("repositories", []):
+        raise FeatureChainError("feature-scope-amend current repository is outside selected scope")
+    return repo
+
+
+def require_scope_amendment_open(state: dict) -> None:
+    if state.get("candidate_handoffs"):
+        raise FeatureChainError("feature-scope-amend cannot modify a chain with verified candidate handoffs")
+    if state.get("integration") or state.get("status") == "locally_verified":
+        raise FeatureChainError("feature-scope-amend cannot modify a chain after integration")
+    if state.get("publication"):
+        raise FeatureChainError("feature-scope-amend cannot modify a published chain")
+
+
+def validate_scope_add_file(state: dict, repo: str, add_file: str) -> str:
+    if not isinstance(add_file, str) or not add_file.strip():
+        raise FeatureChainError("feature-scope-amend requires --add-file")
+    raw = Path(add_file)
+    if raw.is_absolute() or any(part in {"", ".", ".."} for part in raw.parts):
+        raise FeatureChainError("scope amendment path must be a safe repository-relative path")
+    normalized = raw.as_posix()
+    if normalized.startswith(".git/") or normalized == ".git":
+        raise FeatureChainError("scope amendment path cannot target git metadata")
+    worktree = Path(str(state["worktrees"][repo]["worktree"]))
+    candidate = worktree / raw
+    try:
+        resolved = candidate.resolve(strict=True)
+        worktree_resolved = worktree.resolve(strict=True)
+    except OSError as exc:
+        raise FeatureChainError(f"scope amendment file is unavailable: {add_file}") from exc
+    try:
+        resolved.relative_to(worktree_resolved)
+    except ValueError as exc:
+        raise FeatureChainError("scope amendment file must stay inside the selected repository worktree") from exc
+    cursor = worktree
+    for part in raw.parts:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            raise FeatureChainError("scope amendment file must be an existing non-symlink file")
+    if not resolved.is_file():
+        raise FeatureChainError("scope amendment file must be an existing non-symlink file")
+    if hasattr(os, "getuid") and resolved.stat().st_uid != os.getuid():
+        raise FeatureChainError("scope amendment file is not owned by the current operator")
+    tracked = _git(worktree, "ls-files", "--error-unmatch", "--", normalized)
+    if tracked.returncode != 0:
+        raise FeatureChainError("scope amendment file must already be tracked in the selected repository")
+    return normalized
+
+
+def plan_with_added_allowlist_file(plan: dict, repo: str, add_file: str) -> dict:
+    amended = json.loads(json.dumps(plan))
+    stages = amended.get("stages")
+    if isinstance(stages, dict):
+        stage = stages.get(repo)
+        if not isinstance(stage, dict):
+            raise FeatureChainError("approved plan is missing the current repository stage")
+        files = stage.get("files_allowlist")
+        if not isinstance(files, list):
+            raise FeatureChainError("approved plan stage allowlist is malformed")
+        if add_file not in files:
+            stage["files_allowlist"] = [*files, add_file]
+        return amended
+    if isinstance(stages, list):
+        for stage in stages:
+            if isinstance(stage, dict) and stage.get("repo") == repo:
+                files = stage.get("files_allowlist")
+                if not isinstance(files, list):
+                    raise FeatureChainError("approved plan stage allowlist is malformed")
+                if add_file not in files:
+                    stage["files_allowlist"] = [*files, add_file]
+                return amended
+        raise FeatureChainError("approved plan is missing the current repository stage")
+    raise FeatureChainError("approved plan stages are malformed")
+
+
+def scope_amendment_payload(chain_id: str, run_id: str, repo: str, add_file: str, reason: str) -> dict:
+    return {
+        "kind": "feature-scope-amend",
+        "logical_chain_id": chain_id,
+        "run_id": run_id,
+        "repo": repo,
+        "add_file": add_file,
+        "reason": reason,
+    }
+
+
+def planning_source_root(state: dict) -> Path:
+    source = state.get("approval", {}).get("source_artifacts", {})
+    root = Path(str(source.get("root", "")))
+    if not root.is_absolute() or not root.is_dir():
+        raise FeatureChainError("approved planning artifact root is unavailable")
+    return root
+
+
+def ensure_owned_not_symlink(path: Path, label: str) -> None:
+    try:
+        stat = path.lstat()
+    except OSError as exc:
+        raise FeatureChainError(f"{label} is unavailable: {path}") from exc
+    if path.is_symlink():
+        raise FeatureChainError(f"{label} must not be a symlink: {path}")
+    if hasattr(os, "getuid") and stat.st_uid != os.getuid():
+        raise FeatureChainError(f"{label} is not owned by the current operator: {path}")
+
+
+def preflight_scope_amendment_destination(root: Path, amendment_id: str) -> None:
+    ensure_owned_not_symlink(root, "approved planning artifact root")
+    base = root / "scope-amendments"
+    if base.exists():
+        ensure_owned_not_symlink(base, "scope amendment directory")
+        if not base.is_dir():
+            raise FeatureChainError("scope amendment path is not a directory")
+    amend_root = base / amendment_id
+    if amend_root.exists():
+        ensure_owned_not_symlink(amend_root, "scope amendment packet directory")
+        if not amend_root.is_dir():
+            raise FeatureChainError("scope amendment packet path is not a directory")
+
+
+def prepare_scope_amendment_dir(root: Path, amendment_id: str) -> Path:
+    preflight_scope_amendment_destination(root, amendment_id)
+    base = root / "scope-amendments"
+    if not base.exists():
+        base.mkdir(mode=0o700)
+        ensure_owned_not_symlink(base, "scope amendment directory")
+    amend_root = base / amendment_id
+    if not amend_root.exists():
+        amend_root.mkdir(mode=0o700)
+        ensure_owned_not_symlink(amend_root, "scope amendment packet directory")
+    return amend_root
+
+
+def write_scope_amendment_artifacts(root: Path, state: dict, old_plan: dict, new_plan: dict,
+                                    repo: str, add_file: str, reason: str, amendment_id: str) -> dict:
+    amend_root = prepare_scope_amendment_dir(root, amendment_id)
+    source = state.get("approval", {}).get("source_artifacts", {})
+    files = source.get("files", {}) if isinstance(source, dict) else {}
+    copied: dict[str, str] = {}
+    for name in (JOINT_PLAN_ARTIFACT, *PLANNING_SUPPORT_ARTIFACTS):
+        if name not in files:
+            continue
+        src = root / name
+        if src.is_file():
+            ensure_owned_not_symlink(src, "approved planning source artifact")
+            dst = amend_root / ("original-" + name)
+            dst.write_bytes(src.read_bytes())
+            copied[dst.name] = file_digest(dst)
+    write_json_atomic(amend_root / "original-approval.json", state["approval"])
+    write_json_atomic(amend_root / "original-approved-plan.json", old_plan)
+    write_json_atomic(amend_root / JOINT_PLAN_ARTIFACT, new_plan)
+    recorded_at = state.get("scope_amendment", {}).get("started_at") or now()
+    notice = {
+        "schema_version": 1,
+        "kind": "feature-scope-amendment-notice",
+        "logical_chain_id": state["logical_chain_id"],
+        "amendment_id": amendment_id,
+        "repo": repo,
+        "added_file": add_file,
+        "reason": reason,
+        "previous_plan_digest": state["approval"]["plan_digest"],
+        "new_plan_digest": digest(new_plan),
+        "recorded_at": recorded_at,
+    }
+    write_json_atomic(amend_root / "scope-amendment.json", notice)
+    notice_md = (
+        "# Guarded scope amendment approval packet\n\n"
+        + f"- Chain: `{state['logical_chain_id']}`\n"
+        + f"- Amendment: `{amendment_id}`\n"
+        + f"- Repository: `{repo}`\n"
+        + f"- Added allowlist file: `{add_file}`\n"
+        + f"- Previous approval digest: `{state['approval']['approval_digest']}`\n"
+        + f"- New plan digest: `{digest(new_plan)}`\n"
+    )
+    (amend_root / "approval-packet-notice.md").write_text(notice_md, encoding="utf-8")
+    previous_plan_md = approval_plan_markdown(state)
+    addendum = (
+        previous_plan_md.rstrip()
+        + "\n\n## Guarded scope amendment\n\n"
+        + f"- Repository: `{repo}`\n"
+        + f"- Added allowlist file: `{add_file}`\n"
+        + f"- Reason: {reason}\n"
+        + f"- Amendment id: `{amendment_id}`\n"
+    )
+    (amend_root / "plan.md").write_text(addendum + "\n", encoding="utf-8")
+    files_out = {
+        JOINT_PLAN_ARTIFACT: file_digest(amend_root / JOINT_PLAN_ARTIFACT),
+        "plan.md": file_digest(amend_root / "plan.md"),
+        "scope-amendment.json": file_digest(amend_root / "scope-amendment.json"),
+        "approval-packet-notice.md": file_digest(amend_root / "approval-packet-notice.md"),
+        **copied,
+    }
+    return {"root": str(amend_root), "files": files_out}
+
+
+def final_scope_amendment_state(state: dict, repo: str, new_plan: dict, validation: dict,
+                                new_approval: dict, source_artifacts: dict) -> dict:
+    old_approval = state["approval"]
+    amendment = dict(state["scope_amendment"])
+    amendment.update({
+        "status": "applied",
+        "applied_at": now(),
+        "approval_digest": new_approval["approval_digest"],
+        "previous_approval_digest": old_approval.get("approval_digest"),
+        "source_artifacts": source_artifacts,
+    })
+    final = dict(state)
+    final.setdefault("approval_history", []).append(old_approval)
+    final.setdefault("scope_amendments", []).append(amendment)
+    final["approval"] = new_approval
+    final["approved_plan"] = validation["plan"]
+    final["dependency_order"] = validation["dependency_order"]
+    final["stages"] = dict(state["stages"])
+    final["stages"][repo] = dict(final["stages"][repo])
+    final["stages"][repo]["plan"] = validation["stages"][repo]
+    final["scope_amendment"] = None
+    final["updated_at"] = now()
+    return final
+
+
+def build_scope_amendment(control_dir: Path, state: dict, repo: str,
+                          add_file: str, reason: str, amendment_id: str) -> dict:
+    old_approval = state.get("approval")
+    old_plan = state.get("approved_plan")
+    if not isinstance(old_approval, dict) or not isinstance(old_plan, dict):
+        raise FeatureChainError("feature-scope-amend requires an approved joint plan")
+    verify_approval(state)
+    source_root = planning_source_root(state)
+    new_plan = plan_with_added_allowlist_file(old_plan, repo, add_file)
+    validation = validate_plan(new_plan, state["repositories"], state.get("executable_plan_contract") == 1)
+    source_artifacts = write_scope_amendment_artifacts(source_root, state, old_plan, new_plan, repo, add_file, reason, amendment_id)
+    new_approval = approval_snapshot(state, new_plan, validation, source_artifacts)
+    return final_scope_amendment_state(state, repo, new_plan, validation, new_approval, source_artifacts)
+
+
+def current_stage_artifacts(state: dict, row: dict) -> Path:
+    current = state.get("current_run")
+    if not isinstance(current, dict):
+        raise FeatureChainError("feature chain has no current run binding")
+    artifacts = current.get("artifacts_dir") or row.get("output_root")
+    if not artifacts:
+        raise FeatureChainError("current feature stage has no artifact directory")
+    artifacts_path = Path(str(artifacts))
+    if not artifacts_path.is_absolute() or not artifacts_path.is_dir():
+        raise FeatureChainError("current feature stage artifacts are missing")
+    return artifacts_path
+
+
+def validate_current_stage_artifacts(state: dict, row: dict, repo: str | None = None, add_file: str | None = None) -> None:
+    artifacts_path = current_stage_artifacts(state, row)
+    revisions = read_json_artifact(artifacts_path / "candidate-revisions.json", "candidate-revisions.json")
+    old_digest = state["approval"]["plan_digest"]
+    allowed = {old_digest}
+    if isinstance(state.get("scope_amendment"), dict) and repo and add_file:
+        allowed.add(digest(plan_with_added_allowlist_file(state["approved_plan"], repo, add_file)))
+    plan_digest = revisions.get("plan_digest")
+    approved_digest = revisions.get("approved_plan_digest")
+    if plan_digest != approved_digest or plan_digest not in allowed:
+        raise FeatureChainError("current stage candidate revisions do not match the approved plan digest")
+
+
+def refresh_current_stage_artifacts(state: dict, row: dict, repo: str) -> None:
+    artifacts_path = current_stage_artifacts(state, row)
+    write_json_atomic(artifacts_path / JOINT_PLAN_ARTIFACT, state["approved_plan"])
+    write_json_atomic(artifacts_path / "files-allowlist.json", state["stages"][repo]["plan"]["files_allowlist"])
+    revisions = read_json_artifact(artifacts_path / "candidate-revisions.json", "candidate-revisions.json")
+    revisions["plan_digest"] = state["approval"]["plan_digest"]
+    revisions["approved_plan_digest"] = state["approval"]["plan_digest"]
+    write_json_atomic(artifacts_path / "candidate-revisions.json", revisions)
+    plan_md = approval_plan_markdown(state)
+    if plan_md:
+        (artifacts_path / "plan.md").write_text(plan_md, encoding="utf-8")
+
+
+def scope_amend_command(host: Any, args: Any, row: dict) -> dict:
+    add_file_arg = str(getattr(args, "add_file", ""))
+    reason = str(getattr(args, "reason", "")).strip()
+    if not reason:
+        raise FeatureChainError("scope amendment requires a reason")
+    control = getattr(host, "read_control_state")(row, Path(args.control_dir))
+    feature = control_feature({"control": control})
+    if feature.get("scope") != "repositories":
+        raise FeatureChainError("feature-scope-amend requires a repository-list feature run")
+    chain_id = feature.get("logical_chain_id")
+    if not isinstance(chain_id, str):
+        raise FeatureChainError("run-control record is missing feature chain id")
+    applied: dict | None = None
+    with chain_lock(Path(args.control_dir), chain_id):
+        row = host.run_row_by_id(Path(args.db), row["id"])
+        if not isinstance(row, dict) or row.get("status") not in {"failed", "paused", "completed", "cancelled"}:
+            raise FeatureChainError("feature-scope-amend requires a stopped run")
+        control = host.require_control_token(row, Path(args.control_dir), getattr(args, "token", None))
+        if control.get("feature_chain") != feature:
+            raise FeatureChainError("feature control binding changed while acquiring the chain lock")
+        require_no_live_control_processes(control)
+        state = read_state(Path(args.control_dir), chain_id)
+        require_no_incomplete_amendment(state)
+        pending = state.get("pending_control")
+        if pending is not None and (not isinstance(pending, dict) or process_claim_alive(pending)):
+            raise FeatureChainError("repository-list feature control already in progress")
+        if state.get("dispatch_reservation") is not None:
+            raise FeatureChainError("repository-list feature dispatch already in progress")
+        require_scope_amendment_open(state)
+        repo = current_implementation_repo(state, row)
+        add_file = validate_scope_add_file(state, repo, add_file_arg)
+        payload = scope_amendment_payload(chain_id, row["id"], repo, add_file, reason)
+        amendment_id = digest(payload)
+        existing = state.get("scope_amendment")
+        if isinstance(existing, dict) and existing.get("status") == "in_progress":
+            if existing.get("amendment_id") != amendment_id:
+                raise FeatureChainError("a different scope amendment is incomplete")
+        for prior in state.get("scope_amendments", []):
+            if prior.get("amendment_id") == amendment_id:
+                if prior.get("add_file") != add_file or prior.get("repo") != repo:
+                    raise FeatureChainError("scope amendment id was already used for a different change")
+                refresh_current_stage_artifacts(state, row, repo)
+                return {"chain": chain_id, "repo": repo, "add_file": add_file, "amendment_id": amendment_id, "already_applied": True}
+        if add_file in state["stages"][repo].get("plan", {}).get("files_allowlist", []):
+            raise FeatureChainError("scope amendment file is already approved for the current repository")
+        verify_approval(state)
+        validate_current_stage_artifacts(state, row, repo, add_file)
+        preflight_scope_amendment_destination(planning_source_root(state), amendment_id)
+        if not (isinstance(existing, dict) and existing.get("status") == "in_progress"):
+            state["scope_amendment"] = {
+                **payload,
+                "amendment_id": amendment_id,
+                "status": "in_progress",
+                "started_at": now(),
+            }
+            state["updated_at"] = now()
+            state = write_state(Path(args.control_dir), state)
+        final_state = build_scope_amendment(Path(args.control_dir), state, repo, add_file, reason, amendment_id)
+        refresh_current_stage_artifacts(final_state, row, repo)
+        state = write_state(Path(args.control_dir), final_state)
+        applied = {"chain": chain_id, "repo": repo, "add_file": add_file, "amendment_id": amendment_id, "already_applied": False}
+    assert applied is not None
+    return applied
 
 
 def budget_update_command(host: Any, args: Any, row: dict) -> dict:
@@ -2108,6 +2462,8 @@ def before_control(host: Any, args: Any, row: dict, control: dict | None) -> dic
         args.max_total_tokens = state["budget"]["max_total_tokens"]
         action = getattr(args, "action", "")
         stopping_action = action in {"reject", "abandon"}
+        if not stopping_action:
+            require_no_incomplete_scope_amendment(state)
         phase = str(feature.get("phase") or "implement")
         if phase in {"planning", "integration"}:
             current = state.get("current_run")

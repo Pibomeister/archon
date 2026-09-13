@@ -109,6 +109,14 @@ sys.exit(2)
     def run_helper(self):
         return subprocess.run(["bash", str(HELPER), str(self.artifacts)], text=True, capture_output=True, env=self.env)
 
+    def test_resume_without_chain_env_reads_scope_and_phase_from_params(self):
+        # `archon workflow resume` drops the launcher's ARCHON_FEATURE_* env; params.json is the durable copy.
+        self.env.pop("ARCHON_FEATURE_SCOPE")
+        self.env.pop("ARCHON_FEATURE_PHASE")
+        result = self.run_helper()
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertNotIn("missing repository feature scope", result.stdout)
+
     def test_success_writes_actual_unit_count_and_interface_hash(self):
         result = self.run_helper()
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)

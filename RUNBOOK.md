@@ -1197,6 +1197,36 @@ unchanged historical consumption before resuming. Raising a review cap is a
 separate authorized operation: retain the round counter and all review evidence,
 and never accept findings merely to pass the cap.
 
+If a stopped repository implementation run has one verified, existing tracked
+file missing from its approved stage allowance, use the guarded scope amendment
+rather than editing `files-allowlist.json` or approval artifacts by hand:
+
+```bash
+python3 .archon/setup/archon-run.py feature-scope-amend <run-id> --token <operator-token> --add-file <repo-relative-tracked-file> --reason "Authorized scope recovery"
+```
+
+`feature-scope-amend` is intentionally narrower than re-approval. It authenticates
+the current operator token under the chain lock, requires the current run to be
+stopped in an implementation/verification phase, refuses live launcher/watchdog
+process groups, competing controls, dispatch reservations, incomplete budget
+amendments, and chains that already have verified candidate handoffs,
+integration, or publication. The file must be a safe repository-relative path in
+the currently selected repository worktree, already tracked by git, owned by the
+operator, and free of symlink components. The command only adds that path to the
+current repository's stage allowlist; it does not change repositories, contracts,
+dependency order, tests, spec bytes, workflow source, worktrees, budget ledgers,
+control tokens, or human approval requirements.
+
+The controller writes an in-progress private `scope_amendment` journal, preserves
+the old approval packet, creates a deterministic amendment packet under the
+original planning artifacts, refreshes only the current stage's bound
+`joint-plan.json`, `files-allowlist.json`, `candidate-revisions.json` plan
+digests, and rendered `plan.md`, then atomically records the new approval snapshot
+and clears the journal. If interrupted, repeat the identical command with the
+same token, file, and reason. Pending scope amendments block resume/approve and
+dispatch but still allow emergency abandon/reject containment. The amendment
+preserves operator authority; normal guarded resume still rotates the token.
+
 Guarded Codex controls install a private `CLAUDE_BIN_PATH` denial executable.
 Stock approval rejection hooks do not support a scoped provider override;
 an unexpected Claude invocation stops with `ARCHON_CODEX_PROVIDER_GUARD=FAIL`

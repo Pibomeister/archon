@@ -582,3 +582,95 @@ The API worktree remains at ff2b4a689e, with399 focused tests passed before the
 last review. No MCP candidate, joint integration receipt, or PR exists.
 The PR goal is blocked by the corrected token exhaustion. A higher token ceiling
 requires new explicit authorization; no further product dispatch is permitted.
+
+
+### Explicit continuation authorization after accounting repair
+
+The user authorized **350M total tokens /600 active minutes**, preserving all
+consumed usage. Applied through the guarded amendment to the existing API run.
+Verified unchanged run/session bindings, aggregate/session high-water marks,
+provider receipts, and active intervals. Consumption remains259,453,378 tokens
+and28,033 seconds; remaining allowance is90,546,622 tokens and7,967 seconds
+(132m47s). Operator authority is preserved. No token or active-time reset occurred.
+Guarded resume output is protected at /tmp/archon-eng3866-authorized-350m-review.log.
+The user also requested close observation of excessive iteration for later
+workflow efficiency improvements; evidence gathering stays read-only during this
+run and does not weaken or silently substitute the captured review workflow.
+
+
+### Efficiency observations requested by the user
+
+Bounded read-only audit distinguishes real correctness discovery from avoidable
+workflow repetition. Planning reached acceptance at round21; impact evidence was
+UNAVAILABLE in sampled rounds, and late critiques kept discovering compatibility
+and caller/reader cases. API reviews found real invite-only, HTTP-contract,
+disclosure, compensation, legacy-fallback, fencing, decoder, and canonical-selection
+defects. These were not merely stylistic disagreement.
+
+Avoidable overhead: the first two code reviews each dispatched17 lenses and up
+to15 validators over the entire branch (3,946 then4,596 changed lines), despite
+intervening fixes being narrower. Fixer scopes based only on finding-named files
+created invalid scope-only waivers and left tests/schema counterparts unchanged.
+Deslop rounds2–5 repeated clean mechanical checks; several late deslop findings
+were protocol defects rather than cleanup. Interrupted review folders held only
+pre-head/prerun markers, so subsequent attempts repeated expensive discovery.
+The sandbox-only HTTP bind failure was already disproven by the external local
+HTTP test and should have been classified once with reusable evidence.
+
+Future candidates, without changing this captured run mid-flight:
+1. Require early caller/reader tracing or a bounded static substitute when graph
+   impact is unavailable, before the critic loop repeatedly rediscovers edges.
+2. Use one full initial review, then re-review changed code plus unresolved finding
+   neighborhoods; escalate to full review for critical-boundary or broad changes.
+3. Replace scope-only waivers with explicit edit-authority packets naming the
+   required production/test paths and finding. Never turn missing authority into
+   accepted product risk.
+4. Reuse clean cleanup evidence when unchanged; run affected checks after edits
+   and retain full final gates before candidate verification.
+5. Persist per-lens findings/validation evidence so interrupted review can resume
+   safely instead of paying for an entire new broad pass.
+
+Retain exact accounting/descendant discovery, independent protocol review, signed
+scope enforcement, no accepted residuals, and exact-candidate database-backed
+integration. Optimization must reduce repeated work, not suppress real findings.
+
+
+A further efficiency signal: high passing test counts included substantial
+baseline coverage while new cross-store cases were missing. Cheap real-boundary
+checks caught the reserved TTL projection and actual HTTP status/filter shape
+later than they should have. Candidate optimization: front-load small disposable
+DynamoDB and HTTP contract probes, and map newly required behavior to explicit
+tests instead of treating a broad test-pattern pass count as feature completeness.
+This complements, rather than replaces, final cross-candidate integration.
+
+
+Efficiency measurements should distinguish gross counted tokens, cached input,
+uncached input, output, elapsed time, and new validated findings. At the repaired
+checkpoint,246,859,135 of259,453,378 counted tokens were cached input. This does
+not change the authorized budget unit. Investigate narrower per-lens briefs and
+unnecessary full-history forks only with equivalent finding coverage; a reduction
+in gross context alone is not proof of better quality or lower latency.
+
+
+### Review round four and bounded recovery
+
+The completed full API review/fix attempt ended at the durable four-round cap.
+Accounting rose from259,453,378 to307,451,819 total tokens and from28,033
+to30,746 active seconds:47,998,441 tokens and45m13s for this attempt.
+Its review snapshot contained5,073 changed lines,3,282 production lines.
+Remaining authorized allowance at this checkpoint:42,548,181 tokens and
+5,254 seconds (87m34s). These are observations, not a forecast or new limit.
+
+Two concrete blockers appeared in reviewer prose outside the typed findings:
+enrichment IAM lacked ConditionCheckItem and index readiness omitted DynamoDB
+attribute-type validation. Both were reproduced and repaired with regressions.
+The IAM source allowance was added through the reviewed, journaled guarded
+feature-scope-amend command; all prior history and accounting were preserved.
+This exposes another efficiency opportunity: preserve all blocker candidates
+through structured validation rather than losing them during response parsing.
+
+A bounded real DynamoDB Local probe verified current bootstrap twice (one then
+zero mutations per table), default dry-run, disabled-control durable blocked audit
+without business writes, and enabled-control retry with the same operation inputs.
+Evidence: /tmp/goodword-reconcile-runtime-proof.cSp4Vl. This is development
+evidence and does not replace pending exact-candidate joint integration.

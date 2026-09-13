@@ -211,6 +211,26 @@ For the guarded Codex path:
   captured workflow or model. Verify preserved usage and all allowance records
   before guarded resume. A review-cap increase requires separate authorization
   and preserves the existing round counter/findings; it does not waive review.
+  If a stopped repository implementation run needs exactly one existing tracked
+  file added to the current stage allowlist, use guarded scope recovery instead
+  of hand-editing approval artifacts:
+
+  ```bash
+  python3 "$ROOT/.archon/setup/archon-run.py" feature-scope-amend <run-id> --token <operator-token> --add-file <repo-relative-tracked-file> --reason "Authorized scope recovery"
+  ```
+
+  This command authenticates under the chain lock, refuses live processes,
+  pending controls/dispatch, incomplete budget amendments, and any verified
+  handoff/integration/publication. It is add-only for the current repository's
+  safe owned non-symlink tracked file; it preserves contracts, repo order, tests,
+  spec bytes, workflow source, worktrees, budget/accounting, approval history,
+  and operator authority. It journals `scope_amendment`, writes a deterministic
+  amendment packet under the original planning artifacts, refreshes only the
+  current stage's bound plan/allowlist/candidate-revision digests/rendered plan,
+  then signs the new approval snapshot. If interrupted, retry the identical
+  command with the same token, file, and reason. Pending scope amendments block
+  resume/approve and dispatch; abandon/reject containment remains available.
+  Normal guarded resume still rotates the token.
   Guarded Codex controls deny unexpected Claude invocations before model startup
   (`ARCHON_CODEX_PROVIDER_GUARD=FAIL`). Stock rejection hooks cannot pin their
   provider through scoped hook fields; do not add ignored configuration keys.
