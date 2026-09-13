@@ -531,3 +531,54 @@ existing 201 raw-string success and ordinary 400 body; all 395 targeted tests,
 lint, production/specification typechecks, and cleanup checks pass before the
 next independent review. Protected current operator authority is in
 `/tmp/archon-eng3866-api-recovery-protocol-fix.log`.
+
+
+### Accounting incident: omitted descendant usage
+
+While the API's next review was running, the operator audited helper accounting
+and found that all registered rollout sources were `exec`, despite 51 API
+`spawn_agent` calls. The run was stopped through current-token validation and
+recorded process fingerprints under the chain lock. No product execution resumed.
+
+Independent inspection of the dedicated Codex provider database found exact
+`thread_spawn_edges` and complete child rollouts. A child first `session_meta.id`
+is its own UUID, while `session_id` is inherited from the parent; later inherited
+metadata can name the parent too. The old identity-equality check rejected these
+valid child sessions. The old legacy-counter-only parser also missed newer final
+`token_usage_record.thread_token_usage` receipts.
+
+Independent reconciliation found 75 registered sessions and 55 omitted descendants.
+Across 2,870 globally unique response IDs with no conflicting duplicates or
+foreign-thread receipts, the exact recorded Codex sum is 258,475,852 tokens:
+166,687,124 registered-session tokens plus 91,788,728 descendant tokens. Adding
+the already-recorded Claude receipt of 977,526 yields **259,453,378 shared tokens**,
+which exceeds the authorized 200M ceiling by **59,453,378**. All 55 descendants
+were independently verified as Sol/medium. The prior parent-based progress totals
+were incomplete; they must not be represented as enforced complete consumption.
+
+The repaired collector resolves provider DB ancestry, accepts authoritative child
+identity, reads both cumulative counter formats, preserves HWMs, and fails closed
+on missing owned children or unsupported ancestry. Tests also cover exact hosted
+helper identity and duplicate output delivery. A copy of the real ledger reports
+130 sessions and exactly the independent shared total, unchanged on repeated
+refresh, with no new active intervals and no ceiling changes. Consumed active
+time is 28,033 seconds (467m 13s). Live reconciliation follows only after the
+focused review and checks. The run remains failed, both process groups are absent,
+the API candidate is preserved, and MCP/integration/publication remain pending.
+The earlier pending question about 600 active minutes alone is insufficient now;
+no resource increase or resumed product execution is authorized by that question.
+
+
+Live reconciliation completed under the authenticated chain lock after the final
+bounded review passed. The collector passed 36 budget tests; amendment/controller,
+launcher-integration, and watchdog suites also passed (13, 2, and16 tests).
+Two live refreshes both reported exactly259,453,378 tokens across130 sessions,
+tokens_exhausted=true, and28,033 active seconds. Both ceilings remain200M/480min;
+existing provider receipts, control authority, old usage high-water marks, and
+completed active intervals were preserved. No new active interval was created.
+Evidence is in the API run's accounting-reconciliation.json; the pre-repair ledger
+snapshot is private at ~/.archon/logs/eng3866-pre-descendant-reconciliation.json.
+The API worktree remains at ff2b4a689e, with399 focused tests passed before the
+last review. No MCP candidate, joint integration receipt, or PR exists.
+The PR goal is blocked by the corrected token exhaustion. A higher token ceiling
+requires new explicit authorization; no further product dispatch is permitted.

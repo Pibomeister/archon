@@ -13,17 +13,16 @@ SCRIPT = SETUP / "feature-budget.py"
 CHAIN = "a" * 32
 
 
-def session_meta_line(session_id, parent_thread_id=None):
-    payload = {"id": session_id, "session_id": session_id}
+def session_meta_line(session_id, parent_thread_id=None, agent_id=None, inherited_session_id=None):
+    payload = {"id": session_id, "session_id": inherited_session_id or session_id}
     if parent_thread_id is not None:
-        payload["source"] = {
-            "subagent": {
-                "thread_spawn": {
-                    "parent_thread_id": parent_thread_id,
-                    "depth": 1,
-                }
-            }
+        spawn = {
+            "parent_thread_id": parent_thread_id,
+            "depth": 1,
         }
+        if agent_id is not None:
+            spawn["agent_id"] = agent_id
+        payload["source"] = {"subagent": {"thread_spawn": spawn}}
     return json.dumps({"type": "session_meta", "payload": payload})
 
 
@@ -42,6 +41,19 @@ def token_line(total):
             },
         },
     })
+
+
+def token_usage_record_line(total, thread_id=None, input_tokens=None, output_tokens=10):
+    usage = {
+        "input_tokens": input_tokens if input_tokens is not None else max(total - output_tokens, 0),
+        "cached_input_tokens": 0,
+        "output_tokens": min(total, output_tokens),
+        "total_tokens": total,
+    }
+    record = {"type": "token_usage_record", "thread_token_usage": usage}
+    if thread_id is not None:
+        record["thread_id"] = thread_id
+    return json.dumps(record)
 
 
 def claude_assistant(message_id, input_tokens, cache_creation, cache_read, output_tokens, tool_id=None, tool_name="Read"):
@@ -112,12 +124,13 @@ class FeatureBudget(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def write_session(self, name, total, session_id=None, parent_thread_id=None):
+    def write_session(self, name, total, session_id=None, parent_thread_id=None, agent_id=None, inherited_session_id=None, extra_lines=None):
         path = self.sessions / name
         lines = []
         if session_id is not None:
-            lines.append(session_meta_line(session_id, parent_thread_id))
+            lines.append(session_meta_line(session_id, parent_thread_id, agent_id, inherited_session_id))
         lines.append(token_line(total))
+        lines.extend(extra_lines or [])
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return path
 
@@ -134,6 +147,50 @@ class FeatureBudget(unittest.TestCase):
                 "INSERT INTO remote_agent_workflow_events "
                 "(workflow_run_id, event_type, step_name, data) VALUES (?,?,?,?)",
                 (run_id, "tool_called", node_id, json.dumps({"provider": "codex"})),
+            )
+
+    def record_hosted_task(self, run_id, task_name="review", agent_id=None, call_id=None, output="done", event_type="tool_completed", tool_name=None):
+        payload = {"task_name": task_name, "output": output}
+        if tool_name is not None:
+            payload["tool_name"] = tool_name
+        if agent_id is not None:
+            payload["agent_id"] = agent_id
+        if call_id is not None:
+            payload["tool_call_id"] = call_id
+        with sqlite3.connect(self.db) as con:
+            con.execute(
+                "INSERT INTO remote_agent_workflow_events "
+                "(workflow_run_id, event_type, step_name, data) VALUES (?,?,?,?)",
+                (run_id, event_type, "planner", json.dumps(payload)),
+            )
+
+    def write_provider_state_edge(self, parent_id, child_id, status="completed", task_name=None, agent_id=None):
+        db = self.home / "state_5.sqlite"
+        with sqlite3.connect(db) as con:
+            columns = ["parent_thread_id TEXT", "child_thread_id TEXT", "status TEXT"]
+            values = [parent_id, child_id, status]
+            if task_name is not None:
+                columns.append("task_name TEXT")
+                values.append(task_name)
+            if agent_id is not None:
+                columns.append("agent_id TEXT")
+                values.append(agent_id)
+            con.execute(
+                "CREATE TABLE IF NOT EXISTS thread_spawn_edges "
+                f"({', '.join(columns)})"
+            )
+            placeholders = ",".join("?" for _ in values)
+            con.execute(
+                f"INSERT INTO thread_spawn_edges VALUES ({placeholders})",
+                tuple(values),
+            )
+            con.execute(
+                "CREATE TABLE IF NOT EXISTS threads "
+                "(id TEXT, rollout_path TEXT, source TEXT, model TEXT, reasoning_effort TEXT)"
+            )
+            con.execute(
+                "INSERT OR REPLACE INTO threads VALUES (?,?,?,?,?)",
+                (child_id, f"sessions/2026/09/11/rollout-child-{child_id}.jsonl", "subagent", "gpt-5.6-sol", "medium"),
             )
 
     def record_workflow_started(self, run_id):
@@ -388,6 +445,240 @@ class FeatureBudget(unittest.TestCase):
         result = self.run_budget("usage", "--chain-id", CHAIN, "--db", str(self.db), "--require-sessions", "--json")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["total_tokens"], 0)
+
+
+    def test_newer_token_usage_record_cumulative_highwater_wins_mixed_old_rows(self):
+        self.init_budget(tokens=5_000_000)
+        run_id = "e" * 32
+        session_id = "01a06ac7-4d10-7710-b293-2f4a0df2d522"
+        session = self.write_session(
+            f"rollout-2026-09-03T22-57-21-{session_id}.jsonl",
+            2_945_953,
+            session_id=session_id,
+            extra_lines=[
+                token_usage_record_line(3_048_117, thread_id=session_id),
+                token_usage_record_line(100, thread_id="foreign-thread"),
+            ],
+        )
+        result = self.run_budget(
+            "bind-run", "--chain-id", CHAIN, "--run-id", run_id, "--session-file", str(session)
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        summary = self.usage()
+
+        self.assertEqual(3_048_117, summary["total_tokens"])
+        self.assertEqual(3_048_107, summary["input_tokens"])
+        self.assertEqual(10, summary["output_tokens"])
+        self.assertEqual(3_048_117, self.usage()["total_tokens"])
+
+    def test_hosted_collaboration_task_without_native_child_accounting_fails_closed(self):
+        self.init_budget()
+        run_id = "e" * 32
+        result = self.run_budget("bind-run", "--chain-id", CHAIN, "--run-id", run_id)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.record_hosted_task(run_id, task_name="critic")
+
+        result = self.run_budget("active-start", "--chain-id", CHAIN, "--run-id", run_id, "--db", str(self.db))
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("hosted collaboration output without accounted native child session", result.stderr)
+
+    def test_provider_sqlite_spawn_edges_account_native_hosted_children(self):
+        self.init_budget()
+        run_id = "e" * 32
+        parent = "01a09917-ce69-7682-bf8b-a4c9146c66d6"
+        child = "01a0991a-0b89-7cf3-9768-247c8062fdeb"
+        self.write_session(f"rollout-parent-{parent}.jsonl", 100, session_id=parent)
+        self.write_session(
+            f"rollout-child-{child}.jsonl",
+            50,
+            session_id=child,
+            inherited_session_id=parent,
+            extra_lines=[token_usage_record_line(75, thread_id=child)],
+        )
+        self.write_provider_state_edge(parent, child, task_name="critic")
+        self.record_hosted_task(run_id, task_name="critic")
+        result = self.run_budget("bind-session", "--chain-id", CHAIN, "--run-id", run_id, "--session-id", parent)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        result = self.run_budget("usage", "--chain-id", CHAIN, "--db", str(self.db), "--require-sessions", "--json")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        summary = json.loads(result.stdout)
+        self.assertEqual(2, summary["sessions"])
+        self.assertEqual(175, summary["total_tokens"])
+
+
+    def test_provider_sqlite_reachable_child_missing_session_fails_closed(self):
+        self.init_budget()
+        run_id = "e" * 32
+        parent = "01a09917-ce69-7682-bf8b-a4c9146c66d6"
+        child = "01a0991a-0b89-7cf3-9768-247c8062fdeb"
+        self.write_session(f"rollout-parent-{parent}.jsonl", 100, session_id=parent)
+        self.write_provider_state_edge(parent, child, task_name="critic")
+        result = self.run_budget("bind-session", "--chain-id", CHAIN, "--run-id", run_id, "--session-id", parent)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        result = self.run_budget("usage", "--chain-id", CHAIN, "--db", str(self.db), "--json")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("expected one Codex session file", result.stderr)
+
+    def test_provider_sqlite_reachable_child_spoof_session_fails_closed(self):
+        self.init_budget()
+        run_id = "e" * 32
+        parent = "01a09917-ce69-7682-bf8b-a4c9146c66d6"
+        child = "01a0991a-0b89-7cf3-9768-247c8062fdeb"
+        self.write_session(f"rollout-parent-{parent}.jsonl", 100, session_id=parent)
+        spoof = "01a0991a-0b89-7cf3-9768-247c8062fdec"
+        self.write_session(f"rollout-child-{child}.jsonl", 50, session_id=spoof)
+        self.write_provider_state_edge(parent, child, task_name="critic")
+        result = self.run_budget("bind-session", "--chain-id", CHAIN, "--run-id", run_id, "--session-id", parent)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        result = self.run_budget("usage", "--chain-id", CHAIN, "--db", str(self.db), "--json")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("expected one Codex session file", result.stderr)
+
+    def test_provider_sqlite_unsupported_ancestry_schema_fails_closed(self):
+        self.init_budget()
+        run_id = "e" * 32
+        parent = "01a09917-ce69-7682-bf8b-a4c9146c66d6"
+        self.write_session(f"rollout-parent-{parent}.jsonl", 100, session_id=parent)
+        with sqlite3.connect(self.home / "state_5.sqlite") as con:
+            con.execute("CREATE TABLE thread_spawn_edges (parent TEXT, child TEXT)")
+            con.execute("INSERT INTO thread_spawn_edges VALUES (?,?)", (parent, "child"))
+        result = self.run_budget("bind-session", "--chain-id", CHAIN, "--run-id", run_id, "--session-id", parent)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        result = self.run_budget("usage", "--chain-id", CHAIN, "--db", str(self.db), "--json")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("provider thread ancestry schema is unsupported", result.stderr)
+
+    def test_hosted_collaboration_second_unmatched_task_fails_closed(self):
+        self.init_budget()
+        run_id = "e" * 32
+        parent = "01a09917-ce69-7682-bf8b-a4c9146c66d6"
+        child = "01a0991a-0b89-7cf3-9768-247c8062fdeb"
+        self.write_session(f"rollout-parent-{parent}.jsonl", 100, session_id=parent)
+        self.write_session(f"rollout-child-{child}.jsonl", 50, session_id=child, inherited_session_id=parent)
+        self.write_provider_state_edge(parent, child, task_name="critic")
+        self.record_hosted_task(run_id, task_name="critic")
+        self.record_hosted_task(run_id, task_name="reviser")
+        result = self.run_budget("bind-session", "--chain-id", CHAIN, "--run-id", run_id, "--session-id", parent)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        result = self.run_budget("usage", "--chain-id", CHAIN, "--db", str(self.db), "--json")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("hosted collaboration output without accounted native child session", result.stderr)
+
+
+    def test_hosted_collaboration_same_name_distinct_outputs_need_distinct_children(self):
+        self.init_budget()
+        run_id = "e" * 32
+        parent = "01a09917-ce69-7682-bf8b-a4c9146c66d6"
+        child = "01a0991a-0b89-7cf3-9768-247c8062fdeb"
+        self.write_session(f"rollout-parent-{parent}.jsonl", 100, session_id=parent)
+        self.write_session(f"rollout-child-{child}.jsonl", 50, session_id=child, inherited_session_id=parent)
+        self.write_provider_state_edge(parent, child, task_name="critic")
+        self.record_hosted_task(run_id, task_name="critic", output="first")
+        self.record_hosted_task(run_id, task_name="critic", output="second")
+        result = self.run_budget("bind-session", "--chain-id", CHAIN, "--run-id", run_id, "--session-id", parent)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        result = self.run_budget("usage", "--chain-id", CHAIN, "--db", str(self.db), "--json")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("hosted collaboration output without accounted native child session", result.stderr)
+
+    def test_hosted_collaboration_repeated_same_call_id_completion_dedups(self):
+        self.init_budget()
+        run_id = "e" * 32
+        parent = "01a09917-ce69-7682-bf8b-a4c9146c66d6"
+        child = "01a0991a-0b89-7cf3-9768-247c8062fdeb"
+        self.write_session(f"rollout-parent-{parent}.jsonl", 100, session_id=parent)
+        self.write_session(f"rollout-child-{child}.jsonl", 50, session_id=child, inherited_session_id=parent)
+        self.write_provider_state_edge(parent, child, task_name="critic")
+        self.record_hosted_task(run_id, task_name="critic", call_id="call-1", output="same")
+        self.record_hosted_task(run_id, task_name="critic", call_id="call-1", output="same")
+        self.record_hosted_task(run_id, task_name="critic", call_id="call-1", output="same", event_type="tool_called")
+        result = self.run_budget("bind-session", "--chain-id", CHAIN, "--run-id", run_id, "--session-id", parent)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        result = self.run_budget("usage", "--chain-id", CHAIN, "--db", str(self.db), "--json")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(150, json.loads(result.stdout)["total_tokens"])
+
+
+    def test_hosted_collaboration_agent_id_mismatch_does_not_fallback_to_task_name(self):
+        self.init_budget()
+        run_id = "e" * 32
+        parent = "01a09917-ce69-7682-bf8b-a4c9146c66d6"
+        child = "01a0991a-0b89-7cf3-9768-247c8062fdeb"
+        self.write_session(f"rollout-parent-{parent}.jsonl", 100, session_id=parent)
+        self.write_session(f"rollout-child-{child}.jsonl", 50, session_id=child, inherited_session_id=parent)
+        self.write_provider_state_edge(parent, child, task_name="critic", agent_id="agent-good")
+        self.record_hosted_task(run_id, task_name="critic", agent_id="agent-other")
+        result = self.run_budget("bind-session", "--chain-id", CHAIN, "--run-id", run_id, "--session-id", parent)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        result = self.run_budget("usage", "--chain-id", CHAIN, "--db", str(self.db), "--json")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("hosted collaboration output without accounted native child session", result.stderr)
+
+    def test_hosted_collaboration_identical_unkeyed_outputs_need_distinct_children(self):
+        self.init_budget()
+        run_id = "e" * 32
+        parent = "01a09917-ce69-7682-bf8b-a4c9146c66d6"
+        child = "01a0991a-0b89-7cf3-9768-247c8062fdeb"
+        self.write_session(f"rollout-parent-{parent}.jsonl", 100, session_id=parent)
+        self.write_session(f"rollout-child-{child}.jsonl", 50, session_id=child, inherited_session_id=parent)
+        self.write_provider_state_edge(parent, child, task_name="critic")
+        self.record_hosted_task(run_id, task_name="critic", output="same")
+        self.record_hosted_task(run_id, task_name="critic", output="same")
+        result = self.run_budget("bind-session", "--chain-id", CHAIN, "--run-id", run_id, "--session-id", parent)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        result = self.run_budget("usage", "--chain-id", CHAIN, "--db", str(self.db), "--json")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("hosted collaboration output without accounted native child session", result.stderr)
+
+    def test_hosted_collaboration_same_call_id_dedups_different_incidental_payload(self):
+        self.init_budget()
+        run_id = "e" * 32
+        parent = "01a09917-ce69-7682-bf8b-a4c9146c66d6"
+        child = "01a0991a-0b89-7cf3-9768-247c8062fdeb"
+        self.write_session(f"rollout-parent-{parent}.jsonl", 100, session_id=parent)
+        self.write_session(f"rollout-child-{child}.jsonl", 50, session_id=child, inherited_session_id=parent)
+        self.write_provider_state_edge(parent, child, task_name="critic")
+        self.record_hosted_task(run_id, task_name="critic", call_id="call-1", output="first")
+        self.record_hosted_task(run_id, task_name="critic", call_id="call-1", output="second")
+        result = self.run_budget("bind-session", "--chain-id", CHAIN, "--run-id", run_id, "--session-id", parent)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        result = self.run_budget("usage", "--chain-id", CHAIN, "--db", str(self.db), "--json")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(150, json.loads(result.stdout)["total_tokens"])
+
+    def test_hosted_collaboration_followup_completion_is_excluded(self):
+        self.init_budget()
+        run_id = "e" * 32
+        result = self.run_budget("bind-run", "--chain-id", CHAIN, "--run-id", run_id)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.record_hosted_task(run_id, task_name="critic", tool_name="followup_task")
+
+        result = self.run_budget("usage", "--chain-id", CHAIN, "--db", str(self.db), "--json")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(0, json.loads(result.stdout)["total_tokens"])
 
     def test_token_high_water_prevents_session_truncation_replenishing_budget(self):
         self.init_budget()

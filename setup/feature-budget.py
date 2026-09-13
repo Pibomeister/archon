@@ -688,7 +688,7 @@ def read_session_meta_payload(path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def session_parent_id(payload: dict[str, Any]) -> str | None:
+def session_thread_spawn(payload: dict[str, Any]) -> dict[str, Any] | None:
     source = payload.get("source")
     if not isinstance(source, dict):
         return None
@@ -696,7 +696,12 @@ def session_parent_id(payload: dict[str, Any]) -> str | None:
     if not isinstance(subagent, dict):
         return None
     spawn = subagent.get("thread_spawn")
-    if not isinstance(spawn, dict):
+    return spawn if isinstance(spawn, dict) else None
+
+
+def session_parent_id(payload: dict[str, Any]) -> str | None:
+    spawn = session_thread_spawn(payload)
+    if spawn is None:
         return None
     parent = spawn.get("parent_thread_id")
     if not isinstance(parent, str) or not parent.strip():
@@ -704,11 +709,81 @@ def session_parent_id(payload: dict[str, Any]) -> str | None:
     return validate_session_id(parent)
 
 
+def session_agent_id(payload: dict[str, Any]) -> str | None:
+    spawn = session_thread_spawn(payload)
+    if spawn is None:
+        return None
+    agent_id = spawn.get("agent_id")
+    if not isinstance(agent_id, str) or not agent_id.strip():
+        return None
+    return agent_id.strip()
+
+
 def session_meta_id(payload: dict[str, Any]) -> str | None:
     session_id = payload.get("id")
-    if not isinstance(session_id, str) or payload.get("session_id") != session_id:
+    if not isinstance(session_id, str) or not session_id.strip():
         return None
     return validate_session_id(session_id)
+
+
+def provider_state_paths(codex_home: Path) -> list[Path]:
+    return sorted(codex_home.glob("state_*.sqlite"))
+
+
+def sqlite_columns(con: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        return {row[1] for row in con.execute(f"PRAGMA table_info({table})").fetchall()}
+    except sqlite3.Error:
+        return set()
+
+
+def first_column(columns: set[str], candidates: tuple[str, ...]) -> str | None:
+    for candidate in candidates:
+        if candidate in columns:
+            return candidate
+    return None
+
+
+def provider_spawn_edges(codex_home: Path) -> list[dict[str, str]]:
+    edges: list[dict[str, str]] = []
+    for db_path in provider_state_paths(codex_home):
+        try:
+            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            try:
+                if not table_exists(con, "thread_spawn_edges"):
+                    continue
+                columns = sqlite_columns(con, "thread_spawn_edges")
+                parent_col = first_column(columns, ("parent_thread_id", "parent_thread", "source_thread_id", "source_id"))
+                child_col = first_column(columns, ("child_thread_id", "child_thread", "target_thread_id", "spawned_thread_id"))
+                if parent_col is None or child_col is None:
+                    raise BudgetError(f"provider thread ancestry schema is unsupported: {db_path}")
+                optional = [name for name in ("agent_id", "agentId", "task_name", "taskName", "status") if name in columns]
+                select_cols = [parent_col, child_col, *optional]
+                for row in con.execute(f"SELECT {', '.join(select_cols)} FROM thread_spawn_edges").fetchall():
+                    data = dict(zip(select_cols, row))
+                    parent = data.get(parent_col)
+                    child = data.get(child_col)
+                    if not isinstance(parent, str) or not isinstance(child, str):
+                        continue
+                    try:
+                        edge = {"parent_thread_id": validate_session_id(parent), "child_thread_id": validate_session_id(child)}
+                    except BudgetError:
+                        continue
+                    agent_id = data.get("agent_id") or data.get("agentId")
+                    task_name = data.get("task_name") or data.get("taskName")
+                    if isinstance(agent_id, str) and agent_id.strip():
+                        edge["agent_id"] = agent_id.strip()
+                    if isinstance(task_name, str) and task_name.strip():
+                        edge["task_name"] = task_name.strip()
+                    status = data.get("status")
+                    if isinstance(status, str) and status.strip():
+                        edge["status"] = status.strip()
+                    edges.append(edge)
+            finally:
+                con.close()
+        except sqlite3.Error as exc:
+            raise BudgetError(f"provider thread ancestry unavailable: {db_path}: {exc}") from exc
+    return edges
 
 
 def discover_descendant_session_ids(codex_home: Path, root_ids: list[str]) -> list[str]:
@@ -717,6 +792,7 @@ def discover_descendant_session_ids(codex_home: Path, root_ids: list[str]) -> li
         return []
     candidates = sorted(glob.glob(str(codex_home / "sessions" / "*" / "*" / "*" / "*.jsonl")))
     discovered: set[str] = set()
+    edges = provider_spawn_edges(codex_home)
     changed = True
     while changed:
         changed = False
@@ -732,6 +808,15 @@ def discover_descendant_session_ids(codex_home: Path, root_ids: list[str]) -> li
                 continue
             known.add(session_id)
             discovered.add(session_id)
+            changed = True
+        for edge in edges:
+            parent_id = edge["parent_thread_id"]
+            child_id = edge["child_thread_id"]
+            if parent_id not in known or child_id in known:
+                continue
+            discover_session_file(codex_home, child_id)
+            known.add(child_id)
+            discovered.add(child_id)
             changed = True
     return sorted(discovered)
 
@@ -848,6 +933,164 @@ def run_has_codex_activity(db: Path, run_id: str) -> bool:
     return False
 
 
+def session_native_evidence(run: dict[str, Any], codex_home: Path) -> list[dict[str, str]]:
+    session_ids = {item for item in run.get("session_ids", []) if isinstance(item, str)}
+    records: list[dict[str, str]] = []
+    for rel in run.get("session_files", []):
+        if not isinstance(rel, str) or rel.startswith("/") or ".." in rel.split("/"):
+            continue
+        payload = read_session_meta_payload(codex_home / rel)
+        if payload is None:
+            continue
+        session_id = session_meta_id(payload)
+        if session_id is None or session_id not in session_ids:
+            continue
+        record = {"child_thread_id": session_id}
+        agent_id = session_agent_id(payload)
+        if agent_id:
+            record["agent_id"] = agent_id
+        records.append(record)
+    for edge in provider_spawn_edges(codex_home):
+        if edge["child_thread_id"] not in session_ids:
+            continue
+        record = {"child_thread_id": edge["child_thread_id"]}
+        if edge.get("agent_id"):
+            record["agent_id"] = edge["agent_id"]
+        if edge.get("task_name"):
+            record["task_name"] = edge["task_name"]
+        records.append(record)
+    deduped: dict[tuple[str | None, str | None, str], dict[str, str]] = {}
+    for record in records:
+        key = (record.get("task_name"), record.get("agent_id"), record["child_thread_id"])
+        deduped[key] = record
+    return list(deduped.values())
+
+
+def collect_key_values(value: Any, key: str) -> set[str]:
+    found: set[str] = set()
+    if isinstance(value, dict):
+        for item_key, item_value in value.items():
+            if item_key == key and isinstance(item_value, str) and item_value.strip():
+                found.add(item_value.strip())
+            found.update(collect_key_values(item_value, key))
+    elif isinstance(value, list):
+        for item in value:
+            found.update(collect_key_values(item, key))
+    return found
+
+
+def first_key_value(value: Any, keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        values = collect_key_values(value, key)
+        if len(values) > 1:
+            raise BudgetError(f"hosted collaboration output has conflicting {key} values")
+        if values:
+            return next(iter(values))
+    return None
+
+
+def hosted_output_identity(data: Any, task_name: str, agent_id: str | None, call_id: str | None) -> dict[str, str]:
+    identity = {"task_name": task_name}
+    if agent_id:
+        identity["agent_id"] = agent_id
+    if call_id:
+        identity["call_id"] = call_id
+    tool_name = first_key_value(data, ("tool_name", "toolName", "name"))
+    if tool_name:
+        identity["tool_name"] = tool_name
+    return identity
+
+
+def is_followup_task_delivery(data: Any) -> bool:
+    tool_names = collect_key_values(data, "tool_name") | collect_key_values(data, "toolName") | collect_key_values(data, "name")
+    return "followup_task" in tool_names
+
+
+def run_hosted_task_outputs(db: Path, run_id: str) -> list[dict[str, str]]:
+    try:
+        con = sqlite3.connect(db)
+        try:
+            if not table_exists(con, "remote_agent_workflow_events"):
+                return []
+            columns = {row[1] for row in con.execute("PRAGMA table_info(remote_agent_workflow_events)").fetchall()}
+            data_col = "data" if "data" in columns else "payload" if "payload" in columns else None
+            event_col = "event_type" if "event_type" in columns else None
+            if data_col is None or "workflow_run_id" not in columns:
+                return []
+            select_cols = [data_col]
+            if event_col:
+                select_cols.append(event_col)
+            rows = con.execute(
+                f"SELECT {', '.join(select_cols)} FROM remote_agent_workflow_events WHERE workflow_run_id = ?",
+                (run_id,),
+            ).fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error as exc:
+        raise BudgetError(f"workflow hosted-collaboration lookup failed: {exc}") from exc
+    outputs_by_key: dict[str, dict[str, str]] = {}
+    outputs: list[dict[str, str]] = []
+    for row in rows:
+        raw = row[0]
+        event_type = str(row[1] if len(row) > 1 else "").lower()
+        if event_type in {"tool_called", "followup_task"}:
+            continue
+        try:
+            data = json.loads(raw) if isinstance(raw, str) and raw else {}
+        except ValueError:
+            continue
+        if is_followup_task_delivery(data):
+            continue
+        task_name = first_key_value(data, ("task_name", "taskName"))
+        if task_name is None:
+            continue
+        agent_id = first_key_value(data, ("agent_id", "agentId"))
+        call_id = first_key_value(data, ("tool_call_id", "toolCallId", "call_id", "callId", "tool_use_id", "toolUseID"))
+        record = hosted_output_identity(data, task_name, agent_id, call_id)
+        if call_id:
+            previous = outputs_by_key.get(call_id)
+            if previous is not None:
+                if previous != record:
+                    raise BudgetError("hosted collaboration call id was reused for conflicting output identity")
+                continue
+            outputs_by_key[call_id] = record
+        outputs.append(record)
+    return outputs
+
+
+def hosted_output_matches_evidence(output: dict[str, str], evidence: dict[str, str]) -> bool:
+    agent_id = output.get("agent_id")
+    if agent_id:
+        return evidence.get("agent_id") == agent_id
+    return bool(output.get("task_name") and evidence.get("task_name") == output.get("task_name"))
+
+
+def require_hosted_tasks_accounted(db: Path | None, run: dict[str, Any], codex_home: Path) -> None:
+    if db is None:
+        return
+    run_id = run.get("run_id")
+    if not isinstance(run_id, str):
+        return
+    outputs = run_hosted_task_outputs(db, run_id)
+    if not outputs:
+        return
+    available = session_native_evidence(run, codex_home)
+    used: set[int] = set()
+    for output in outputs:
+        matched = None
+        for index, evidence in enumerate(available):
+            if index in used:
+                continue
+            if hosted_output_matches_evidence(output, evidence):
+                matched = index
+                break
+        if matched is None:
+            raise BudgetError(
+                f"run {run_id[:8]} has hosted collaboration output without accounted native child session"
+            )
+        used.add(matched)
+
+
 def refresh_recorded_sessions(state: dict[str, Any], db: Path | None, codex_home: Path, require_sessions: bool) -> None:
     for run in state.get("runs", []):
         run_id = run.get("run_id")
@@ -856,6 +1099,7 @@ def refresh_recorded_sessions(state: dict[str, Any], db: Path | None, codex_home
         db_ids = db_session_ids(db, run_id) if db is not None else []
         id_count = add_session_ids(run, db_ids)
         file_count = resolve_session_ids(run, codex_home)
+        require_hosted_tasks_accounted(db, run, codex_home)
         if not run.get("session_files") and db is not None and require_sessions and run_has_codex_activity(db, run_id):
             raise BudgetError(f"run {run_id[:8]} has Codex activity but no recorded Codex session")
         if id_count or file_count:
@@ -1068,31 +1312,68 @@ def command_terminate_groups(args: argparse.Namespace) -> None:
     print(f"FEATURE_BUDGET=GROUPS_TERMINATED chain={args.chain_id} count={len(rows)}")
 
 
+def usage_from_mapping(usage: Any) -> dict[str, int] | None:
+    if isinstance(usage, int):
+        if usage < 0:
+            raise BudgetError("session token usage must be non-negative")
+        return {"input_tokens": usage, "cached_input_tokens": 0, "output_tokens": 0, "total_tokens": usage}
+    if not isinstance(usage, dict):
+        return None
+    total = usage.get("total_tokens", usage.get("total"))
+    input_tokens = usage.get("input_tokens", usage.get("input", 0))
+    cached = usage.get("cached_input_tokens", usage.get("cache_read_input_tokens", usage.get("cached", 0)))
+    output = usage.get("output_tokens", usage.get("output", 0))
+    if total is None:
+        total = int(input_tokens or 0) + int(output or 0)
+    return {
+        "input_tokens": non_negative_int(int(input_tokens or 0), "session input tokens"),
+        "cached_input_tokens": non_negative_int(int(cached or 0), "session cached input tokens"),
+        "output_tokens": non_negative_int(int(output or 0), "session output tokens"),
+        "total_tokens": non_negative_int(int(total or 0), "session total tokens"),
+    }
+
+
+def token_usage_from_line(data: dict[str, Any], expected_thread_id: str | None = None) -> dict[str, int] | None:
+    payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+    if data.get("type") == "token_usage_record":
+        thread_id = data.get("thread_id") or payload.get("thread_id")
+        if expected_thread_id and isinstance(thread_id, str) and thread_id != expected_thread_id:
+            return None
+        return usage_from_mapping(data.get("thread_token_usage") or payload.get("thread_token_usage"))
+    if payload.get("type") == "token_usage_record":
+        thread_id = payload.get("thread_id")
+        if expected_thread_id and isinstance(thread_id, str) and thread_id != expected_thread_id:
+            return None
+        return usage_from_mapping(payload.get("thread_token_usage"))
+    if payload.get("type") == "token_count":
+        info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+        return usage_from_mapping(info.get("total_token_usage"))
+    return None
+
+
 def session_usage(path: Path) -> dict[str, int]:
     usage = None
+    meta = read_session_meta_payload(path)
+    expected_thread_id = session_meta_id(meta) if meta is not None else None
     try:
         with path.open(encoding="utf-8") as fh:
             for line in fh:
-                if '"token_count"' not in line:
+                if '"token_count"' not in line and '"token_usage_record"' not in line:
                     continue
                 try:
                     data = json.loads(line)
                 except ValueError:
                     continue
-                info = (data.get("payload") or {}).get("info") or {}
-                current = info.get("total_token_usage")
-                if isinstance(current, dict):
+                current = token_usage_from_line(data, expected_thread_id)
+                if current is None:
+                    continue
+                if usage is None or current["total_tokens"] >= usage["total_tokens"]:
                     usage = current
     except OSError as exc:
         raise BudgetError(f"session accounting unavailable for {path}: {exc}") from exc
     if usage is None:
         return {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
-    return {
-        "input_tokens": int(usage.get("input_tokens", 0) or 0),
-        "cached_input_tokens": int(usage.get("cached_input_tokens", 0) or 0),
-        "output_tokens": int(usage.get("output_tokens", 0) or 0),
-        "total_tokens": int(usage.get("total_tokens", 0) or 0),
-    }
+    return usage
 
 
 def active_seconds(state: dict[str, Any], now: int) -> int:
@@ -1187,7 +1468,7 @@ def discover_session_file(codex_home: Path, session_id: str) -> Path:
 
 def session_file_has_id(path: Path, session_id: str) -> bool:
     payload = read_session_meta_payload(path)
-    return payload is not None and payload.get("id") == session_id and payload.get("session_id") == session_id
+    return payload is not None and session_meta_id(payload) == session_id
 
 
 def parser() -> argparse.ArgumentParser:

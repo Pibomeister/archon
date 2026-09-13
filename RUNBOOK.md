@@ -1224,6 +1224,17 @@ Repository-list commit checks do not inherit the scalar helper's sibling-file
 auto-expansion: their exact signed stage allowance is authoritative. An absent
 file allowance is a scope finding, not permission to broaden the local manifest.
 
+Codex accounting uses the first rollout `session_meta.id` as the thread identity;
+`session_id` may be inherited from a parent. Descendants are resolved from both
+rollout ancestry and the provider's root `state_*.sqlite` thread-spawn edges.
+An owned child with missing or mismatched evidence, or an unsupported ancestry
+schema, makes accounting unavailable instead of silently omitting usage.
+Both legacy `token_count` and newer `token_usage_record.thread_token_usage`
+contribute cumulative high-water marks, counted once per owned session. This
+captures final-response receipts that can arrive after the last legacy counter.
+Reconciliation may reveal a previously exceeded cap; record all recovered usage
+and retain containment. Never reset usage or increase limits to hide an overrun.
+
 An operator may supply cited factual corrections in a run-local `AGENTS.md` for
 planning nodes, whose working directory is the run's artifacts directory. This
 supplements the captured prompt without replacing its workflow or model. It is

@@ -150,6 +150,12 @@ For the guarded Codex path:
   including planning, retries, all repository stages, and integration. Approval
   waits do not consume active time. Exact recorded Codex sessions and native
   subagent ancestry are deduplicated; unrelated concurrent features are excluded.
+  The first rollout `session_meta.id` identifies its thread even when `session_id`
+  is inherited. Provider SQLite spawn edges supplement rollout ancestry; owned
+  child evidence must be present and consistent. New `token_usage_record`
+  cumulative receipts supplement legacy counters, including final responses.
+  An accounting correction can expose an existing overrun: preserve every count
+  and keep the run stopped until a sufficient allowance is explicitly authorized.
   Resumes never replenish the budget. Unavailable accounting is a containment
   failure, and exhausted budgets prevent dispatch. Do not claim this Codex
   watchdog/accounting guarantee for the separate Claude path.
