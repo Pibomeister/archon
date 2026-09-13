@@ -14,6 +14,7 @@ import contextlib
 import datetime
 import fcntl
 import glob
+import hashlib
 import json
 import os
 import re
@@ -316,6 +317,327 @@ def command_bind_session(args: argparse.Namespace) -> None:
     print(f"FEATURE_BUDGET=SESSION chain={args.chain_id} run={run_id[:8]} added={added}")
 
 
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    try:
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+    except OSError as exc:
+        raise BudgetError(f"evidence file cannot be read: {path}: {exc}") from exc
+    return h.hexdigest()
+
+
+def sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def non_negative_int(value: Any, name: str) -> int:
+    if type(value) is not int or value < 0:
+        raise BudgetError(f"{name} must be a non-negative integer")
+    return value
+
+
+def normalize_model(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise BudgetError("provider usage model is missing")
+    return re.sub(r"\[[^\]]+\]\s*$", "", value.strip())
+
+
+def event_row_by_id(db: Path, event_id: str) -> dict[str, Any]:
+    if not isinstance(event_id, str) or not event_id.strip():
+        raise BudgetError("provider usage event id is required")
+    try:
+        con = sqlite3.connect(db)
+        try:
+            if not table_exists(con, "remote_agent_workflow_events"):
+                raise BudgetError("workflow events table is unavailable")
+            columns = [row[1] for row in con.execute("PRAGMA table_info(remote_agent_workflow_events)").fetchall()]
+            if "id" not in columns:
+                raise BudgetError("workflow events table has no event id column")
+            row = con.execute(
+                f"SELECT {', '.join(columns)} FROM remote_agent_workflow_events WHERE id = ?",
+                (event_id,),
+            ).fetchone()
+        finally:
+            con.close()
+    except sqlite3.Error as exc:
+        raise BudgetError(f"workflow event lookup failed: {exc}") from exc
+    if row is None:
+        raise BudgetError("provider usage event was not found")
+    return dict(zip(columns, row))
+
+
+def event_tool_ids(db: Path, run_id: str) -> set[str]:
+    try:
+        con = sqlite3.connect(db)
+        try:
+            if not table_exists(con, "remote_agent_workflow_events"):
+                raise BudgetError("workflow events table is unavailable")
+            columns = {row[1] for row in con.execute("PRAGMA table_info(remote_agent_workflow_events)").fetchall()}
+            if "workflow_run_id" not in columns or "data" not in columns:
+                return set()
+            rows = con.execute(
+                "SELECT data FROM remote_agent_workflow_events "
+                "WHERE workflow_run_id = ? AND event_type IN ('tool_called', 'tool_completed')",
+                (run_id,),
+            ).fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error as exc:
+        raise BudgetError(f"workflow tool ownership lookup failed: {exc}") from exc
+    ids: set[str] = set()
+    for (raw,) in rows:
+        try:
+            data = json.loads(raw) if isinstance(raw, str) and raw else {}
+        except ValueError:
+            continue
+        for key in ("tool_call_id", "toolUseID", "tool_use_id"):
+            value = data.get(key) if isinstance(data, dict) else None
+            if isinstance(value, str) and value:
+                ids.add(value)
+    return ids
+
+
+def parse_provider_event(db: Path, event_id: str, run_id: str) -> dict[str, Any]:
+    row = event_row_by_id(db, event_id)
+    if row.get("workflow_run_id") != run_id:
+        raise BudgetError("provider usage event does not belong to the registered run")
+    if row.get("event_type") != "node_completed":
+        raise BudgetError("provider usage event must be a completed node event")
+    raw = row.get("data")
+    if not isinstance(raw, str) or not raw:
+        raise BudgetError("provider usage event has no JSON data")
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise BudgetError("provider usage event data is malformed") from exc
+    tokens = data.get("tokens")
+    if not isinstance(tokens, dict):
+        raise BudgetError("provider usage event is missing token totals")
+    inclusive_input = non_negative_int(tokens.get("input"), "event input tokens")
+    output_tokens = non_negative_int(tokens.get("output"), "event output tokens")
+    cache_read = non_negative_int(tokens.get("cacheRead"), "event cache read tokens")
+    cache_write = non_negative_int(tokens.get("cacheWrite"), "event cache write tokens")
+    uncached_input = inclusive_input - cache_read - cache_write
+    if uncached_input < 0:
+        raise BudgetError("provider usage event cache tokens exceed inclusive input")
+    model_usage = data.get("model_usage")
+    if not isinstance(model_usage, dict):
+        raise BudgetError("provider usage event is missing model usage")
+    model = normalize_model(model_usage.get("resolved"))
+    provider = "claude" if model.startswith("claude-") else "unknown"
+    if provider == "unknown":
+        raise BudgetError("provider usage event model is not a supported provider model")
+    return {
+        "event_id": event_id,
+        "event_sha256": sha256_text(raw),
+        "run_id": run_id,
+        "node": row.get("step_name") or row.get("node_name"),
+        "provider": provider,
+        "model": model,
+        "event_model": model_usage.get("resolved"),
+        "provider_usage": {
+            "uncached_input_tokens": uncached_input,
+            "cache_creation_input_tokens": cache_write,
+            "cache_read_input_tokens": cache_read,
+            "inclusive_input_tokens": inclusive_input,
+            "output_tokens": output_tokens,
+            "total_tokens": inclusive_input + output_tokens,
+        },
+        "usage": {
+            "input_tokens": inclusive_input,
+            "cached_input_tokens": cache_read,
+            "output_tokens": output_tokens,
+            "total_tokens": inclusive_input + output_tokens,
+        },
+    }
+
+
+def normalized_provider_usage(raw: dict[str, int]) -> dict[str, int]:
+    return {
+        "input_tokens": raw["inclusive_input_tokens"],
+        "cached_input_tokens": raw["cache_read_input_tokens"],
+        "output_tokens": raw["output_tokens"],
+        "total_tokens": raw["total_tokens"],
+    }
+
+
+def raw_provider_usage(raw: dict[str, int]) -> dict[str, int]:
+    return {
+        "uncached_input_tokens": raw["input_tokens"],
+        "cache_creation_input_tokens": raw["cache_creation_input_tokens"],
+        "cache_read_input_tokens": raw["cache_read_input_tokens"],
+        "inclusive_input_tokens": raw["input_tokens"] + raw["cache_creation_input_tokens"] + raw["cache_read_input_tokens"],
+        "output_tokens": raw["output_tokens"],
+        "total_tokens": raw["total_tokens"],
+    }
+
+
+def transcript_tool_ids_from_content(content: Any) -> tuple[set[str], set[str]]:
+    tool_ids: set[str] = set()
+    tool_names: set[str] = set()
+    if not isinstance(content, list):
+        return tool_ids, tool_names
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        value = item.get("id") or item.get("tool_use_id")
+        if isinstance(value, str) and value.startswith("toolu_"):
+            tool_ids.add(value)
+        name = item.get("name")
+        if isinstance(name, str):
+            tool_names.add(name)
+    return tool_ids, tool_names
+
+
+def parse_provider_transcript(path: Path) -> dict[str, Any]:
+    transcript_sha = sha256_file(path)
+    usage_by_message: dict[str, dict[str, int]] = {}
+    usage_rows = 0
+    tool_ids: set[str] = set()
+    tool_names: set[str] = set()
+    models: set[str] = set()
+    try:
+        with path.open(encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    data = json.loads(line)
+                except ValueError as exc:
+                    raise BudgetError("provider transcript contains malformed JSONL") from exc
+                message = data.get("message")
+                if not isinstance(message, dict):
+                    continue
+                model = message.get("model")
+                if isinstance(model, str) and model.strip():
+                    models.add(normalize_model(model))
+                found_ids, found_names = transcript_tool_ids_from_content(message.get("content"))
+                tool_ids.update(found_ids)
+                tool_names.update(found_names)
+                usage = message.get("usage")
+                message_id = message.get("id")
+                if not isinstance(usage, dict):
+                    continue
+                usage_rows += 1
+                if not isinstance(message_id, str) or not message_id.strip():
+                    raise BudgetError("provider transcript usage row is missing a message id")
+                item = {
+                    "input_tokens": non_negative_int(usage.get("input_tokens", 0), "transcript input tokens"),
+                    "cache_creation_input_tokens": non_negative_int(
+                        usage.get("cache_creation_input_tokens", 0), "transcript cache creation tokens"
+                    ),
+                    "cache_read_input_tokens": non_negative_int(
+                        usage.get("cache_read_input_tokens", 0), "transcript cache read tokens"
+                    ),
+                    "output_tokens": non_negative_int(usage.get("output_tokens", 0), "transcript output tokens"),
+                }
+                if message_id in usage_by_message and usage_by_message[message_id] != item:
+                    raise BudgetError("provider transcript has conflicting duplicate usage rows")
+                usage_by_message[message_id] = item
+    except OSError as exc:
+        raise BudgetError(f"provider transcript cannot be read: {path}: {exc}") from exc
+    if not usage_by_message:
+        raise BudgetError("provider transcript has no usage rows")
+    if tool_names.intersection({"Agent", "Task"}):
+        raise BudgetError("provider transcript contains unsupported child-agent tool usage")
+    totals = {"input_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+              "output_tokens": 0}
+    for usage in usage_by_message.values():
+        totals["input_tokens"] += usage["input_tokens"]
+        totals["cache_creation_input_tokens"] += usage["cache_creation_input_tokens"]
+        totals["cache_read_input_tokens"] += usage["cache_read_input_tokens"]
+        totals["output_tokens"] += usage["output_tokens"]
+    provider_usage = raw_provider_usage({
+        **totals,
+        "total_tokens": totals["input_tokens"] + totals["cache_creation_input_tokens"]
+        + totals["cache_read_input_tokens"] + totals["output_tokens"],
+    })
+    return {
+        "transcript_sha256": transcript_sha,
+        "model": next(iter(models)) if len(models) == 1 else None,
+        "models": sorted(models),
+        "usage_rows": usage_rows,
+        "unique_message_ids": len(usage_by_message),
+        "tool_use_ids": sorted(tool_ids),
+        "provider_usage": provider_usage,
+        "usage": normalized_provider_usage(provider_usage),
+    }
+
+
+def provider_receipt_totals(state: dict[str, Any]) -> dict[str, int]:
+    totals = {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    for receipt in state.get("provider_usage_receipts", []):
+        if not isinstance(receipt, dict):
+            raise BudgetError("provider usage receipt is malformed")
+        usage = receipt.get("usage")
+        if not isinstance(usage, dict):
+            raise BudgetError("provider usage receipt is missing usage")
+        totals["input_tokens"] += non_negative_int(usage.get("input_tokens", 0), "receipt input tokens")
+        totals["cached_input_tokens"] += non_negative_int(usage.get("cached_input_tokens", 0), "receipt cached input tokens")
+        totals["output_tokens"] += non_negative_int(usage.get("output_tokens", 0), "receipt output tokens")
+        totals["total_tokens"] += non_negative_int(usage.get("total_tokens", 0), "receipt total tokens")
+    return totals
+
+
+def validate_provider_receipt(db: Path, run_id: str, event_id: str, transcript: Path) -> dict[str, Any]:
+    event = parse_provider_event(db, event_id, run_id)
+    transcript_usage = parse_provider_transcript(transcript)
+    if transcript_usage["model"] != event["model"]:
+        raise BudgetError("provider transcript model does not match the completed event")
+    if transcript_usage["provider_usage"] != event["provider_usage"]:
+        raise BudgetError("provider transcript usage does not match the completed event")
+    owned_tool_ids = event_tool_ids(db, run_id)
+    transcript_tool_ids = set(transcript_usage["tool_use_ids"])
+    if not transcript_tool_ids.issubset(owned_tool_ids):
+        raise BudgetError("provider transcript includes tool calls not owned by the registered run")
+    return {
+        "kind": "provider-usage-receipt",
+        "run_id": run_id,
+        "provider": event["provider"],
+        "model": event["model"],
+        "node": event["node"],
+        "event_id": event_id,
+        "event_sha256": event["event_sha256"],
+        "transcript_path": str(transcript),
+        "transcript_sha256": transcript_usage["transcript_sha256"],
+        "usage_rows": transcript_usage["usage_rows"],
+        "unique_message_ids": transcript_usage["unique_message_ids"],
+        "tool_use_ids": len(transcript_usage["tool_use_ids"]),
+        "provider_usage": transcript_usage["provider_usage"],
+        "usage": transcript_usage["usage"],
+        "recorded_at": utc_now(),
+    }
+
+
+def command_account_provider_usage(args: argparse.Namespace) -> None:
+    run_id = validate_run_id(args.run_id)
+    with locked_budget(args.control_dir, args.chain_id) as path:
+        state = read_budget(path)
+        if find_run(state, run_id) is None:
+            raise BudgetError("provider usage run is not registered in this ledger")
+        receipt = validate_provider_receipt(args.db, run_id, args.event_id, args.transcript)
+        receipts = state.setdefault("provider_usage_receipts", [])
+        for existing in receipts:
+            if existing.get("event_id") == receipt["event_id"]:
+                if (
+                    existing.get("transcript_sha256") == receipt["transcript_sha256"]
+                    and existing.get("usage") == receipt["usage"]
+                    and existing.get("run_id") == receipt["run_id"]
+                ):
+                    print(f"FEATURE_BUDGET=PROVIDER_USAGE chain={args.chain_id} run={run_id[:8]} existing=true")
+                    return
+                raise BudgetError("provider usage event was already recorded with different evidence")
+            if existing.get("transcript_sha256") == receipt["transcript_sha256"]:
+                raise BudgetError("provider usage transcript was already recorded for a different event")
+        receipts.append(receipt)
+        state["updated_at"] = utc_now()
+        write_budget(path, state)
+    print(
+        f"FEATURE_BUDGET=PROVIDER_USAGE chain={args.chain_id} run={run_id[:8]} "
+        f"provider={receipt['provider']} total={receipt['usage']['total_tokens']} existing=false"
+    )
+
+
 def table_exists(con: sqlite3.Connection, table: str) -> bool:
     row = con.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
@@ -545,6 +867,7 @@ def command_active_start(args: argparse.Namespace) -> None:
     now = int(args.now if args.now is not None else time.time())
     with locked_budget(args.control_dir, args.chain_id) as path:
         state = read_budget(path)
+        require_no_pending_amendment(state)
         recover_open_intervals(state, args.db)
         refresh_recorded_sessions(state, args.db, args.codex_home, True)
         summary = usage_summary(state, args.codex_home, now, True)
@@ -567,6 +890,96 @@ def command_active_start(args: argparse.Namespace) -> None:
         state["updated_at"] = utc_now()
         write_budget(path, state)
     print(f"FEATURE_BUDGET=ACTIVE chain={args.chain_id} run={run_id[:8]} already=false")
+
+
+def require_no_pending_amendment(state: dict[str, Any]) -> None:
+    pending = state.get("pending_amendment")
+    if isinstance(pending, dict):
+        raise BudgetError("budget amendment is incomplete; retry feature-budget-update before dispatch")
+
+
+def require_no_live_execution(state: dict[str, Any]) -> None:
+    for interval in state.get("active_intervals", []):
+        if interval.get("end_epoch") is None:
+            raise BudgetError("cannot amend budget while an active interval is open")
+    for group in state.get("process_groups", []):
+        if group.get("unregistered_at") is None and group.get("terminated_at") is None:
+            raise BudgetError("cannot amend budget while a controlled process group is registered")
+
+
+def command_amend_limit(args: argparse.Namespace) -> None:
+    total_tokens = require_positive_int(args.total_tokens, "total tokens")
+    total_active_minutes = getattr(args, "total_active_minutes", None)
+    wall_seconds_target = None
+    if total_active_minutes is not None:
+        wall_seconds_target = require_positive_int(total_active_minutes, "total active minutes") * 60
+    amendment_id = args.amendment_id.strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", amendment_id):
+        raise BudgetError("amendment id must be a sha256 hex digest")
+    with locked_budget(args.control_dir, args.chain_id) as path:
+        state = read_budget(path)
+        applied = state.setdefault("amendments", [])
+        for item in applied:
+            if item.get("amendment_id") != amendment_id:
+                continue
+            if item.get("total_tokens") != total_tokens or item.get("wall_seconds") != wall_seconds_target:
+                raise BudgetError("amendment id was already used for a different allowance")
+            print(f"FEATURE_BUDGET=AMENDED chain={args.chain_id} total_tokens={total_tokens} existing=true")
+            return
+        pending = state.get("pending_amendment")
+        if isinstance(pending, dict):
+            if (pending.get("amendment_id") != amendment_id
+                    or pending.get("total_tokens") != total_tokens
+                    or pending.get("wall_seconds") != wall_seconds_target):
+                raise BudgetError("a different budget amendment is incomplete")
+        else:
+            require_no_live_execution(state)
+            current = state.get("max_total_tokens")
+            current_wall = state.get("wall_seconds")
+            if type(current) is not int or current <= 0:
+                raise BudgetError("current token limit is malformed")
+            if type(current_wall) is not int or current_wall <= 0:
+                raise BudgetError("current active time limit is malformed")
+            if total_tokens < current:
+                raise BudgetError("budget amendment may only increase the token ceiling")
+            if wall_seconds_target is not None and wall_seconds_target < current_wall:
+                raise BudgetError("budget amendment may only increase the active time ceiling")
+            tokens_increase = total_tokens > current
+            wall_increase = wall_seconds_target is not None and wall_seconds_target > current_wall
+            if not tokens_increase and not wall_increase:
+                raise BudgetError("budget amendment must increase at least one ceiling")
+            state["pending_amendment"] = {
+                "amendment_id": amendment_id,
+                "from_total_tokens": current,
+                "from_wall_seconds": current_wall,
+                "total_tokens": total_tokens,
+                "wall_seconds": wall_seconds_target,
+                "reason": args.reason,
+                "started_at": utc_now(),
+            }
+            state["updated_at"] = utc_now()
+            write_budget(path, state)
+        pending = state["pending_amendment"]
+        state["max_total_tokens"] = total_tokens
+        if pending.get("wall_seconds") is not None:
+            state["wall_seconds"] = pending["wall_seconds"]
+        last_usage = state.get("last_usage")
+        if isinstance(last_usage, dict):
+            last_usage["max_total_tokens"] = total_tokens
+            total = int(last_usage.get("total_tokens", 0) or 0)
+            last_usage["tokens_exhausted"] = total >= total_tokens
+            if pending.get("wall_seconds") is not None:
+                last_usage["wall_seconds"] = pending["wall_seconds"]
+                active = int(last_usage.get("active_seconds", 0) or 0)
+                last_usage["wall_exhausted"] = active >= pending["wall_seconds"]
+        applied.append({
+            **pending,
+            "applied_at": utc_now(),
+        })
+        state.pop("pending_amendment", None)
+        state["updated_at"] = utc_now()
+        write_budget(path, state)
+    print(f"FEATURE_BUDGET=AMENDED chain={args.chain_id} total_tokens={total_tokens} existing=false")
 
 
 def command_active_stop(args: argparse.Namespace) -> None:
@@ -697,6 +1110,9 @@ def active_seconds(state: dict[str, Any], now: int) -> int:
 def usage_summary(state: dict[str, Any], codex_home: Path, now: int, require_sessions: bool) -> dict[str, Any]:
     seen: set[str] = set()
     totals = {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    prior_high_water = state.get("token_high_water")
+    if not isinstance(prior_high_water, dict):
+        prior_high_water = {}
     session_high_water = state.setdefault("session_token_high_water", {})
     runs = state.get("runs", [])
     for run in runs:
@@ -715,7 +1131,11 @@ def usage_summary(state: dict[str, Any], codex_home: Path, now: int, require_ses
                 effective[key] = value
                 totals[key] += value
             session_high_water[rel] = effective
+    for key in totals:
+        totals[key] = max(totals[key], int(prior_high_water.get(key, 0) or 0))
     state["token_high_water"] = dict(totals)
+    receipt_totals = provider_receipt_totals(state)
+    reported = {key: totals[key] + receipt_totals[key] for key in totals}
     used_seconds = active_seconds(state, now)
     wall_seconds = state.get("wall_seconds")
     token_cap = state.get("max_total_tokens")
@@ -725,12 +1145,13 @@ def usage_summary(state: dict[str, Any], codex_home: Path, now: int, require_ses
         "chain": state.get("logical_chain_id"),
         "runs": len(runs),
         "sessions": len(seen),
-        **totals,
+        "provider_receipts": len(state.get("provider_usage_receipts", [])),
+        **reported,
         "active_seconds": used_seconds,
         "wall_seconds": wall_seconds,
         "max_total_tokens": token_cap,
         "wall_exhausted": used_seconds >= wall_seconds,
-        "tokens_exhausted": totals["total_tokens"] >= token_cap,
+        "tokens_exhausted": reported["total_tokens"] >= token_cap,
     }
 
 
@@ -828,6 +1249,18 @@ def parser() -> argparse.ArgumentParser:
     usage.add_argument("--now", type=int)
     usage.add_argument("--require-sessions", action="store_true")
     usage.add_argument("--json", action="store_true")
+    account = sub.add_parser("account-provider-usage")
+    account.add_argument("--chain-id", required=True)
+    account.add_argument("--run-id", required=True)
+    account.add_argument("--db", type=Path, required=True)
+    account.add_argument("--event-id", required=True)
+    account.add_argument("--transcript", type=Path, required=True)
+    amend = sub.add_parser("amend-limit")
+    amend.add_argument("--chain-id", required=True)
+    amend.add_argument("--total-tokens", type=int, required=True)
+    amend.add_argument("--total-active-minutes", type=int)
+    amend.add_argument("--amendment-id", required=True)
+    amend.add_argument("--reason", required=True)
     return ap
 
 
@@ -844,6 +1277,8 @@ def main() -> None:
             "unregister-group": command_unregister_group,
             "terminate-groups": command_terminate_groups,
             "usage": command_usage,
+            "account-provider-usage": command_account_provider_usage,
+            "amend-limit": command_amend_limit,
         }[args.action](args)
     except BudgetError as exc:
         fail(str(exc))

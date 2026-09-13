@@ -1168,6 +1168,71 @@ missing accounting is excluded with diagnostics. These estimates group repositor
 and phase costs, not semantic task difficulty or model/effort cohorts. They need
 more comparable successful runs before their accuracy can be calibrated.
 
+To apply an explicitly authorized higher total token ceiling to a stopped Codex
+repository-list run, use the guarded launcher:
+
+```bash
+python3 .archon/setup/archon-run.py feature-budget-update <run-id> --token <operator-token> --total-tokens 100000000 --enable-shepherd --reason "Authorized ENG-3866 retry"
+```
+
+The ceiling includes all prior consumption. An explicitly authorized active-time
+increase uses optional `--total-active-minutes`; omitting it preserves the current
+active-time ceiling. Both ceilings are increase-only, and every new amendment
+must increase at least one. This command does not reset consumed active time,
+reset session accounting, replace worktrees or planning revisions,
+grant approval, or change the captured workflow/model. It authenticates the
+current operator token under the chain lock and refuses live execution or a
+competing control action. `--enable-shepherd` opts an older chain into advisory
+forecasts, including controller supervision at planning-round boundaries.
+Forecast warnings continue; actual exhaustion or unavailable accounting stops.
+
+The amendment journals updates to the private chain, budget ledger, and run
+control allowance. If interrupted, repeat the same command with the same token,
+ceilings, reason, and shepherd option; do not edit private state. Token-only
+requests retain their original amendment IDs. An incomplete
+amendment blocks dispatch until recovery finishes. Amendment does not rotate
+the token; normal guarded resume still does. Verify every allowance record and
+unchanged historical consumption before resuming. Raising a review cap is a
+separate authorized operation: retain the round counter and all review evidence,
+and never accept findings merely to pass the cap.
+
+Guarded Codex controls install a private `CLAUDE_BIN_PATH` denial executable.
+Stock approval rejection hooks do not support a scoped provider override;
+an unexpected Claude invocation stops with `ARCHON_CODEX_PROVIDER_GUARD=FAIL`
+before starting a model. Do not add ignored provider/model keys to those hooks.
+Keep existing captured sources intact during recovery.
+
+If a historical provider incident has independently verifiable usage, import it
+while the current run is stopped:
+
+```bash
+python3 .archon/setup/archon-run.py feature-account-provider-usage <run-id> --token <operator-token> --event-id <completed-event-id> --transcript <absolute-jsonl-path>
+```
+
+The controller authenticates under the chain lock. The budget helper reconciles
+deduplicated transcript usage with the run's completed event and tool ownership,
+and records one private receipt. Repeating identical evidence is idempotent.
+Receipt tokens count toward the shared cap without changing Codex session
+high-water marks or adding elapsed time already recorded by active intervals.
+Unsupported or inconsistent evidence blocks import; never invent a Codex session
+to represent another provider.
+
+An operator may supply cited factual corrections in a run-local `AGENTS.md` for
+planning nodes, whose working directory is the run's artifacts directory. This
+supplements the captured prompt without replacing its workflow or model. It is
+review input, not approval or a finding waiver. The Codex wrapper keeps this file
+read-only to workers, alongside the other controller inputs. New node sessions
+consume the instructions; verify their recorded input before claiming that a
+correction has reached a critic or reviser.
+
+Repository-list Codex workflow nodes must use fresh conversations. The external
+wrapper converts the adapter's `exec resume <uuid>` into fresh `exec` while
+preserving the model, effort, permissions, and prompt. It refuses ambiguous
+history selectors. Node continuity comes from run artifacts; a critic must not
+inherit a reviser's private conversation. Every newly emitted session id is
+still recorded in the same cumulative ledger. This does not rewind the workflow,
+replace its captured source, or replenish its budget.
+
 If an unapproved planning run terminates without a usable joint packet, repair
 the planning failure and use `feature-replan <run-id> --token <operator-held-token>`.
 This starts guarded successor planning under the same scope, worktrees, baselines,

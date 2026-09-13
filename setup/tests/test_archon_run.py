@@ -106,6 +106,25 @@ class AdaptiveBugfix(unittest.TestCase):
         reject_branch = reject_branch[:reject_branch.index("\n    else:")]
         self.assertNotIn("ensure_environment", reject_branch)
 
+
+    def test_guarded_controls_deny_unexpected_claude_provider_before_llm(self):
+        control_dir = self.root / "private-control"
+        control_dir.mkdir(mode=0o700)
+
+        wrapper = ar.install_private_claude_deny_wrapper(control_dir)
+        result = subprocess.run([str(wrapper)], capture_output=True, encoding="utf-8")
+
+        self.assertEqual(result.returncode, 78)
+        self.assertIn("ARCHON_CODEX_PROVIDER_GUARD=FAIL", result.stderr)
+        self.assertEqual(wrapper.stat().st_mode & 0o777, 0o500)
+
+    def test_guarded_codex_launch_env_pins_claude_deny_wrapper(self):
+        source = inspect.getsource(ar.main)
+        env_block = source[source.index('if private_codex_wrapper is not None:'):]
+        env_block = env_block[:env_block.index('    log_dir = Path')]
+        self.assertIn('env["CODEX_BIN_PATH"]', env_block)
+        self.assertIn('env["CLAUDE_BIN_PATH"] = str(install_private_claude_deny_wrapper(args.control_dir))', env_block)
+
     def test_supervision_reads_the_real_archon_approval_step_name(self):
         event = {
             "event_type": "approval_requested",
@@ -146,6 +165,230 @@ class AdaptiveBugfix(unittest.TestCase):
         result = ar.supervise_exact_run(self.db, run_id, 0)
 
         self.assertEqual(result["gate"], "smoke-approval")
+
+    def test_supervision_shepherd_checkpoints_repository_planning_boundaries(self):
+        run_id = "c" * 32
+        output_root = self.root / "out"
+        artifacts = output_root / "artifacts" / "runs" / run_id
+        artifacts.mkdir(parents=True)
+        (artifacts / "plan-round.txt").write_text("1\n", encoding="utf-8")
+        with sqlite3.connect(self.db) as con:
+            con.execute(
+                "INSERT INTO remote_agent_workflow_runs VALUES (?,?,?,?,?,?)",
+                (run_id, "full-sdlc-api-codex", "/spec.md", "running", str(output_root), "2026-09-12"),
+            )
+            con.execute(
+                "CREATE TABLE remote_agent_workflow_events "
+                "(workflow_run_id TEXT, event_order INTEGER, event_type TEXT, step_name TEXT, data TEXT, created_at TEXT)"
+            )
+            con.execute(
+                "INSERT INTO remote_agent_workflow_events VALUES (?,?,?,?,?,?)",
+                (run_id, 1, "node_completed", "plan-round-pre", "{}", "2026-09-12 00:00:01"),
+            )
+        args = Namespace(control_dir=self.root / "control", codex_home=self.root / "codex-home", db=self.db)
+        args.control_dir.mkdir(mode=0o700)
+        control = {
+            "run": run_id,
+            "feature_chain": {
+                "scope": "repositories",
+                "provider": "codex",
+                "phase": "planning",
+                "logical_chain_id": "d" * 32,
+            }
+        }
+        ar.secure_write_json(ar.control_state_path({"id": run_id}, args.control_dir), control)
+        sleeps = {"count": 0}
+        checkpoint_calls = []
+
+        class Controller:
+            class FeatureChainError(ValueError):
+                pass
+
+            @staticmethod
+            def shepherd_checkpoint(call_args, chain_id):
+                checkpoint_calls.append((call_args, chain_id))
+
+        def advance(_seconds):
+            sleeps["count"] += 1
+            with sqlite3.connect(self.db) as con:
+                if sleeps["count"] == 1:
+                    (artifacts / "plan-round.txt").write_text("2\n", encoding="utf-8")
+                    con.execute(
+                        "INSERT INTO remote_agent_workflow_events VALUES (?,?,?,?,?,?)",
+                        (run_id, 2, "node_completed", "plan-critic", "{}", "2026-09-12 00:00:02"),
+                    )
+                else:
+                    con.execute("UPDATE remote_agent_workflow_runs SET status = 'paused' WHERE id = ?", (run_id,))
+                    con.execute(
+                        "INSERT INTO remote_agent_workflow_events VALUES (?,?,?,?,?,?)",
+                        (run_id, 3, "approval_requested", "plan-gate", "{}", "2026-09-12 00:00:03"),
+                    )
+
+        with mock.patch.object(ar, "feature_repository_controller", return_value=Controller), \
+                mock.patch.object(ar.time, "time", side_effect=[0, 0, 1]), \
+                mock.patch.object(ar.time, "sleep", side_effect=advance):
+            result = ar.supervise_exact_run(self.db, run_id, 10, 0.1, shepherd_args=args)
+
+        self.assertEqual(result["state"], "gate")
+        self.assertEqual(result["gate"], "plan-gate")
+        self.assertEqual(
+            checkpoint_calls,
+            [(args, "d" * 32), (args, "d" * 32)],
+        )
+
+    def test_supervision_shepherd_failure_stops_controlled_processes(self):
+        run_id = "d" * 32
+        output_root = self.root / "out-hard-stop"
+        (output_root / "artifacts" / "runs" / run_id).mkdir(parents=True)
+        with sqlite3.connect(self.db) as con:
+            con.execute(
+                "INSERT INTO remote_agent_workflow_runs VALUES (?,?,?,?,?,?)",
+                (run_id, "full-sdlc-api-codex", "/spec.md", "running", str(output_root), "2026-09-12"),
+            )
+            con.execute(
+                "CREATE TABLE remote_agent_workflow_events "
+                "(workflow_run_id TEXT, event_order INTEGER, event_type TEXT, step_name TEXT, data TEXT, created_at TEXT)"
+            )
+            con.execute(
+                "INSERT INTO remote_agent_workflow_events VALUES (?,?,?,?,?,?)",
+                (run_id, 1, "node_completed", "plan-round-pre", "{}", "2026-09-12 00:00:01"),
+            )
+        args = Namespace(control_dir=self.root / "control", codex_home=self.root / "codex-home", db=self.db)
+        args.control_dir.mkdir(mode=0o700)
+        control = {
+            "run": run_id,
+            "feature_chain": {
+                "scope": "repositories",
+                "provider": "codex",
+                "phase": "planning",
+                "logical_chain_id": "e" * 32,
+            }
+        }
+        ar.secure_write_json(ar.control_state_path({"id": run_id}, args.control_dir), control)
+
+        class Controller:
+            class FeatureChainError(ValueError):
+                pass
+
+            @staticmethod
+            def shepherd_checkpoint(_args, _chain_id):
+                raise Controller.FeatureChainError("shared token budget is exhausted")
+
+        with mock.patch.object(ar, "feature_repository_controller", return_value=Controller), \
+                mock.patch.object(ar, "stop_controlled_processes") as stop, \
+                mock.patch.object(ar.time, "time", return_value=0), \
+                self.assertRaises(SystemExit):
+            ar.supervise_exact_run(self.db, run_id, 10, 0.1, shepherd_args=args)
+
+        stop.assert_called_once()
+
+    def test_supervision_without_private_control_skips_shepherd_for_unguarded_runs(self):
+        run_id = "f" * 32
+        output_root = self.root / "out-unguarded"
+        (output_root / "artifacts" / "runs" / run_id).mkdir(parents=True)
+        with sqlite3.connect(self.db) as con:
+            con.execute(
+                "INSERT INTO remote_agent_workflow_runs VALUES (?,?,?,?,?,?)",
+                (run_id, "full-sdlc-api", "/spec.md", "running", str(output_root), "2026-09-12"),
+            )
+            con.execute(
+                "CREATE TABLE remote_agent_workflow_events "
+                "(workflow_run_id TEXT, event_order INTEGER, event_type TEXT, step_name TEXT, data TEXT, created_at TEXT)"
+            )
+            con.execute(
+                "INSERT INTO remote_agent_workflow_events VALUES (?,?,?,?,?,?)",
+                (run_id, 1, "node_completed", "plan-round-pre", "{}", "2026-09-12 00:00:01"),
+            )
+        args = Namespace(control_dir=self.root / "missing-control", codex_home=self.root / "codex-home", db=self.db)
+        with mock.patch.object(ar, "feature_repository_controller") as controller, \
+                mock.patch.object(ar.time, "time", side_effect=[0, 1]), \
+                mock.patch.object(ar.time, "sleep"):
+            result = ar.supervise_exact_run(self.db, run_id, 0, 0.1, shepherd_args=args)
+
+        self.assertEqual("handoff", result["state"])
+        controller.assert_not_called()
+
+    def test_repository_feature_dispatch_supervision_passes_shepherd_args(self):
+        controller = ar.feature_repository_controller()
+        run_id = "1" * 32
+        chain_id = "2" * 32
+        spec = self.report("# Feature\nRepository: api\n")
+        output_root = self.root / "planning-output"
+        row = {
+            "id": run_id,
+            "workflow_name": "full-sdlc-api-codex",
+            "user_message": str(spec),
+            "status": "running",
+            "output_root": str(output_root),
+        }
+        args = Namespace(
+            db=self.db,
+            control_dir=self.root / "control",
+            codex_home=self.root / "codex-home",
+            planning_artifacts=self.root / "planning-artifacts",
+            no_watch=False,
+            watch_timeout_seconds=12,
+            watch_interval_seconds=0.25,
+        )
+        state = {
+            "schema_version": 2,
+            "kind": "archon-feature-chain",
+            "logical_chain_id": chain_id,
+            "chain_secret": "s" * 32,
+            "provider": "codex",
+            "scope": "repositories",
+            "repositories": ["api"],
+            "presentation_order": ["api"],
+            "spec": str(spec),
+            "spec_sha256": ar.hashlib.sha256(spec.read_bytes()).hexdigest(),
+            "baselines": {"commits": {"api": "a" * 40}, "dirty": {"api": False}},
+            "worktrees": {"api": {"worktree": str(self.root / "api-worktree")}},
+            "approval": None,
+            "approved_plan": None,
+            "dependency_order": [],
+            "stages": {"api": {"repo": "api", "status": "pending", "attempts": []}},
+            "child_runs": {},
+            "candidate_handoffs": {},
+            "integration": None,
+            "pending_control": None,
+            "dispatch_reservation": None,
+            "budget": {"wall_minutes": 240, "max_total_tokens": 100000000, "ledger": "feature-budget.py"},
+            "created_at": "2026-09-12T00:00:00Z",
+            "updated_at": "2026-09-12T00:00:00Z",
+        }
+        controller.write_state(args.control_dir, state)
+        calls = []
+
+        class Host:
+            ROOT = self.root
+
+            @staticmethod
+            def dispatch_feature_phase(call_args, lane, message, env):
+                self.assertIs(call_args, args)
+                self.assertEqual(lane, "full-sdlc-api-codex")
+                self.assertEqual(message, spec)
+                self.assertEqual(env["ARCHON_FEATURE_CHAIN_ID"], chain_id)
+                bound = controller.read_state(args.control_dir, chain_id)
+                bound["current_run"] = {"run_id": run_id, "phase": "planning", "repo": None}
+                controller.write_state(args.control_dir, bound)
+                return row
+
+            @staticmethod
+            def supervise_exact_run(db, supervised_run_id, timeout, interval, shepherd_args=None):
+                calls.append((db, supervised_run_id, timeout, interval, shepherd_args))
+                return {"state": "handoff", "run": supervised_run_id, "status": "running"}
+
+            @staticmethod
+            def artifact_dir(dispatched_row):
+                return Path(dispatched_row["output_root"]) / "artifacts" / "runs" / dispatched_row["id"]
+
+        with mock.patch.object(controller, "shepherd_checkpoint"), \
+                mock.patch.object(controller, "budget_require_remaining"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            result = controller.dispatch_planning(Host(), args, state)
+
+        self.assertEqual(result["result"]["state"], "handoff")
+        self.assertEqual(calls, [(self.db, run_id, 12, 0.25, args)])
 
     def test_static_prefilter_routes_thin_unknown_and_unsafe_reports_full(self):
         cases = [
@@ -196,6 +439,21 @@ class AdaptiveBugfix(unittest.TestCase):
         self.assertEqual(data["discarded_lite_run_id"], lite["id"])
         self.assertEqual(data["active_run_id"], full["id"])
         self.assertIn("provider=codex lane=bugfix-codex", out.getvalue())
+
+
+    def test_codex_feature_stage_dispatch_uses_guarded_launcher(self):
+        args = Namespace(provider="codex")
+        spec = self.report("# Feature\n")
+        env = {"ARCHON_FEATURE_PROVIDER": "codex"}
+        row = self.row("9" * 32, "full-sdlc-api-codex")
+
+        with mock.patch.object(ar, "invoke_codex_lane", return_value=row) as invoke, \
+                mock.patch.object(ar, "run_claude_lane") as claude:
+            result = ar.dispatch_feature_phase(args, "full-sdlc-api-codex", spec, env)
+
+        self.assertEqual(result, row)
+        invoke.assert_called_once_with(args, "full-sdlc-api-codex", spec)
+        claude.assert_not_called()
 
     def test_static_full_skips_lite_for_both_providers(self):
         report = self.report("# thin ticket\n")
@@ -989,7 +1247,7 @@ class FeatureFlow(unittest.TestCase):
         for key in ("ARCHON_DB", "ARCHON_FEATURE_CHAIN_ID", "ARCHON_FEATURE_PROVIDER", "ARCHON_FEATURE_LANE", "ARCHON_FEATURE_HANDOFF"):
             ar.os.environ.pop(key, None)
 
-        def complete(_db, run_id, _timeout, _interval):
+        def complete(_db, run_id, _timeout, _interval, shepherd_args=None):
             self.update_run(run_id, status="completed")
             return {"state": "terminal", "status": "completed", "run": run_id, "lane": "full-sdlc-web-codex"}
 

@@ -171,6 +171,12 @@ def write_state(control_dir: Path, state: dict) -> dict:
     return sealed
 
 
+def require_no_incomplete_amendment(state: dict) -> None:
+    amendment = state.get("budget_amendment")
+    if isinstance(amendment, dict) and amendment.get("status") == "in_progress":
+        raise FeatureChainError("budget amendment is incomplete; retry feature-budget-update before dispatch")
+
+
 def _root(host: Any) -> Path:
     return Path(getattr(host, "ROOT"))
 
@@ -623,6 +629,7 @@ def restart_planning(host: Any, args: Any, row: dict, control: dict) -> dict:
             raise FeatureChainError("feature-replan action is stale")
         if state.get("approval") or state.get("candidate_handoffs"):
             raise FeatureChainError("feature-replan cannot replace approved or implemented work")
+        require_no_incomplete_amendment(state)
         budget_require_remaining(args, chain_id)
         if not retry:
             state["executable_plan_contract"] = 1
@@ -829,6 +836,7 @@ def dispatch_lane(host: Any, args: Any, lane: str, message: Path, env: dict[str,
     with host_env(host, env):
         try:
             if env.get("ARCHON_FEATURE_SCOPE") == "repositories" and env.get("ARCHON_FEATURE_CHAIN_ID"):
+                require_no_incomplete_amendment(read_state(Path(args.control_dir), env["ARCHON_FEATURE_CHAIN_ID"]))
                 shepherd_checkpoint(args, env["ARCHON_FEATURE_CHAIN_ID"])
                 budget_require_remaining(args, env["ARCHON_FEATURE_CHAIN_ID"])
             if hasattr(host, "dispatch_feature_phase"):
@@ -1005,7 +1013,7 @@ def maybe_supervise(host: Any, args: Any, row: dict) -> dict | None:
         raise FeatureChainError("host does not expose supervise_exact_run")
     timeout = getattr(args, "watch_timeout_seconds", 86400)
     interval = getattr(args, "watch_interval_seconds", 2.0)
-    result = host.supervise_exact_run(args.db, row["id"], timeout, interval)
+    result = host.supervise_exact_run(args.db, row["id"], timeout, interval, shepherd_args=args)
     if isinstance(result, dict):
         result.setdefault("artifacts", str(artifact_dir(host, row)))
     return result
@@ -1168,6 +1176,227 @@ def budget_require_remaining(args: Any, chain_id: str) -> dict:
     return summary
 
 
+def budget_amend_allowance(args: Any, chain_id: str, total_tokens: int, total_active_minutes: int | None,
+                           amendment_id: str, reason: str) -> None:
+    argv = [
+        "amend-limit",
+        "--chain-id",
+        chain_id,
+        "--total-tokens",
+        str(total_tokens),
+    ]
+    if total_active_minutes is not None:
+        argv.extend(["--total-active-minutes", str(total_active_minutes)])
+    argv.extend(["--amendment-id", amendment_id, "--reason", reason])
+    run_budget(args, *argv)
+
+
+def budget_account_provider_usage(args: Any, chain_id: str, run_id: str, event_id: str, transcript: Path) -> None:
+    run_budget(
+        args,
+        "account-provider-usage",
+        "--chain-id",
+        chain_id,
+        "--run-id",
+        run_id,
+        "--db",
+        str(args.db),
+        "--event-id",
+        event_id,
+        "--transcript",
+        str(transcript),
+    )
+
+
+def update_run_control_allowance(host: Any, args: Any, row: dict, control: dict, total_tokens: int,
+                                 wall_minutes: int | None = None) -> None:
+    if not hasattr(host, "control_state_path") or not hasattr(host, "secure_write_json"):
+        raise FeatureChainError("host cannot update private run-control allowance")
+    updated = dict(control)
+    updated["max_total_tokens"] = total_tokens
+    if wall_minutes is not None:
+        updated["wall_minutes"] = wall_minutes
+    host.secure_write_json(host.control_state_path(row, Path(args.control_dir)), updated)
+    artifact = Path(row["output_root"]) / "artifacts" / "runs" / row["id"] / "codex-lite-control.json"
+    if artifact.is_file():
+        try:
+            public = json.loads(artifact.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise FeatureChainError(f"public run-control artifact is malformed: {exc}") from exc
+        public["max_total_tokens"] = total_tokens
+        if wall_minutes is not None:
+            public["wall_minutes"] = wall_minutes
+        write_json_atomic(artifact, public)
+
+
+def budget_update_command(host: Any, args: Any, row: dict) -> dict:
+    total_tokens = int(getattr(args, "total_tokens", 0))
+    total_active_minutes = getattr(args, "total_active_minutes", None)
+    if total_active_minutes is not None:
+        total_active_minutes = int(total_active_minutes)
+        if total_active_minutes <= 0:
+            raise FeatureChainError("total active minutes must be positive")
+    if total_tokens <= 0:
+        raise FeatureChainError("total token allowance must be positive")
+    if not str(getattr(args, "reason", "")).strip():
+        raise FeatureChainError("budget amendment requires a reason")
+    control = getattr(host, "read_control_state")(row, Path(args.control_dir))
+    feature = control_feature({"control": control})
+    if feature.get("scope") != "repositories":
+        raise FeatureChainError("feature-budget-update requires a repository-list feature run")
+    if feature.get("provider") != "codex":
+        raise FeatureChainError("feature-budget-update requires a Codex repository-list feature run")
+    chain_id = feature.get("logical_chain_id")
+    if not isinstance(chain_id, str):
+        raise FeatureChainError("run-control record is missing feature chain id")
+    amendment_payload = {
+        "kind": "feature-budget-update",
+        "logical_chain_id": chain_id,
+        "run_id": row["id"],
+        "total_tokens": total_tokens,
+        "enable_shepherd": bool(getattr(args, "enable_shepherd", False)),
+        "reason": getattr(args, "reason", ""),
+    }
+    if total_active_minutes is not None:
+        amendment_payload["total_active_minutes"] = total_active_minutes
+    amendment_id = digest(amendment_payload)
+    with chain_lock(Path(args.control_dir), chain_id):
+        row = host.run_row_by_id(Path(args.db), row["id"])
+        if not isinstance(row, dict) or row.get("status") not in {"failed", "paused", "completed", "cancelled"}:
+            raise FeatureChainError("feature-budget-update requires a stopped run")
+        control = host.require_control_token(row, Path(args.control_dir), getattr(args, "token", None))
+        if control.get("feature_chain") != feature:
+            raise FeatureChainError("feature control binding changed while acquiring the chain lock")
+        require_no_live_control_processes(control)
+        state = read_state(Path(args.control_dir), chain_id)
+        if state.get("provider") != "codex":
+            raise FeatureChainError("feature-budget-update requires a Codex repository-list feature chain")
+        pending = state.get("pending_control")
+        if pending is not None and (not isinstance(pending, dict) or process_claim_alive(pending)):
+            raise FeatureChainError("repository-list feature control already in progress")
+        reservation = state.get("dispatch_reservation")
+        if reservation is not None:
+            raise FeatureChainError("repository-list feature dispatch already in progress")
+        current = state.get("current_run")
+        if not isinstance(current, dict) or current.get("run_id") != row.get("id"):
+            raise FeatureChainError("feature-budget-update is stale for this chain")
+        current_limit = state.get("budget", {}).get("max_total_tokens")
+        current_wall = state.get("budget", {}).get("wall_minutes")
+        if type(current_limit) is not int or current_limit <= 0:
+            raise FeatureChainError("feature chain token allowance is malformed")
+        if type(current_wall) is not int or current_wall <= 0:
+            raise FeatureChainError("feature chain active time allowance is malformed")
+        existing = state.get("budget_amendment")
+        if isinstance(existing, dict) and existing.get("status") == "in_progress":
+            if (existing.get("amendment_id") != amendment_id
+                    or existing.get("total_tokens") != total_tokens
+                    or existing.get("total_active_minutes") != total_active_minutes):
+                raise FeatureChainError("a different budget amendment is incomplete")
+        for applied in state.get("budget_amendments", []):
+            if applied.get("amendment_id") != amendment_id:
+                continue
+            if applied.get("total_tokens") != total_tokens or applied.get("total_active_minutes") != total_active_minutes:
+                raise FeatureChainError("amendment id was already used for a different allowance")
+            control = getattr(host, "require_control_token")(row, Path(args.control_dir), getattr(args, "token", None))
+            update_run_control_allowance(host, args, row, control, total_tokens, total_active_minutes)
+            return {"chain": chain_id, "total_tokens": total_tokens, "total_active_minutes": total_active_minutes, "amendment_id": amendment_id}
+        if total_tokens < current_limit:
+            raise FeatureChainError("feature-budget-update may only increase the token ceiling")
+        if total_active_minutes is not None and total_active_minutes < current_wall:
+            raise FeatureChainError("feature-budget-update may only increase the active time ceiling")
+        tokens_increase = total_tokens > current_limit
+        wall_increase = total_active_minutes is not None and total_active_minutes > current_wall
+        if not tokens_increase and not wall_increase:
+            raise FeatureChainError("feature-budget-update must increase at least one ceiling")
+        if not (isinstance(existing, dict) and existing.get("status") == "in_progress"):
+            state["budget_amendment"] = {
+                "amendment_id": amendment_id,
+                "run_id": row["id"],
+                "from_total_tokens": current_limit,
+                "from_wall_minutes": current_wall,
+                "total_tokens": total_tokens,
+                "total_active_minutes": total_active_minutes,
+                "reason": getattr(args, "reason", ""),
+                "enable_shepherd": bool(getattr(args, "enable_shepherd", False)),
+                "status": "in_progress",
+                "started_at": now(),
+            }
+            state["updated_at"] = now()
+            state = write_state(Path(args.control_dir), state)
+        budget_amend_allowance(args, chain_id, total_tokens, total_active_minutes, amendment_id, getattr(args, "reason", ""))
+        control = getattr(host, "require_control_token")(row, Path(args.control_dir), getattr(args, "token", None))
+        update_run_control_allowance(host, args, row, control, total_tokens, total_active_minutes)
+        amendment = dict(state["budget_amendment"])
+        state.setdefault("budget", {})["max_total_tokens"] = total_tokens
+        if total_active_minutes is not None:
+            state.setdefault("budget", {})["wall_minutes"] = total_active_minutes
+        if getattr(args, "enable_shepherd", False):
+            state["budget_shepherd_version"] = 1
+        amendment["status"] = "applied"
+        amendment["applied_at"] = now()
+        state.setdefault("budget_amendments", []).append(amendment)
+        state["budget_amendment"] = None
+        state["updated_at"] = now()
+        state = write_state(Path(args.control_dir), state)
+    return {"chain": chain_id, "total_tokens": total_tokens, "total_active_minutes": total_active_minutes, "amendment_id": amendment_id}
+
+
+def account_provider_usage_command(host: Any, args: Any, row: dict) -> dict:
+    event_id = str(getattr(args, "event_id", "")).strip()
+    transcript = Path(getattr(args, "transcript", ""))
+    if not event_id:
+        raise FeatureChainError("feature-account-provider-usage requires an event id")
+    if not transcript.is_file():
+        raise FeatureChainError("feature-account-provider-usage requires a readable transcript")
+    control = getattr(host, "read_control_state")(row, Path(args.control_dir))
+    feature = control_feature({"control": control})
+    if feature.get("scope") != "repositories":
+        raise FeatureChainError("feature-account-provider-usage requires a repository-list feature run")
+    if feature.get("provider") != "codex":
+        raise FeatureChainError("feature-account-provider-usage requires a Codex repository-list feature run")
+    chain_id = feature.get("logical_chain_id")
+    if not isinstance(chain_id, str):
+        raise FeatureChainError("run-control record is missing feature chain id")
+    with chain_lock(Path(args.control_dir), chain_id):
+        row = host.run_row_by_id(Path(args.db), row["id"])
+        if not isinstance(row, dict) or row.get("status") not in {"failed", "paused", "completed", "cancelled"}:
+            raise FeatureChainError("feature-account-provider-usage requires a stopped run")
+        control = host.require_control_token(row, Path(args.control_dir), getattr(args, "token", None))
+        if control.get("feature_chain") != feature:
+            raise FeatureChainError("feature control binding changed while acquiring the chain lock")
+        require_no_live_control_processes(control)
+        state = read_state(Path(args.control_dir), chain_id)
+        if state.get("provider") != "codex":
+            raise FeatureChainError("feature-account-provider-usage requires a Codex repository-list feature chain")
+        pending = state.get("pending_control")
+        if pending is not None and (not isinstance(pending, dict) or process_claim_alive(pending)):
+            raise FeatureChainError("repository-list feature control already in progress")
+        reservation = state.get("dispatch_reservation")
+        if reservation is not None:
+            raise FeatureChainError("repository-list feature dispatch already in progress")
+        current = state.get("current_run")
+        if not isinstance(current, dict) or current.get("run_id") != row.get("id"):
+            raise FeatureChainError("feature-account-provider-usage is stale for this chain")
+        budget_account_provider_usage(args, chain_id, row["id"], event_id, transcript)
+    return {"chain": chain_id, "run_id": row["id"], "event_id": event_id}
+
+
+def require_no_live_control_processes(control: dict) -> None:
+    for label in ("launcher", "watchdog"):
+        pgid = control.get(f"{label}_pgid")
+        if pgid is None:
+            continue
+        if type(pgid) is not int or pgid <= 1:
+            raise FeatureChainError(f"invalid {label} process group")
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            continue
+        except OSError as exc:
+            raise FeatureChainError(f"cannot inspect {label} process group: {exc}") from exc
+        raise FeatureChainError(f"cannot amend budget while {label} process group is live")
+
+
 def estimate_for_scope(args: Any, repos: list[str], state: dict | None = None, usage: dict | None = None) -> dict:
     import feature_estimate
 
@@ -1215,6 +1444,7 @@ def report_forecast_allowance(report: dict) -> None:
 
 
 def shepherd_unlocked(args: Any, state: dict, announce: bool = True) -> dict | None:
+    require_no_incomplete_amendment(state)
     if state.get("budget_shepherd_version") != 1 or state.get("provider") != "codex":
         return None
     usage = budget_usage(args, state["logical_chain_id"])
@@ -1867,6 +2097,9 @@ def before_control(host: Any, args: Any, row: dict, control: dict | None) -> dic
             raise FeatureChainError("repository-list control record is malformed")
     with chain_lock(Path(args.control_dir), chain_id):
         state = read_state(Path(args.control_dir), chain_id)
+        require_no_incomplete_amendment(state)
+        args.wall_minutes = state["budget"]["wall_minutes"]
+        args.max_total_tokens = state["budget"]["max_total_tokens"]
         action = getattr(args, "action", "")
         stopping_action = action in {"reject", "abandon"}
         phase = str(feature.get("phase") or "implement")

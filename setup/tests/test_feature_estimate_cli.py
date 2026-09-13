@@ -56,6 +56,68 @@ class FeatureEstimateCli(unittest.TestCase):
         self.assertIsNone(args.scope)
         self.assertIsNone(args.spec)
 
+
+    def test_parser_accepts_provider_usage_accounting_command(self):
+        args = ar.parser().parse_args([
+            "feature-account-provider-usage",
+            "r" * 32,
+            "--token",
+            "operator-token",
+            "--event-id",
+            "d2f8f63a-2b7d-4023-9209-d56851b28e02",
+            "--transcript",
+            "/tmp/provider.jsonl",
+        ])
+
+        self.assertEqual(args.action, "feature-account-provider-usage")
+        self.assertEqual(args.run_id, "r" * 32)
+        self.assertEqual(args.token, "operator-token")
+        self.assertEqual(args.event_id, "d2f8f63a-2b7d-4023-9209-d56851b28e02")
+        self.assertEqual(args.transcript, Path("/tmp/provider.jsonl"))
+
+    def test_provider_usage_accounting_routes_through_controller(self):
+        row = {"id": "r" * 32}
+        result = {
+            "chain": "c" * 32,
+            "run_id": row["id"],
+            "event_id": "d2f8f63a-2b7d-4023-9209-d56851b28e02",
+        }
+        args = Namespace(
+            action="feature-account-provider-usage",
+            run_id=row["id"],
+            token="operator-token",
+            event_id=result["event_id"],
+            transcript=Path("/tmp/provider.jsonl"),
+            control_dir=Path("/private/control"),
+            db=Path("/tmp/archon.db"),
+        )
+        with mock.patch.object(ar, "validate_control_location") as validate, \
+                mock.patch.object(ar, "resolve_run", return_value=row) as resolve, \
+                mock.patch.object(ar, "repository_feature_call", return_value=result) as controller, \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            ar.feature_account_provider_usage_command(args)
+
+        validate.assert_called_once_with(args.control_dir)
+        resolve.assert_called_once_with(args.db, row["id"])
+        controller.assert_called_once_with("account_provider_usage_command", args, row)
+        self.assertIn("ARCHON_FEATURE_ACCOUNT_PROVIDER_USAGE=APPLIED", output.getvalue())
+        self.assertIn("event=d2f8f63a-2b7d-4023-9209-d56851b28e02", output.getvalue())
+
+
+    def test_main_dispatches_provider_usage_accounting_command(self):
+        args = Namespace(action="feature-account-provider-usage")
+
+        class Parser:
+            @staticmethod
+            def parse_args():
+                return args
+
+        with mock.patch.object(ar, "parser", return_value=Parser()), \
+                mock.patch.object(ar, "feature_account_provider_usage_command") as command:
+            ar.main()
+
+        command.assert_called_once_with(args)
+
     def test_parser_accepts_shepherd_command(self):
         args = ar.parser().parse_args(["feature-shepherd", "--chain", "c" * 32, "--json"])
 

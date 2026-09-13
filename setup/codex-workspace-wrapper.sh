@@ -70,6 +70,63 @@ print(paths[0] if paths else "")
       *) args+=("$1"); shift ;;
     esac
   done
+  if [ "${ARCHON_FEATURE_SCOPE:-}" = repositories ]; then
+    normalized_args=()
+    stripped_resume=0
+    value_for=""
+    i=0
+    while [ "$i" -lt "${#args[@]}" ]; do
+      token="${args[$i]}"
+      if [ -n "$value_for" ]; then
+        normalized_args+=("$token")
+        value_for=""
+        i=$((i + 1))
+        continue
+      fi
+      case "$token" in
+        --model|-m|--config|-c|--output-schema|--color|--approval-policy|--image|-i|--enable|--disable|--thread-source|--output-last-message|-o|--local-provider)
+          normalized_args+=("$token")
+          value_for="$token"
+          i=$((i + 1))
+          ;;
+        --model=*|--output-schema=*|--color=*|--approval-policy=*)
+          normalized_args+=("$token")
+          i=$((i + 1))
+          ;;
+        resume)
+          if [ "$stripped_resume" -ne 0 ]; then
+            echo "CODEX_WRAPPER=FAIL multiple Codex session selectors are unsupported" >&2
+            exit 2
+          fi
+          next=$((i + 1))
+          if [ "$next" -ge "${#args[@]}" ]; then
+            echo "CODEX_WRAPPER=FAIL Codex resume selector missing session id" >&2
+            exit 2
+          fi
+          selector="${args[$next]}"
+          if [[ ! "$selector" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+            echo "CODEX_WRAPPER=FAIL unsupported Codex resume session id" >&2
+            exit 2
+          fi
+          stripped_resume=1
+          i=$((i + 2))
+          ;;
+        fork|--resume|--resume=*|-r|resume=*|--last|--all)
+          echo "CODEX_WRAPPER=FAIL unsupported Codex session selector: $token" >&2
+          exit 2
+          ;;
+        *)
+          if [[ "$token" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+            echo "CODEX_WRAPPER=FAIL unsupported bare Codex session selector" >&2
+            exit 2
+          fi
+          normalized_args+=("$token")
+          i=$((i + 1))
+          ;;
+      esac
+    done
+    args=("${normalized_args[@]}")
+  fi
   WORKTREE="$(python3 - "$ROOT" "$WORKTREE" "$ARTIFACTS_DIR" "$ARTIFACTS_BASE" <<'PY_WORKTREE'
 import json
 import hashlib
@@ -163,7 +220,7 @@ rules = ",".join(json.dumps(str(path.resolve())) + '= "deny"' for path in denied
 if os.environ.get("ARCHON_FEATURE_SCOPE") == "repositories":
     artifacts = Path(sys.argv[1]).resolve()
     frozen = ["params.json", "worktrees.json", "bootstrap-head.txt", "feature-chain-request.json",
-              "prior-planning-evidence.json", "budget-forecast.json"]
+              "prior-planning-evidence.json", "budget-forecast.json", "AGENTS.md"]
     if os.environ.get("ARCHON_FEATURE_PHASE") != "planning":
         frozen += ["joint-plan.json", "plan.md", "files-allowlist.json", "verify.json",
                    "candidate-inputs.json", "candidate-revisions.json", "premises.json",
