@@ -35,7 +35,7 @@ class QualificationTextContract(unittest.TestCase):
     def test_runbook_section_says_five_not_four(self):
         self.assertIn("the five discriminators", self.runbook_text)
         self.assertIn("exactly one of five ways", self.runbook_text)
-        self.assertNotIn("the four discriminators", self.runbook_text)
+        self.assertNotIn("the four " + "discriminators", self.runbook_text)
         self.assertNotIn("exactly one of four ways", self.runbook_text)
 
     def test_no_tracked_file_still_says_the_four_discriminators(self):
@@ -52,7 +52,7 @@ class QualificationTextContract(unittest.TestCase):
                 text = path.read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError):
                 continue
-            if "the four discriminators" in text:
+            if "the four " + "discriminators" in text:
                 offenders.append(rel)
         self.assertEqual(offenders, [])
 
