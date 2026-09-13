@@ -1632,21 +1632,23 @@ def integration_receipt(state: dict, evidence: dict) -> dict:
     return body
 
 
-def finalize_integration_unlocked(control_dir: Path, state: dict, evidence: dict) -> dict:
+def finalize_integration_unlocked(control_dir: Path, state: dict, evidence: dict, artifacts: Path | None = None) -> dict:
     verify_approval(state)
     missing = [repo for repo in state["repositories"] if state["stages"][repo].get("status") != "verified"]
     if missing:
         raise FeatureChainError("cannot finalize before verified stages: " + ",".join(missing))
     receipt = integration_receipt(state, evidence)
     state["integration"] = receipt
+    if artifacts is not None:
+        state["integration_artifacts"] = str(artifacts)
     state["status"] = "locally_verified"
     state["updated_at"] = now()
     return write_state(control_dir, state)
 
 
-def finalize_integration(control_dir: Path, chain_id: str, evidence: dict) -> dict:
+def finalize_integration(control_dir: Path, chain_id: str, evidence: dict, artifacts: Path | None = None) -> dict:
     with chain_lock(control_dir, chain_id):
-        return finalize_integration_unlocked(control_dir, read_state(control_dir, chain_id), evidence)
+        return finalize_integration_unlocked(control_dir, read_state(control_dir, chain_id), evidence, artifacts)
 
 
 def advance(host: Any, args: Any, row: dict, result: dict) -> dict:
@@ -1718,7 +1720,7 @@ def advance(host: Any, args: Any, row: dict, result: dict) -> dict:
                 return {"state": state, "paused": True, "phase": "integration"}
             artifacts = Path(str(current.get("artifacts_dir") or result.get("artifacts") or row.get("output_root", "")))
             evidence = read_json_artifact(artifacts / INTEGRATION_EVIDENCE_ARTIFACT, INTEGRATION_EVIDENCE_ARTIFACT)
-            state = finalize_integration_unlocked(control_dir, state, evidence)
+            state = finalize_integration_unlocked(control_dir, state, evidence, artifacts)
             receipt_path = artifacts / "feature-chain-receipt.json"
             write_json_atomic(receipt_path, state["integration"])
             launcher = getattr(host, "__file__", "archon-run.py")
@@ -2187,13 +2189,15 @@ def publish(host: Any, args: Any, chain_id: str, run: Any = subprocess.run) -> d
             if url and _sync_body(run, repo, info, url, publication_body(state, repo, publications)):
                 edited.append(repo)
         record = publication_record(state, publications)
-        current = state.get("current_run") or {}
-        artifacts_dir = current.get("artifacts_dir")
-        record_path = write_json_atomic(Path(str(artifacts_dir)) / PUBLICATION_ARTIFACT, record) if artifacts_dir else None
+        # The receipt body carries no artifacts path, so these two sources are the whole fallback chain.
+        artifacts_dir = state.get("integration_artifacts") or (state.get("current_run") or {}).get("artifacts_dir")
+        if not artifacts_dir:
+            raise FeatureChainError("chain has no integration artifacts directory for the publication record")
+        record_path = write_json_atomic(Path(str(artifacts_dir)) / PUBLICATION_ARTIFACT, record)
         state["publication"] = record
         state["updated_at"] = now()
         state = write_state(control_dir, state)
     summary = " ".join(f"{repo}={pub['pr_url'] or pub['outcome']}" for repo, pub in publications.items())
     print(f"ARCHON_FEATURE_REPOSITORY_CHAIN=PUBLISHED chain={chain_id} {summary} edited={','.join(edited) or 'none'} "
           f"record={record_path} next=\"babysit is per-PR; the merge click is yours\"")
-    return {"state": state, "publications": publications, "record": record, "record_path": str(record_path) if record_path else None, "edited": edited}
+    return {"state": state, "publications": publications, "record": record, "record_path": str(record_path), "edited": edited}
