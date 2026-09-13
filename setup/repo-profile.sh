@@ -72,7 +72,11 @@ PROFILES = {
                       "--testPathIgnorePatterns", r"\.(e2e|smoke)\.test\.ts$",
                       "--testPathPatterns"],
         "env_src":   "",
-        "smoke":     "",
+        # setup/mcp-smoke.sh. Declaring it is what allocates APIPORT: the port is
+        # allocated only when HAS_SMOKE is non-empty (resolve-params.sh:113), and
+        # the lane treats a missing APIPORT for a smoke-bearing repo as a hard
+        # PREFLIGHT=FAIL. An empty value here would leave the smoke with no port.
+        "smoke":     "1",
         "browser":   "",
         "impact":    "",
     },

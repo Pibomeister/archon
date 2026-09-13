@@ -81,6 +81,22 @@ def profile(repo, setup_dir=SETUP):
     return out
 
 
+def declare_no_smoke(setup_dir, repo="goodword-mcp"):
+    """Rewrite the COPIED profile so `repo` declares no smoke stack.
+
+    Every shipped profile now declares one, so the capability-driven skip has no
+    real repo left to be a control against; asserting it with a repo that DOES
+    declare a smoke stack would assert nothing. Idempotent, so the caller still
+    passes against a tree where the repo declared none."""
+    path = setup_dir / "repo-profile.sh"
+    text = path.read_text(encoding="utf-8")
+    start = text.index(f'"{repo}": {{')
+    end = text.index("\n    },", start)
+    block = text[start:end].replace('"smoke":     "1",', '"smoke":     "",')
+    assert '"smoke":     "",' in block, "profile shape changed; re-derive this helper"
+    path.write_text(text[:start] + block + text[end:], encoding="utf-8")
+
+
 def recheck_writer():
     """The production recheck.json writer, EXTRACTED FROM THE LANE at test time.
 
@@ -274,10 +290,12 @@ class Preservation(unittest.TestCase):
             self.assertFalse((f.ad / "params.json").exists())
 
     def test_p6b_a_repo_with_no_smoke_never_touches_the_allocator(self):
-        """Control for the case above: mcp must succeed even with a broken
-        allocator, which is what proves the skip is capability-driven rather than
-        failure-driven."""
+        """Control for the case above: a repo declaring no smoke stack must
+        succeed even with a broken allocator, which is what proves the skip is
+        capability-driven rather than failure-driven. goodword-mcp declares one
+        now (it has a boot smoke), so the profile is edited in the fixture."""
         with FakeRoot() as f:
+            declare_no_smoke(f.setup)
             (f.setup / "port-alloc.sh").write_text(
                 "echo 'no free port' >&2\nexit 1\n", encoding="utf-8")
             r = f.resolve("--allow", "api,goodword-mcp", repo="goodword-mcp")
@@ -340,9 +358,11 @@ class Acceptance(unittest.TestCase):
         ).splitlines()
         self.assertEqual(["api", "goodword-mcp", "web-app"], listed)
 
-    def test_a3_mcp_declares_no_lint_no_smoke_no_browser_no_impact_index(self):
+    def test_a3_mcp_declares_no_lint_no_browser_no_impact_index_but_a_smoke(self):
         s = profile("goodword-mcp")["_scalars"]
-        self.assertEqual("", s["HAS_SMOKE"])
+        # setup/mcp-smoke.sh boots the server on $APIPORT, and APIPORT is
+        # allocated only for a repo whose profile declares a smoke stack.
+        self.assertEqual("1", s["HAS_SMOKE"])
         self.assertEqual("", s["HAS_BROWSER"])
         self.assertEqual("", s["ENV_SRC"])
         self.assertEqual("", s["IMPACT_INDEX"])
@@ -384,12 +404,13 @@ class Acceptance(unittest.TestCase):
             self.assertEqual(0, r.returncode, r.stdout + r.stderr)
             self.assertEqual("web-app", f.params()["repo"])
 
-    def test_a9_a_resumed_mcp_run_keeps_its_repo_and_allocates_no_port(self):
+    def test_a9_a_resumed_mcp_run_keeps_its_repo_and_its_smoke_port(self):
         with FakeRoot() as f:
             r = f.resolve("--allow", "api,goodword-mcp", repo="goodword-mcp")
             self.assertEqual(0, r.returncode, r.stdout + r.stderr)
-            self.assertNotIn("api_port", f.params(),
-                             "a repo with no smoke stack must not hold a port")
+            self.assertIn("api_port", f.params(),
+                          "mcp-smoke.sh binds this port; without it the lane "
+                          "fails preflight")
             r2 = f.resolve("--allow", "api,goodword-mcp")  # ARCHON_REPO unset
             self.assertEqual(0, r2.returncode, r2.stdout + r2.stderr)
             self.assertIn("adopted", r2.stdout)
