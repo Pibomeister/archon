@@ -4,8 +4,10 @@ import importlib.util
 import io
 import inspect
 import json
+import os
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
 from argparse import Namespace
@@ -166,6 +168,177 @@ class AdaptiveBugfix(unittest.TestCase):
         env_block = env_block[:env_block.index('    log_dir = Path')]
         self.assertIn('env["CODEX_BIN_PATH"]', env_block)
         self.assertIn('env["CLAUDE_BIN_PATH"] = str(install_private_claude_deny_wrapper(args.control_dir))', env_block)
+        self.assertIn("install_archon_codex_spawn_hook", env_block)
+
+    def test_archon_codex_spawn_hook_installs_trusted_manifest(self):
+        codex_home = self.root / "codex-home"
+        codex_home.mkdir(mode=0o700)
+        (codex_home / "config.toml").write_text(
+            'model = "gpt-5.6-sol"\nmodel_reasoning_effort = "medium"\n',
+            encoding="utf-8",
+        )
+        guard = self.root / "control" / "codex-spawn-guard.py"
+        guard.parent.mkdir(mode=0o700)
+        guard.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+        ar.install_archon_codex_spawn_hook(codex_home, guard)
+        ar.install_archon_codex_spawn_hook(codex_home, guard)
+
+        hooks_path = codex_home / "hooks.json"
+        manifest = json.loads(hooks_path.read_text(encoding="utf-8"))
+        command = str(guard.resolve())
+        self.assertEqual(manifest, {
+            "hooks": {
+                "PreToolUse": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": command,
+                        "timeout": 5,
+                    }],
+                }],
+            },
+        })
+        trust_hash = ar.codex_hook_trust_hash({
+            "event_name": "pre_tool_use",
+            "hooks": [{
+                "async": False,
+                "command": command,
+                "timeout": 5,
+                "type": "command",
+            }],
+        })
+        config = (codex_home / "config.toml").read_text(encoding="utf-8")
+        self.assertIn("[features]\nhooks = true", config)
+        self.assertIn(f'[hooks.state."{hooks_path.resolve()}:pre_tool_use:0:0"]', config)
+        self.assertEqual(config.count(f'trusted_hash = "{trust_hash}"'), 1)
+
+    def test_archon_codex_spawn_hook_refuses_unexpected_existing_manifest(self):
+        codex_home = self.root / "codex-home"
+        codex_home.mkdir(mode=0o700)
+        (codex_home / "config.toml").write_text('model = "gpt-5.6-sol"\n', encoding="utf-8")
+        (codex_home / "hooks.json").write_text('{"hooks":{"Stop":[]}}\n', encoding="utf-8")
+        guard = self.root / "guard.py"
+        guard.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+        with self.assertRaises(SystemExit):
+            ar.install_archon_codex_spawn_hook(codex_home, guard)
+
+    def test_archon_codex_spawn_hook_refuses_insecure_paths(self):
+        codex_home = self.root / "codex-home"
+        codex_home.mkdir(mode=0o777)
+        os.chmod(codex_home, 0o777)
+        (codex_home / "config.toml").write_text('model = "gpt-5.6-sol"\n', encoding="utf-8")
+        guard = self.root / "guard.py"
+        guard.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+        with self.assertRaises(SystemExit):
+            ar.install_archon_codex_spawn_hook(codex_home, guard)
+
+        os.chmod(codex_home, 0o700)
+        os.chmod(codex_home / "config.toml", 0o622)
+        with self.assertRaises(SystemExit):
+            ar.install_archon_codex_spawn_hook(codex_home, guard)
+
+        os.chmod(codex_home / "config.toml", 0o600)
+        ar.install_archon_codex_spawn_hook(codex_home, guard)
+        os.chmod(codex_home / "hooks.json", 0o622)
+        with self.assertRaises(SystemExit):
+            ar.install_archon_codex_spawn_hook(codex_home, guard)
+
+    def test_codex_spawn_guard_blocks_unpinned_or_mismatched_native_children(self):
+        payload = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "collaborationspawn_agent",
+            "tool_input": {
+                "task_name": "review",
+                "model": "gpt-5.6-luna",
+                "reasoning_effort": "high",
+            },
+        }
+        result = subprocess.run(
+            [sys.executable, str(ar.SPAWN_GUARD)],
+            input=json.dumps(payload),
+            capture_output=True,
+            encoding="utf-8",
+            env={
+                **os.environ,
+                "ARCHON_FEATURE_SCOPE": "repositories",
+                "ARCHON_CODEX_PINNED_MODEL": "gpt-5.6-sol",
+                "ARCHON_CODEX_PINNED_REASONING_EFFORT": "medium",
+            },
+        )
+
+        self.assertEqual(result.returncode, 0)
+        decision = json.loads(result.stdout)
+        self.assertEqual(decision["decision"], "block")
+        self.assertIn("explicitly match", decision["reason"])
+        self.assertIn("model=gpt-5.6-sol", decision["reason"])
+        self.assertIn("reasoning_effort=medium", decision["reason"])
+
+        unpinned = subprocess.run(
+            [sys.executable, str(ar.SPAWN_GUARD)],
+            input=json.dumps(payload),
+            capture_output=True,
+            encoding="utf-8",
+            env={
+                **{key: value for key, value in os.environ.items() if not key.startswith("ARCHON_CODEX_PINNED_")},
+                "ARCHON_FEATURE_SCOPE": "repositories",
+            },
+        )
+        self.assertEqual(unpinned.returncode, 0)
+        self.assertIn("no explicit model/effort pin", json.loads(unpinned.stdout)["reason"])
+
+    def test_codex_spawn_guard_ignores_non_repository_lanes(self):
+        payload = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "collaborationspawn_agent",
+            "tool_input": {
+                "task_name": "review",
+                "model": "gpt-5.6-luna",
+                "reasoning_effort": "high",
+            },
+        }
+        result = subprocess.run(
+            [sys.executable, str(ar.SPAWN_GUARD)],
+            input=json.dumps(payload),
+            capture_output=True,
+            encoding="utf-8",
+            env={
+                **os.environ,
+                "ARCHON_FEATURE_SCOPE": "api",
+                "ARCHON_CODEX_PINNED_MODEL": "gpt-5.6-sol",
+                "ARCHON_CODEX_PINNED_REASONING_EFFORT": "medium",
+            },
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+
+    def test_codex_spawn_guard_allows_explicit_matching_native_children(self):
+        payload = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "spawn_agent",
+            "tool_input": {
+                "task_name": "review",
+                "model": "gpt-5.6-sol",
+                "reasoning_effort": "medium",
+            },
+        }
+        result = subprocess.run(
+            [sys.executable, str(ar.SPAWN_GUARD)],
+            input=json.dumps(payload),
+            capture_output=True,
+            encoding="utf-8",
+            env={
+                **os.environ,
+                "ARCHON_FEATURE_SCOPE": "repositories",
+                "ARCHON_CODEX_PINNED_MODEL": "gpt-5.6-sol",
+                "ARCHON_CODEX_PINNED_REASONING_EFFORT": "medium",
+            },
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
 
     def test_supervision_reads_the_real_archon_approval_step_name(self):
         event = {

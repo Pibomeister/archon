@@ -53,6 +53,7 @@ else:
     ROOT = ARCHON_DIR.parent
     SETUP = ARCHON_DIR / "setup"
 WORKSPACE_WRAPPER = SETUP / "codex-workspace-wrapper.sh"
+SPAWN_GUARD = SETUP / "codex-spawn-guard.py"
 CODEX_LANES = {
     "full-sdlc-api-lite-codex": (90, 8_000_000),
     "bugfix-lite-codex": (90, 8_000_000),
@@ -662,6 +663,114 @@ def install_private_claude_deny_wrapper(control_dir: Path) -> Path:
     return install_private_executable(
         control_dir, "claude-provider-denied.sh", payload, "claude-deny"
     )
+
+
+def install_private_codex_spawn_guard(control_dir: Path) -> Path:
+    try:
+        payload = SPAWN_GUARD.read_bytes()
+    except OSError as exc:
+        fail(f"Codex spawn guard unreadable at {SPAWN_GUARD}: {exc}")
+    return install_private_executable(
+        control_dir, "codex-spawn-guard.py", payload, "codex-spawn-guard"
+    )
+
+
+def codex_hook_trust_hash(value: Any) -> str:
+    return "sha256:" + hashlib.sha256(
+        json.dumps(value, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def codex_hook_state_key(hooks_path: Path, event: str, group_index: int = 0, handler_index: int = 0) -> str:
+    return f"{hooks_path.resolve()!s}:{event}:{group_index}:{handler_index}"
+
+
+def assert_private_codex_hook_path(path: Path, *, label: str, directory: bool = False) -> None:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        fail(f"dedicated Codex hook {label} is unavailable: {path}: {exc}")
+    if stat.S_ISLNK(info.st_mode) or info.st_uid != os.getuid():
+        fail(f"dedicated Codex hook {label} must be user-owned and non-symlink: {path}")
+    if directory and info.st_mode & 0o077:
+        fail(f"dedicated Codex hook {label} must not grant group/world permissions: {path}")
+    if not directory and info.st_mode & 0o022:
+        fail(f"dedicated Codex hook {label} must not be group/world writable: {path}")
+
+
+def install_archon_codex_spawn_hook(codex_home: Path, guard: Path) -> None:
+    codex_home.mkdir(parents=True, mode=0o700, exist_ok=True)
+    assert_private_codex_hook_path(codex_home, label="home", directory=True)
+    assert_private_codex_hook_path(codex_home / "config.toml", label="config")
+    hooks_path = codex_home / "hooks.json"
+    if hooks_path.exists() or hooks_path.is_symlink():
+        assert_private_codex_hook_path(hooks_path, label="manifest")
+    assert_private_codex_hook_path(guard, label="guard")
+    command = str(guard.resolve())
+    hook_group = {"hooks": [{"type": "command", "command": command, "timeout": 5}]}
+    manifest = {"hooks": {"PreToolUse": [hook_group]}}
+    if hooks_path.exists():
+        try:
+            existing = json.loads(hooks_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            fail(f"dedicated Codex hook manifest is unreadable: {exc}")
+        if existing != manifest:
+            fail(f"dedicated Codex hook manifest has unexpected contents: {hooks_path}")
+    else:
+        hooks_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        hooks_path.chmod(0o600)
+
+    config_path = codex_home / "config.toml"
+    try:
+        config = config_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        fail(f"Codex config unreadable at {config_path}: {exc}")
+    trust_key = codex_hook_state_key(hooks_path, "pre_tool_use")
+    trust_hash = codex_hook_trust_hash({
+        "event_name": "pre_tool_use",
+        "hooks": [{
+            "async": False,
+            "command": command,
+            "timeout": 5,
+            "type": "command",
+        }],
+    })
+    block = f'[hooks.state."{trust_key}"]\ntrusted_hash = "{trust_hash}"\n'
+    header = f'[hooks.state."{trust_key}"]'
+    lines = config.splitlines()
+    kept: list[str] = []
+    index = 0
+    while index < len(lines):
+        if lines[index] == header and index + 1 < len(lines) and re.fullmatch(r'trusted_hash\s*=\s*"[^"]*"', lines[index + 1]):
+            index += 2
+            if index < len(lines) and lines[index] == "":
+                index += 1
+            continue
+        kept.append(lines[index])
+        index += 1
+    features_start = next((i for i, line in enumerate(kept) if line.strip() == "[features]"), None)
+    if features_start is None:
+        kept.extend(["", "[features]", "hooks = true"])
+    else:
+        insert_at = len(kept)
+        hooks_set = False
+        for offset in range(features_start + 1, len(kept)):
+            if kept[offset].startswith("[") and kept[offset].strip().endswith("]"):
+                insert_at = offset
+                break
+            if re.fullmatch(r'\s*hooks\s*=.*', kept[offset]):
+                kept[offset] = "hooks = true"
+                hooks_set = True
+                break
+        if not hooks_set:
+            kept.insert(insert_at, "hooks = true")
+    base = "\n".join(kept).rstrip() + "\n\n"
+    next_config = base + block
+    if next_config != config:
+        temporary = config_path.with_name(f".{config_path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
+        temporary.write_text(next_config, encoding="utf-8")
+        temporary.chmod(0o600)
+        os.replace(temporary, config_path)
 
 
 def stage_private_codex_skills(root: Path, codex_home: Path) -> None:
@@ -3565,6 +3674,10 @@ def main() -> None:
     if guard_file is not None:
         env["ARCHON_CODEX_LITE_GUARD_FILE"] = str(guard_file)
     if private_codex_wrapper is not None:
+        if os.environ.get("ARCHON_FEATURE_SCOPE") == "repositories":
+            install_archon_codex_spawn_hook(
+                args.codex_home, install_private_codex_spawn_guard(args.control_dir)
+            )
         env["CODEX_BIN_PATH"] = str(private_codex_wrapper)
         env["CODEX_REAL_BIN"] = str(Path(shutil.which("codex") or "codex").resolve())
         env["CLAUDE_BIN_PATH"] = str(install_private_claude_deny_wrapper(args.control_dir))

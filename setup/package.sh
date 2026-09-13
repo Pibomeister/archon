@@ -162,6 +162,7 @@ MANIFEST=(
   setup/codex-usage.py
   setup/codex-watchdog.sh
   setup/codex-workspace-wrapper.sh
+  setup/codex-spawn-guard.py
   setup/archon-run.py
   setup/codex-lite-run.py
   setup/bugfix-contract.py

@@ -78,6 +78,14 @@ print(paths[0] if paths else "")
     while [ "$i" -lt "${#args[@]}" ]; do
       token="${args[$i]}"
       if [ -n "$value_for" ]; then
+        if [ "$value_for" = "--enable" ] && [ "$token" = "multi_agent" ]; then
+          echo "CODEX_WRAPPER=FAIL native multi-agent cannot be enabled inside a guarded repository chain" >&2
+          exit 2
+        fi
+        if { [ "$value_for" = "--config" ] || [ "$value_for" = "-c" ]; } && [[ "$token" =~ ^(features\.)?multi_agent[[:space:]]*= ]]; then
+          echo "CODEX_WRAPPER=FAIL native multi-agent config cannot be changed inside a guarded repository chain" >&2
+          exit 2
+        fi
         normalized_args+=("$token")
         value_for=""
         i=$((i + 1))
@@ -115,6 +123,10 @@ print(paths[0] if paths else "")
           echo "CODEX_WRAPPER=FAIL unsupported Codex session selector: $token" >&2
           exit 2
           ;;
+        --enable=multi_agent)
+          echo "CODEX_WRAPPER=FAIL native multi-agent cannot be enabled inside a guarded repository chain" >&2
+          exit 2
+          ;;
         *)
           if [[ "$token" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
             echo "CODEX_WRAPPER=FAIL unsupported bare Codex session selector" >&2
@@ -126,6 +138,33 @@ print(paths[0] if paths else "")
       esac
     done
     args=("${normalized_args[@]}")
+  fi
+  PINNED_MODEL=""
+  PINNED_REASONING_EFFORT=""
+  if [ "${ARCHON_FEATURE_SCOPE:-}" = repositories ]; then
+    value_for=""
+    for token in "${args[@]}"; do
+      if [ -n "$value_for" ]; then
+        case "$value_for" in
+          --model|-m) PINNED_MODEL="$token" ;;
+          --config|-c)
+            case "$token" in
+              model_reasoning_effort=*) PINNED_REASONING_EFFORT="${token#*=}" ;;
+            esac
+            ;;
+        esac
+        value_for=""
+        continue
+      fi
+      case "$token" in
+        --model|-m|--config|-c) value_for="$token" ;;
+        --model=*) PINNED_MODEL="${token#*=}" ;;
+      esac
+    done
+    PINNED_REASONING_EFFORT="${PINNED_REASONING_EFFORT%\"}"
+    PINNED_REASONING_EFFORT="${PINNED_REASONING_EFFORT#\"}"
+    export ARCHON_CODEX_PINNED_MODEL="$PINNED_MODEL"
+    export ARCHON_CODEX_PINNED_REASONING_EFFORT="$PINNED_REASONING_EFFORT"
   fi
   WORKTREE="$(python3 - "$ROOT" "$WORKTREE" "$ARTIFACTS_DIR" "$ARTIFACTS_BASE" <<'PY_WORKTREE'
 import json
@@ -233,6 +272,9 @@ PY_PERMISSIONS
 )"
   forced=(exec --cd "$WORKTREE" --config 'default_permissions="archon-worker"'
     --config "$PERMISSIONS")
+  if [ "${ARCHON_FEATURE_SCOPE:-}" = repositories ]; then
+    forced+=(--disable multi_agent)
+  fi
   if [ "$SKIP_GIT_CHECK" -eq 1 ] || [ ! -e "$WORKTREE/.git" ]; then
     forced+=(--skip-git-repo-check)
   fi

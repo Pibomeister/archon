@@ -324,7 +324,7 @@ reference.
 The package must contain `feature_chain.py`, `feature-budget.py`,
 `validate-joint-plan.py`, `run-joint-integration.py`,
 `trusted-local-candidate.sh`, and `write-local-candidate.py` under `.archon/setup/`,
-alongside the launcher, watchdog, repository profiles, and generated feature twins.
+alongside the launcher, watchdog, Codex workspace wrapper, `codex-spawn-guard.py`, repository profiles, and generated feature twins.
 Operator skills come from `.archon/skills/`; staging links these packaged sources
 into the provider skill directories. Do not hand-edit `dist/gist` or a generated
 Codex twin to repair a missing capability.

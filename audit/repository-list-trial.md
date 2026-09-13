@@ -674,3 +674,41 @@ zero mutations per table), default dry-run, disabled-control durable blocked aud
 without business writes, and enabled-control retry with the same operation inputs.
 Evidence: /tmp/goodword-reconcile-runtime-proof.cSp4Vl. This is development
 evidence and does not replace pending exact-candidate joint integration.
+
+
+### Round-five model deviation and containment
+
+After recovery commit797b5b98bc passed420 tests, both typechecks, lint,
+branch slop, exact scope, and fresh real DynamoDB proof, guarded resume kept
+the same API run and advanced its durable review counter to5 (cap8).
+The review again selected17 lenses over6,330 changed lines /3,955 production
+lines. Inspection of native child turn_contexts found actual Luna/high children
+despite the required Sol/medium chain contract. The parent explicitly requested
+these overrides. Authenticated process containment stopped the attempt; its
+results and usage were retained, with no candidate acceptance or publication.
+
+Final refreshed usage is335,238,161 tokens /31,707 active seconds. The attempt
+added27,174,469 tokens and961 active seconds relative to the refreshed resume
+checkpoint308,063,692 /30,746. Remaining ceiling14,761,839 tokens /4,293 seconds.
+Evidence: API operator-native-model-deviation.json and provider turn_contexts.
+This is a concrete harness enforcement gap, distinct from product defects and
+full-review repetition. Native child model/effort must be constrained or blocked
+before future dispatch; root-level model pinning alone did not enforce it.
+
+
+### Native model enforcement repair
+
+Feature-disable flags were insufficient in real native-spawn probes; stdout
+filtering observes dispatch too late. A private trusted PreToolUse guard now
+checks explicit native-child model/effort against repository-chain pins before
+execution. Trust registration uses the resolved manifest path and CLI identity
+hash; the initial non-bypass failure was a canonical-path identity mismatch.
+The installer rejects insecure/symlink/unowned paths and unexpected manifests.
+Other Codex lanes are unchanged. No broad hook-trust bypass is used.
+
+Independent review passed after private-path and lane-isolation regressions.
+86 launcher/wrapper tests passed. Real non-bypass negative proof recorded no
+child edge; positive proof recorded one child edge with both parent and child
+Sol/medium and the expected response. Probe homes contain auth material and
+must not be copied wholesale or published. This repairs model enforcement only;
+the captured review workflow and resource ceilings remain unchanged.

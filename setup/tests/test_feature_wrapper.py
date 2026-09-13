@@ -131,7 +131,22 @@ class FeatureWrapper(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--model\ngpt-5.6-sol", result.stdout)
         self.assertIn("--config\nmodel_reasoning_effort=\"medium\"", result.stdout)
+        self.assertIn("--disable\nmulti_agent", result.stdout)
         self.assertNotIn("\nresume\n", result.stdout)
+
+    def test_repository_feature_cannot_reenable_native_multi_agent(self):
+        self.seal()
+        cases = [
+            ("--enable", "multi_agent"),
+            ("--enable=multi_agent",),
+            ("--config", "features.multi_agent=true"),
+            ("-c", "multi_agent=true"),
+        ]
+        for argv in cases:
+            with self.subTest(argv=argv):
+                result = self.invoke("--model", "gpt-5.6-sol", *argv)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("multi-agent", result.stderr)
 
     def test_repository_feature_resume_selector_is_removed_but_model_flags_remain(self):
         self.seal()
