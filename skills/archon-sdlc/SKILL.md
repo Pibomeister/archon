@@ -1,6 +1,6 @@
 ---
 name: archon-sdlc
-description: Use when driving or supervising a Goodword Archon SDLC, repository-list feature, bugfix, or backfill run - starting full-sdlc-api on a feature spec, bugfix on a bug report, or backfill on a backfill spec, reading the plan-gate, RCA-gate, or backfill-packet, interpreting loop exits (CONVERGED, NO_PROGRESS, FIXER_BLOCKED, SCOPE_BREACH, ROUND_CAP_REACHED, CHAIN_CONFLICT, FIX_STALLED, ARCHITECTURE_SUSPECT, NEGCONTROL=FAIL, CLAIM_DIVERGED, SAMPLE_SUSPECT, BOUND_BREACH, RECONCILE_FAIL, PLAN_REJECTED, PLAN_NO_PROGRESS, PLAN_SCOPE_DISPUTE, PLAN_ROUND_CAP, RCA_PLAN_REJECTED, RCA_PLAN_SCOPE_DISPUTE, RCA_PLAN_SHAPE=FAIL, CRITIC_GATE=FAIL, IMPACT=UNAVAILABLE, IMPACT=SKIPPED, DESLOP=DIRTY, DESLOP_GATE=FAIL, DESLOP_REVIEW=FAIL, DESLOP_ROUND_CAP, ROUTE=FULL, LITE_FIXES_UNREVIEWED, PROOF_SELF_CONTRADICTED, RCA_PLAN_FINDING_RESTATED, RCA_PLAN_SCOPE_WIDENED, RCA_PLAN_CRITIQUE_ORPHANED, E2E_MUTEX=FAIL), choosing between a lite lane (full-sdlc-api-lite, bugfix-lite) and the full lane, deciding resume vs escalate, or running babysit/cleanup afterwards. Triggers on "archon run", "start the SDLC lane", "archon bugfix", "archon backfill", "the run is stuck", "resume the run", or any mention of a paused/failed archon workflow.
+description: Use when driving or supervising a Goodword Archon SDLC, repository-list feature, bugfix, or backfill run - starting full-sdlc-api on a feature spec, bugfix on a bug report, or backfill on a backfill spec, reading the plan-gate, RCA-gate, or backfill-packet, interpreting loop exits (CONVERGED, NO_PROGRESS, FIXER_BLOCKED, SCOPE_BREACH, ROUND_CAP_REACHED, CHAIN_CONFLICT, FIX_STALLED, ARCHITECTURE_SUSPECT, NEGCONTROL=FAIL, CLAIM_DIVERGED, SAMPLE_SUSPECT, BOUND_BREACH, RECONCILE_FAIL, PLAN_REJECTED, PLAN_NO_PROGRESS, PLAN_SCOPE_DISPUTE, PLAN_ROUND_CAP, RCA_PLAN_REJECTED, RCA_PLAN_SCOPE_DISPUTE, RCA_PLAN_SHAPE=FAIL, CRITIC_GATE=FAIL, IMPACT=UNAVAILABLE, IMPACT=SKIPPED, DESLOP=DIRTY, DESLOP_GATE=FAIL, DESLOP_REVIEW=FAIL, DESLOP_ROUND_CAP, ROUTE=FULL, LITE_FIXES_UNREVIEWED, PROOF_SELF_CONTRADICTED, RCA_PLAN_FINDING_RESTATED, RCA_PLAN_SCOPE_WIDENED, RCA_PLAN_CRITIQUE_ORPHANED, E2E_MUTEX=FAIL, CROSS_REPO_FINDING), choosing between a lite lane (full-sdlc-api-lite, bugfix-lite) and the full lane, deciding resume vs escalate, or running babysit/cleanup afterwards. Triggers on "archon run", "start the SDLC lane", "archon bugfix", "archon backfill", "the run is stuck", "resume the run", or any mention of a paused/failed archon workflow.
 ---
 
 <WORKFLOW-NODE-STOP>
@@ -204,8 +204,10 @@ For the guarded Codex path:
 
 Repository-list qualification requires a supervised two-repository Sol/medium
 Codex trial through the human gate, both stages, local integration, and shared
-budget evidence. Until that receipt exists, report qualification as pending;
-ENG-3866 remains deferred. After `LOCALLY_VERIFIED`, publication is the explicit
+budget evidence. That receipt exists: chain `2205cded…` reached
+`locally_verified` under the `claude` provider with receipt `7da448da…`,
+publication held; `feature-publish` opened draft PRs api#2359 and
+goodword-mcp#32. Qualification is established. After `LOCALLY_VERIFIED`, publication is the explicit
 human-run `python3 "$ROOT/.archon/setup/archon-run.py" feature-publish --chain <id>`:
 it pushes each candidate branch (`--no-verify`) and opens draft PRs against `main` in
 dependency order, adopting an open PR only on an exact head match and recording
@@ -476,7 +478,7 @@ They run the command. You never do (§0).
 ## 4. Supervising the review loop
 
 Between `implement` and `ship` sits a per-repo loop: review -> commit fixes ->
-fixer -> converge. It ends in exactly one of four ways (RUNBOOK §3), and the
+fixer -> converge. It ends in exactly one of five ways (RUNBOOK §3), and the
 discriminator string is verbatim in `round-N/converge.txt` in the run's artifacts:
 
 | Verbatim | Meaning | Action |
@@ -485,6 +487,7 @@ discriminator string is verbatim in `round-N/converge.txt` in the run's artifact
 | verdict acceptable, HEAD moved | Fixes landed; next round re-reviews them | None - expected |
 | `NO_PROGRESS` | `Not ready` AND HEAD unchanged - the fixer is not moving the needle | Escalate. Semantic, not budget-shaped |
 | `FIXER_BLOCKED` | Fixer reported a P0-P2 it cannot fix, or wrote no result file | Escalate. Read the `failed` partition first |
+| `CROSS_REPO_FINDING round=N count=N repos=<comma list>` | A fixer finding's defect lives in a different repository of this chain - not waivable, not fixable here | Escalate. Read `cross-repo-findings.json` |
 
 Three rules that decide most supervision calls:
 
