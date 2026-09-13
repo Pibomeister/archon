@@ -109,6 +109,10 @@ def stem(path):
     return os.path.basename(path).split(".", 1)[0]
 
 
+def repository_list_scope():
+    return os.environ.get("ARCHON_FEATURE_SCOPE") == "repositories"
+
+
 def adoptable(path):
     """A new file belongs to the unit when an allowlisted file in its own
     directory shares its stem. Anything looser adopts unrelated work; anything
@@ -131,6 +135,13 @@ if breaches and stage and quarantine:
             print(f"COMMIT_SCOPE=STRAY file={b} (modified, not new: outside the allowlist)")
         print("COMMIT_SCOPE=FAIL nothing staged (a human expands files-allowlist.json — "
               "the edit is the approval — or reverts the file, then resume)")
+        sys.exit(1)
+    if adopted and repository_list_scope():
+        for b in adopted:
+            print(f"COMMIT_SCOPE=STRAY file={b} "
+                  "(new sibling outside the approved repository-stage allowlist)")
+        print("COMMIT_SCOPE=FAIL nothing staged (repository-list stages require the "
+              "approved joint-plan allowlist; no auto-expansion applied)")
         sys.exit(1)
     for b in moved:
         dest = os.path.join(quarantine, "strays", b)

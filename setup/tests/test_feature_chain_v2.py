@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+import contextlib
 import importlib.util
+import io
 import json
 import sqlite3
 import subprocess
@@ -18,6 +20,16 @@ spec = importlib.util.spec_from_file_location("feature_chain", SETUP / "feature_
 assert spec and spec.loader
 fc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fc)
+
+
+class RecordingStream(io.StringIO):
+    def __init__(self):
+        super().__init__()
+        self.flushes = []
+
+    def flush(self):
+        self.flushes.append(self.getvalue())
+        super().flush()
 
 
 def git(repo: Path, *argv: str) -> str:
@@ -200,6 +212,24 @@ class FeatureChainV2(unittest.TestCase):
         self.assertNotIn("executable_plan_contract", approved)
         self.assertEqual(approved["approval"]["plan_digest"], fc.digest(plan))
         fc.verify_approval(approved)
+
+    def test_dispatch_status_flushes_control_authority_before_followup_output(self):
+        state = {"logical_chain_id": "chain-1", "repositories": ["api", "goodword-mcp"]}
+        row = {
+            "id": "1234567890abcdef",
+            "workflow_name": "full-sdlc-api-codex",
+            "_control_line": "CODEX_LITE_RUN=STARTED run=12345678 control_token=operator",
+        }
+        stream = RecordingStream()
+
+        with contextlib.redirect_stdout(stream):
+            fc.emit_dispatch_status(state, row, "implement", "api")
+
+        self.assertIn("CODEX_LITE_RUN=STARTED", stream.getvalue())
+        self.assertIn("ARCHON_FEATURE_REPOSITORY_CHAIN=DISPATCHED", stream.getvalue())
+        self.assertGreaterEqual(len(stream.flushes), 2)
+        self.assertIn("control_token=operator", stream.flushes[0])
+        self.assertIn("ARCHON_FEATURE_REPOSITORY_CHAIN=DISPATCHED", stream.flushes[-1])
 
     def test_controller_consumes_list_stage_plan_without_rewriting_approved_plan(self):
         state = fc.launch(self.host, self.args, ["api", "goodword-mcp"])["state"]

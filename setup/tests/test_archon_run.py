@@ -20,6 +20,16 @@ ar = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ar)
 
 
+class RecordingStream(io.StringIO):
+    def __init__(self):
+        super().__init__()
+        self.flushes = []
+
+    def flush(self):
+        self.flushes.append(self.getvalue())
+        super().flush()
+
+
 class AdaptiveBugfix(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -50,6 +60,38 @@ class AdaptiveBugfix(unittest.TestCase):
         return Namespace(report=str(report), provider=provider, db=self.db,
                          codex_home=self.root / "home", registry=self.root / "registry",
                          control_dir=self.root / "control")
+
+    def test_guarded_started_control_token_print_is_unbuffered(self):
+        source = inspect.getsource(ar.main)
+        started = source[source.index('CODEX_LITE_RUN=STARTED action='):]
+        started = started[:started.index('if args.action in {"approve", "resume"}')]
+        self.assertIn('flush=True', started)
+
+    def test_codex_feature_start_flushes_control_authority_immediately(self):
+        spec_path = self.report("# Feature\n")
+        row = {
+            "id": "abcdef1234567890",
+            "workflow_name": "full-sdlc-api-codex",
+            "_control_line": "CODEX_LITE_RUN=STARTED run=abcdef12 control_token=operator",
+        }
+        args = Namespace(
+            spec=str(spec_path),
+            provider="codex",
+            scope="api",
+            db=self.db,
+            no_watch=True,
+        )
+        stream = RecordingStream()
+
+        with mock.patch.object(ar, "run_feature_lane", return_value=row), \
+             contextlib.redirect_stdout(stream):
+            ar.adaptive_legacy_feature(args)
+
+        self.assertIn("ARCHON_FEATURE=STARTED", stream.getvalue())
+        self.assertIn("control_token=operator", stream.getvalue())
+        self.assertGreaterEqual(len(stream.flushes), 2)
+        self.assertIn("ARCHON_FEATURE=STARTED", stream.flushes[0])
+        self.assertIn("control_token=operator", stream.flushes[-1])
 
     def test_static_prefilter_accepts_exact_engineering_ready_repro(self):
         p = self.report("""# Bug\nRepository: api\n## Repro\n```bash\nbun run test -- widgets.spec.ts\n```\nObserved: expected 2, received 1\n""")

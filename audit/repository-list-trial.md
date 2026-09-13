@@ -490,3 +490,44 @@ guarded approval succeeded. The same chain automatically dispatched API stage
 `174a229b-0866-482f-bb33-3c5cce536793`; implementation is now running. New stage
 sessions naturally extend the preserved session ledger. Protected operator log:
 `/tmp/archon-eng3866-approved-implementation.log`.
+
+
+### API implementation and scope-safe recovery
+
+The joint plan was approved under the user's autonomous-through-PR directive.
+API run `174a229b-0866-482f-bb33-3c5cce536793` implemented the candidate on
+Sol/medium. Mechanical test/scope gates passed; cleanup review surfaced unused
+exports/options plus unimplemented lease/journal obligations. Operator fixes
+preserved all findings/counters, completed token/lease recovery, and achieved a
+CLEAN cleanup verdict with zero findings. The subsequent reader audit completed
+and code review round one ran 17 lenses; 395 focused tests passed after fixes.
+
+Two harness inconsistencies then required recovery. The legacy commit helper
+auto-expanded the stage allowlist for a sibling utility even though the signed
+repository-list plan is exact. Repository-list scope checks now refuse this
+expansion before staging/quarantine/mutation (17 staging tests pass); legacy
+scalar behavior remains unchanged. Also STARTED/control-token output was buffered
+before long supervision, leaving the operator's rotated authority inaccessible.
+Control/dispatch emissions now flush immediately (107 launcher/chain tests pass).
+To recover the current token, the operator interrupted only its own supervising
+CLI, which flushed its protected log without stopping the detached workflow.
+It then validated the current token and contained the recorded process groups
+under the chain lock. The existing run became failed; no run was reset.
+
+The review fixer's scope-only P1 waivers were not accepted as delivery approval.
+Their original ledger is archived in the API run; bootstrap and transaction
+boundary findings were repaired, while exact-candidate concurrent integration
+remains mandatory in the approved MCP-owned integration stage. The local stage
+allowlist is restored from the signed plan and the utility addition is removed.
+The required direct-API reuse member-reason event is restored without storage
+writes; MCP's read-only path remains a separate operation.
+
+Real disposable DynamoDB Local verification found and corrected the reserved
+`ttl` projection alias. Fresh tables and a retained legacy table without a GSI
+then converged to ACTIVE indexes, real complete reconciliation markers, and the
+expected canonical legacy claim. The actual API readiness function passed.
+The disposable container was removed. HTTP-level Swagger tests now prove the
+existing 201 raw-string success and ordinary 400 body; all 395 targeted tests,
+lint, production/specification typechecks, and cleanup checks pass before the
+next independent review. Protected current operator authority is in
+`/tmp/archon-eng3866-api-recovery-protocol-fix.log`.

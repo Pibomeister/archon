@@ -2780,10 +2780,11 @@ def adaptive_legacy_feature(args: argparse.Namespace) -> None:
         row = run_feature_lane(args, args.provider, lane_map["api"], spec)
         print(
             f"ARCHON_FEATURE=STARTED provider={args.provider} scope=api "
-            f"lane={row['workflow_name']} run={row['id'][:8]}"
+            f"lane={row['workflow_name']} run={row['id'][:8]}",
+            flush=True,
         )
         if args.provider == "codex" and row.get("_control_line"):
-            print(row["_control_line"])
+            print(row["_control_line"], flush=True)
         return
 
     if args.scope == "web":
@@ -2801,10 +2802,11 @@ def adaptive_legacy_feature(args: argparse.Namespace) -> None:
         state["web_run_id"] = web["id"]
         state = write_feature_chain(args.control_dir, state)
         if args.provider == "codex" and web.get("_control_line"):
-            print(web["_control_line"])
+            print(web["_control_line"], flush=True)
         print(
             f"ARCHON_FEATURE_WEB=STARTED provider={args.provider} scope=web "
-            f"lane={web['workflow_name']} run={web['id'][:8]} chain={state['logical_chain_id']}"
+            f"lane={web['workflow_name']} run={web['id'][:8]} chain={state['logical_chain_id']}",
+            flush=True,
         )
         if getattr(args, "no_watch", False):
             return
@@ -2836,10 +2838,11 @@ def adaptive_legacy_feature(args: argparse.Namespace) -> None:
     state = write_feature_chain(args.control_dir, state)
     print(
         f"ARCHON_FEATURE_API=STARTED provider={args.provider} lane={api['workflow_name']} "
-        f"run={api['id'][:8]} chain={state['logical_chain_id']}"
+        f"run={api['id'][:8]} chain={state['logical_chain_id']}",
+        flush=True,
     )
     if args.provider == "codex" and api.get("_control_line"):
-        print(api["_control_line"])
+        print(api["_control_line"], flush=True)
     if getattr(args, "no_watch", False):
         return
     result = supervise_exact_run(
@@ -2868,10 +2871,11 @@ def adaptive_legacy_feature(args: argparse.Namespace) -> None:
     state["web_run_id"] = web["id"]
     state = write_feature_chain(args.control_dir, state)
     if args.provider == "codex" and web.get("_control_line"):
-        print(web["_control_line"])
+        print(web["_control_line"], flush=True)
     print(
         f"ARCHON_FEATURE_WEB=STARTED provider={args.provider} lane={web['workflow_name']} "
-        f"run={web['id'][:8]} chain={state['logical_chain_id']} handoff={handoff}"
+        f"run={web['id'][:8]} chain={state['logical_chain_id']} handoff={handoff}",
+        flush=True,
     )
     with temporary_env(web_env):
         web_result = supervise_exact_run(
@@ -3170,10 +3174,11 @@ def adaptive_bugfix(args: argparse.Namespace) -> None:
     }
     write_routing_receipt(active, receipt)
     if args.provider == "codex" and active.get("_control_line"):
-        print(active["_control_line"])
+        print(active["_control_line"], flush=True)
     print(
         f"ARCHON_BUGFIX=STARTED provider={args.provider} lane={active['workflow_name']} "
-        f"run={active['id'][:8]} chain={state['logical_chain_id']} routed_by={routed_by}"
+        f"run={active['id'][:8]} chain={state['logical_chain_id']} routed_by={routed_by}",
+        flush=True,
     )
     if not getattr(args, "no_watch", False) and status != "MISSING":
         while True:
@@ -3231,7 +3236,7 @@ def adaptive_bugfix(args: argparse.Namespace) -> None:
                 args.control_dir, state, active, transition, parent
             )
             if args.provider == "codex" and active.get("_control_line"):
-                print(active["_control_line"])
+                print(active["_control_line"], flush=True)
             write_routing_receipt(active, {
                 **receipt,
                 "parent_run_id": parent,
@@ -3244,7 +3249,8 @@ def adaptive_bugfix(args: argparse.Namespace) -> None:
             print(
                 f"ARCHON_BUGFIX=STARTED provider={args.provider} lane={active['workflow_name']} "
                 f"run={active['id'][:8]} chain={state['logical_chain_id']} "
-                f"routed_by={transition}"
+                f"routed_by={transition}",
+                flush=True,
             )
 
 
@@ -3694,7 +3700,7 @@ def main() -> None:
                     arm_file, False, args.wall_minutes, args.max_total_tokens,
                 )
                 print(f"CODEX_LITE_RUN=RECOVERABLE run={row['id']} "
-                      f"control_token={next_control_token} status=failed log={workflow_log}")
+                      f"control_token={next_control_token} status=failed log={workflow_log}", flush=True)
             if feature_control_claimed:
                 repository_feature_call("control_failed", args, row)
             if guard_file is not None:
@@ -3709,7 +3715,8 @@ def main() -> None:
         f"CODEX_LITE_RUN=STARTED action={args.action} run={row['id'][:8]} "
         f"launcher_pid={launcher_pid} launcher_pgid={launcher_pgid} "
         f"watchdog_pid={watchdog_pid} control_token={next_control_token} "
-        f"log={workflow_log} watchdog_log={watchdog_log}"
+        f"log={workflow_log} watchdog_log={watchdog_log}",
+        flush=True,
     )
     if args.action in {"approve", "resume"} and os.environ.get("ARCHON_FEATURE_SCOPE") == "repositories":
         result = supervise_exact_run(args.db, row["id"], 86400, 2.0, shepherd_args=args)

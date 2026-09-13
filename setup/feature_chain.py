@@ -648,7 +648,10 @@ def restart_planning(host: Any, args: Any, row: dict, control: dict) -> dict:
     args.wall_minutes = state["budget"]["wall_minutes"]
     args.max_total_tokens = state["budget"]["max_total_tokens"]
     result = dispatch_planning(host, args, state)
-    print(f"ARCHON_FEATURE_REPLAN=STARTED chain={chain_id} predecessor={row['id']} run={result['row']['id']}")
+    print(
+        f"ARCHON_FEATURE_REPLAN=STARTED chain={chain_id} predecessor={row['id']} run={result['row']['id']}",
+        flush=True,
+    )
     return result
 
 
@@ -1078,13 +1081,14 @@ def dispatch_integration(host: Any, args: Any, state: dict) -> dict:
 
 def emit_dispatch_status(state: dict, row: dict, phase: str, repo: str | None) -> None:
     if row.get("_control_line"):
-        print(row["_control_line"])
+        print(row["_control_line"], flush=True)
     repo_part = f" repo={repo}" if repo else ""
     print(
         "ARCHON_FEATURE_REPOSITORY_CHAIN=DISPATCHED "
         f"chain={state['logical_chain_id']} phase={phase}{repo_part} "
         f"lane={row.get('workflow_name')} run={str(row.get('id', ''))[:8]} "
-        f"repositories={','.join(state['repositories'])}"
+        f"repositories={','.join(state['repositories'])}",
+        flush=True,
     )
 
 

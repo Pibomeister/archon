@@ -8,6 +8,7 @@ breach that was already in history and only a human could clear. The guard was
 right and too late: staging is where scope has to be enforced, because that is
 the last point at which a stray is still a deletable file."""
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -185,11 +186,14 @@ class StrayTriage(unittest.TestCase):
             "lib/__tests__/commit-import-note-resolution.spec.ts",
         ]))
 
-    def stage(self):
+    def stage(self, feature_scope=None):
+        env = os.environ.copy()
+        if feature_scope is not None:
+            env["ARCHON_FEATURE_SCOPE"] = feature_scope
         return subprocess.run(
             ["python3", str(SCRIPT), str(self.allow), str(self.wt), "HEAD", "--stage",
              "--quarantine", str(self.art), "--exclude", "pnpm-lock.yaml"],
-            capture_output=True, encoding="utf-8")
+            capture_output=True, encoding="utf-8", env=env)
 
     def staged(self):
         out = subprocess.run(["git", "-C", str(self.wt), "diff", "--cached", "--name-only"],
@@ -206,6 +210,34 @@ class StrayTriage(unittest.TestCase):
         rec = json.loads((self.art / "allowlist-auto-expansion.json").read_text())
         self.assertEqual(rec[0]["path"], "lib/commit-import.util.ts")
         self.assertEqual(rec[0]["sibling_of"], ["lib/commit-import.service.ts"])
+
+    def test_scalar_feature_scope_still_adopts_mandated_siblings(self):
+        (self.wt / "lib/commit-import.util.ts").write_text("export const c = 3;\n")
+        r = self.stage(feature_scope="api")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("COMMIT_SCOPE=ADOPTED file=lib/commit-import.util.ts", r.stdout)
+        self.assertIn("lib/commit-import.util.ts", self.staged())
+        self.assertIn("lib/commit-import.util.ts", json.loads(self.allow.read_text()))
+
+    def test_repository_list_scope_rejects_sibling_auto_expansion_without_mutation(self):
+        sibling = self.wt / "lib/commit-import.util.ts"
+        sibling.write_text("export const c = 3;\n")
+        before = json.loads(self.allow.read_text())
+
+        r = self.stage(feature_scope="repositories")
+
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(
+            "COMMIT_SCOPE=STRAY file=lib/commit-import.util.ts "
+            "(new sibling outside the approved repository-stage allowlist)",
+            r.stdout,
+        )
+        self.assertIn("no auto-expansion applied", r.stdout)
+        self.assertTrue(sibling.exists(), "repo-list rejection must preserve the file")
+        self.assertEqual(json.loads(self.allow.read_text()), before)
+        self.assertFalse((self.art / "allowlist-auto-expansion.json").exists())
+        self.assertFalse((self.art / "strays/lib/commit-import.util.ts").exists())
+        self.assertEqual(self.staged(), [], "a refused repo-list round must leave the index empty")
 
     def test_a_scratch_probe_is_quarantined_not_committed_and_not_deleted(self):
         probe = self.wt / "lib/__tests__/zzz-timing-check.spec.ts"

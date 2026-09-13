@@ -1218,6 +1218,12 @@ high-water marks or adding elapsed time already recorded by active intervals.
 Unsupported or inconsistent evidence blocks import; never invent a Codex session
 to represent another provider.
 
+Operator authority lines are flushed before long supervision so redirected logs
+contain the rotated token while the run is active. Keep those logs private.
+Repository-list commit checks do not inherit the scalar helper's sibling-file
+auto-expansion: their exact signed stage allowance is authoritative. An absent
+file allowance is a scope finding, not permission to broaden the local manifest.
+
 An operator may supply cited factual corrections in a run-local `AGENTS.md` for
 planning nodes, whose working directory is the run's artifacts directory. This
 supplements the captured prompt without replacing its workflow or model. It is
