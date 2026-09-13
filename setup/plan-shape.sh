@@ -5,7 +5,10 @@
 # plan.md's five headings, verify.json/files-allowlist.json/web-files-allowlist.json/reader-audit.json,
 # web-reader-audit.json, web-premises.json, browser-evidence.json/.sha256 shape, and — when the spec declares premises — that every premises.json
 # evidence quote is cited verbatim in the worktree (same cited() helper as
-# plan-snapshot, verbatim).
+# plan-snapshot, verbatim). When the spec pins an interface
+# (`## Interface (pinned)`) and a joint-plan.json exists, every
+# contracts[].artifact must appear verbatim in that section or be named by a
+# `deviation: <artifact>` line in plan.md.
 # Usage: plan-shape.sh <artifacts-dir> <worktree> <spec-path>
 set -euo pipefail
 AD="${1:?usage: plan-shape.sh <artifacts-dir> <worktree> <spec-path>}"
@@ -109,6 +112,24 @@ for p in prem:
             ok = True
             break
     assert ok, f"premise {p.get('id')}: no evidence quote found verbatim in the worktree"
+PY
+fi
+
+if [ -f "$AD/joint-plan.json" ] && grep -q '^## Interface (pinned)' "$SPEC"; then
+  python3 - "$AD/joint-plan.json" "$SPEC" "$AD/plan.md" <<'PY'
+import json, re, sys
+joint_path, spec_path, plan_path = sys.argv[1:4]
+contracts = json.load(open(joint_path, encoding="utf-8")).get("contracts") or []
+spec_text = open(spec_path, encoding="utf-8").read()
+m = re.search(r"^## Interface \(pinned\)\n(.*?)(?=^## |\Z)", spec_text, re.M | re.S)
+section = m.group(1) if m else ""
+deviations = {line[len("deviation:"):].strip()
+              for line in open(plan_path, encoding="utf-8") if line.startswith("deviation:")}
+for c in contracts:
+    artifact = c.get("artifact")
+    if artifact and artifact not in section and artifact not in deviations:
+        print(f"PLAN_SHAPE=FAIL interface deviation undeclared: {artifact}")
+        sys.exit(1)
 PY
 fi
 echo "PLAN_SHAPE=OK"
