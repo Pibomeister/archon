@@ -157,6 +157,8 @@ MANIFEST=(
   setup/feature-budget.py
   setup/feature_estimate.py
   setup/feature_chain.py
+  setup/review-yield.py
+  setup/mcp-smoke.sh
   setup/codex-usage.py
   setup/codex-watchdog.sh
   setup/codex-workspace-wrapper.sh
