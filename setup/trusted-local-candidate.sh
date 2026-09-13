@@ -8,6 +8,21 @@ test "${ARCHON_FEATURE_SCOPE-}" = repositories || { echo "LOCAL_CANDIDATE=FAIL m
 test "${ARCHON_FEATURE_PHASE-}" = implement || { echo "LOCAL_CANDIDATE=FAIL phase is not implement"; exit 1; }
 cd "$WT"
 BASE=$(cat "$AD/bootstrap-head.txt")
+CANDIDATE_COMMITS=$(git rev-list --count "$BASE"..HEAD)
+if ! test -s "$AD/commit-msg.txt"; then
+  echo "CANDIDATE_SQUASH=SKIP no commit-msg.txt"
+elif test "$CANDIDATE_COMMITS" -eq 0; then
+  echo "CANDIDATE_SQUASH=SKIP no commits"
+elif test "$CANDIDATE_COMMITS" -eq 1 \
+  && test "$(git log -1 --format=%s)" = "$(head -n 1 "$AD/commit-msg.txt")"; then
+  echo "CANDIDATE_SQUASH=SKIP already squashed"
+else
+  TREE_BEFORE=$(git rev-parse 'HEAD^{tree}')
+  git reset --soft "$BASE"
+  git commit -q -F "$AD/commit-msg.txt"
+  test "$(git rev-parse 'HEAD^{tree}')" = "$TREE_BEFORE" || { echo "CANDIDATE_SQUASH=FAIL tree changed"; exit 1; }
+  echo "CANDIDATE_SQUASH=OK commits=1 head=$(git rev-parse HEAD)"
+fi
 CANDIDATE_HEAD=$(git rev-parse HEAD)
 python3 "$SETUP/check-scope.py" "$AD/files-allowlist.json" "$WT" "$BASE" \
   || { echo "LOCAL_CANDIDATE=FAIL scope breach"; exit 1; }
