@@ -44,6 +44,26 @@ def token_line(total):
     })
 
 
+def claude_assistant(message_id, input_tokens, cache_creation, cache_read, output_tokens, tool_id=None, tool_name="Read"):
+    content = []
+    if tool_id is not None:
+        content.append({"type": "tool_use", "id": tool_id, "name": tool_name, "input": {}})
+    return json.dumps({
+        "type": "assistant",
+        "message": {
+            "id": message_id,
+            "model": "claude-opus-5",
+            "content": content,
+            "usage": {
+                "input_tokens": input_tokens,
+                "cache_creation_input_tokens": cache_creation,
+                "cache_read_input_tokens": cache_read,
+                "output_tokens": output_tokens,
+            },
+        },
+    })
+
+
 class FeatureBudget(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -136,6 +156,42 @@ class FeatureBudget(unittest.TestCase):
                 "(workflow_run_id, event_type, step_name, data, created_at) VALUES (?,?,?,?,?)",
                 (run_id, event_type, None, "{}", created_at),
             )
+
+    def record_provider_event(self, run_id="e" * 32, event_id="evt-1", tokens=None, model="claude-opus-5[1m]"):
+        data = {
+            "tokens": tokens or {"input": 964_761, "output": 12_765, "cacheRead": 840_703, "cacheWrite": 123_768},
+            "model_usage": {"resolved": model},
+        }
+        with sqlite3.connect(self.db) as con:
+            try:
+                con.execute("ALTER TABLE remote_agent_workflow_events ADD COLUMN id TEXT")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" not in str(exc):
+                    raise
+            con.execute(
+                "INSERT INTO remote_agent_workflow_events "
+                "(id, workflow_run_id, event_type, step_name, data, created_at) VALUES (?,?,?,?,?,?)",
+                (event_id, run_id, "node_completed", "plan-gate:on_reject", json.dumps(data), "2026-09-13 00:56:30"),
+            )
+
+    def record_tool_owner(self, run_id="e" * 32, tool_id="toolu_01"):
+        with sqlite3.connect(self.db) as con:
+            con.execute(
+                "INSERT INTO remote_agent_workflow_events "
+                "(workflow_run_id, event_type, step_name, data) VALUES (?,?,?,?)",
+                (run_id, "tool_called", "plan-gate:on_reject", json.dumps({"tool_call_id": tool_id})),
+            )
+
+    def write_claude_transcript(self, lines=None):
+        path = self.root / "claude.jsonl"
+        if lines is None:
+            lines = [
+                claude_assistant("msg-1", 100, 50_000, 400_000, 5_000, "toolu_01"),
+                claude_assistant("msg-1", 100, 50_000, 400_000, 5_000, "toolu_01"),
+                claude_assistant("msg-2", 190, 73_768, 440_703, 7_765),
+            ]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
 
     def usage(self, now=1000):
         result = self.run_budget("usage", "--chain-id", CHAIN, "--now", str(now), "--json")
@@ -362,6 +418,112 @@ class FeatureBudget(unittest.TestCase):
 
         self.assertEqual(self.usage()["total_tokens"], 150)
 
+    def test_amend_limit_increases_cap_without_replenishing_usage_or_time(self):
+        self.init_budget(tokens=30_000_000)
+        session = self.write_session("used.jsonl", 30_154_003)
+        run_id = "e" * 32
+        for action, now in (("active-start", "100"), ("active-stop", "5131")):
+            result = self.run_budget(action, "--chain-id", CHAIN, "--run-id", run_id, "--now", now)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = self.run_budget(
+            "bind-run", "--chain-id", CHAIN, "--run-id", run_id, "--session-file", str(session)
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        result = self.run_budget(
+            "amend-limit",
+            "--chain-id", CHAIN,
+            "--total-tokens", "100000000",
+            "--amendment-id", "f" * 64,
+            "--reason", "Authorized ENG-3866 retry",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        summary = self.usage(now=6000)
+        self.assertEqual(100_000_000, summary["max_total_tokens"])
+        self.assertEqual(30_154_003, summary["total_tokens"])
+        self.assertEqual(5_031, summary["active_seconds"])
+
+    def test_amend_limit_can_increase_active_minutes_without_replenishing_usage_or_time(self):
+        self.init_budget(tokens=100_000_000)
+        session = self.write_session("used.jsonl", 30_154_003)
+        run_id = "e" * 32
+        for action, now in (("active-start", "100"), ("active-stop", "5131")):
+            result = self.run_budget(action, "--chain-id", CHAIN, "--run-id", run_id, "--now", now)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = self.run_budget(
+            "bind-run", "--chain-id", CHAIN, "--run-id", run_id, "--session-file", str(session)
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        result = self.run_budget(
+            "amend-limit",
+            "--chain-id", CHAIN,
+            "--total-tokens", "100000000",
+            "--total-active-minutes", "480",
+            "--amendment-id", "a" * 64,
+            "--reason", "Authorized extended retry",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        summary = self.usage(now=6000)
+        self.assertEqual(100_000_000, summary["max_total_tokens"])
+        self.assertEqual(28_800, summary["wall_seconds"])
+        self.assertEqual(30_154_003, summary["total_tokens"])
+        self.assertEqual(5_031, summary["active_seconds"])
+        self.assertFalse(summary["wall_exhausted"])
+        self.assertFalse(summary["tokens_exhausted"])
+        state = json.loads((self.control / "feature-budgets" / f"{CHAIN}.json").read_text())
+        self.assertEqual(28_800, state["last_usage"]["wall_seconds"])
+        self.assertEqual(5_031, state["last_usage"]["active_seconds"])
+
+    def test_amend_limit_retries_pending_journal_idempotently(self):
+        self.init_budget(tokens=30_000_000)
+        state_path = self.control / "feature-budgets" / f"{CHAIN}.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["pending_amendment"] = {
+            "amendment_id": "e" * 64,
+            "from_total_tokens": 30_000_000,
+            "total_tokens": 100_000_000,
+            "reason": "Authorized retry",
+            "started_at": "2026-09-12T00:00:00Z",
+        }
+        state_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+        blocked = self.run_budget("active-start", "--chain-id", CHAIN, "--run-id", "d" * 32, "--now", "100")
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn("amendment is incomplete", blocked.stderr)
+
+        second = self.run_budget(
+            "amend-limit", "--chain-id", CHAIN, "--total-tokens", "100000000",
+            "--amendment-id", "e" * 64, "--reason", "Authorized retry",
+        )
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        third = self.run_budget(
+            "amend-limit", "--chain-id", CHAIN, "--total-tokens", "100000000",
+            "--amendment-id", "e" * 64, "--reason", "Authorized retry",
+        )
+        self.assertEqual(third.returncode, 0, third.stdout + third.stderr)
+        self.assertIn("existing=true", third.stdout)
+        self.assertEqual(100_000_000, self.usage()["max_total_tokens"])
+
+    def test_amend_limit_rejects_live_execution_and_decrease(self):
+        self.init_budget(tokens=30_000_000)
+        result = self.run_budget("active-start", "--chain-id", CHAIN, "--run-id", "e" * 32, "--now", "100")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        active = self.run_budget(
+            "amend-limit", "--chain-id", CHAIN, "--total-tokens", "100000000",
+            "--amendment-id", "d" * 64, "--reason", "active",
+        )
+        self.assertNotEqual(active.returncode, 0)
+        self.assertIn("active interval is open", active.stderr)
+        result = self.run_budget("active-stop", "--chain-id", CHAIN, "--run-id", "e" * 32, "--now", "120")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        decrease = self.run_budget(
+            "amend-limit", "--chain-id", CHAIN, "--total-tokens", "10000000",
+            "--amendment-id", "c" * 64, "--reason", "decrease",
+        )
+        self.assertNotEqual(decrease.returncode, 0)
+        self.assertIn("may only increase", decrease.stderr)
+
     def test_stale_open_interval_recovers_at_run_stop_event_before_retry(self):
         self.init_budget()
         run_id = "e" * 32
@@ -389,6 +551,164 @@ class FeatureBudget(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("session file must live under codex home", result.stderr)
+
+    def test_provider_usage_receipt_adds_exact_incident_total_once(self):
+        self.init_budget(tokens=2_000_000)
+        run_id = "e" * 32
+        self.run_budget("bind-run", "--chain-id", CHAIN, "--run-id", run_id)
+        self.record_provider_event(run_id)
+        self.record_tool_owner(run_id, "toolu_01")
+        transcript = self.write_claude_transcript()
+
+        result = self.run_budget(
+            "account-provider-usage", "--chain-id", CHAIN, "--run-id", run_id,
+            "--db", str(self.db), "--event-id", "evt-1", "--transcript", str(transcript),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        summary = self.usage()
+        self.assertEqual(977_526, summary["total_tokens"])
+        self.assertEqual(1, summary["provider_receipts"])
+        self.assertEqual(964_761, summary["input_tokens"])
+        self.assertEqual(840_703, summary["cached_input_tokens"])
+        self.assertEqual(12_765, summary["output_tokens"])
+        self.assertEqual(summary["total_tokens"], summary["input_tokens"] + summary["output_tokens"])
+        state = json.loads((self.control / "feature-budgets" / f"{CHAIN}.json").read_text(encoding="utf-8"))
+        receipt = state["provider_usage_receipts"][0]
+        self.assertEqual(290, receipt["provider_usage"]["uncached_input_tokens"])
+        self.assertEqual(123_768, receipt["provider_usage"]["cache_creation_input_tokens"])
+        self.assertEqual(840_703, receipt["provider_usage"]["cache_read_input_tokens"])
+        self.assertEqual(964_761, receipt["provider_usage"]["inclusive_input_tokens"])
+        self.assertEqual(840_703, receipt["usage"]["cached_input_tokens"])
+        self.assertEqual(receipt["usage"]["total_tokens"], receipt["usage"]["input_tokens"] + receipt["usage"]["output_tokens"])
+        self.assertEqual(0, state["token_high_water"]["total_tokens"])
+
+        repeated = self.run_budget(
+            "account-provider-usage", "--chain-id", CHAIN, "--run-id", run_id,
+            "--db", str(self.db), "--event-id", "evt-1", "--transcript", str(transcript),
+        )
+        self.assertEqual(repeated.returncode, 0, repeated.stdout + repeated.stderr)
+        self.assertIn("existing=true", repeated.stdout)
+        self.assertEqual(977_526, self.usage()["total_tokens"])
+        state = json.loads((self.control / "feature-budgets" / f"{CHAIN}.json").read_text(encoding="utf-8"))
+        self.assertEqual(0, state["token_high_water"]["total_tokens"])
+
+    def test_provider_usage_rejects_conflicting_or_unowned_evidence(self):
+        self.init_budget(tokens=2_000_000)
+        run_id = "e" * 32
+        self.run_budget("bind-run", "--chain-id", CHAIN, "--run-id", run_id)
+        self.record_provider_event(run_id)
+        transcript = self.write_claude_transcript()
+
+        unowned = self.run_budget(
+            "account-provider-usage", "--chain-id", CHAIN, "--run-id", run_id,
+            "--db", str(self.db), "--event-id", "evt-1", "--transcript", str(transcript),
+        )
+        self.assertNotEqual(unowned.returncode, 0)
+        self.assertIn("not owned by the registered run", unowned.stderr)
+
+        self.record_tool_owner(run_id, "toolu_01")
+        ok = self.run_budget(
+            "account-provider-usage", "--chain-id", CHAIN, "--run-id", run_id,
+            "--db", str(self.db), "--event-id", "evt-1", "--transcript", str(transcript),
+        )
+        self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+        conflict = self.write_claude_transcript([
+            claude_assistant("msg-x", 290, 123_768, 840_703, 12_765),
+        ])
+        result = self.run_budget(
+            "account-provider-usage", "--chain-id", CHAIN, "--run-id", run_id,
+            "--db", str(self.db), "--event-id", "evt-1", "--transcript", str(conflict),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("different evidence", result.stderr)
+
+    def test_provider_usage_rejects_malformed_negative_mismatch_and_wrong_run(self):
+        self.init_budget(tokens=2_000_000)
+        run_id = "e" * 32
+        self.run_budget("bind-run", "--chain-id", CHAIN, "--run-id", run_id)
+        self.record_provider_event("f" * 32)
+        transcript = self.write_claude_transcript()
+
+        wrong_run = self.run_budget(
+            "account-provider-usage", "--chain-id", CHAIN, "--run-id", run_id,
+            "--db", str(self.db), "--event-id", "evt-1", "--transcript", str(transcript),
+        )
+        self.assertNotEqual(wrong_run.returncode, 0)
+        self.assertIn("does not belong", wrong_run.stderr)
+
+        with sqlite3.connect(self.db) as con:
+            con.execute("DELETE FROM remote_agent_workflow_events")
+        self.record_provider_event(run_id, tokens={"input": 1, "output": 1, "cacheRead": 2, "cacheWrite": 0})
+        negative = self.run_budget(
+            "account-provider-usage", "--chain-id", CHAIN, "--run-id", run_id,
+            "--db", str(self.db), "--event-id", "evt-1", "--transcript", str(transcript),
+        )
+        self.assertNotEqual(negative.returncode, 0)
+        self.assertIn("cache tokens exceed", negative.stderr)
+
+        malformed = self.root / "bad.jsonl"
+        malformed.write_text("{not-json}\n", encoding="utf-8")
+        with sqlite3.connect(self.db) as con:
+            con.execute("DELETE FROM remote_agent_workflow_events")
+        self.record_provider_event(run_id)
+        bad = self.run_budget(
+            "account-provider-usage", "--chain-id", CHAIN, "--run-id", run_id,
+            "--db", str(self.db), "--event-id", "evt-1", "--transcript", str(malformed),
+        )
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("malformed JSONL", bad.stderr)
+
+        mismatch = self.write_claude_transcript([claude_assistant("msg-1", 1, 2, 3, 4)])
+        bad_total = self.run_budget(
+            "account-provider-usage", "--chain-id", CHAIN, "--run-id", run_id,
+            "--db", str(self.db), "--event-id", "evt-1", "--transcript", str(mismatch),
+        )
+        self.assertNotEqual(bad_total.returncode, 0)
+        self.assertIn("usage does not match", bad_total.stderr)
+
+    def test_provider_usage_preserves_old_aggregate_highwater_without_folding_receipts_into_it(self):
+        self.init_budget(tokens=1_000)
+        run_id = "e" * 32
+        session = self.write_session("used.jsonl", 50)
+        self.run_budget("bind-run", "--chain-id", CHAIN, "--run-id", run_id, "--session-file", str(session))
+        state_path = self.control / "feature-budgets" / f"{CHAIN}.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["token_high_water"] = {"input_tokens": 90, "cached_input_tokens": 0, "output_tokens": 10, "total_tokens": 100}
+        state["provider_usage_receipts"] = [{
+            "kind": "provider-usage-receipt",
+            "run_id": run_id,
+            "provider": "claude",
+            "model": "claude-opus-5",
+            "event_id": "evt-low",
+            "event_sha256": "a" * 64,
+            "transcript_sha256": "b" * 64,
+            "provider_usage": {
+                "uncached_input_tokens": 7,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "inclusive_input_tokens": 7,
+                "output_tokens": 3,
+                "total_tokens": 10,
+            },
+            "usage": {
+                "input_tokens": 7,
+                "cached_input_tokens": 0,
+                "output_tokens": 3,
+                "total_tokens": 10,
+            },
+        }]
+        state_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+        summary = self.usage()
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(110, summary["total_tokens"])
+        self.assertEqual(100, state["token_high_water"]["total_tokens"])
+        self.assertEqual({"input_tokens": 90, "cached_input_tokens": 0, "output_tokens": 10, "total_tokens": 100},
+                         state["token_high_water"])
+        self.assertEqual(110, self.usage()["total_tokens"])
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(100, state["token_high_water"]["total_tokens"])
 
 
 if __name__ == "__main__":

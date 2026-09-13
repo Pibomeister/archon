@@ -78,6 +78,7 @@ class FeatureWrapper(unittest.TestCase):
         result = self.invoke()
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn(json.dumps(str(self.artifacts / "prior-planning-evidence.json")) + '= "read"', result.stdout)
+        self.assertIn(json.dumps(str(self.artifacts / "AGENTS.md")) + '= "read"', result.stdout)
         self.assertIn(json.dumps(str(self.artifacts / "budget-forecast.json")) + '= "read"', result.stdout)
 
     def test_executor_uses_private_worktree_even_if_params_drift(self):
@@ -124,6 +125,51 @@ class FeatureWrapper(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("evil", result.stdout)
 
+    def test_repository_feature_exec_starts_fresh_without_resume_selector(self):
+        self.seal()
+        result = self.invoke("--model", "gpt-5.6-sol", "--config", "model_reasoning_effort=\"medium\"")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--model\ngpt-5.6-sol", result.stdout)
+        self.assertIn("--config\nmodel_reasoning_effort=\"medium\"", result.stdout)
+        self.assertNotIn("\nresume\n", result.stdout)
+
+    def test_repository_feature_resume_selector_is_removed_but_model_flags_remain(self):
+        self.seal()
+        prior = "01a09692-7455-7b03-9e1f-d232497c3f68"
+        result = self.invoke("--model", "gpt-5.6-sol", "--config", "model_reasoning_effort=\"medium\"", "resume", prior)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--model\ngpt-5.6-sol", result.stdout)
+        self.assertIn("--config\nmodel_reasoning_effort=\"medium\"", result.stdout)
+        self.assertNotIn("\nresume\n", result.stdout)
+        self.assertNotIn(prior, result.stdout)
+
+    def test_repository_feature_option_values_named_resume_are_preserved(self):
+        self.seal()
+        result = self.invoke("--model", "resume", "--config", "resume")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--model\nresume", result.stdout)
+        self.assertIn("--config\nresume", result.stdout)
+
+    def test_repository_feature_unknown_resume_selector_forms_fail_closed(self):
+        self.seal()
+        prior = "01a09692-7455-7b03-9e1f-d232497c3f68"
+        cases = [
+            ("--resume", prior),
+            ("--resume=" + prior,),
+            ("resume",),
+            ("resume", "--last"),
+            ("resume", "not-a-uuid"),
+            ("fork", prior),
+            ("--last",),
+            ("--all",),
+            (prior,),
+        ]
+        for argv in cases:
+            with self.subTest(argv=argv):
+                result = self.invoke(*argv)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("CODEX_WRAPPER=FAIL", result.stderr)
+
     def test_records_every_started_session_before_forwarding_event(self):
         self.seal()
         common = [sys.executable, str(self.recorder), "--control-dir", str(self.control)]
@@ -137,6 +183,21 @@ class FeatureWrapper(unittest.TestCase):
         self.assertIn('"thread.started"', result.stdout)
         ledger = json.loads((self.control / "feature-budgets" / (self.chain_id + ".json")).read_text())
         self.assertEqual(ledger["runs"][0]["session_ids"], [session])
+
+    def test_resume_conversion_records_new_thread_not_prior_selector(self):
+        self.seal()
+        common = [sys.executable, str(self.recorder), "--control-dir", str(self.control)]
+        subprocess.run([*common, "init", "--chain-id", self.chain_id], check=True, capture_output=True)
+        subprocess.run([*common, "bind-run", "--chain-id", self.chain_id, "--run-id", self.run_id],
+                       check=True, capture_output=True)
+        prior = "01a09692-7455-7b03-9e1f-d232497c3f68"
+        fresh = "01999999-1111-7222-8333-444444444444"
+        self.real.write_text("#!/bin/sh\nprintf '%s\\n' '" + json.dumps({"type": "thread.started", "thread_id": fresh}) + "'\n")
+        result = self.invoke("--model", "gpt-5.6-sol", "resume", prior)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(prior, result.stdout)
+        ledger = json.loads((self.control / "feature-budgets" / (self.chain_id + ".json")).read_text())
+        self.assertEqual(ledger["runs"][0]["session_ids"], [fresh])
 
     def test_session_recording_failure_stops_provider_output(self):
         self.seal()

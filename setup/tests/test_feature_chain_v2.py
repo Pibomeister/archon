@@ -555,6 +555,28 @@ class FeatureChainV2(unittest.TestCase):
         fc.before_control(self.host, Namespace(**vars(self.args), action="resume", token="fresh"), row, {"feature_chain": control})
         self.assertEqual(calls, [(row["id"], "old"), (row["id"], "fresh")])
 
+    def test_before_control_refreshes_stale_args_from_locked_chain_budget(self):
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        row = launched["row"]
+        state = fc.read_state(self.control, launched["state"]["logical_chain_id"])
+        state["budget"]["wall_minutes"] = 240
+        state["budget"]["max_total_tokens"] = 100_000_000
+        state = fc.write_state(self.control, state)
+        control = fc.bind_run_control_payload(self.control, state, None, row, "planning")
+        args = Namespace(**vars(self.args), action="resume", token="token")
+        args.max_total_tokens = 30_000_000
+
+        def budget_require_remaining(_args, _chain_id):
+            self.assertEqual(100_000_000, _args.max_total_tokens)
+            self.assertEqual(240, _args.wall_minutes)
+            return {"max_total_tokens": 100_000_000}
+
+        with mock.patch.object(fc, "budget_require_remaining", side_effect=budget_require_remaining):
+            fc.before_control(self.host, args, row, {"feature_chain": control})
+
+        self.assertEqual(100_000_000, args.max_total_tokens)
+        self.assertEqual(240, args.wall_minutes)
+
     def test_failed_approval_validation_does_not_leave_pending_claim(self):
         launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
         state = launched["state"]

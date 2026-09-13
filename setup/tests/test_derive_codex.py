@@ -282,6 +282,23 @@ class GuardTextProperties(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("fixed private control directory", result.stdout)
 
+
+    def test_codex_reject_hooks_do_not_carry_ignored_provider_fields(self):
+        for target in sorted(dc.GUARDED_TARGETS):
+            with self.subTest(target=target):
+                _, text, _ = dc.derive(target)
+                twin = yaml.safe_load(text)
+                hooks = [
+                    n["approval"]["on_reject"]
+                    for n in walk(twin["nodes"])
+                    if isinstance(n.get("approval"), dict)
+                    and isinstance(n["approval"].get("on_reject"), dict)
+                ]
+                self.assertTrue(hooks, target)
+                for hook in hooks:
+                    self.assertNotIn("provider", hook)
+                    self.assertNotIn("model", hook)
+
     def test_lite_packets_use_guarded_control_commands(self):
         for target in dc.LITE_TARGETS:
             with self.subTest(target=target):

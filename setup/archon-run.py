@@ -625,14 +625,10 @@ def validate_control_location(control_dir: Path) -> None:
     ensure_control_dir(control_dir)
 
 
-def install_private_codex_wrapper(control_dir: Path) -> Path:
+def install_private_executable(control_dir: Path, name: str, payload: bytes, temp_prefix: str) -> Path:
     ensure_control_dir(control_dir)
-    try:
-        payload = WORKSPACE_WRAPPER.read_bytes()
-    except OSError as exc:
-        fail(f"Codex sandbox wrapper unreadable at {WORKSPACE_WRAPPER}: {exc}")
-    target = control_dir / "codex-workspace-wrapper.sh"
-    temporary = control_dir / f".codex-wrapper.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+    target = control_dir / name
+    temporary = control_dir / f".{temp_prefix}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -645,6 +641,27 @@ def install_private_codex_wrapper(control_dir: Path) -> Path:
         os.close(fd)
     os.replace(temporary, target)
     return target
+
+
+def install_private_codex_wrapper(control_dir: Path) -> Path:
+    try:
+        payload = WORKSPACE_WRAPPER.read_bytes()
+    except OSError as exc:
+        fail(f"Codex sandbox wrapper unreadable at {WORKSPACE_WRAPPER}: {exc}")
+    return install_private_executable(
+        control_dir, "codex-workspace-wrapper.sh", payload, "codex-wrapper"
+    )
+
+
+def install_private_claude_deny_wrapper(control_dir: Path) -> Path:
+    payload = (
+        b"#!/usr/bin/env bash\n"
+        b"echo \"ARCHON_CODEX_PROVIDER_GUARD=FAIL attempted claude provider inside guarded Codex control\" >&2\n"
+        b"exit 78\n"
+    )
+    return install_private_executable(
+        control_dir, "claude-provider-denied.sh", payload, "claude-deny"
+    )
 
 
 def stage_private_codex_skills(root: Path, codex_home: Path) -> None:
@@ -1544,8 +1561,57 @@ def gate_discriminator(row: dict) -> str:
     return redact_control_tokens(reason)[:200]
 
 
-def supervise_exact_run(db: Path, run_id: str, timeout_s: int, interval_s: float = 2.0) -> dict:
+def supervisor_checkpoint_key(db: Path, row: dict) -> str:
+    event = latest_run_event(db, row["id"])
+    parts = [
+        str(row.get("status", "")),
+        str(event.get("event_order", "")),
+        str(event.get("created_at", "")),
+        gate_name_from_event(event),
+    ]
+    try:
+        parts.append("plan-round=" + (artifact_dir(row) / "plan-round.txt").read_text(encoding="utf-8").strip())
+    except OSError:
+        pass
+    return "|".join(parts)
+
+
+def supervisor_feature_shepherd_checkpoint(args: argparse.Namespace | None, db: Path, row: dict,
+                                           previous_key: str | None) -> str | None:
+    if args is None or not hasattr(args, "control_dir"):
+        return previous_key
+    control_path = Path(args.control_dir) / f"{row['id']}.json"
+    if not control_path.exists():
+        return previous_key
+    control = read_control_state(row, args.control_dir)
+    feature = control.get("feature_chain") if isinstance(control, dict) else None
+    if not isinstance(feature, dict) or feature.get("scope") != "repositories" or feature.get("provider") != "codex":
+        return previous_key
+    if feature.get("phase") != "planning":
+        return previous_key
+    chain_id = feature.get("logical_chain_id")
+    if not isinstance(chain_id, str):
+        return previous_key
+    key = supervisor_checkpoint_key(db, row)
+    if key == previous_key:
+        return previous_key
+    controller = feature_repository_controller()
+    try:
+        controller.shepherd_checkpoint(args, chain_id)
+    except Exception as exc:
+        if row.get("status") == "running":
+            stop_controlled_processes(row, args.control_dir)
+        feature_error = getattr(controller, "FeatureChainError", None)
+        if feature_error is not None and isinstance(exc, feature_error):
+            fail(f"FEATURE_CHAIN=FAIL {exc}")
+        raise
+    return key
+
+
+def supervise_exact_run(db: Path, run_id: str, timeout_s: int, interval_s: float = 2.0,
+                        shepherd_args: argparse.Namespace | None = None) -> dict:
     deadline = time.time() + timeout_s
+    last_shepherd_key = None
     while True:
         row = run_row_by_id(db, run_id)
         if not row:
@@ -1563,6 +1629,7 @@ def supervise_exact_run(db: Path, run_id: str, timeout_s: int, interval_s: float
             if discriminator:
                 terminal["discriminator"] = discriminator
             return terminal
+        last_shepherd_key = supervisor_feature_shepherd_checkpoint(shepherd_args, db, row, last_shepherd_key)
         if time.time() >= deadline:
             return {"state": "handoff", "run": row["id"], "status": status, "lane": row["workflow_name"], "reason": "timeout"}
         time.sleep(interval_s)
@@ -1765,7 +1832,7 @@ def maybe_finalize_feature_receipt(args: argparse.Namespace, row: dict, result: 
 
 def supervise_command(args: argparse.Namespace) -> None:
     row = resolve_any_run(args.db, args.run_id, {"bugfix", "bugfix-lite", "bugfix-codex", "bugfix-lite-codex", *LANES})
-    result = supervise_exact_run(args.db, row["id"], args.timeout_seconds, args.interval_s)
+    result = supervise_exact_run(args.db, row["id"], args.timeout_seconds, args.interval_s, shepherd_args=args)
     receipt = maybe_finalize_feature_receipt(args, row, result)
     if receipt is not None:
         result["feature_receipt"] = str(receipt)
@@ -2494,7 +2561,7 @@ def print_feature_chain_pause(args: argparse.Namespace, chain_id: str) -> None:
     row = run_row_by_id(args.db, run_id) if run_id else None
     if row is None:
         fail(f"FEATURE_CHAIN=FAIL chain {chain_id} has no current run to supervise")
-    probe = supervise_exact_run(args.db, row["id"], 0)
+    probe = supervise_exact_run(args.db, row["id"], 0, shepherd_args=args)
     gate = probe.get("gate") or probe.get("status")
     advance_command = f"python3 {Path(__file__).resolve()} feature-advance --chain {chain_id}"
     label = {"gate": "PAUSED", "handoff": "RUNNING"}.get(probe["state"], probe["state"].upper())
@@ -2524,7 +2591,7 @@ def feature_advance_command(args: argparse.Namespace) -> None:
     row = run_row_by_id(args.db, run_id) if isinstance(run_id, str) else None
     if row is None:
         fail(f"FEATURE_CHAIN=FAIL chain {args.chain} has no current run")
-    result = supervise_exact_run(args.db, row["id"], args.watch_timeout_seconds)
+    result = supervise_exact_run(args.db, row["id"], args.watch_timeout_seconds, shepherd_args=args)
     if result["state"] != "terminal":
         print_feature_chain_pause(args, args.chain)
         return
@@ -2680,6 +2747,32 @@ def feature_shepherd_command(args: argparse.Namespace) -> None:
             print("BUDGET_SHEPHERD=WARN forecast exceeds allowance; continuing under the unchanged hard cap")
 
 
+def feature_budget_update_command(args: argparse.Namespace) -> None:
+    validate_control_location(args.control_dir)
+    row = resolve_run(args.db, args.run_id)
+    result = repository_feature_call("budget_update_command", args, row)
+    active_part = ""
+    if result.get("total_active_minutes") is not None:
+        active_part = f"total_active_minutes={result['total_active_minutes']} "
+    print(
+        "ARCHON_FEATURE_BUDGET_UPDATE=APPLIED "
+        f"chain={result['chain']} run={row['id'][:8]} "
+        f"total_tokens={result['total_tokens']} "
+        f"{active_part}"
+        f"shepherd={str(bool(args.enable_shepherd)).lower()}"
+    )
+
+
+def feature_account_provider_usage_command(args: argparse.Namespace) -> None:
+    validate_control_location(args.control_dir)
+    row = resolve_run(args.db, args.run_id)
+    result = repository_feature_call("account_provider_usage_command", args, row)
+    print(
+        "ARCHON_FEATURE_ACCOUNT_PROVIDER_USAGE=APPLIED "
+        f"chain={result['chain']} run={result['run_id'][:8]} event={result['event_id']}"
+    )
+
+
 def adaptive_legacy_feature(args: argparse.Namespace) -> None:
     spec = Path(args.spec).resolve()
     lane_map = FEATURE_LANES[args.provider]
@@ -2717,7 +2810,7 @@ def adaptive_legacy_feature(args: argparse.Namespace) -> None:
             return
         with temporary_env(web_env):
             web_result = supervise_exact_run(
-                args.db, web["id"], getattr(args, "watch_timeout_seconds", 86400), 2.0
+                args.db, web["id"], getattr(args, "watch_timeout_seconds", 86400), 2.0, shepherd_args=args
             )
         print(
             "ARCHON_FEATURE_WEB_SUPERVISION="
@@ -2750,7 +2843,7 @@ def adaptive_legacy_feature(args: argparse.Namespace) -> None:
     if getattr(args, "no_watch", False):
         return
     result = supervise_exact_run(
-        args.db, api["id"], getattr(args, "watch_timeout_seconds", 86400), 2.0
+        args.db, api["id"], getattr(args, "watch_timeout_seconds", 86400), 2.0, shepherd_args=args
     )
     print(
         "ARCHON_FEATURE_API_SUPERVISION="
@@ -2782,7 +2875,7 @@ def adaptive_legacy_feature(args: argparse.Namespace) -> None:
     )
     with temporary_env(web_env):
         web_result = supervise_exact_run(
-            args.db, web["id"], getattr(args, "watch_timeout_seconds", 86400), 2.0
+            args.db, web["id"], getattr(args, "watch_timeout_seconds", 86400), 2.0, shepherd_args=args
         )
     print(
         "ARCHON_FEATURE_WEB_SUPERVISION="
@@ -3084,7 +3177,7 @@ def adaptive_bugfix(args: argparse.Namespace) -> None:
     )
     if not getattr(args, "no_watch", False) and status != "MISSING":
         while True:
-            result = supervise_exact_run(args.db, active["id"], getattr(args, "watch_timeout_seconds", 86400), 2.0)
+            result = supervise_exact_run(args.db, active["id"], getattr(args, "watch_timeout_seconds", 86400), 2.0, shepherd_args=args)
             print("ARCHON_BUGFIX_SUPERVISION=" + result["state"].upper() + " " + redact_control_tokens(" ".join(
                 f"{k}={v}" for k, v in result.items()
             )))
@@ -3193,6 +3286,18 @@ def parser() -> argparse.ArgumentParser:
     shepherd = sub.add_parser("feature-shepherd", help="budget shepherd check for an existing Codex repository-list chain without launching AI")
     shepherd.add_argument("--chain", required=True)
     shepherd.add_argument("--json", action="store_true")
+    budget_update = sub.add_parser("feature-budget-update", help="guarded token allowance amendment for an existing repository-list feature chain")
+    budget_update.add_argument("run_id")
+    budget_update.add_argument("--token", required=True)
+    budget_update.add_argument("--total-tokens", type=int, required=True)
+    budget_update.add_argument("--total-active-minutes", type=int)
+    budget_update.add_argument("--enable-shepherd", action="store_true")
+    budget_update.add_argument("--reason", required=True)
+    account_usage = sub.add_parser("feature-account-provider-usage", help="guarded provider transcript usage accounting for a stopped Codex repository-list feature run")
+    account_usage.add_argument("run_id")
+    account_usage.add_argument("--token", required=True)
+    account_usage.add_argument("--event-id", required=True)
+    account_usage.add_argument("--transcript", type=Path, required=True)
     advance = sub.add_parser("feature-advance", help="claude only: seal the approved joint plan and dispatch the next chain stage")
     advance.add_argument("--chain", required=True)
     advance.add_argument("--watch-timeout-seconds", type=int, default=86400)
@@ -3268,6 +3373,12 @@ def main() -> None:
     if args.action == "feature-shepherd":
         validate_control_location(args.control_dir)
         feature_shepherd_command(args)
+        return
+    if args.action == "feature-budget-update":
+        feature_budget_update_command(args)
+        return
+    if args.action == "feature-account-provider-usage":
+        feature_account_provider_usage_command(args)
         return
     if args.action == "feature-advance":
         feature_advance_command(args)
@@ -3430,6 +3541,7 @@ def main() -> None:
     if private_codex_wrapper is not None:
         env["CODEX_BIN_PATH"] = str(private_codex_wrapper)
         env["CODEX_REAL_BIN"] = str(Path(shutil.which("codex") or "codex").resolve())
+        env["CLAUDE_BIN_PATH"] = str(install_private_claude_deny_wrapper(args.control_dir))
         env["CODEX_WORKSPACE_ROOT"] = str(ROOT)
         env["CODEX_ARTIFACTS_BASE"] = str(codex_artifacts_base(args.db, ROOT, row))
         if row is not None:
@@ -3460,6 +3572,8 @@ def main() -> None:
     if previous_control and previous_control.get("feature_chain", {}).get("scope") == "repositories":
         try:
             repository_feature_call("before_control", args, row, previous_control)
+            previous_control["wall_minutes"] = args.wall_minutes
+            previous_control["max_total_tokens"] = args.max_total_tokens
             feature_control_claimed = True
         except BaseException:
             if guard_file is not None:
@@ -3598,7 +3712,7 @@ def main() -> None:
         f"log={workflow_log} watchdog_log={watchdog_log}"
     )
     if args.action in {"approve", "resume"} and os.environ.get("ARCHON_FEATURE_SCOPE") == "repositories":
-        result = supervise_exact_run(args.db, row["id"], 86400, 2.0)
+        result = supervise_exact_run(args.db, row["id"], 86400, 2.0, shepherd_args=args)
         maybe_finalize_feature_receipt(args, row, result)
         print("ARCHON_FEATURE_SUPERVISION=" + result["state"].upper() + " " + redact_control_tokens(
             " ".join(f"{key}={value}" for key, value in result.items())

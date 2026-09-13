@@ -71,6 +71,11 @@ def secure_write_json(path: Path, data: dict, *, replace: bool = True) -> None:
             os.replace(temporary, path)
         else:
             os.link(temporary, path)
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
     except FileExistsError as exc:
         raise ControlContractError(f"private state already exists: {path}") from exc
     finally:

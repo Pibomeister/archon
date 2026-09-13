@@ -27,8 +27,9 @@ class FakeFeatureChainError(ValueError):
 class FakeRepositoryController:
     FeatureChainError = FakeFeatureChainError
 
-    def __init__(self, *, fail_before_control: bool = False):
+    def __init__(self, *, fail_before_control: bool = False, amended_tokens: int | None = None):
         self.fail_before_control = fail_before_control
+        self.amended_tokens = amended_tokens
         self.calls = []
         self.state = {
             "logical_chain_id": "a" * 32,
@@ -80,6 +81,8 @@ class FakeRepositoryController:
         self.calls.append(("before_control", row["id"]))
         if self.fail_before_control:
             raise self.FeatureChainError("repository-list feature control already in progress")
+        if self.amended_tokens is not None:
+            _args.max_total_tokens = self.amended_tokens
         return dict(self.state)
 
     def control_failed(self, _host, _args, row):
@@ -263,6 +266,24 @@ class FeaturePrearmRecoveryTest(unittest.TestCase):
         restored = ar.read_control_state(row, self.control_dir)
         self.assertEqual(ar.token_digest("prior-token"), restored["control_token_hash"])
         self.assertEqual(row["id"], ar.require_control_token(row, self.control_dir, "prior-token")["run"])
+
+    def test_repository_continuation_prearm_failure_restores_locked_amended_allowance(self):
+        row = self.add_run(status="failed")
+        prior = self.private_control(row, "prior-token")
+        self.assertEqual(30_000_000, prior["max_total_tokens"])
+        ar.secure_write_json(ar.control_state_path(row, self.control_dir), prior)
+        controller = FakeRepositoryController(amended_tokens=100_000_000)
+        stdout = io.StringIO()
+        argv = self.argv("resume", row["id"], "--token", "prior-token")
+        with self.patched_runtime(argv, controller):
+            with contextlib.redirect_stdout(stdout), self.assertRaises(SystemExit):
+                ar.main()
+
+        self.assertIn(("before_control", row["id"]), controller.calls)
+        restored = ar.require_control_token(row, self.control_dir, "prior-token")
+        self.assertEqual(100_000_000, restored["max_total_tokens"])
+        self.assertEqual(240, restored["wall_minutes"])
+        self.assertNotIn("CODEX_LITE_RUN=RECOVERABLE", stdout.getvalue())
 
     def test_duplicate_before_control_failure_does_not_cleanup_or_overwrite_authority(self):
         row = self.add_run(status="failed")
