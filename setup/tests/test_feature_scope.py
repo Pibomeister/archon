@@ -93,6 +93,10 @@ class FeatureScope(unittest.TestCase):
         self.assertEqual(args.action, "feature-advance")
         self.assertEqual(args.chain, "c" * 32)
 
+    def test_parser_accepts_feature_reopen(self):
+        args = ar.parser().parse_args(["feature-reopen", "--chain", "c" * 32, "--repo", "api", "--reason", "why"])
+        self.assertEqual((args.action, args.repo, args.reason), ("feature-reopen", "api", "why"))
+
     def test_parser_accepts_feature_publish(self):
         args = ar.parser().parse_args(["feature-publish", "--chain", "c" * 32])
         self.assertEqual(args.action, "feature-publish")

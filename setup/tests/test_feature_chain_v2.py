@@ -328,7 +328,7 @@ class FeatureChainV2(unittest.TestCase):
         self.assertEqual(final["status"], "locally_verified")
         self.assertEqual(final["integration"]["publication"], "held")
 
-    def locally_verified_chain(self, api_changed=True, finalize_artifacts=None):
+    def locally_verified_chain(self, api_changed=True, finalize_artifacts=None, finalize=True):
         launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
         state = fc.approve_plan(self.control, launched["state"]["logical_chain_id"], self.plan())
         for run_id, repo in (("1" * 32, "api"), ("2" * 32, "goodword-mcp")):
@@ -346,6 +346,8 @@ class FeatureChainV2(unittest.TestCase):
                 "feature_chain": {"logical_chain_id": state["logical_chain_id"], "repo": repo},
             })["state"]
         latest = fc.read_state(self.control, state["logical_chain_id"])
+        if not finalize:
+            return latest
         evidence = {
             "status": "passed", "tests": [{"name": "fixture"}], "counters": {"tests_passed": 1, "scenarios": 1},
             "commands": [{"scenario": "local api mcp"}],
@@ -394,6 +396,45 @@ class FeatureChainV2(unittest.TestCase):
 
         run.calls, run.prs, run.bodies = calls, prs, bodies
         return run
+
+    def test_reopen_resets_the_stage_and_its_consumers_and_redispatches(self):
+        state = self.locally_verified_chain(finalize=False)
+        self.assertEqual(state["current_run"]["phase"], "integration")
+        api_head = state["candidate_handoffs"]["api"]["candidate_head"]
+        with mock.patch("builtins.print"):
+            out = fc.reopen(self.host, self.args, state["logical_chain_id"], "api", "integration failed: non-owner 403 path")
+        latest = fc.read_state(self.control, state["logical_chain_id"])
+        self.assertEqual(latest["stages"]["api"]["status"], "running")
+        self.assertEqual(latest["stages"]["goodword-mcp"]["status"], "pending")
+        self.assertNotIn("api", latest["candidate_handoffs"])
+        self.assertNotIn("goodword-mcp", latest["candidate_handoffs"])
+        self.assertIsNone(latest["integration"])
+        self.assertEqual(latest["reopens"][0]["affected"], ["api", "goodword-mcp"])
+        self.assertEqual(latest["reopens"][0]["previous_heads"]["api"], api_head)
+        lane, _message, env, _row = self.host.calls[-1]
+        self.assertEqual(env["ARCHON_FEATURE_REPO"], "api")
+        self.assertEqual(env["ARCHON_FEATURE_PHASE"], "implement")
+        self.assertEqual(out["row"]["id"], latest["current_run"]["run_id"])
+
+    def test_reopen_of_a_leaf_stage_leaves_the_producer_verified(self):
+        state = self.locally_verified_chain(finalize=False)
+        with mock.patch("builtins.print"):
+            fc.reopen(self.host, self.args, state["logical_chain_id"], "goodword-mcp", "fix the e2e non-owner case")
+        latest = fc.read_state(self.control, state["logical_chain_id"])
+        self.assertEqual(latest["stages"]["api"]["status"], "verified")
+        self.assertEqual(latest["stages"]["goodword-mcp"]["status"], "running")
+        self.assertIn("api", latest["candidate_handoffs"])
+
+    def test_reopen_refuses_verified_chains_pending_stages_and_empty_reasons(self):
+        state = self.locally_verified_chain()
+        with self.assertRaisesRegex(fc.FeatureChainError, "locally verified"):
+            fc.reopen(self.host, self.args, state["logical_chain_id"], "api", "x")
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        fc.approve_plan(self.control, launched["state"]["logical_chain_id"], self.plan())
+        with self.assertRaisesRegex(fc.FeatureChainError, "not verified"):
+            fc.reopen(self.host, self.args, launched["state"]["logical_chain_id"], "api", "x")
+        with self.assertRaisesRegex(fc.FeatureChainError, "requires a reason"):
+            fc.reopen(self.host, self.args, launched["state"]["logical_chain_id"], "api", " ")
 
     def test_publish_opens_draft_prs_in_dependency_order_and_cross_links(self):
         state = self.locally_verified_chain()

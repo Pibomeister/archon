@@ -139,17 +139,32 @@ print(paths[0] if paths else "")
     done
     args=("${normalized_args[@]}")
   fi
-  PINNED_MODEL=""
-  PINNED_REASONING_EFFORT=""
+  PINNED_MODEL="${ARCHON_CODEX_PINNED_MODEL:-}"
+  PINNED_REASONING_EFFORT="${ARCHON_CODEX_PINNED_REASONING_EFFORT:-}"
   if [ "${ARCHON_FEATURE_SCOPE:-}" = repositories ]; then
     value_for=""
     for token in "${args[@]}"; do
       if [ -n "$value_for" ]; then
         case "$value_for" in
-          --model|-m) PINNED_MODEL="$token" ;;
+          --model|-m)
+            if [ -n "$PINNED_MODEL" ] && [ "$token" != "$PINNED_MODEL" ]; then
+              echo "CODEX_WRAPPER=FAIL repository model override $token does not match trusted chain model $PINNED_MODEL" >&2
+              exit 2
+            fi
+            PINNED_MODEL="$token"
+            ;;
           --config|-c)
             case "$token" in
-              model_reasoning_effort=*) PINNED_REASONING_EFFORT="${token#*=}" ;;
+              model_reasoning_effort=*)
+                requested_effort="${token#*=}"
+                requested_effort="${requested_effort%\"}"
+                requested_effort="${requested_effort#\"}"
+                if [ -n "$PINNED_REASONING_EFFORT" ] && [ "$requested_effort" != "$PINNED_REASONING_EFFORT" ]; then
+                  echo "CODEX_WRAPPER=FAIL repository reasoning effort override $requested_effort does not match trusted chain effort $PINNED_REASONING_EFFORT" >&2
+                  exit 2
+                fi
+                PINNED_REASONING_EFFORT="$requested_effort"
+                ;;
             esac
             ;;
         esac
@@ -158,11 +173,16 @@ print(paths[0] if paths else "")
       fi
       case "$token" in
         --model|-m|--config|-c) value_for="$token" ;;
-        --model=*) PINNED_MODEL="${token#*=}" ;;
+        --model=*)
+          requested_model="${token#*=}"
+          if [ -n "$PINNED_MODEL" ] && [ "$requested_model" != "$PINNED_MODEL" ]; then
+            echo "CODEX_WRAPPER=FAIL repository model override $requested_model does not match trusted chain model $PINNED_MODEL" >&2
+            exit 2
+          fi
+          PINNED_MODEL="$requested_model"
+          ;;
       esac
     done
-    PINNED_REASONING_EFFORT="${PINNED_REASONING_EFFORT%\"}"
-    PINNED_REASONING_EFFORT="${PINNED_REASONING_EFFORT#\"}"
     export ARCHON_CODEX_PINNED_MODEL="$PINNED_MODEL"
     export ARCHON_CODEX_PINNED_REASONING_EFFORT="$PINNED_REASONING_EFFORT"
   fi

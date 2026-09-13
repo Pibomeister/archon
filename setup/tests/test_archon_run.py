@@ -169,6 +169,28 @@ class AdaptiveBugfix(unittest.TestCase):
         self.assertIn('env["CODEX_BIN_PATH"]', env_block)
         self.assertIn('env["CLAUDE_BIN_PATH"] = str(install_private_claude_deny_wrapper(args.control_dir))', env_block)
         self.assertIn("install_archon_codex_spawn_hook", env_block)
+        self.assertIn("read_codex_config_pins", env_block)
+        self.assertIn('env["ARCHON_CODEX_PINNED_MODEL"]', env_block)
+        self.assertIn('env["ARCHON_CODEX_PINNED_REASONING_EFFORT"]', env_block)
+
+
+    def test_codex_config_pins_read_from_dedicated_home(self):
+        codex_home = self.root / "codex-home"
+        codex_home.mkdir(mode=0o700)
+        (codex_home / "config.toml").write_text(
+            'model = "gpt-5.6-sol"\nmodel_reasoning_effort = "medium"\n',
+            encoding="utf-8",
+        )
+
+        self.assertEqual(ar.read_codex_config_pins(codex_home), ("gpt-5.6-sol", "medium"))
+
+    def test_codex_config_pins_require_model_and_effort(self):
+        codex_home = self.root / "codex-home"
+        codex_home.mkdir(mode=0o700)
+        (codex_home / "config.toml").write_text('model = "gpt-5.6-sol"\n', encoding="utf-8")
+
+        with self.assertRaises(SystemExit):
+            ar.read_codex_config_pins(codex_home)
 
     def test_archon_codex_spawn_hook_installs_trusted_manifest(self):
         codex_home = self.root / "codex-home"

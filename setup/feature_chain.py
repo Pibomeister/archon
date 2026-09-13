@@ -2796,3 +2796,61 @@ def publish(host: Any, args: Any, chain_id: str, run: Any = subprocess.run) -> d
     print(f"ARCHON_FEATURE_REPOSITORY_CHAIN=PUBLISHED chain={chain_id} {summary} edited={','.join(edited) or 'none'} "
           f"record={record_path} next=\"babysit is per-PR; the merge click is yours\"")
     return {"state": state, "publications": publications, "record": record, "record_path": str(record_path), "edited": edited}
+
+
+# --- reopen: send a verified stage back to implementation after an integration failure ---
+
+def consumers_of(state: dict, repo: str) -> list[str]:
+    """Stages that depend on ``repo`` directly or transitively, in dependency order."""
+    out: list[str] = []
+    for name in state["dependency_order"]:
+        deps = set((state["stages"][name].get("plan") or {}).get("depends_on") or [])
+        if name != repo and (repo in deps or deps & set(out)):
+            out.append(name)
+    return out
+
+
+def reopen(host: Any, args: Any, chain_id: str, repo: str, reason: str) -> dict:
+    """Reset a verified stage (and its consumers) to pending and re-dispatch it.
+
+    Only between integration attempts: the chain must not be locally_verified,
+    and the current run must be a terminal integration run. The stage worktree is
+    kept as-is, so the re-run starts from the previous candidate plus any hand fix.
+    """
+    control_dir = Path(args.control_dir)
+    if not isinstance(reason, str) or not reason.strip():
+        raise FeatureChainError("reopen requires a reason")
+    with chain_lock(control_dir, chain_id):
+        state = read_state(control_dir, chain_id)
+        if state.get("status") == "locally_verified":
+            raise FeatureChainError("cannot reopen a locally verified chain; its receipt would be invalidated")
+        if repo not in state["repositories"]:
+            raise FeatureChainError(f"reopen repository is outside selected scope: {repo}")
+        if state["stages"][repo].get("status") != "verified":
+            raise FeatureChainError(f"{repo} stage is not verified; nothing to reopen")
+        current = state.get("current_run")
+        if not isinstance(current, dict) or current.get("phase") != "integration":
+            raise FeatureChainError("reopen is only allowed after an integration attempt")
+        reservation = state.get("dispatch_reservation")
+        if isinstance(reservation, dict) and reservation.get("status") != "failed" and process_claim_alive(reservation):
+            raise FeatureChainError("a live dispatch reservation holds the chain")
+        verify_approval(state)
+        affected = [repo] + consumers_of(state, repo)
+        record = {
+            "repo": repo, "reason": reason.strip(), "affected": affected,
+            "previous_heads": {r: state["candidate_handoffs"][r]["candidate_head"] for r in affected if r in state["candidate_handoffs"]},
+            "integration_run_id": current.get("run_id"), "reopened_at": now(),
+        }
+        for name in affected:
+            state["stages"][name]["status"] = "pending"
+            state["stages"][name].pop("candidate", None)
+            state["candidate_handoffs"].pop(name, None)
+        state.setdefault("reopens", []).append(record)
+        state["integration"] = None
+        state["current_run"] = None
+        state["dispatch_reservation"] = None
+        state["updated_at"] = now()
+        state = write_state(control_dir, state)
+    print(f"ARCHON_FEATURE_REPOSITORY_CHAIN=REOPENED chain={chain_id} repo={repo} affected={','.join(affected)}")
+    dispatched = dispatch_repository_stage(host, args, state, repo)
+    return {"state": dispatched["state"], "row": dispatched["row"], "result": dispatched.get("result"), "reopen": record}

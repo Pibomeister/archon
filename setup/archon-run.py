@@ -30,6 +30,7 @@ import subprocess
 import sys
 import time
 import types
+import tomllib
 from pathlib import Path
 from typing import NoReturn, Any, Iterator
 
@@ -697,6 +698,21 @@ def assert_private_codex_hook_path(path: Path, *, label: str, directory: bool = 
     if not directory and info.st_mode & 0o022:
         fail(f"dedicated Codex hook {label} must not be group/world writable: {path}")
 
+
+
+def read_codex_config_pins(codex_home: Path) -> tuple[str, str]:
+    config_path = codex_home / "config.toml"
+    assert_private_codex_hook_path(codex_home, label="home", directory=True)
+    assert_private_codex_hook_path(config_path, label="config")
+    try:
+        data = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        fail(f"Codex config unreadable at {config_path}: {exc}")
+    model = str(data.get("model") or "").strip()
+    effort = str(data.get("model_reasoning_effort") or "").strip()
+    if not model or not effort:
+        fail("repository Codex chain requires model and model_reasoning_effort in dedicated CODEX_HOME config")
+    return model, effort
 
 def install_archon_codex_spawn_hook(codex_home: Path, guard: Path) -> None:
     codex_home.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -2722,6 +2738,12 @@ def feature_publish_command_line(chain_id: str) -> str:
     return f"python3 {Path(__file__).resolve()} feature-publish --chain {chain_id}"
 
 
+def feature_reopen_command(args: argparse.Namespace) -> None:
+    validate_control_location(args.control_dir)
+    repository_feature_call("reopen", args, args.chain, args.repo, args.reason)
+    print_feature_chain_pause(args, args.chain)
+
+
 def feature_publish_command(args: argparse.Namespace) -> None:
     validate_control_location(args.control_dir)
     repository_feature_call("publish", args, args.chain)
@@ -3433,6 +3455,12 @@ def parser() -> argparse.ArgumentParser:
     advance = sub.add_parser("feature-advance", help="claude only: seal the approved joint plan and dispatch the next chain stage")
     advance.add_argument("--chain", required=True)
     advance.add_argument("--watch-timeout-seconds", type=int, default=86400)
+    reopen = sub.add_parser("feature-reopen", help="after a failed integration: reset a verified stage (and its consumers) and re-dispatch it")
+    reopen.add_argument("--chain", required=True)
+    reopen.add_argument("--repo", required=True)
+    reopen.add_argument("--reason", required=True)
+    reopen.add_argument("--no-watch", action="store_true")
+    reopen.add_argument("--watch-timeout-seconds", type=int, default=86400)
     publish = sub.add_parser("feature-publish", help="push each verified candidate branch and open draft PRs in dependency order")
     publish.add_argument("--chain", required=True)
     replan = sub.add_parser("feature-replan")
@@ -3520,6 +3548,9 @@ def main() -> None:
         return
     if args.action == "feature-publish":
         feature_publish_command(args)
+        return
+    if args.action == "feature-reopen":
+        feature_reopen_command(args)
         return
     if args.action == "verify-feature-handoff":
         validate_control_location(args.control_dir)
@@ -3675,6 +3706,9 @@ def main() -> None:
         env["ARCHON_CODEX_LITE_GUARD_FILE"] = str(guard_file)
     if private_codex_wrapper is not None:
         if os.environ.get("ARCHON_FEATURE_SCOPE") == "repositories":
+            codex_model, codex_effort = read_codex_config_pins(args.codex_home)
+            env["ARCHON_CODEX_PINNED_MODEL"] = codex_model
+            env["ARCHON_CODEX_PINNED_REASONING_EFFORT"] = codex_effort
             install_archon_codex_spawn_hook(
                 args.codex_home, install_private_codex_spawn_guard(args.control_dir)
             )

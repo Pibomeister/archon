@@ -31,7 +31,12 @@ class FeatureWrapper(unittest.TestCase):
         self.other = self.workspace / "goodword-mcp"
         (self.other / ".git").mkdir(parents=True)
         self.real = self.root / "fake-codex"
-        self.real.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+        self.real.write_text(
+            '#!/bin/sh\n'
+            'printf "%s\\n" "$@"\n'
+            'printf "PINNED_MODEL=%s\\n" "${ARCHON_CODEX_PINNED_MODEL:-}"\n'
+            'printf "PINNED_EFFORT=%s\\n" "${ARCHON_CODEX_PINNED_REASONING_EFFORT:-}"\n'
+        )
         self.real.chmod(0o700)
         self.recorder = WRAPPER.parent / "feature-budget.py"
         self.state = {
@@ -53,16 +58,19 @@ class FeatureWrapper(unittest.TestCase):
         path.chmod(0o600)
         return path
 
-    def invoke(self, *args):
+    def invoke(self, *args, extra_env=None):
+        env = dict(os.environ, CODEX_REAL_BIN=str(self.real),
+                   CODEX_WORKSPACE_ROOT=str(self.workspace), CODEX_ARTIFACTS_BASE=str(self.artifacts.parent),
+                   ARCHON_CONTROL_DIR=str(self.control), ARCHON_FEATURE_CHAIN_ID=self.chain_id,
+                   ARCHON_FEATURE_BUDGET_SCRIPT=str(self.recorder), CODEX_HOME=str(self.root / "codex-home"),
+                   ARCHON_FEATURE_PHASE=self.state["current_run"]["phase"],
+                   ARCHON_FEATURE_SCOPE="repositories")
+        if extra_env:
+            env.update(extra_env)
         return subprocess.run(
             ["bash", str(WRAPPER), "exec", "--cd", str(self.other), *args],
             input=f"Write artifacts to {self.artifacts}", text=True, capture_output=True,
-            env=dict(os.environ, CODEX_REAL_BIN=str(self.real),
-                     CODEX_WORKSPACE_ROOT=str(self.workspace), CODEX_ARTIFACTS_BASE=str(self.artifacts.parent),
-                     ARCHON_CONTROL_DIR=str(self.control), ARCHON_FEATURE_CHAIN_ID=self.chain_id,
-                     ARCHON_FEATURE_BUDGET_SCRIPT=str(self.recorder), CODEX_HOME=str(self.root / "codex-home"),
-                     ARCHON_FEATURE_PHASE=self.state["current_run"]["phase"],
-                     ARCHON_FEATURE_SCOPE="repositories"),
+            env=env,
         )
 
     def test_planner_cannot_gain_product_write_root_from_params(self):
@@ -133,6 +141,33 @@ class FeatureWrapper(unittest.TestCase):
         self.assertIn("--config\nmodel_reasoning_effort=\"medium\"", result.stdout)
         self.assertIn("--disable\nmulti_agent", result.stdout)
         self.assertNotIn("\nresume\n", result.stdout)
+
+
+    def test_repository_feature_uses_trusted_pins_when_adapter_omits_model_args(self):
+        self.seal()
+        result = self.invoke(
+            extra_env={
+                "ARCHON_CODEX_PINNED_MODEL": "gpt-5.6-sol",
+                "ARCHON_CODEX_PINNED_REASONING_EFFORT": "medium",
+            },
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PINNED_MODEL=gpt-5.6-sol", result.stdout)
+        self.assertIn("PINNED_EFFORT=medium", result.stdout)
+
+    def test_repository_feature_rejects_model_or_effort_override_of_trusted_pins(self):
+        self.seal()
+        trusted = {
+            "ARCHON_CODEX_PINNED_MODEL": "gpt-5.6-sol",
+            "ARCHON_CODEX_PINNED_REASONING_EFFORT": "medium",
+        }
+        model_result = self.invoke("--model", "gpt-5.6-luna", extra_env=trusted)
+        self.assertNotEqual(model_result.returncode, 0)
+        self.assertIn("does not match trusted chain model", model_result.stderr)
+
+        effort_result = self.invoke("--config", "model_reasoning_effort=\"high\"", extra_env=trusted)
+        self.assertNotEqual(effort_result.returncode, 0)
+        self.assertIn("does not match trusted chain effort", effort_result.stderr)
 
     def test_repository_feature_cannot_reenable_native_multi_agent(self):
         self.seal()
