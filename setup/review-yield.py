@@ -34,7 +34,7 @@ KEY_LEN = 80
 def _key(text):
     """Normalized finding key: casefold, strip everything outside [a-z0-9 ],
     collapse whitespace, truncate. Must stay identical to update-waivers.py's."""
-    s = re.sub(r"[^a-z0-9 ]", "", str(text).casefold())
+    s = re.sub(r"[^a-z0-9\s]", "", str(text).casefold())
     return re.sub(r"\s+", " ", s).strip()[:KEY_LEN]
 
 

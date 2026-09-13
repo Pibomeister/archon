@@ -488,6 +488,7 @@
       "produces": [
         "round.txt",
         "waivers.md",
+        "waivers.json",
         "cross-repo-findings.json"
       ],
       "consumes": [
