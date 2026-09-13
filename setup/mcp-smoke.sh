@@ -61,13 +61,9 @@ export WORKOS_ISSUER="https://mcp-smoke.invalid"
 export WORKOS_AUDIENCE="https://mcp-smoke.invalid/mcp"
 export WORKOS_AS_METADATA_URL="https://mcp-smoke.invalid/.well-known/oauth-authorization-server"
 
-if [ -n "${MCP_SMOKE_START_CMD-}" ]; then
-  bash -c "$MCP_SMOKE_START_CMD" > "$AD/mcp-boot.log" 2>&1 &
-else
-  mise x node@20 -- pnpm build > "$AD/mcp-build.log" 2>&1 \
-    || fail "pnpm build (build log in artifacts)"
-  mise x node@20 -- node dist/index.js > "$AD/mcp-boot.log" 2>&1 &
-fi
+mise x node@20 -- pnpm build > "$AD/mcp-build.log" 2>&1 \
+  || fail "pnpm build (build log in artifacts)"
+mise x node@20 -- node dist/index.js > "$AD/mcp-boot.log" 2>&1 &
 SRV=$!
 # node spawns children that outlive the parent: sweep the PORT on exit, not just $SRV.
 trap 'kill "$SRV" 2>/dev/null; sleep 1; P=$(port_pids "$PORT"); test -n "$P" && kill $P 2>/dev/null; true' EXIT
@@ -78,7 +74,7 @@ CODE=000
 for _ in $(seq 1 60); do
   sleep 1
   kill -0 "$SRV" 2>/dev/null || fail "mcp-boot exited before ready (boot log in artifacts)"
-  CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$PORT/favicon.ico" || echo 000)
+  CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$PORT/favicon.ico" || true)
   test "$CODE" = "200" && break
 done
 test "$CODE" = "200" || fail "favicon code=$CODE (boot log in artifacts)"
@@ -88,7 +84,7 @@ test "$CODE" = "200" || fail "favicon code=$CODE (boot log in artifacts)"
 HDRS="$AD/mcp-unauth.headers"
 UCODE=$(curl -s -o /dev/null -D "$HDRS" -w '%{http_code}' -X POST \
   -H 'Content-Type: application/json' --data '{}' \
-  "http://localhost:$PORT/mcp" || echo 000)
+  "http://localhost:$PORT/mcp" || true)
 test "$UCODE" = "401" || fail "unauth /mcp code=$UCODE expected=401"
 grep -qi '^www-authenticate:[[:space:]]*Bearer' "$HDRS" \
   || fail "unauth /mcp 401 carries no WWW-Authenticate: Bearer header"

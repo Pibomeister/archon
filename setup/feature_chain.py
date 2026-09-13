@@ -2404,6 +2404,12 @@ def publish(host: Any, args: Any, chain_id: str, run: Any = subprocess.run) -> d
     with chain_lock(control_dir, chain_id):
         state = read_state(control_dir, chain_id)
         plan = preflight_publication(state)
+        # Resolved before any push: the receipt body carries no artifacts path, so these
+        # two sources are the whole fallback chain, and a chain with neither must fail
+        # here, ahead of the irreversible GitHub work, not after it.
+        artifacts_dir = state.get("integration_artifacts") or (state.get("current_run") or {}).get("artifacts_dir")
+        if not artifacts_dir:
+            raise FeatureChainError("chain has no integration artifacts directory for the publication record")
         prior = state.get("publication")
         publications = dict(verify_publication_record(state, prior)["publications"]) if isinstance(prior, dict) else {}
         for repo, info in plan.items():
@@ -2422,10 +2428,6 @@ def publish(host: Any, args: Any, chain_id: str, run: Any = subprocess.run) -> d
             if url and _sync_body(run, repo, info, url, publication_body(state, repo, publications)):
                 edited.append(repo)
         record = publication_record(state, publications)
-        # The receipt body carries no artifacts path, so these two sources are the whole fallback chain.
-        artifacts_dir = state.get("integration_artifacts") or (state.get("current_run") or {}).get("artifacts_dir")
-        if not artifacts_dir:
-            raise FeatureChainError("chain has no integration artifacts directory for the publication record")
         record_path = write_json_atomic(Path(str(artifacts_dir)) / PUBLICATION_ARTIFACT, record)
         state["publication"] = record
         state["updated_at"] = now()

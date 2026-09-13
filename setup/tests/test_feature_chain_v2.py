@@ -488,8 +488,10 @@ class FeatureChainV2(unittest.TestCase):
         state = self.locally_verified_chain()
         self.clear_current_run(state["logical_chain_id"])
         self.assertNotIn("integration_artifacts", fc.read_state(self.control, state["logical_chain_id"]))
+        run = self.fake_gh()
         with self.assertRaisesRegex(fc.FeatureChainError, "no integration artifacts directory for the publication record"):
-            fc.publish(self.host, self.args, state["logical_chain_id"], run=self.fake_gh())
+            fc.publish(self.host, self.args, state["logical_chain_id"], run=run)
+        self.assertEqual(run.calls, [], "must fail before any push or PR call")
 
     def test_before_control_claim_rejects_duplicate_resume_until_released(self):
         launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])

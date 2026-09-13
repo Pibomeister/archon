@@ -21,7 +21,8 @@ import unittest
 from pathlib import Path
 
 ARCHON = Path(__file__).resolve().parent.parent.parent
-SCRIPT = ARCHON / "setup" / "review-yield.py"
+SETUP = ARCHON / "setup"
+SCRIPT = SETUP / "review-yield.py"
 
 
 def f(finding, severity="P2"):
@@ -168,6 +169,30 @@ class ReviewYield(unittest.TestCase):
 
     def test_a_non_integer_round_reports_continue_and_exits_zero(self):
         self.assertIn("verdict=CONTINUE", self.ask("N"))
+
+class KeyParityWithWaiverLedger(unittest.TestCase):
+    """review-yield's _key must agree with update-waivers.py on real multi-line findings,
+    or `reraised` silently undercounts. Proven end to end: the ledger script writes the
+    key, the yield script has to find it."""
+
+    def test_multiline_finding_written_by_update_waivers_is_counted_as_reraised(self):
+        finding = "P2 src/x.ts:1 -- the loader\n  splits   across\ttwo modules."
+        with tempfile.TemporaryDirectory() as td:
+            ad = Path(td)
+            (ad / "round-1").mkdir()
+            (ad / "round-2").mkdir()
+            (ad / "round-1" / "fixer-result.json").write_text(json.dumps(
+                {"applied": [], "failed": [], "advisory": [{"finding": finding, "action": "Waived: x"}], "incomplete": []}))
+            subprocess.run([sys.executable, str(SETUP / "update-waivers.py"),
+                            str(ad / "round-1" / "fixer-result.json"), str(ad / "waivers.md")],
+                           check=True, capture_output=True)
+            (ad / "round-2" / "fixer-result.json").write_text(json.dumps(
+                {"applied": [{"finding": finding, "action": "fixed", "severity": "P2"}],
+                 "failed": [], "advisory": [], "incomplete": []}))
+            out = subprocess.run([sys.executable, str(SCRIPT), str(ad), "2"],
+                                 capture_output=True, encoding="utf-8", check=True).stdout
+        self.assertIn("reraised=1", out)
+
 
 
 if __name__ == "__main__":

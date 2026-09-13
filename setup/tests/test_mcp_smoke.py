@@ -2,8 +2,8 @@
 """setup/mcp-smoke.sh against a stub HTTP server.
 
 The real server needs `pnpm build` and a node toolchain, so these substitute a
-stub through MCP_SMOKE_START_CMD -- the one documented override, honoured only
-when set. What is exercised is the script's own logic: the readiness poll, the
+stub through a PATH shim of `mise` (the script's only toolchain entrypoint), so
+the production script carries no test hook. What is exercised is the script's own logic: the readiness poll, the
 child-liveness check, and both halves of the 401 assertion (status AND the
 WWW-Authenticate header, since a 401 without it is what a crashed proxy returns).
 """
@@ -74,9 +74,17 @@ class McpSmokeTest(unittest.TestCase):
             stub = wt / "stub.py"
             stub.write_text(STUB, encoding="utf-8")
             port = free_port()
+            shim = Path(td) / "bin"
+            shim.mkdir()
+            mise = shim / "mise"
+            mise.write_text(
+                "#!/bin/bash\n# PATH shim: `mise x node@20 -- <cmd>` -> build is a no-op, node runs the stub\n"
+                "shift 3\ncase \"$1\" in pnpm) exit 0 ;; node) " + (start_cmd or f"exec python3 {stub}") + " ;; esac\n"
+                "echo \"unexpected: $*\" >&2; exit 1\n", encoding="utf-8")
+            mise.chmod(0o755)
             env = dict(os.environ)
             env["STUB_MODE"] = mode
-            env["MCP_SMOKE_START_CMD"] = start_cmd or f"exec python3 {stub}"
+            env["PATH"] = f"{shim}:{env.get('PATH', '')}"
             argv = ["bash", str(SCRIPT), str(wt), str(ad), str(port)]
             if args is not None:
                 argv = ["bash", str(SCRIPT), *args]

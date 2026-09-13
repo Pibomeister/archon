@@ -2008,8 +2008,8 @@ nodes:
           scope, goes in "advisory" with action starting "Waived:" plus one line of
           rationale. Advisory entries surface in the PR body's Known Residuals —
           recorded, not lost.
-        - If waivers.md exists in the artifacts directory, a finding that
-          materially matches one of its entries is "advisory" by default —
+        - If waivers.json exists in the artifacts directory, a finding whose
+          normalized key matches one of its entries is "advisory" by default —
           record it as a waiver again rather than re-fixing or failing on
           it, unless the review states specific new evidence.
         - "incomplete" is for TRANSIENT incompletions, and transient means a retry
