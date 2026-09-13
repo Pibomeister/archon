@@ -487,7 +487,8 @@
     "review-loop": {
       "produces": [
         "round.txt",
-        "waivers.md"
+        "waivers.md",
+        "cross-repo-findings.json"
       ],
       "consumes": [
         "params.json",
