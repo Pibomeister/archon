@@ -172,6 +172,14 @@ controller preserves the failed diff and launches a pristine-baseline,
 same-provider investigation successor. Proactively surface the third-failure
 `ARCHITECTURE_SUSPECT` stop and its required protected architecture review.
 
+A repository-list snapshot for a feature with a pinned cross-repository
+interface should emit a `## Interface (pinned)` section listing the committed
+interface files the consumer repository imports. `plan-shape.sh` enforces this
+against `joint-plan.json`: once the spec carries that section, every
+`contracts[].artifact` must appear verbatim inside it, or plan.md must declare
+the change with a line starting `deviation: <artifact>`; otherwise the run
+fails with `PLAN_SHAPE=FAIL interface deviation undeclared: <artifact>`.
+
 For Codex repository-list features, use `archon-sdlc`'s joint-plan procedure:
 one human approval binds the exact spec, repository set, baselines, contracts,
 dependencies, file allowances, and verification plan. Guarded approval/resume
