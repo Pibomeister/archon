@@ -712,3 +712,24 @@ child edge; positive proof recorded one child edge with both parent and child
 Sol/medium and the expected response. Probe homes contain auth material and
 must not be copied wholesale or published. This repairs model enforcement only;
 the captured review workflow and resource ceilings remain unchanged.
+
+
+### Real adapter pin propagation and round-six result
+
+The real adapter omits model argv and relies on the dedicated trusted config.
+The first guard integration therefore failed closed even on explicit matching
+child requests, and the review selected the captured skill's sequential fallback
+on its pinned Sol/medium parent. No unauthorized child was created. A follow-up
+now reads pins in the launcher from validated config, preserves them through the
+wrapper, and rejects both ordinary and config-form overrides before dispatch.
+Independent review passed;93 launcher/wrapper tests and10 packaging tests passed.
+The live private wrapper was not changed mid-run.
+
+Round6 completed with three validated findings: malformed claim legacy fallback,
+bootstrap audit identity reuse, and stale reshare recipient resurrection. The
+fixer changed three files (29 insertions /25 deletions), verified its changes, and
+committed c99b307a95. The captured workflow immediately started full review round7
+with about3.63M tokens left. The earlier Swagger failure was again identified as
+sandbox EPERM rather than application failure. No MCP candidate/integration/PR
+exists at this checkpoint. This supplies direct evidence for future delta-review
+and exact-environment evidence reuse; neither policy was silently changed here.

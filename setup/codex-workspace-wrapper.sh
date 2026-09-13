@@ -142,45 +142,73 @@ print(paths[0] if paths else "")
   PINNED_MODEL="${ARCHON_CODEX_PINNED_MODEL:-}"
   PINNED_REASONING_EFFORT="${ARCHON_CODEX_PINNED_REASONING_EFFORT:-}"
   if [ "${ARCHON_FEATURE_SCOPE:-}" = repositories ]; then
+    parse_pin_config() {
+      python3 - "$1" <<'PY_PIN_CONFIG'
+import re
+import sys
+text = sys.argv[1]
+match = re.fullmatch(r"\s*(model|model_reasoning_effort)\s*=\s*(.+?)\s*", text)
+if not match:
+    raise SystemExit(1)
+key, raw = match.groups()
+if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
+    value = raw[1:-1]
+    quote = raw[0]
+    if quote == "'" and "'" in value:
+        raise SystemExit(2)
+    if quote == '"' and ('\\' in value or '"' in value):
+        raise SystemExit(2)
+elif re.fullmatch(r"[A-Za-z0-9._-]+", raw):
+    value = raw
+else:
+    raise SystemExit(2)
+print(f"{key}={value}")
+PY_PIN_CONFIG
+    }
+    check_model_pin() {
+      requested_model="$1"
+      if [ -n "$PINNED_MODEL" ] && [ "$requested_model" != "$PINNED_MODEL" ]; then
+        echo "CODEX_WRAPPER=FAIL repository model override $requested_model does not match trusted chain model $PINNED_MODEL" >&2
+        exit 2
+      fi
+      PINNED_MODEL="$requested_model"
+    }
+    check_effort_pin() {
+      requested_effort="$1"
+      if [ -n "$PINNED_REASONING_EFFORT" ] && [ "$requested_effort" != "$PINNED_REASONING_EFFORT" ]; then
+        echo "CODEX_WRAPPER=FAIL repository reasoning effort override $requested_effort does not match trusted chain effort $PINNED_REASONING_EFFORT" >&2
+        exit 2
+      fi
+      PINNED_REASONING_EFFORT="$requested_effort"
+    }
+    check_config_pin() {
+      parsed="$(parse_pin_config "$1")" || {
+        case "$1" in
+          *model*=*|*model_reasoning_effort*=*)
+            echo "CODEX_WRAPPER=FAIL unsupported repository model/effort config override: $1" >&2
+            exit 2
+            ;;
+          *) return 0 ;;
+        esac
+      }
+      case "$parsed" in
+        model=*) check_model_pin "${parsed#*=}" ;;
+        model_reasoning_effort=*) check_effort_pin "${parsed#*=}" ;;
+      esac
+    }
     value_for=""
     for token in "${args[@]}"; do
       if [ -n "$value_for" ]; then
         case "$value_for" in
-          --model|-m)
-            if [ -n "$PINNED_MODEL" ] && [ "$token" != "$PINNED_MODEL" ]; then
-              echo "CODEX_WRAPPER=FAIL repository model override $token does not match trusted chain model $PINNED_MODEL" >&2
-              exit 2
-            fi
-            PINNED_MODEL="$token"
-            ;;
-          --config|-c)
-            case "$token" in
-              model_reasoning_effort=*)
-                requested_effort="${token#*=}"
-                requested_effort="${requested_effort%\"}"
-                requested_effort="${requested_effort#\"}"
-                if [ -n "$PINNED_REASONING_EFFORT" ] && [ "$requested_effort" != "$PINNED_REASONING_EFFORT" ]; then
-                  echo "CODEX_WRAPPER=FAIL repository reasoning effort override $requested_effort does not match trusted chain effort $PINNED_REASONING_EFFORT" >&2
-                  exit 2
-                fi
-                PINNED_REASONING_EFFORT="$requested_effort"
-                ;;
-            esac
-            ;;
+          --model|-m) check_model_pin "$token" ;;
+          --config|-c) check_config_pin "$token" ;;
         esac
         value_for=""
         continue
       fi
       case "$token" in
         --model|-m|--config|-c) value_for="$token" ;;
-        --model=*)
-          requested_model="${token#*=}"
-          if [ -n "$PINNED_MODEL" ] && [ "$requested_model" != "$PINNED_MODEL" ]; then
-            echo "CODEX_WRAPPER=FAIL repository model override $requested_model does not match trusted chain model $PINNED_MODEL" >&2
-            exit 2
-          fi
-          PINNED_MODEL="$requested_model"
-          ;;
+        --model=*) check_model_pin "${token#*=}" ;;
       esac
     done
     export ARCHON_CODEX_PINNED_MODEL="$PINNED_MODEL"

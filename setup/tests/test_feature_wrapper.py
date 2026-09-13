@@ -169,6 +169,41 @@ class FeatureWrapper(unittest.TestCase):
         self.assertNotEqual(effort_result.returncode, 0)
         self.assertIn("does not match trusted chain effort", effort_result.stderr)
 
+        config_model_result = self.invoke("--config", 'model="gpt-5.6-luna"', extra_env=trusted)
+        self.assertNotEqual(config_model_result.returncode, 0)
+        self.assertIn("does not match trusted chain model", config_model_result.stderr)
+
+    def test_repository_feature_accepts_matching_config_pin_forms(self):
+        self.seal()
+        trusted = {
+            "ARCHON_CODEX_PINNED_MODEL": "gpt-5.6-sol",
+            "ARCHON_CODEX_PINNED_REASONING_EFFORT": "medium",
+        }
+        result = self.invoke(
+            "--config", " model = 'gpt-5.6-sol' ",
+            "--config", " model_reasoning_effort = 'medium' ",
+            extra_env=trusted,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PINNED_MODEL=gpt-5.6-sol", result.stdout)
+        self.assertIn("PINNED_EFFORT=medium", result.stdout)
+
+    def test_repository_feature_rejects_unsupported_model_config_forms(self):
+        self.seal()
+        trusted = {
+            "ARCHON_CODEX_PINNED_MODEL": "gpt-5.6-sol",
+            "ARCHON_CODEX_PINNED_REASONING_EFFORT": "medium",
+        }
+        cases = [
+            "model = [\"gpt-5.6-sol\"]",
+            "model_reasoning_effort = { value = \"medium\" }",
+        ]
+        for config in cases:
+            with self.subTest(config=config):
+                result = self.invoke("--config", config, extra_env=trusted)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("unsupported repository model/effort config override", result.stderr)
+
     def test_repository_feature_cannot_reenable_native_multi_agent(self):
         self.seal()
         cases = [
