@@ -334,6 +334,7 @@ nodes:
     JOINT-REPOSITORY RUNS must also write joint-plan.json in that directory:
       {"schema":"archon.joint-feature-plan.v1",
        "repositories":["<canonical repo>", "..."],
+       "acceptance_criteria":[{"id":"<id>","text":"<criterion>"}],
        "contracts":[{"producer":"<repo>",
                      "consumer":"<repo>",
                      "artifact":"<producer-relative committed interface file>",
@@ -345,9 +346,14 @@ nodes:
           "verification":["<exact local command>", "..."]}},
        "integration":{"scenarios":[{"name":"<scenario>",
                                     "uses":["<repo>", "..."],
+                                    "covers":["<criterion id>", "..."],
                                     "commands":[{"repo":"<selected repo>",
                                                  "argv":["<executable>", "<candidate-relative script>"]}],
                                     "expected_tests":["<observable assertion>"]}]}}
+    Every acceptance criterion the spec states gets one id in
+    acceptance_criteria, and every id appears in some scenario's covers. One
+    scenario covers several criteria only when its expected_tests name an
+    observable assertion per criterion it covers.
     The controller computes dependency_order from the stage depends_on lists
     and freezes it into the approval snapshot using repository-name ordering
     for independent stages. Every depends_on entry and integration uses entry
@@ -2025,11 +2031,11 @@ nodes:
           source — and verify each against out-of-diff code; report
           mismatches as findings." Feed its findings through the skill's
           normal merge pipeline like any other reviewer's.
-        - If waivers.md exists in the artifacts directory, read it first.
-          A finding that materially matches a waived entry goes under a
-          "Previously waived" heading in the envelope — NOT as a new
-          actionable finding — unless the reviewer states specific new
-          evidence that was absent when the waiver was recorded.
+        - If waivers.json exists in the artifacts directory, read that ledger first.
+          A finding whose normalized key matches a ledger entry goes under a
+          "Previously waived" heading in the envelope — NOT as a new actionable
+          finding — unless the reviewer states specific new evidence that was
+          absent when the waiver was recorded.
 
         Then invoke the ce-code-review skill with arguments exactly:
           mode:headless base:origin/main plan:<that directory>/plan.md
@@ -2149,8 +2155,8 @@ nodes:
           scope, goes in "advisory" with action starting "Waived:" plus one line of
           rationale. Advisory entries surface in the PR body's Known Residuals —
           recorded, not lost.
-        - If waivers.md exists in the artifacts directory, a finding that
-          materially matches one of its entries is "advisory" by default —
+        - If waivers.json exists in the artifacts directory, a finding whose
+          normalized key matches one of its entries is "advisory" by default —
           record it as a waiver again rather than re-fixing or failing on
           it, unless the review states specific new evidence.
         - "incomplete" is for TRANSIENT incompletions, and transient means a retry
@@ -2174,8 +2180,16 @@ nodes:
           and never reaches the commit, so writing it in the tree only costs you
           the round's clarity.
         Write JSON to round-<N>/fixer-result.json in the artifacts directory:
-          {"applied": [...], "failed": [...], "advisory": [...], "incomplete": [...]}
+          {"applied": [...], "failed": [...], "advisory": [...], "incomplete": [...], "cross_repo": [...]}
         each entry {"finding": "<one-line>", "action": "<what/why>"}.
+        Every "applied", "advisory" and "incomplete" entry also carries
+        "severity": "P0|P1|P2|P3". An omitted severity reads as P0, which
+        keeps the loop running.
+        "cross_repo" is for a finding whose defect lives in a DIFFERENT
+        repository of this chain: entries are {"finding", "action",
+        "producer_repo", "severity"}. Such a finding is neither advisory nor
+        failed — it is not waivable and not fixable here, and it stops the
+        run so the chain can route it to the repository that owns it.
         Writing the JSON result file is MANDATORY and comes BEFORE your final line —
         ending without it aborts the pipeline. Write it even when all arrays are
         empty. Then end with the single line: FIXER_DONE
@@ -2205,7 +2219,7 @@ nodes:
         cd "$WT"
         V=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['verdict'])" "$RD/review-summary.json" 2>/dev/null || echo UNKNOWN)
         FIXOK=NO
-        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-fixer-result.py "$RD/fixer-result.json" >/dev/null 2>&1 && FIXOK=YES
+        FIXMSG=$(python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-fixer-result.py "$RD/fixer-result.json" 2>&1 | tr '\n' ' ') && FIXOK=YES
         CLEAN=NO; test -z "$(git status --porcelain | grep -v '^?? \.env')" && CLEAN=YES
         MOVED=YES; test "$(git rev-parse HEAD)" = "$(cat "$RD/pre-head.txt")" && MOVED=NO
         INC=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1])).get('incomplete',[])))" "$RD/fixer-result.json" 2>/dev/null || echo 0)
@@ -2215,11 +2229,23 @@ nodes:
         python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py \
           "$ARTIFACTS_DIR/files-allowlist.json" "$WT" \
           "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" --round "$N" || exit 1
-        if [ "$FIXOK" = NO ]; then echo "FIXER_BLOCKED round=$N"; exit 1; fi
+        if [ "$FIXOK" = NO ]; then echo "FIXER_BLOCKED round=$N $FIXMSG"; exit 1; fi
+        # Cross-repo stop: a finding owned by another repository of this chain is
+        # not waivable here, so it must never reach update-waivers.py.
+        CROSSN=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1])).get('cross_repo') or []))" "$RD/fixer-result.json" 2>/dev/null || echo 0)
+        if [ "$CROSSN" != 0 ]; then
+          REPOS=$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]))['cross_repo'];json.dump(d,open(sys.argv[2],'w'),indent=1);print(','.join(sorted({str(e.get('producer_repo','?')) for e in d})))" "$RD/fixer-result.json" "$ARTIFACTS_DIR/cross-repo-findings.json")
+          echo "CROSS_REPO_FINDING round=$N count=$CROSSN repos=$REPOS"
+          exit 1
+        fi
         # Waiver ledger: record this round's advisory declines so later rounds
         # do not re-litigate them without new evidence.
         python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/update-waivers.py \
           "$RD/fixer-result.json" "$ARTIFACTS_DIR/waivers.md"
+        # Review yield, measured every round and printed for the operator.
+        YIELD=$(python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/review-yield.py "$ARTIFACTS_DIR" "$N")
+        echo "$YIELD"
+        DIM=NO; case "$YIELD" in *"verdict=DIMINISHING"*) DIM=YES ;; esac
         # Durable round cap: counted against round.txt (survives resumes), not
         # loop iterations. accept-residuals.txt is a HUMAN act, never an agent's.
         CAP=$(cat "$ARTIFACTS_DIR/round-cap.txt" 2>/dev/null || echo 4)
@@ -2228,6 +2254,23 @@ nodes:
           "Ready to merge"|"Ready with fixes")
             if [ "$MOVED" = NO ] && [ "$CLEAN" = YES ] && [ "$INC" = 0 ]; then
               echo "CONVERGED round=$N"
+              echo "<promise>REVIEW_CONVERGED</promise>"
+            elif [ "${ARCHON_FEATURE_SCOPE-}" = repositories ] && [ -f "$ARTIFACTS_DIR/yield-stop.txt" ] \
+                 && [ "$CLEAN" = YES ] && [ "$INC" = 0 ] && [ "$N" -ge 2 ] && [ "$N" -lt "$CAP" ] && [ "$DIM" = YES ]; then
+              # Opt-in yield convergence, repositories scope only: the fixes below are
+              # NOT re-reviewed, and trusted-local-candidate.sh re-runs typecheck, lint
+              # and the unit patterns on the candidate. No other lane has that belt.
+              # lite-fixes-unreviewed.txt has no reader on this path (post-fix-gate and
+              # the lite prbody are lite-only); it is written for the record.
+              {
+                echo "fixer_commit=$(git rev-parse HEAD)"
+                echo "pre_round_head=$(cat "$RD/pre-head.txt")"
+                echo "applied_findings=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1])).get('applied',[])))" "$RD/fixer-result.json" 2>/dev/null || echo unknown)"
+                echo "files:"
+                git diff --name-only "$(cat "$RD/pre-head.txt")" HEAD | sed 's/^/  /'
+              } > "$ARTIFACTS_DIR/lite-fixes-unreviewed.txt"
+              echo "LITE_FIXES_UNREVIEWED round=$N $(git diff --name-only "$(cat "$RD/pre-head.txt")" HEAD | wc -l | tr -d ' ') file(s) landed by the fixer and not re-reviewed (see lite-fixes-unreviewed.txt)"
+              echo "CONVERGED round=$N (REVIEW_DIMINISHING $YIELD)"
               echo "<promise>REVIEW_CONVERGED</promise>"
             elif [ "$N" -ge "$CAP" ]; then
               if [ "$ACCEPT" = YES ]; then
@@ -2267,6 +2310,10 @@ nodes:
     cd "$WT"
     N=$(cat "$ARTIFACTS_DIR/round.txt"); RD="$ARTIFACTS_DIR/round-$N"
     case "$N" in ''|*[!0-9]*) echo "EXIT_GATE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
+    # Cross-repo belt: converge's stop is bypassable by a resume, and the
+    # accept-residuals branch below skips the fixer re-check entirely.
+    CROSSN=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1])).get('cross_repo') or []))" "$RD/fixer-result.json" 2>/dev/null || echo 0)
+    test "$CROSSN" = 0 || { echo "EXIT_GATE=FAIL CROSS_REPO_FINDING round=$N count=$CROSSN"; exit 1; }
     # A human accepting residuals waives the verdict and fixer checks — never
     # the clean-tree, scope, or unit-test checks (accepted findings, not a broken tree).
     if [ -f "$ARTIFACTS_DIR/accept-residuals.txt" ]; then
@@ -2308,6 +2355,7 @@ nodes:
     set -uo pipefail
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-smoke.out") 2> >(tee -a "$ARTIFACTS_DIR/node-smoke.out" >&2); fi
     eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+    case "$REPO" in goodword-mcp) exec bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/mcp-smoke.sh "$WT" "$ARTIFACTS_DIR" "$APIPORT" ;; esac
     # Gated on the repo's DECLARED capability, never on an empty $APIPORT: a
     # port that failed to allocate for a smoke-bearing repo must stay a hard
     # failure at preflight, not become a silent skip here. prbody reads this

@@ -10,12 +10,16 @@ those was "out of this finding's scope" -- which is the decline criterion
 verbatim -- but the contract's word "attempted but not landed" fit too, so it
 chose the bucket that deadlocks the loop. The run then hit its cap on a finding
 no round was ever able to fix."""
+import json
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
 import yaml
 
 ARCHON = Path(__file__).resolve().parent.parent.parent
+CHECK_FIXER_RESULT = ARCHON / "setup" / "check-fixer-result.py"
 LANES = ["full-sdlc-api", "bugfix", "full-sdlc-web", "full-sdlc-api-lite", "bugfix-lite"]
 
 
@@ -71,6 +75,36 @@ class IncompleteContract(unittest.TestCase):
             for nid, prompt in fixer_prompts(lane):
                 self.assertIn("pre-existing violations", prompt, f"{lane}/{nid}")
                 self.assertIn("outside this diff's scope", prompt, f"{lane}/{nid}")
+
+
+class CrossRepoPartition(unittest.TestCase):
+    """B3: check-fixer-result.py accepts an optional cross_repo list."""
+
+    def run_check(self, obj):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(obj, f)
+            path = f.name
+        try:
+            return subprocess.run(["python3", str(CHECK_FIXER_RESULT), path],
+                                   capture_output=True, encoding="utf-8")
+        finally:
+            Path(path).unlink()
+
+    def test_valid_cross_repo_entry_passes_and_is_counted(self):
+        r = self.run_check({
+            "applied": [], "failed": [], "advisory": [],
+            "cross_repo": [{"finding": "f1", "action": "a1", "producer_repo": "web-app"}],
+        })
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("CROSS_REPO=1", r.stdout)
+
+    def test_entry_missing_producer_repo_blocks(self):
+        r = self.run_check({
+            "applied": [], "failed": [], "advisory": [],
+            "cross_repo": [{"finding": "f1", "action": "a1", "producer_repo": ""}],
+        })
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("FIXER_BLOCKED: cross_repo entry missing producer_repo", r.stderr)
 
 
 if __name__ == "__main__":

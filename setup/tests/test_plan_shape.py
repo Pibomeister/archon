@@ -14,6 +14,7 @@ SCRIPT = Path(__file__).resolve().parent.parent / "plan-shape.sh"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 MINIMAL = FIXTURES / "plan-minimal"
 WITH_PREMISES = FIXTURES / "plan-with-premises"
+WITH_INTERFACE = FIXTURES / "plan-with-interface"
 
 
 def run(ad, wt, spec):
@@ -112,6 +113,43 @@ class PlanShapeWithPremisesTest(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("PLAN_SHAPE=FAIL premises.json missing, empty, or uncited", r.stdout)
 
+
+class PlanShapeInterfaceTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.ad = self.tmp / "artifacts"
+        self.wt = self.tmp / "worktree"
+        self.wt.mkdir()
+        shutil.copytree(MINIMAL, self.ad)
+        shutil.copyfile(WITH_INTERFACE / "spec.md", self.ad / "spec.md")
+        self.spec = self.ad / "spec.md"
+
+    def test_pinned_artifact_declared_passes(self):
+        shutil.copyfile(WITH_INTERFACE / "joint-plan-foo.json", self.ad / "joint-plan.json")
+        r = run(self.ad, self.wt, self.spec)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.strip(), "PLAN_SHAPE=OK")
+
+    def test_undeclared_artifact_fails(self):
+        shutil.copyfile(WITH_INTERFACE / "joint-plan-bar.json", self.ad / "joint-plan.json")
+        r = run(self.ad, self.wt, self.spec)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("PLAN_SHAPE=FAIL interface deviation undeclared: src/api/bar.ts", r.stdout)
+
+    def test_declared_deviation_passes(self):
+        shutil.copyfile(WITH_INTERFACE / "joint-plan-bar.json", self.ad / "joint-plan.json")
+        with open(self.ad / "plan.md", "a", encoding="utf-8") as f:
+            f.write("\ndeviation: src/api/bar.ts\n")
+        r = run(self.ad, self.wt, self.spec)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.strip(), "PLAN_SHAPE=OK")
+
+    def test_no_joint_plan_json_skips_check(self):
+        # joint-plan.json never copied in; the gate only applies when it exists.
+        r = run(self.ad, self.wt, self.spec)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.strip(), "PLAN_SHAPE=OK")
 
 
 if __name__ == "__main__":

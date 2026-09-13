@@ -4050,11 +4050,11 @@ nodes:
           symptom site — and verify the test would catch a regression of
           exactly that cause; report mismatches as findings." Feed its
           findings through the skill's normal merge pipeline.
-        - If waivers.md exists in the artifacts directory, read it first.
-          A finding that materially matches a waived entry goes under a
-          "Previously waived" heading in the envelope — NOT as a new
-          actionable finding — unless the reviewer states specific new
-          evidence that was absent when the waiver was recorded.
+        - If waivers.json exists in the artifacts directory, read that ledger first.
+          A finding whose normalized key matches a ledger entry goes under a
+          "Previously waived" heading in the envelope — NOT as a new actionable
+          finding — unless the reviewer states specific new evidence that was
+          absent when the waiver was recorded.
 
         Then invoke the ce-code-review skill with arguments exactly:
           mode:headless base:<SHA from bootstrap-head.txt> plan:<that directory>/rca.md
@@ -4194,8 +4194,8 @@ nodes:
           scope, goes in "advisory" with action starting "Waived:" plus one line of
           rationale. Advisory entries surface in the PR body's Known Residuals —
           recorded, not lost.
-        - If waivers.md exists in the artifacts directory, a finding that
-          materially matches one of its entries is "advisory" by default —
+        - If waivers.json exists in the artifacts directory, a finding whose
+          normalized key matches one of its entries is "advisory" by default —
           record it as a waiver again rather than re-fixing or failing on
           it, unless the review states specific new evidence.
         - "incomplete" is for TRANSIENT incompletions, and transient means a retry
@@ -4219,8 +4219,16 @@ nodes:
           and never reaches the commit, so writing it in the tree only costs you
           the round's clarity.
         Write JSON to round-<N>/fixer-result.json in the artifacts directory:
-          {"applied": [...], "failed": [...], "advisory": [...], "incomplete": [...]}
+          {"applied": [...], "failed": [...], "advisory": [...], "incomplete": [...], "cross_repo": [...]}
         each entry {"finding": "<one-line>", "action": "<what/why>"}.
+        Every "applied", "advisory" and "incomplete" entry also carries
+        "severity": "P0|P1|P2|P3". An omitted severity reads as P0, which
+        keeps the loop running.
+        "cross_repo" is for a finding whose defect lives in a DIFFERENT
+        repository of this chain: entries are {"finding", "action",
+        "producer_repo", "severity"}. Such a finding is neither advisory nor
+        failed — it is not waivable and not fixable here, and it stops the
+        run so the chain can route it to the repository that owns it.
         Writing the JSON result file is MANDATORY and comes BEFORE your final line —
         ending without it aborts the pipeline. Write it even when all arrays are
         empty. Then end with the single line: FIXER_DONE
@@ -4255,7 +4263,7 @@ nodes:
         test -z "$(git diff "$RED" -- "$TESTF")" || { echo "REVIEW_SCOPE=FAIL repro test modified in review (restore it: git checkout $RED -- $TESTF)"; exit 1; }
         V=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['verdict'])" "$RD/review-summary.json" 2>/dev/null || echo UNKNOWN)
         FIXOK=NO
-        python3 "$SETUP/check-fixer-result.py" "$RD/fixer-result.json" >/dev/null 2>&1 && FIXOK=YES
+        FIXMSG=$(python3 "$SETUP/check-fixer-result.py" "$RD/fixer-result.json" 2>&1 | tr '\n' ' ') && FIXOK=YES
         CLEAN=NO; test -z "$(git status --porcelain | grep -vE '^\?\? \.env$|^ M pnpm-lock\.yaml$')" && CLEAN=YES
         MOVED=YES; test "$(git rev-parse HEAD)" = "$(cat "$RD/pre-head.txt")" && MOVED=NO
         INC=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1])).get('incomplete',[])))" "$RD/fixer-result.json" 2>/dev/null || echo 0)
@@ -4263,8 +4271,19 @@ nodes:
         # Scope guard vs the RED anchor: any change outside the allowlist is a human stop.
         python3 "$SETUP/check-scope.py" \
           "$ARTIFACTS_DIR/files-allowlist.json" "$WT" "$RED" --round "$N" --exclude pnpm-lock.yaml || exit 1
-        if [ "$FIXOK" = NO ]; then echo "FIXER_BLOCKED round=$N"; exit 1; fi
+        if [ "$FIXOK" = NO ]; then echo "FIXER_BLOCKED round=$N $FIXMSG"; exit 1; fi
+        # Cross-repo stop: a finding owned by another repository of this chain is
+        # not waivable here, so it must never reach update-waivers.py.
+        CROSSN=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1])).get('cross_repo') or []))" "$RD/fixer-result.json" 2>/dev/null || echo 0)
+        if [ "$CROSSN" != 0 ]; then
+          REPOS=$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]))['cross_repo'];json.dump(d,open(sys.argv[2],'w'),indent=1);print(','.join(sorted({str(e.get('producer_repo','?')) for e in d})))" "$RD/fixer-result.json" "$ARTIFACTS_DIR/cross-repo-findings.json")
+          echo "CROSS_REPO_FINDING round=$N count=$CROSSN repos=$REPOS"
+          exit 1
+        fi
         python3 "$SETUP/update-waivers.py" "$RD/fixer-result.json" "$ARTIFACTS_DIR/waivers.md"
+        # Review yield, measured every round and printed for the operator.
+        YIELD=$(python3 "$SETUP/review-yield.py" "$ARTIFACTS_DIR" "$N")
+        echo "$YIELD"
         # Durable round cap: bug fixes default to 2 (override via round-cap.txt).
         # accept-residuals.txt is a HUMAN act, never an agent's.
         CAP=$(cat "$ARTIFACTS_DIR/round-cap.txt" 2>/dev/null || echo 2)
@@ -4315,6 +4334,10 @@ nodes:
     cd "$WT"
     N=$(cat "$ARTIFACTS_DIR/round.txt"); RD="$ARTIFACTS_DIR/round-$N"
     case "$N" in ''|*[!0-9]*) echo "EXIT_GATE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
+    # Cross-repo belt: converge's stop is bypassable by a resume, and the
+    # accept-residuals branch below skips the fixer re-check entirely.
+    CROSSN=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1])).get('cross_repo') or []))" "$RD/fixer-result.json" 2>/dev/null || echo 0)
+    test "$CROSSN" = 0 || { echo "EXIT_GATE=FAIL CROSS_REPO_FINDING round=$N count=$CROSSN"; exit 1; }
     python3 "$SETUP/repo-policy.py" validate-diff --root "$ROOT" --artifacts "$ARTIFACTS_DIR" \
       || { echo "EXIT_GATE=FAIL repository policy"; exit 1; }
     # A human accepting residuals waives the verdict and fixer checks — never

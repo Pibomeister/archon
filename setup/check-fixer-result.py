@@ -14,7 +14,12 @@ if missing:
     sys.exit(f"missing keys: {missing}")
 if d["failed"]:
     sys.exit(f"FIXER_BLOCKED: failed partition not empty: {d['failed']}")
+cross_repo = d.get("cross_repo", [])
+for entry in cross_repo:
+    for field in ("finding", "action", "producer_repo"):
+        if not entry.get(field):
+            sys.exit(f"FIXER_BLOCKED: cross_repo entry missing {field}")
 print(
     f"APPLIED={len(d['applied'])} ADVISORY={len(d['advisory'])} "
-    f"INCOMPLETE={len(d.get('incomplete', []))} FAILED=0"
+    f"INCOMPLETE={len(d.get('incomplete', []))} CROSS_REPO={len(cross_repo)} FAILED=0"
 )

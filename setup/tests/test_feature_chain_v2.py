@@ -298,7 +298,7 @@ class FeatureChainV2(unittest.TestCase):
         self.assertEqual(final["status"], "locally_verified")
         self.assertEqual(final["integration"]["publication"], "held")
 
-    def locally_verified_chain(self, api_changed=True):
+    def locally_verified_chain(self, api_changed=True, finalize_artifacts=None):
         launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
         state = fc.approve_plan(self.control, launched["state"]["logical_chain_id"], self.plan())
         for run_id, repo in (("1" * 32, "api"), ("2" * 32, "goodword-mcp")):
@@ -322,7 +322,7 @@ class FeatureChainV2(unittest.TestCase):
             "plan_digest": latest["approval"]["plan_digest"], "approved_plan_digest": latest["approval"]["plan_digest"],
             "candidate_heads": {repo: latest["candidate_handoffs"][repo]["candidate_head"] for repo in latest["repositories"]},
         }
-        state = fc.finalize_integration(self.control, state["logical_chain_id"], evidence)
+        state = fc.finalize_integration(self.control, state["logical_chain_id"], evidence, finalize_artifacts)
         integration_dir = self.root / "integration-artifacts"
         integration_dir.mkdir()
         with fc.chain_lock(self.control, state["logical_chain_id"]):
@@ -462,6 +462,36 @@ class FeatureChainV2(unittest.TestCase):
             again = fc.publish(self.host, self.args, state["logical_chain_id"], run=run3)
         self.assertEqual(again["publications"], out["publications"])
         self.assertEqual([c for c in run3.calls if c[0] == "git" or c[:3] in (["gh", "pr", "create"], ["gh", "pr", "edit"])], [])
+
+    def clear_current_run(self, chain_id):
+        with fc.chain_lock(self.control, chain_id):
+            state = fc.read_state(self.control, chain_id)
+            state["current_run"] = None
+            fc.write_state(self.control, state)
+
+    def test_finalize_through_wrapper_records_integration_artifacts(self):
+        artifacts = self.root / "wrapper-artifacts"
+        state = self.locally_verified_chain(finalize_artifacts=artifacts)
+        self.assertEqual(state["integration_artifacts"], str(artifacts))
+
+    def test_publish_falls_back_to_integration_artifacts_when_current_run_is_cleared(self):
+        artifacts = self.root / "wrapper-artifacts"
+        state = self.locally_verified_chain(finalize_artifacts=artifacts)
+        self.clear_current_run(state["logical_chain_id"])
+        run = self.fake_gh()
+        with mock.patch("builtins.print"):
+            out = fc.publish(self.host, self.args, state["logical_chain_id"], run=run)
+        self.assertEqual(out["record_path"], str(artifacts / fc.PUBLICATION_ARTIFACT))
+        self.assertEqual(json.loads((artifacts / fc.PUBLICATION_ARTIFACT).read_text(encoding="utf-8")), out["record"])
+
+    def test_publish_without_any_artifacts_directory_raises(self):
+        state = self.locally_verified_chain()
+        self.clear_current_run(state["logical_chain_id"])
+        self.assertNotIn("integration_artifacts", fc.read_state(self.control, state["logical_chain_id"]))
+        run = self.fake_gh()
+        with self.assertRaisesRegex(fc.FeatureChainError, "no integration artifacts directory for the publication record"):
+            fc.publish(self.host, self.args, state["logical_chain_id"], run=run)
+        self.assertEqual(run.calls, [], "must fail before any push or PR call")
 
     def test_before_control_claim_rejects_duplicate_resume_until_released(self):
         launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])

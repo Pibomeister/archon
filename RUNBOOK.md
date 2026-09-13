@@ -187,9 +187,9 @@ archon workflow abandon <run-id>            # ends the run, no reason recorded, 
 - `approve` / `reject` / `abandon` are real verbs but **absent from `--help`**. They exist; use them. Tell anyone you hand a command to that they are missing from `--help`, or they will check, not find them, and assume the command is wrong.
 - Find the run id with `archon workflow runs` or `archon workflow status`. It is also the basename of the run's artifacts dir, which is how the gate renderers put a ready-to-paste command in the packet; `archon workflow runs` prints the first 8 characters, the packet prints all 32, and both work.
 
-## 3. Review-loop exits — the four discriminators
+## 3. Review-loop exits — the five discriminators
 
-The per-repo review loop (review → commit fixes → fixer → converge) ends in exactly one of four ways. The discriminator strings appear verbatim in the converge output (`round-N/converge.txt` in the run's artifacts dir; stdout is teed there because archon persists bash stderr but not stdout).
+The per-repo review loop (review → commit fixes → fixer → converge) ends in exactly one of five ways. The discriminator strings appear verbatim in the converge output (`round-N/converge.txt` in the run's artifacts dir; stdout is teed there because archon persists bash stderr but not stdout).
 
 | Exit | Verbatim signal | Meaning | Action |
 |---|---|---|---|
@@ -197,6 +197,7 @@ The per-repo review loop (review → commit fixes → fixer → converge) ends i
 | Round progressed | verdict acceptable but HEAD moved this round | Fixes landed; the next round re-reviews them. | None — expected. Steady state is ~2 rounds per repo. |
 | No progress | `NO_PROGRESS` (converge exits 1) | Verdict `Not ready` AND HEAD unchanged — the fixer isn't moving the needle. | Engineer. Semantic problem, not budget-shaped. Do not resume blindly. |
 | Fixer blocked | `FIXER_BLOCKED` (converge exits 1; also fired when `fixer-result.json` is missing) | The fixer reported a P0–P2 it cannot fix, or produced no result file. | Engineer. Read `round-N/fixer-result.json` `failed` partition for the finding. First check whether each `failed` entry is a genuine could-not-fix or a mis-partitioned scope decline (see the observed table below) — a decline belongs in `advisory` and can be reclassified by hand to unblock. |
+| Cross-repo finding | `CROSS_REPO_FINDING round=N count=N repos=<comma list>` (converge exits 1) | The fixer's `cross_repo` partition is non-empty — a finding whose defect lives in a different repository of this chain, neither waivable nor fixable here. | Engineer. Read `cross-repo-findings.json`, fix or file the finding against the named repository, then resume. |
 
 Bound-related failures that look similar but are different:
 

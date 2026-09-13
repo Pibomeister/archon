@@ -60,7 +60,7 @@ PASS_VALUES = {"PASS", "OK", "CLEAN", "SKIP"}
 FAIL_VALUES = {"FAIL", "DIRTY"}
 
 # Bare-token form: the loop discriminators. These carry their meaning in the
-# token itself (RUNBOOK.md section 3 "the four discriminators", 3a, 3b), so
+# token itself (RUNBOOK.md section 3 "the five discriminators", 3a, 3b), so
 # they are enumerated rather than pattern-matched — a typo in a workflow body
 # should read as an untyped exit, not silently classify.
 PASS_TOKENS = {
@@ -81,7 +81,7 @@ FAIL_TOKENS = {
     "PLAN_REJECTED", "RCA_PLAN_REJECTED",
     "PLAN_NO_PROGRESS", "RCA_PLAN_NO_PROGRESS", "NO_PROGRESS",
     "PLAN_SCOPE_DISPUTE", "RCA_PLAN_SCOPE_DISPUTE",
-    "FIXER_BLOCKED", "SCOPE_BREACH",
+    "FIXER_BLOCKED", "SCOPE_BREACH", "CROSS_REPO_FINDING",
 }
 
 # Whole-line PASS forms, for a key that is NOT on its own a PASS token.
@@ -126,6 +126,7 @@ def _isolation_env(tmp):
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_CONFIG_NOSYSTEM": "1",
         "XDG_CONFIG_HOME": str(home / ".config"),
+        "ARCHON_FEATURE_SCOPE": "fullstack",
     }
 
 

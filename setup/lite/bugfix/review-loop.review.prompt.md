@@ -50,11 +50,11 @@ BEFORE you invoke the skill:
   causal chain is a P0 finding titled 'tautological or
   non-reproducing test'." Feed it through the same merge pipeline. Feed its
   findings through the skill's normal merge pipeline.
-- If waivers.md exists in the artifacts directory, read it first.
-  A finding that materially matches a waived entry goes under a
-  "Previously waived" heading in the envelope — NOT as a new
-  actionable finding — unless the reviewer states specific new
-  evidence that was absent when the waiver was recorded.
+- If waivers.json exists in the artifacts directory, read that ledger first.
+  A finding whose normalized key matches a ledger entry goes under a
+  "Previously waived" heading in the envelope — NOT as a new actionable
+  finding — unless the reviewer states specific new evidence that was
+  absent when the waiver was recorded.
 
 Then invoke the ce-code-review skill with arguments exactly:
   mode:headless base:<SHA from bugfix-chain.json baseline.commits[repo]> plan:<that directory>/rca.md

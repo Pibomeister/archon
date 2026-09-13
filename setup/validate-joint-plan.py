@@ -9,6 +9,7 @@ import sys
 KNOWN_REPOS = {"api", "goodword-mcp", "web-app"}
 SCHEMA = "archon.joint-feature-plan.v1"
 PATHISH = re.compile(r"(^/)|(\.\.)|[/\\]|(^~)")
+NEGATIVE_SCENARIO = re.compile(r"(?i)(denied|reject|forbidden|unauthori[sz]ed|403|negative)")
 
 
 def fail(message: str) -> None:
@@ -196,6 +197,33 @@ def validate_integration(doc: dict, selected: set[str], require_executable: bool
             fail(f"{label} has malformed expected_artifacts")
 
 
+def validate_negative_scenario(scenarios: list) -> None:
+    # ponytail: regex over planner prose; upgrade to a typed scenario.kind field if planners game it.
+    for scenario in scenarios:
+        haystack = [scenario.get("name", "")] + list(scenario.get("expected_tests", []))
+        if any(NEGATIVE_SCENARIO.search(text) for text in haystack):
+            return
+    fail("integration has no negative scenario")
+
+
+def validate_acceptance_coverage(doc: dict, scenarios: list) -> None:
+    criteria = doc.get("acceptance_criteria")
+    if not isinstance(criteria, list) or not all(
+        isinstance(c, dict) and isinstance(c.get("id"), str) and c["id"].strip() for c in criteria
+    ):
+        fail("joint-plan.json acceptance_criteria must be a list of {id, text}")
+    declared = [c["id"] for c in criteria]
+    covered: set[str] = set()
+    for scenario in scenarios:
+        for cid in scenario.get("covers", []):
+            if cid not in declared:
+                fail(f"unknown covered criterion {cid}")
+            covered.add(cid)
+    for cid in declared:
+        if cid not in covered:
+            fail(f"acceptance criterion {cid} is uncovered")
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         fail("usage: validate-joint-plan.py <artifacts-dir>")
@@ -226,6 +254,14 @@ def main() -> int:
         fail("joint-plan.json dependency_order must be stable topological order")
     validate_contracts(doc)
     validate_integration(doc, selected, params.get("executable_plan_contract") == 1)
+    scenarios = doc["integration"]["scenarios"]
+    if "acceptance_criteria" in doc:
+        # Rule 1 is gated on acceptance_criteria's presence too: persisted plans from before
+        # this feature (e.g. chain 2205cded's) predate both fields and must keep passing.
+        validate_negative_scenario(scenarios)
+        validate_acceptance_coverage(doc, scenarios)
+    else:
+        print("JOINT_PLAN=WARN no acceptance_criteria (legacy plan)")
     print(f"JOINT_PLAN=PASS repositories={','.join(repos)} order={','.join(expected_order)}")
     if params.get("executable_plan_contract") == 1:
         print("JOINT_EXECUTION=structured argv runs in its repo's disposable detached candidate worktree; "

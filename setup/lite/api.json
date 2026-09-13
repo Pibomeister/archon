@@ -285,6 +285,8 @@
       "produces": [
         "round.txt",
         "waivers.md",
+        "waivers.json",
+        "cross-repo-findings.json",
         "lite-fixes-unreviewed.txt"
       ],
       "consumes": [
