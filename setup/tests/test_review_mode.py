@@ -91,6 +91,21 @@ class ReviewMode(unittest.TestCase):
         self.write_round(1, [])
         self.assertDecision(2, "delta", PREV_HEAD)
 
+    def test_an_unmoved_head_has_no_delta_to_review(self):
+        # round-pre writes round-N/pre-head.txt before calling this script, so
+        # an equal pair means the previous round committed nothing -- a Ready
+        # verdict carrying an incomplete item reaches round N on the same tree.
+        self.write_round(1, [f("a")])
+        self.write_round(2, [], head=PREV_HEAD)
+        self.assertDecision(2, "full", "origin/main")
+
+    def test_a_moved_head_still_deltas(self):
+        # Negative control for the rule above: comparing nothing would make
+        # every round full and the test above would pass for the wrong reason.
+        self.write_round(1, [f("a")])
+        self.write_round(2, [], head="447e92ed4f01c4edb401d685c320bd94757d56d6")
+        self.assertDecision(2, "delta", PREV_HEAD)
+
     def test_a_missing_severity_reads_as_p0(self):
         # Pre-2026-09-13 fixer results carry no severity at all; half the runs
         # on this machine are that shape. Guessing P2 for them would hand a

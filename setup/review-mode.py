@@ -28,18 +28,26 @@ COSMETIC = {"P2", "P3"}
 FULL_BASE = "origin/main"
 
 
+def head_of(round_dir):
+    """That round's pre-fix HEAD, or None when it cannot be read."""
+    try:
+        return open(os.path.join(round_dir, "pre-head.txt"),
+                    encoding="utf-8").read().strip() or None
+    except Exception:
+        return None
+
+
 def delta_base(prev_dir):
     """Previous round's pre-fix HEAD, or None when round N cannot go delta."""
     try:
         applied = json.load(open(os.path.join(prev_dir, "fixer-result.json"),
                                  encoding="utf-8"))["applied"]
-        for e in applied:
-            if not isinstance(e, dict) or e.get("severity") not in COSMETIC:
-                return None
-        head = open(os.path.join(prev_dir, "pre-head.txt"), encoding="utf-8").read()
-        return head.strip() or None
     except Exception:
         return None
+    for e in applied:
+        if not isinstance(e, dict) or e.get("severity") not in COSMETIC:
+            return None
+    return head_of(prev_dir)
 
 
 def main():
@@ -49,6 +57,11 @@ def main():
     except (IndexError, ValueError):
         n = 1
     base = delta_base(os.path.join(ad, f"round-{n - 1}")) if n > 1 else None
+    # HEAD has not moved since the previous round: a Ready verdict carrying an
+    # incomplete item reaches round N with nothing committed, and a delta
+    # against that base diffs nothing at all.
+    if base and base == head_of(os.path.join(ad, f"round-{n}")):
+        base = None
     mode, base = ("delta", base) if base else ("full", FULL_BASE)
     # No artifacts dir means a caller bug, not round-1 of a run in $PWD: print
     # the safe answer rather than minting a round-1/ wherever this was invoked.
