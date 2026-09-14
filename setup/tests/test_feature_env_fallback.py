@@ -35,6 +35,7 @@ import feature_env  # noqa: E402
 
 GIT_ENV = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"}
 CHAIN = "b" * 32
+RESULT_NAME = "joint-integration-result.json"
 RUN_ID = "a" * 32
 
 REPOSITORY_PARAMS = {
@@ -50,8 +51,14 @@ REPOSITORY_PARAMS = {
 
 
 def clean_env(**overrides):
-    """The launcher's chain env, gone -- which is exactly the resume case."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith("ARCHON_FEATURE_")}
+    """The launcher's chain env, gone -- which is exactly the resume case.
+
+    Every ARCHON_* is dropped, not just ARCHON_FEATURE_*: the suite runs in one
+    process and an earlier test leaks ARCHON_CONTROL_DIR into os.environ. That
+    is enough to arm feature-budget registration once the chain id is restored,
+    and the registration then fails against the leaked directory.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("ARCHON_")}
     env.update(GIT_ENV)
     env.update(overrides)
     return env
@@ -319,16 +326,49 @@ class JointIntegrationFallbackTest(unittest.TestCase):
         log = self.artifacts / "joint-integration-1.log"
         return result, log.read_text() if log.exists() else ""
 
+    def diagnosis(self, result):
+        """The runner's own typed line says a command failed but not which way.
+        A failure here is useless without the command log and the result rows."""
+        parts = [result.stdout + result.stderr]
+        for name in ("joint-integration-1.log", "joint-integration-result.json"):
+            path = self.artifacts / name
+            parts.append(f"--- {name} ---\n" + (path.read_text() if path.exists() else "(absent)"))
+        return "\n".join(parts)
+
     def test_params_json_restores_the_chain_id_for_approved_commands(self):
         (self.artifacts / "params.json").write_text(json.dumps(REPOSITORY_PARAMS))
         result, log = self.run_runner()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 0, self.diagnosis(result))
         self.assertIn(f"CHAIN={CHAIN}", log)
 
     def test_negative_control_without_params_json_the_chain_id_is_unset(self):
         result, log = self.run_runner()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 0, self.diagnosis(result))
         self.assertIn("CHAIN=unset", log)
+
+    def test_restored_chain_id_actually_registers_the_command_group(self):
+        """The env var reaching the command is not the point -- being killable
+        by chain is. With a real control dir the restored id registers the
+        group; without params.json the same run registers nothing."""
+        control = self.root / "control"
+        control.mkdir(mode=0o700)
+        budget = subprocess.run(
+            ["python3", str(SETUP / "feature-budget.py"), "--control-dir", str(control),
+             "init", "--chain-id", CHAIN],
+            capture_output=True, text=True, env=self.env)
+        self.assertEqual(budget.returncode, 0, budget.stdout + budget.stderr)
+        self.env["ARCHON_CONTROL_DIR"] = str(control)
+
+        result, _ = self.run_runner()
+        self.assertEqual(result.returncode, 0, self.diagnosis(result))
+        rows = json.loads((self.artifacts / RESULT_NAME).read_text())["commands"]
+        self.assertFalse(any(row["registered_group"] for row in rows), self.diagnosis(result))
+
+        (self.artifacts / "params.json").write_text(json.dumps(REPOSITORY_PARAMS))
+        result, _ = self.run_runner()
+        self.assertEqual(result.returncode, 0, self.diagnosis(result))
+        rows = json.loads((self.artifacts / RESULT_NAME).read_text())["commands"]
+        self.assertTrue(all(row["registered_group"] for row in rows), self.diagnosis(result))
 
 
 class CodexWrapperFallbackTest(unittest.TestCase):
