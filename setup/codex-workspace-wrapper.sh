@@ -26,6 +26,33 @@ if len(paths) > 1:
     raise SystemExit(2)
 print(paths[0] if paths else "")
 ' "$ARTIFACTS_BASE")"
+  # A plain `archon workflow resume` drops the launcher's ARCHON_FEATURE_* env,
+  # and every guarded-chain branch below reads it. params.json is the durable
+  # copy. archon-run.py installs this wrapper as a standalone private copy
+  # outside the workspace, so it cannot source setup/feature-env.sh; the key map
+  # is inlined and test_feature_env_fallback.py pins it to feature_env.KEYS.
+  if [ -z "${ARCHON_FEATURE_SCOPE:-}" ] && [ -n "$ARTIFACTS_DIR" ] && [ -f "$ARTIFACTS_DIR/params.json" ]; then
+    eval "$(python3 - "$ARTIFACTS_DIR/params.json" <<'PY_FEATURE_ENV'
+import json, shlex, sys
+PARAMS_KEYS = {
+    "ARCHON_FEATURE_SCOPE": "feature_scope",
+    "ARCHON_FEATURE_PHASE": "feature_phase",
+    "ARCHON_FEATURE_CHAIN_ID": "logical_chain_id",
+    "ARCHON_FEATURE_RUN_ID": "run_id",
+}
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        params = json.load(handle)
+except (OSError, ValueError):
+    raise SystemExit(0)
+if isinstance(params, dict):
+    for name, key in PARAMS_KEYS.items():
+        value = params.get(key)
+        if isinstance(value, str) and value:
+            print("export " + name + "=" + shlex.quote(value))
+PY_FEATURE_ENV
+)"
+  fi
   args=()
   WORKTREE="$PWD"
   SKIP_GIT_CHECK=0

@@ -99,6 +99,8 @@ MANIFEST=(
   setup/package.sh
   setup/params-env.sh
   setup/repo-profile.sh
+  setup/feature-env.sh
+  setup/feature_env.py
   setup/parse-critique.py
   setup/parse-review-envelope.py
   setup/plan-shape.sh
