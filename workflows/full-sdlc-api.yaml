@@ -2266,6 +2266,33 @@ nodes:
             FIXMSG=$(python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-fixer-result.py "$RD/fixer-result.json" 2>&1 | tr '\n' ' ') && FIXOK=YES
             CLEAN=NO; test -z "$(git status --porcelain | grep -v '^?? \.env')" && CLEAN=YES
             MOVED=YES; test "$(git rev-parse HEAD)" = "$(cat "$RD/pre-head.txt")" && MOVED=NO
+            # A reviewer session that edits the tree must not buy the loop another
+            # round. commit-fixes commits whatever the REVIEW session left behind
+            # ("apply autofix feedback"); commit-fixer commits the fixer's work
+            # ("apply fixer feedback"). Only the second is progress a reviewer
+            # asked for, so head movement is derived from the commit subjects
+            # rather than from the sha. Any other subject is a hand edit or a
+            # foreign commit in the round window: stop, do not guess.
+            if [ "$MOVED" = YES ]; then
+              PREHEAD=$(cat "$RD/pre-head.txt")
+              SUBJECTS=$(git log --format=%s "$PREHEAD"..HEAD)
+              FOREIGN=$(printf '%s\n' "$SUBJECTS" | grep -v 'apply fixer feedback' | grep -v 'apply autofix feedback' | grep -v '^$' || true)
+              if [ -n "$FOREIGN" ]; then
+                echo "REVIEW_TREE_DRIFT round=$N sha=$(git rev-parse HEAD)"
+                printf '%s\n' "$FOREIGN" | sed 's/^/  unexpected subject: /'
+                exit 1
+              fi
+              if ! printf '%s\n' "$SUBJECTS" | grep -q 'apply fixer feedback'; then
+                MOVED=NO
+                {
+                  echo "autofix_commit=$(git rev-parse HEAD)"
+                  echo "pre_round_head=$PREHEAD"
+                  echo "files:"
+                  git diff --name-only "$PREHEAD" HEAD | sed 's/^/  /'
+                } > "$ARTIFACTS_DIR/review-autofix-unreviewed.txt"
+                echo "REVIEW_AUTOFIX_ONLY round=$N files=$(git diff --name-only "$PREHEAD" HEAD | wc -l | tr -d ' ')"
+              fi
+            fi
             INC=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1])).get('incomplete',[])))" "$RD/fixer-result.json" 2>/dev/null || echo 0)
             echo "ROUND=$N verdict=[$V] fixer_ok=$FIXOK clean=$CLEAN head_moved=$MOVED incomplete=$INC"
             # Scope guard: any change outside the plan's allowlist is a human stop.
@@ -2290,6 +2317,26 @@ nodes:
             YIELD=$(python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/review-yield.py "$ARTIFACTS_DIR" "$N")
             echo "$YIELD"
             DIM=NO; case "$YIELD" in *"verdict=DIMINISHING"*) DIM=YES ;; esac
+            # Re-litigation is the other shape of a loop that has stopped
+            # yielding: two rounds that applied nothing, while at least half of
+            # what this round handled was a finding the ledger had already
+            # waived. That is a reviewer re-raising settled decisions, and
+            # another round buys the same argument again. Parsed tolerantly —
+            # reraised_advisory is absent on an older review-yield.py and reads
+            # as 0 — and it qualifies the SAME opt-in branch as DIMINISHING
+            # below, never a branch of its own.
+            RR=0; case "$YIELD" in *" reraised="*) RR=${YIELD##* reraised=}; RR=${RR%% *} ;; esac
+            RRA=0; case "$YIELD" in *" reraised_advisory="*) RRA=${YIELD##* reraised_advisory=}; RRA=${RRA%% *} ;; esac
+            APPLIED=0; case "$YIELD" in *" applied="*) APPLIED=${YIELD##* applied=}; APPLIED=${APPLIED%% *} ;; esac
+            for v in RR RRA APPLIED; do eval "case \"\$$v\" in ''|*[!0-9]*) $v=0 ;; esac"; done
+            PREV_APPLIED=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))['applied']))" "$ARTIFACTS_DIR/round-$((N-1))/fixer-result.json" 2>/dev/null || echo -1)
+            HANDLED=$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(len(d.get('applied') or [])+len(d.get('advisory') or []))" "$RD/fixer-result.json" 2>/dev/null || echo 0)
+            RERAISE=NO
+            if [ "$APPLIED" = 0 ] && [ "$PREV_APPLIED" = 0 ] && [ "$HANDLED" -gt 0 ] \
+               && [ "$(( (RR + RRA) * 2 ))" -ge "$HANDLED" ]; then
+              RERAISE=YES
+              echo "REVIEW_RERAISE round=$N reraised=$((RR + RRA))/$HANDLED"
+            fi
             # Durable round cap: counted against round.txt (survives resumes), not
             # loop iterations. accept-residuals.txt is a HUMAN act, never an agent's.
             CAP=$(cat "$ARTIFACTS_DIR/round-cap.txt" 2>/dev/null || echo 4)
@@ -2300,7 +2347,8 @@ nodes:
                   echo "CONVERGED round=$N"
                   echo "<promise>REVIEW_CONVERGED</promise>"
                 elif [ "${ARCHON_FEATURE_SCOPE-}" = repositories ] && [ -f "$ARTIFACTS_DIR/yield-stop.txt" ] \
-                     && [ "$CLEAN" = YES ] && [ "$INC" = 0 ] && [ "$N" -ge 2 ] && [ "$N" -lt "$CAP" ] && [ "$DIM" = YES ]; then
+                     && [ "$CLEAN" = YES ] && [ "$INC" = 0 ] && [ "$N" -ge 2 ] && [ "$N" -lt "$CAP" ] \
+                     && { [ "$DIM" = YES ] || [ "$RERAISE" = YES ]; }; then
                   # Opt-in yield convergence, repositories scope only: the fixes below are
                   # NOT re-reviewed, and trusted-local-candidate.sh re-runs typecheck, lint
                   # and the unit patterns on the candidate. No other lane has that belt.
