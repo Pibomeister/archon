@@ -50,11 +50,14 @@ def main():
         n = 1
     base = delta_base(os.path.join(ad, f"round-{n - 1}")) if n > 1 else None
     mode, base = ("delta", base) if base else ("full", FULL_BASE)
-    out = os.path.join(ad, f"round-{n}")
-    os.makedirs(out, exist_ok=True)
-    for name, text in (("review-mode.txt", mode), ("review-base.txt", base)):
-        with open(os.path.join(out, name), "w", encoding="utf-8") as f:
-            f.write(text + "\n")
+    # No artifacts dir means a caller bug, not round-1 of a run in $PWD: print
+    # the safe answer rather than minting a round-1/ wherever this was invoked.
+    if ad:
+        out = os.path.join(ad, f"round-{n}")
+        os.makedirs(out, exist_ok=True)
+        for name, text in (("review-mode.txt", mode), ("review-base.txt", base)):
+            with open(os.path.join(out, name), "w", encoding="utf-8") as f:
+                f.write(text + "\n")
     print(f"REVIEW_MODE={mode} base={base}")
     return 0
 

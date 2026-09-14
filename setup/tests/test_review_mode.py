@@ -108,6 +108,13 @@ class ReviewMode(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout, "REVIEW_MODE=full base=origin/main\n")
 
+    def test_no_artifacts_dir_writes_nothing_into_the_working_directory(self):
+        r = subprocess.run([sys.executable, str(SCRIPT)], cwd=self.ad,
+                           capture_output=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "REVIEW_MODE=full base=origin/main\n")
+        self.assertEqual(list(self.ad.iterdir()), [])
+
     def test_the_delta_decision_survives_a_real_fixer_result(self):
         # The synthetic fixtures above are this script's own shape. Pin it to a
         # result an actual lane wrote: round 3 of the api candidate in chain
