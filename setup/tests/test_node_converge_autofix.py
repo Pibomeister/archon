@@ -141,6 +141,41 @@ class ConvergeAutofix(unittest.TestCase):
         self.assertNotIn("REVIEW_CONVERGED", p.stdout)
         self.assertFalse((ad / "review-autofix-unreviewed.txt").exists())
 
+    def test_an_autofix_only_round_that_progresses_still_leaves_a_diff(self):
+        # MOVED=NO is a statement about who asked for the change, not about
+        # whether HEAD moved. An incomplete item keeps the loop going, and the
+        # next round's window still contains the autofix commit — so a delta
+        # review based on this round's pre-head has something to read.
+        p, ad = self.run_converge(subjects=[AUTOFIX_SUBJECT], incomplete=1)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("REVIEW_AUTOFIX_ONLY round=2 files=1", p.stdout)
+        self.assertIn("ROUND_PROGRESSED round=2", p.stdout)
+        self.assertNotIn("REVIEW_CONVERGED", p.stdout)
+        self.assertIn("  b0.ts", (ad / "review-autofix-unreviewed.txt").read_text())
+
+    def test_an_unmoved_head_with_an_incomplete_item_progresses_on_an_empty_window(self):
+        # The one path that reaches another round with NOTHING in the window:
+        # a Ready verdict, no commits at all, and an incomplete item. It
+        # predates the autofix guard — the converged branch has always required
+        # incomplete=0 — and a delta review based on this round's pre-head
+        # would read an empty diff. Pinned here so the behaviour is visible;
+        # picking the base is review-mode.py's call, not converge's.
+        p, ad = self.run_converge(subjects=[], incomplete=1)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("head_moved=NO", p.stdout)
+        self.assertIn("ROUND_PROGRESSED round=2", p.stdout)
+        self.assertNotIn("REVIEW_AUTOFIX_ONLY", p.stdout)
+        self.assertFalse((ad / "review-autofix-unreviewed.txt").exists())
+
+    def test_a_not_ready_verdict_after_an_autofix_only_round_stops(self):
+        # The other half of the answer: an unreviewed edit cannot carry a
+        # "Not ready" round forward either, because MOVED=NO makes it
+        # NO_PROGRESS rather than another round.
+        p, _ = self.run_converge(subjects=[AUTOFIX_SUBJECT], verdict="Not ready")
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("NO_PROGRESS round=2 (Not ready and nothing changed)", p.stdout)
+        self.assertNotIn("REVIEW_CONVERGED", p.stdout)
+
     def test_an_unmoved_head_never_reaches_the_subject_filter(self):
         p, _ = self.run_converge(subjects=[])
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
