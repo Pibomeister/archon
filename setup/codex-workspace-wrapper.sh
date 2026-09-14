@@ -142,6 +142,16 @@ print(paths[0] if paths else "")
   PINNED_MODEL="${ARCHON_CODEX_PINNED_MODEL:-}"
   PINNED_REASONING_EFFORT="${ARCHON_CODEX_PINNED_REASONING_EFFORT:-}"
   if [ "${ARCHON_FEATURE_SCOPE:-}" = repositories ]; then
+    MODEL_PIN_PRESENT=0
+    EFFORT_PIN_PRESENT=0
+    assert_pin_value() {
+      case "$2" in
+        *[!A-Za-z0-9._-]*|'')
+          echo "CODEX_WRAPPER=FAIL trusted repository $1 pin is not argv-safe" >&2
+          exit 2
+          ;;
+      esac
+    }
     parse_pin_config() {
       python3 - "$1" <<'PY_PIN_CONFIG'
 import re
@@ -167,6 +177,7 @@ PY_PIN_CONFIG
     }
     check_model_pin() {
       requested_model="$1"
+      MODEL_PIN_PRESENT=1
       if [ -n "$PINNED_MODEL" ] && [ "$requested_model" != "$PINNED_MODEL" ]; then
         echo "CODEX_WRAPPER=FAIL repository model override $requested_model does not match trusted chain model $PINNED_MODEL" >&2
         exit 2
@@ -175,6 +186,7 @@ PY_PIN_CONFIG
     }
     check_effort_pin() {
       requested_effort="$1"
+      EFFORT_PIN_PRESENT=1
       if [ -n "$PINNED_REASONING_EFFORT" ] && [ "$requested_effort" != "$PINNED_REASONING_EFFORT" ]; then
         echo "CODEX_WRAPPER=FAIL repository reasoning effort override $requested_effort does not match trusted chain effort $PINNED_REASONING_EFFORT" >&2
         exit 2
@@ -211,6 +223,14 @@ PY_PIN_CONFIG
         --model=*) check_model_pin "${token#*=}" ;;
       esac
     done
+    if [ -n "$PINNED_MODEL" ] && [ "$MODEL_PIN_PRESENT" -eq 0 ]; then
+      assert_pin_value model "$PINNED_MODEL"
+      args+=(--model "$PINNED_MODEL")
+    fi
+    if [ -n "$PINNED_REASONING_EFFORT" ] && [ "$EFFORT_PIN_PRESENT" -eq 0 ]; then
+      assert_pin_value effort "$PINNED_REASONING_EFFORT"
+      args+=(--config "model_reasoning_effort=\"$PINNED_REASONING_EFFORT\"")
+    fi
     export ARCHON_CODEX_PINNED_MODEL="$PINNED_MODEL"
     export ARCHON_CODEX_PINNED_REASONING_EFFORT="$PINNED_REASONING_EFFORT"
   fi
@@ -313,6 +333,8 @@ if os.environ.get("ARCHON_FEATURE_SCOPE") == "repositories":
                    "candidate-inputs.json", "candidate-revisions.json", "premises.json",
                    "reader-audit.json", "web-premises.json", "web-reader-audit.json",
                    "browser-evidence.json", "browser-evidence.sha256", "smoke-probe.json"]
+        if os.environ.get("ARCHON_FEATURE_SCOPE") == "repositories":
+            frozen += ["review-authority.json", "review-state.json", "current-review.json", "review-checkpoints"]
     rules += "," + ",".join(json.dumps(str(artifacts / name)) + '= "read"' for name in frozen)
 print('permissions={archon-worker={extends=":workspace",filesystem={' + rules +
       '},network={enabled=false}}}')
@@ -342,6 +364,11 @@ PY_PERMISSIONS
   fi
   if [ "${ARCHON_FEATURE_SCOPE:-}" = repositories ]; then
     : "${ARCHON_FEATURE_BUDGET_SCRIPT:?repository chains require exact session recording}"
+    REVIEW_SLOT="$(printf '%s\n' "$PROMPT" | sed -n 's/^ARCHON_RISK_DELTA_SLOT=\([1-9]\)$/\1/p')"
+    REVIEW_ROLE="$(printf '%s\n' "$PROMPT" | sed -n 's/^ARCHON_RISK_DELTA_ROLE=\(fixer\)$/\1/p')"
+    if [ -n "$REVIEW_SLOT" ]; then REVIEW_ROLE=reviewer; fi
+    export ARCHON_RISK_DELTA_SLOT="$REVIEW_SLOT" ARCHON_RISK_DELTA_ROLE="$REVIEW_ROLE"
+    export ARCHON_REVIEW_SESSION_HELPER="$ROOT/.archon/setup/review_session.py"
     exec python3 -c '
 import json, os, subprocess, sys
 
@@ -366,6 +393,17 @@ try:
             ], capture_output=True, text=True, timeout=30)
             if registered.returncode:
                 raise ValueError("exact Codex session registration failed: " + registered.stderr.strip())
+            review_role = os.environ.get("ARCHON_RISK_DELTA_ROLE")
+            if review_role:
+                argv = [sys.executable, os.environ["ARCHON_REVIEW_SESSION_HELPER"],
+                        "--control-dir", os.environ["ARCHON_CONTROL_DIR"],
+                        "--chain", os.environ["ARCHON_FEATURE_CHAIN_ID"], "--run", run_id,
+                        "--session", session_id, "--role", review_role]
+                if review_role == "reviewer":
+                    argv.extend(["--slot", os.environ["ARCHON_RISK_DELTA_SLOT"]])
+                bound = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+                if bound.returncode:
+                    raise ValueError("independent reviewer session binding failed: " + bound.stdout.strip())
         sys.stdout.write(line)
         sys.stdout.flush()
     raise SystemExit(child.wait())

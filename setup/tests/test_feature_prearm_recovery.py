@@ -102,6 +102,13 @@ class FeaturePrearmRecoveryTest(unittest.TestCase):
         self.db = self.root / "archon.db"
         self.control_dir = self.root / "control"
         self.codex_home = self.root / "codex-home"
+        self.codex_home.mkdir(mode=0o700)
+        codex_config = self.codex_home / "config.toml"
+        codex_config.write_text(
+            'model = "gpt-5.6-sol"\nmodel_reasoning_effort = "medium"\n',
+            encoding="utf-8",
+        )
+        codex_config.chmod(0o600)
         self.registry = self.root / "registry.json"
         self.spec = self.root / "spec.md"
         self.spec.write_text("# Feature\n", encoding="utf-8")

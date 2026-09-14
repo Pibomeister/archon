@@ -58,7 +58,7 @@ class FeatureWrapper(unittest.TestCase):
         path.chmod(0o600)
         return path
 
-    def invoke(self, *args, extra_env=None):
+    def invoke(self, *args, extra_env=None, prompt_prefix=""):
         env = dict(os.environ, CODEX_REAL_BIN=str(self.real),
                    CODEX_WORKSPACE_ROOT=str(self.workspace), CODEX_ARTIFACTS_BASE=str(self.artifacts.parent),
                    ARCHON_CONTROL_DIR=str(self.control), ARCHON_FEATURE_CHAIN_ID=self.chain_id,
@@ -69,7 +69,7 @@ class FeatureWrapper(unittest.TestCase):
             env.update(extra_env)
         return subprocess.run(
             ["bash", str(WRAPPER), "exec", "--cd", str(self.other), *args],
-            input=f"Write artifacts to {self.artifacts}", text=True, capture_output=True,
+            input=f"{prompt_prefix}Write artifacts to {self.artifacts}", text=True, capture_output=True,
             env=env,
         )
 
@@ -142,7 +142,6 @@ class FeatureWrapper(unittest.TestCase):
         self.assertIn("--disable\nmulti_agent", result.stdout)
         self.assertNotIn("\nresume\n", result.stdout)
 
-
     def test_repository_feature_uses_trusted_pins_when_adapter_omits_model_args(self):
         self.seal()
         result = self.invoke(
@@ -152,8 +151,25 @@ class FeatureWrapper(unittest.TestCase):
             },
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--model\ngpt-5.6-sol", result.stdout)
+        self.assertIn('--config\nmodel_reasoning_effort="medium"', result.stdout)
+        self.assertIn("--disable\nmulti_agent", result.stdout)
         self.assertIn("PINNED_MODEL=gpt-5.6-sol", result.stdout)
         self.assertIn("PINNED_EFFORT=medium", result.stdout)
+
+    def test_repository_feature_injects_only_adapter_omitted_trusted_pin(self):
+        self.seal()
+        result = self.invoke(
+            "--model", "gpt-5.6-sol",
+            extra_env={
+                "ARCHON_CODEX_PINNED_MODEL": "gpt-5.6-sol",
+                "ARCHON_CODEX_PINNED_REASONING_EFFORT": "medium",
+            },
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.count("\n--model\n"), 1, result.stdout)
+        self.assertIn("--model\ngpt-5.6-sol", result.stdout)
+        self.assertIn('--config\nmodel_reasoning_effort="medium"', result.stdout)
 
     def test_repository_feature_rejects_model_or_effort_override_of_trusted_pins(self):
         self.seal()
@@ -283,6 +299,24 @@ class FeatureWrapper(unittest.TestCase):
         self.assertNotIn(prior, result.stdout)
         ledger = json.loads((self.control / "feature-budgets" / (self.chain_id + ".json")).read_text())
         self.assertEqual(ledger["runs"][0]["session_ids"], [fresh])
+
+    def test_review_slot_is_bound_to_actual_thread_event_before_forwarding(self):
+        self.seal()
+        common = [sys.executable, str(self.recorder), "--control-dir", str(self.control)]
+        subprocess.run([*common, "init", "--chain-id", self.chain_id], check=True, capture_output=True)
+        subprocess.run([*common, "bind-run", "--chain-id", self.chain_id, "--run-id", self.run_id], check=True, capture_output=True)
+        helper = self.workspace / ".archon/setup/review_session.py"
+        helper.parent.mkdir(parents=True)
+        recorded = self.root / "review-session-argv.json"
+        helper.write_text("import json,sys\nfrom pathlib import Path\nPath(" + repr(str(recorded)) + ").write_text(json.dumps(sys.argv[1:]))\n")
+        session = "01999999-1111-7222-8333-444444444444"
+        self.real.write_text("#!/bin/sh\nprintf '%s\\n' '" + json.dumps({"type": "thread.started", "thread_id": session}) + "'\n")
+        result = self.invoke(prompt_prefix="ARCHON_RISK_DELTA_SLOT=2\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = json.loads(recorded.read_text())
+        self.assertEqual(args[args.index("--session") + 1], session)
+        self.assertEqual(args[args.index("--slot") + 1], "2")
+        self.assertEqual(args[args.index("--role") + 1], "reviewer")
 
     def test_session_recording_failure_stops_provider_output(self):
         self.seal()
