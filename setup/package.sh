@@ -167,10 +167,10 @@ MANIFEST=(
   setup/review_qualification.py
   workflows/risk-delta-v1.md
   setup/review-yield.py
-  # Two-hour convergence: delta review scope, the shared finding-key
-  # normalizer, and the feature-chain env carriers.
+  # Two-hour convergence: delta review scope and the feature-chain env
+  # carriers. review-mode.py is listed because round-pre calls it; the
+  # packaging test pins every referenced script to this list.
   setup/review-mode.py
-  setup/finding_key.py
   setup/feature-env.sh
   setup/feature_env.py
   setup/mcp-smoke.sh
