@@ -474,7 +474,10 @@ class FeatureChainV2(unittest.TestCase):
         params = json.loads((Path(self.host.calls[-1][3]["output_root"]) / "params.json").read_text(encoding="utf-8"))
         self.assertEqual(params["feature_verify_only"], "yes")
         self.assertEqual(params["feature_previous_head"], api_head)
-        self.assertTrue(fc.read_state(self.control, state["logical_chain_id"])["reopens"][0]["verify_only"])
+        latest = fc.read_state(self.control, state["logical_chain_id"])
+        self.assertTrue(latest["reopens"][0]["verify_only"])
+        self.assertEqual(latest["stages"]["api"]["verify_only_head"], api_head)
+        self.assertNotIn("verify_only_head", latest["stages"]["goodword-mcp"])
 
     def test_reopen_without_verify_only_records_neither_param(self):
         state = self.locally_verified_chain(finalize=False)

@@ -3493,6 +3493,7 @@ def chain_timing(state: dict, db: Path) -> dict:
         key = phase if phase in {"planning", "integration"} else repo
         if isinstance(key, str):
             totals[key] = totals.get(key, 0.0) + max(0.0, completed - started)
+
     def seconds(key: str) -> int | None:
         return None if key not in totals else round(totals[key])
 
@@ -4128,9 +4129,10 @@ def reopen(host: Any, args: Any, chain_id: str, repo: str, reason: str, verify_o
     kept as-is, so the re-run starts from the previous candidate plus any hand fix.
 
     ``verify_only`` (also taken from ``--verify-only`` on args) re-verifies a hand
-    fix that is already in the worktree instead of re-implementing: each reset stage
-    records its previous candidate head so the stage params carry
-    ``feature_verify_only``/``feature_previous_head``.
+    fix that is already in the reopened stage's worktree instead of re-implementing:
+    that stage records its previous candidate head, so its params carry
+    ``feature_verify_only``/``feature_previous_head``. Reset consumers are not
+    marked; their verified input changed, so they are implemented again.
     """
     verify_only = bool(verify_only or getattr(args, "verify_only", False))
     control_dir = Path(args.control_dir)
@@ -4160,7 +4162,9 @@ def reopen(host: Any, args: Any, chain_id: str, repo: str, reason: str, verify_o
             state["stages"][name]["status"] = "pending"
             state["stages"][name].pop("candidate", None)
             state["candidate_handoffs"].pop(name, None)
-            previous_head = record["previous_heads"].get(name)
+            # Only the reopened stage holds a hand fix. A consumer was reset because its
+            # verified input changed, so it has to be implemented again, not re-verified.
+            previous_head = record["previous_heads"].get(name) if name == repo else None
             if verify_only and previous_head:
                 state["stages"][name]["verify_only_head"] = previous_head
             else:
