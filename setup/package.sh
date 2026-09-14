@@ -167,6 +167,7 @@ MANIFEST=(
   setup/review_qualification.py
   workflows/risk-delta-v1.md
   setup/review-yield.py
+  setup/review-mode.py
   setup/mcp-smoke.sh
   setup/codex-usage.py
   setup/codex-watchdog.sh
