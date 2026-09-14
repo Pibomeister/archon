@@ -998,6 +998,13 @@ nodes:
           scope, goes in "advisory" with action starting "Waived:" plus one line of
           rationale. Advisory entries surface in the PR body's Known Residuals —
           recorded, not lost.
+        - If joint-plan.json in the artifacts directory carries a non-empty
+          "pinned_decisions" array, a finding that can only be resolved by
+          changing one of those symbols is "advisory", with its action
+          starting "Pinned:" and naming the symbol. It is neither a "failed"
+          blocker nor work to attempt: a pin is reopened at the plan gate and
+          nowhere else, so applying it here would land a change the approved
+          plan does not cover.
         - If waivers.json exists in the artifacts directory, a finding whose
           normalized key matches one of its entries is "advisory" by default —
           record it as a waiver again rather than re-fixing or failing on

@@ -331,6 +331,17 @@ nodes:
       locally against the selected candidate revisions in disposable worktrees
       or fixtures; do not make PRs, deploy, publish, or rely on an upstream
       merge.
+      A joint plan also records what the spec already decided. If the spec has a
+      section titled "## Interface (pinned)", every symbol named there is frozen
+      by the spec itself and is not the implementation's to redesign. Add to
+      joint-plan.json the key "pinned_decisions": a JSON array of
+      {"symbol": "<exact symbol name>", "file": "<repo-relative path>",
+       "rule": "<the constraint, in the spec's own words, one line>"}, one entry
+      per pinned symbol in the order the spec lists them, and [] when the spec
+      has no such section. Each "file" must be a path this plan also lists under
+      ## Files. Downstream review treats a pin as settled: a finding that can
+      only be resolved by changing a pinned symbol is filed as advisory, so this
+      plan is the only place a pin can be renegotiated.
       Joint execution contracts are executable, not prose placeholders:
       - A contract artifact is a literal relative file path. By default it must
         exist in the final producer candidate. For generated exports, add
@@ -2231,6 +2242,13 @@ nodes:
               scope, goes in "advisory" with action starting "Waived:" plus one line of
               rationale. Advisory entries surface in the PR body's Known Residuals —
               recorded, not lost.
+            - If joint-plan.json in the artifacts directory carries a non-empty
+              "pinned_decisions" array, a finding that can only be resolved by
+              changing one of those symbols is "advisory", with its action
+              starting "Pinned:" and naming the symbol. It is neither a "failed"
+              blocker nor work to attempt: a pin is reopened at the plan gate and
+              nowhere else, so applying it here would land a change the approved
+              plan does not cover.
             - If waivers.json exists in the artifacts directory, a finding whose
               normalized key matches one of its entries is "advisory" by default —
               record it as a waiver again rather than re-fixing or failing on
