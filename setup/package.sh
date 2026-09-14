@@ -132,6 +132,7 @@ MANIFEST=(
   setup/strip-premise-answers.py
   setup/thread-lane.py
   setup/update-waivers.py
+  setup/finding_key.py
   setup/write-review-summary.py
   # Lite lanes: the two YAMLs above are GENERATED from these by derive-lite.py.
   # package.sh regenerates and diffs them (LITE_DRIFT) before the secret gate.
@@ -167,6 +168,7 @@ MANIFEST=(
   setup/review_qualification.py
   workflows/risk-delta-v1.md
   setup/review-yield.py
+  setup/review-mode.py
   setup/mcp-smoke.sh
   setup/codex-usage.py
   setup/codex-watchdog.sh
