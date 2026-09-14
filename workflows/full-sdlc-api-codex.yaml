@@ -373,6 +373,16 @@ nodes:
     acceptance_criteria, and every id appears in some scenario's covers. One
     scenario covers several criteria only when its expected_tests name an
     observable assertion per criterion it covers.
+    COUNTING RULE for expected_tests, which the runner enforces mechanically:
+    each entry is one TEST CASE — one `it` or `test` block in the named file —
+    never one assertion. Several assertions inside a single case are still one
+    entry; group them. ARCHON_INTEGRATION_TESTS is a test-case count (jest's
+    numPassedTests), and run-joint-integration.py fails the scenario when the
+    summed count is below len(expected_tests). Four assertion-shaped entries
+    backed by two `it` blocks therefore fail the integration while every test
+    passes, which is how chain 6a3a3b06 failed. Write one entry per case you
+    will actually add, so the count equals the number of cases the command
+    reports.
     The controller computes dependency_order from the stage depends_on lists
     and freezes it into the approval snapshot using repository-name ordering
     for independent stages. Every depends_on entry and integration uses entry
@@ -412,6 +422,9 @@ nodes:
       those selected repos. Only this vocabulary is supported. These are exact
       candidate inputs, not invented *_CANDIDATE_SHA names. Each command must
       print its actual assertion count; expected_tests names concrete checks.
+      The number it prints in ARCHON_INTEGRATION_TESTS is the count of test
+      CASES the command ran, and it must be at least the scenario's
+      expected_tests length — see the COUNTING RULE above.
     - Trace each changed interface end to end: producer status/payload, client
       normalization, generated types, consumer behavior, and observable tests.
       Cite the existing transformation code. If errors are collapsed by a client,
