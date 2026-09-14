@@ -26,6 +26,9 @@ RESULT = "joint-integration-result.json"
 EVIDENCE = "integration-evidence.json"
 FEATURE_BUDGET = Path(__file__).resolve().parent / "feature-budget.py"
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from feature_env import feature_env_all  # noqa: E402
+
 
 def fail(message: str) -> None:
     print("JOINT_INTEGRATION=FAIL " + message)
@@ -452,6 +455,10 @@ def structured_command_details(command: dict, scenario: dict, name: str, command
 
 def run_commands(artifacts: Path, plan: dict, worktrees: dict[str, Path], candidates: dict) -> tuple[list[dict], list[dict]]:
     env = dict(os.environ)
+    # A plain `archon workflow resume` drops the launcher's chain env, and
+    # without ARCHON_FEATURE_CHAIN_ID every command below runs unregistered
+    # with the feature budget. params.json is the durable copy.
+    env.update(feature_env_all(artifacts))
     env["ARCHON_INTEGRATION_ROOT"] = str(artifacts / "joint-integration-worktrees")
     for repo, worktree in worktrees.items():
         env[safe_env_name(repo, "WORKTREE")] = str(worktree)
