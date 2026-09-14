@@ -8,6 +8,7 @@ strict transitions needed for repository-list feature runs.
 """
 from __future__ import annotations
 
+import datetime
 import fcntl
 import hashlib
 import hmac
@@ -3430,6 +3431,101 @@ def finalize_integration(control_dir: Path, chain_id: str, evidence: dict, artif
         return finalize_integration_unlocked(control_dir, read_state(control_dir, chain_id), evidence, artifacts)
 
 
+# --- chain timing: report-only wall accounting across the chain's own run rows ---
+
+CHAIN_WALL_BUDGET_SECONDS = 10800
+
+
+def timing_path(control_dir: Path, chain_id: str) -> Path:
+    return state_dir(control_dir) / f"{chain_id}-chain-timing.json"
+
+
+def parse_run_timestamp(value: object) -> float | None:
+    """`remote_agent_workflow_runs` stores `YYYY-MM-DD HH:MM:SS`; ISO-8601 also reads."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        stamp = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=datetime.timezone.utc)
+    return stamp.timestamp()
+
+
+def run_intervals(db: Path, run_ids: list[str]) -> dict[str, tuple[float | None, float | None]]:
+    """Start/end epoch seconds per run id. An unreadable database yields nothing."""
+    if not run_ids:
+        return {}
+    try:
+        with sqlite3.connect(db) as con:
+            if not {"id", "started_at", "completed_at"} <= table_columns(con, "remote_agent_workflow_runs"):
+                return {}
+            placeholders = ",".join("?" for _ in run_ids)
+            rows = con.execute(
+                f"SELECT id, started_at, completed_at FROM remote_agent_workflow_runs WHERE id IN ({placeholders})",
+                run_ids,
+            ).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {str(row[0]): (parse_run_timestamp(row[1]), parse_run_timestamp(row[2])) for row in rows}
+
+
+def chain_timing(state: dict, db: Path) -> dict:
+    """Wall and per-phase seconds for the chain. A run row we cannot read stays null."""
+    records = [item for item in state.get("phase_runs") or [] if isinstance(item, dict)]
+    intervals = run_intervals(db, [item["run_id"] for item in records if isinstance(item.get("run_id"), str)])
+    starts: list[float] = []
+    ends: list[float] = []
+    totals: dict[str, float] = {}
+    for item in records:
+        started, completed = intervals.get(str(item.get("run_id")), (None, None))
+        if started is not None:
+            starts.append(started)
+        if completed is not None:
+            ends.append(completed)
+        if started is None or completed is None:
+            continue
+        phase, repo = item.get("phase"), item.get("repo")
+        key = phase if phase in {"planning", "integration"} else repo
+        if isinstance(key, str):
+            totals[key] = totals.get(key, 0.0) + max(0.0, completed - started)
+    def seconds(key: str) -> int | None:
+        return None if key not in totals else round(totals[key])
+
+    return {
+        "wall_s": round(max(ends) - min(starts)) if starts and ends and max(ends) >= min(starts) else None,
+        "planning_s": seconds("planning"),
+        "stages": {repo: seconds(repo) for repo in state.get("repositories") or []},
+        "integration_s": seconds("integration"),
+        "updated_at": now(),
+    }
+
+
+def timing_field(value: object) -> str:
+    return "null" if value is None else str(value)
+
+
+def record_chain_timing(args: Any, state: dict) -> dict | None:
+    """Write chain-timing.json and print the typed lines. Report only: never blocks a transition."""
+    try:
+        timing = chain_timing(state, Path(args.db))
+        write_json_atomic(timing_path(Path(args.control_dir), state["logical_chain_id"]), timing)
+    except (OSError, KeyError, ValueError, sqlite3.Error):
+        return None
+    stages = ",".join(f"{repo}:{timing_field(value)}" for repo, value in timing["stages"].items())
+    print(
+        f"CHAIN_TIMING wall={timing_field(timing['wall_s'])} planning={timing_field(timing['planning_s'])} "
+        f"stages={stages} integration={timing_field(timing['integration_s'])}"
+    )
+    if isinstance(timing["wall_s"], int) and timing["wall_s"] > CHAIN_WALL_BUDGET_SECONDS:
+        print(f"CHAIN_BUDGET=EXCEEDED wall={timing['wall_s']} cap={CHAIN_WALL_BUDGET_SECONDS}")
+    return timing
+
+
 def advance(host: Any, args: Any, row: dict, result: dict) -> dict:
     control_dir = Path(args.control_dir)
     feature = (result.get("feature_chain") if isinstance(result, dict) else None) or {}
@@ -3500,6 +3596,7 @@ def advance(host: Any, args: Any, row: dict, result: dict) -> dict:
             artifacts = Path(str(current.get("artifacts_dir") or result.get("artifacts") or row.get("output_root", "")))
             evidence = read_json_artifact(artifacts / INTEGRATION_EVIDENCE_ARTIFACT, INTEGRATION_EVIDENCE_ARTIFACT)
             state = finalize_integration_unlocked(control_dir, state, evidence, artifacts)
+            record_chain_timing(args, state)
             receipt_path = artifacts / "feature-chain-receipt.json"
             write_json_atomic(receipt_path, state["integration"])
             launcher = getattr(host, "__file__", "archon-run.py")
@@ -3539,6 +3636,7 @@ def advance(host: Any, args: Any, row: dict, result: dict) -> dict:
                 "reserved_at": now(),
             }
             state = write_state(control_dir, state)
+            record_chain_timing(args, state)
     if dispatch_repo is not None:
         dispatched = dispatch_repository_stage(host, args, state, dispatch_repo)
         if dispatched.get("result") is not None:

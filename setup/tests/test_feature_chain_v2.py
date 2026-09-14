@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import contextlib
+import datetime
 import importlib.util
 import io
 import json
@@ -491,6 +492,84 @@ class FeatureChainV2(unittest.TestCase):
             fc.reopen(self.host, Namespace(**vars(self.args), verify_only=True), state["logical_chain_id"], "api", "x")
         params = json.loads((Path(self.host.calls[-1][3]["output_root"]) / "params.json").read_text(encoding="utf-8"))
         self.assertEqual(params["feature_previous_head"], api_head)
+
+    def timing_db(self, rows):
+        db = self.root / f"timing-{len(list(self.root.glob('timing-*.db')))}.db"
+        with sqlite3.connect(db) as con:
+            con.execute(
+                "CREATE TABLE remote_agent_workflow_runs "
+                "(id TEXT, workflow_name TEXT, status TEXT, started_at TEXT, completed_at TEXT)"
+            )
+            con.executemany(
+                "INSERT INTO remote_agent_workflow_runs (id, started_at, completed_at) VALUES (?, ?, ?)", rows)
+        return db
+
+    def timing_state(self, chain_id="f" * 32):
+        return {
+            "logical_chain_id": chain_id,
+            "repositories": ["api", "goodword-mcp"],
+            "phase_runs": [
+                {"phase": "planning", "run_id": "a" * 32},
+                {"phase": "implement", "repo": "api", "run_id": "b" * 32},
+                {"phase": "implement", "repo": "goodword-mcp", "run_id": "c" * 32},
+                {"phase": "integration", "run_id": "d" * 32},
+            ],
+        }
+
+    def test_chain_timing_sums_each_phase_and_leaves_unfinished_runs_null(self):
+        db = self.timing_db([
+            ("a" * 32, "2026-09-14 10:00:00", "2026-09-14 10:10:00"),
+            ("b" * 32, "2026-09-14 10:10:00", "2026-09-14 10:40:00"),
+            ("c" * 32, "2026-09-14 10:40:00", "2026-09-14 11:00:00"),
+            ("d" * 32, "2026-09-14 11:00:00", None),
+        ])
+
+        timing = fc.chain_timing(self.timing_state(), db)
+
+        self.assertEqual(timing["planning_s"], 600)
+        self.assertEqual(timing["stages"], {"api": 1800, "goodword-mcp": 1200})
+        self.assertIsNone(timing["integration_s"])
+        self.assertEqual(timing["wall_s"], 3600)
+        self.assertRegex(timing["updated_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+
+    def test_chain_timing_is_all_null_when_the_run_table_is_unreadable(self):
+        timing = fc.chain_timing(self.timing_state(), self.root / "missing.db")
+
+        self.assertIsNone(timing["wall_s"])
+        self.assertIsNone(timing["planning_s"])
+        self.assertIsNone(timing["integration_s"])
+        self.assertEqual(timing["stages"], {"api": None, "goodword-mcp": None})
+
+    def record_timing(self, wall_seconds, chain_id):
+        start = datetime.datetime(2026, 9, 14, 10, 0, 0)
+        end = start + datetime.timedelta(seconds=wall_seconds)
+        db = self.timing_db([
+            ("a" * 32, start.strftime("%Y-%m-%d %H:%M:%S"), start.strftime("%Y-%m-%d %H:%M:%S")),
+            ("d" * 32, start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S")),
+        ])
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            fc.record_chain_timing(Namespace(db=db, control_dir=self.control), self.timing_state(chain_id))
+        return stream.getvalue()
+
+    def test_chain_timing_prints_the_typed_line_and_flags_only_a_wall_over_the_cap(self):
+        at_cap = self.record_timing(10800, "a" * 32)
+        over_cap = self.record_timing(10801, "b" * 32)
+
+        self.assertIn("CHAIN_TIMING wall=10800 planning=0 stages=api:null,goodword-mcp:null integration=10800\n", at_cap)
+        self.assertNotIn("CHAIN_BUDGET", at_cap)
+        self.assertIn("CHAIN_TIMING wall=10801 planning=0 stages=api:null,goodword-mcp:null integration=10801\n", over_cap)
+        self.assertIn("CHAIN_BUDGET=EXCEEDED wall=10801 cap=10800\n", over_cap)
+        written = json.loads(fc.timing_path(self.control, "b" * 32).read_text(encoding="utf-8"))
+        self.assertEqual(written["wall_s"], 10801)
+
+    def test_advance_writes_chain_timing_on_every_stage_transition(self):
+        state = self.locally_verified_chain(finalize=False)
+
+        timing = json.loads(fc.timing_path(self.control, state["logical_chain_id"]).read_text(encoding="utf-8"))
+
+        self.assertEqual(set(timing), {"wall_s", "planning_s", "stages", "integration_s", "updated_at"})
+        self.assertEqual(timing["stages"], {"api": None, "goodword-mcp": None})
 
     def test_publish_opens_draft_prs_in_dependency_order_and_cross_links(self):
         state = self.locally_verified_chain()
