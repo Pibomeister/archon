@@ -75,6 +75,16 @@ nodes:
       fi
       test -d /Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb/wiki || { echo "PREFLIGHT=FAIL knowledge base missing"; exit 1; }
       git -C /Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb status --porcelain | sort > "$ARTIFACTS_DIR/kb-pre-porcelain.txt"
+      # Repository-scope runs are budgeted to converge inside two hours, so they
+      # get tighter caps than the legacy defaults baked into the readers
+      # (round-pre/converge default 4, plan-round-pre/plan-converge default 3).
+      # Written only when absent: an operator who raised a cap and resumed keeps
+      # the raise even if this node re-runs. Legacy runs get no file at all.
+      if [ "${ARCHON_FEATURE_SCOPE-}" = repositories ]; then
+        test -f "$ARTIFACTS_DIR/round-cap.txt" || echo 3 > "$ARTIFACTS_DIR/round-cap.txt"
+        test -f "$ARTIFACTS_DIR/plan-round-cap.txt" || echo 2 > "$ARTIFACTS_DIR/plan-round-cap.txt"
+        echo "ROUND_CAPS=OK review=$(cat "$ARTIFACTS_DIR/round-cap.txt") plan=$(cat "$ARTIFACTS_DIR/plan-round-cap.txt")"
+      fi
       echo "PREFLIGHT=PASS"
 
   - id: feature-phase
