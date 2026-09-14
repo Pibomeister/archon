@@ -8,7 +8,8 @@
 # plan-snapshot, verbatim). When the spec pins an interface
 # (`## Interface (pinned)`) and a joint-plan.json exists, every
 # contracts[].artifact must appear verbatim in that section or be named by a
-# `deviation: <artifact>` line in plan.md.
+# `deviation: <artifact>` line in plan.md, and joint-plan.json must carry a
+# non-empty pinned_decisions list of {symbol, file, rule}.
 # Usage: plan-shape.sh <artifacts-dir> <worktree> <spec-path>
 set -euo pipefail
 AD="${1:?usage: plan-shape.sh <artifacts-dir> <worktree> <spec-path>}"
@@ -36,6 +37,11 @@ for h in "## Goal" "## Files" "## Approach" "## Test scenarios" "## Verification
 done
 if [ -f "$AD/params.json" ]; then
   python3 "$HERE_PS/validate-joint-plan.py" "$AD"
+# No params.json fallback is possible here: this branch is reached only when
+# params.json is absent, which is the very file the fallback would read. A
+# repository-list run that resumes with the chain env dropped AND no params.json
+# passes this check silently; params.json is written before any plan node runs,
+# so that combination means the controller never got as far as writing it.
 elif [ "${ARCHON_FEATURE_SCOPE-}" = repositories ]; then
   echo "PLAN_SHAPE=FAIL repository feature run missing params.json"; exit 1
 fi
@@ -119,7 +125,19 @@ if [ -f "$AD/joint-plan.json" ] && grep -q '^## Interface (pinned)' "$SPEC"; the
   python3 - "$AD/joint-plan.json" "$SPEC" "$AD/plan.md" <<'PY'
 import json, re, sys
 joint_path, spec_path, plan_path = sys.argv[1:4]
-contracts = json.load(open(joint_path, encoding="utf-8")).get("contracts") or []
+joint = json.load(open(joint_path, encoding="utf-8"))
+# A pinned interface is only pinned if the plan says what it pinned it to. The
+# planner emits pinned_decisions: [{symbol, file, rule}], one per decision the
+# consumer repo is now allowed to depend on; without it the section is a
+# sentence in a spec that no later gate can check anything against.
+decisions = joint.get("pinned_decisions")
+if not isinstance(decisions, list) or not decisions or not all(
+        isinstance(d, dict) and all(isinstance(d.get(f), str) and d.get(f).strip()
+                                    for f in ("symbol", "file", "rule"))
+        for d in decisions):
+    print("PLAN_SHAPE=FAIL pinned_decisions missing")
+    sys.exit(1)
+contracts = joint.get("contracts") or []
 spec_text = open(spec_path, encoding="utf-8").read()
 m = re.search(r"^## Interface \(pinned\)\n(.*?)(?=^## |\Z)", spec_text, re.M | re.S)
 section = m.group(1) if m else ""

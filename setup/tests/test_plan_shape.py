@@ -145,6 +145,33 @@ class PlanShapeInterfaceTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(r.stdout.strip(), "PLAN_SHAPE=OK")
 
+    def test_missing_pinned_decisions_fails(self):
+        plan = json.loads((WITH_INTERFACE / "joint-plan-foo.json").read_text(encoding="utf-8"))
+        del plan["pinned_decisions"]
+        (self.ad / "joint-plan.json").write_text(json.dumps(plan), encoding="utf-8")
+        r = run(self.ad, self.wt, self.spec)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("PLAN_SHAPE=FAIL pinned_decisions missing", r.stdout)
+
+    def test_pinned_decision_missing_a_field_fails(self):
+        plan = json.loads((WITH_INTERFACE / "joint-plan-foo.json").read_text(encoding="utf-8"))
+        del plan["pinned_decisions"][0]["rule"]
+        (self.ad / "joint-plan.json").write_text(json.dumps(plan), encoding="utf-8")
+        r = run(self.ad, self.wt, self.spec)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("PLAN_SHAPE=FAIL pinned_decisions missing", r.stdout)
+
+    def test_unpinned_spec_does_not_require_pinned_decisions(self):
+        # Negative control: the gate keys on the spec section, not on the
+        # joint plan. Drop the section and the same plan passes.
+        plan = json.loads((WITH_INTERFACE / "joint-plan-foo.json").read_text(encoding="utf-8"))
+        del plan["pinned_decisions"]
+        (self.ad / "joint-plan.json").write_text(json.dumps(plan), encoding="utf-8")
+        self.spec.write_text("# Spec\n", encoding="utf-8")
+        r = run(self.ad, self.wt, self.spec)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.strip(), "PLAN_SHAPE=OK")
+
     def test_no_joint_plan_json_skips_check(self):
         # joint-plan.json never copied in; the gate only applies when it exists.
         r = run(self.ad, self.wt, self.spec)
