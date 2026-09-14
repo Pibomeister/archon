@@ -2810,6 +2810,26 @@ def consumers_of(state: dict, repo: str) -> list[str]:
     return out
 
 
+def assert_reopenable_run(host: Any, args: Any, current: object, affected: list[str]) -> None:
+    """The chain may be reopened after an integration attempt, or after a stopped
+    implement run of a stage the reopen resets (a CROSS_REPO_FINDING stops the
+    consumer's run, and the producer is what gets reopened). Never mid-flight."""
+    if current is None:
+        return
+    if not isinstance(current, dict):
+        raise FeatureChainError("reopen cannot read the current run")
+    phase, run_id = current.get("phase"), current.get("run_id")
+    if phase == "implement" and current.get("repo") not in affected:
+        raise FeatureChainError(f"reopen would abandon the {current.get('repo')} stage run {str(run_id)[:8]}")
+    if phase not in {"integration", "implement"}:
+        raise FeatureChainError("reopen is only allowed after an integration or implementation attempt")
+    lookup = getattr(host, "run_row_by_id", None)
+    if callable(lookup) and isinstance(run_id, str):
+        row = lookup(args.db, run_id)
+        if isinstance(row, dict) and row.get("status") == "running":
+            raise FeatureChainError(f"run {run_id[:8]} is still running; wait or abandon it first")
+
+
 def reopen(host: Any, args: Any, chain_id: str, repo: str, reason: str) -> dict:
     """Reset a verified stage (and its consumers) to pending and re-dispatch it.
 
@@ -2828,18 +2848,16 @@ def reopen(host: Any, args: Any, chain_id: str, repo: str, reason: str) -> dict:
             raise FeatureChainError(f"reopen repository is outside selected scope: {repo}")
         if state["stages"][repo].get("status") != "verified":
             raise FeatureChainError(f"{repo} stage is not verified; nothing to reopen")
-        current = state.get("current_run")
-        if not isinstance(current, dict) or current.get("phase") != "integration":
-            raise FeatureChainError("reopen is only allowed after an integration attempt")
         reservation = state.get("dispatch_reservation")
         if isinstance(reservation, dict) and reservation.get("status") != "failed" and process_claim_alive(reservation):
             raise FeatureChainError("a live dispatch reservation holds the chain")
         verify_approval(state)
         affected = [repo] + consumers_of(state, repo)
+        assert_reopenable_run(host, args, state.get("current_run"), affected)
         record = {
             "repo": repo, "reason": reason.strip(), "affected": affected,
             "previous_heads": {r: state["candidate_handoffs"][r]["candidate_head"] for r in affected if r in state["candidate_handoffs"]},
-            "integration_run_id": current.get("run_id"), "reopened_at": now(),
+            "stopped_run_id": (state.get("current_run") or {}).get("run_id"), "reopened_at": now(),
         }
         for name in affected:
             state["stages"][name]["status"] = "pending"

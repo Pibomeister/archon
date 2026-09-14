@@ -410,6 +410,7 @@ class FeatureChainV2(unittest.TestCase):
         self.assertNotIn("goodword-mcp", latest["candidate_handoffs"])
         self.assertIsNone(latest["integration"])
         self.assertEqual(latest["reopens"][0]["affected"], ["api", "goodword-mcp"])
+        self.assertIsInstance(latest["reopens"][0]["stopped_run_id"], str)
         self.assertEqual(latest["reopens"][0]["previous_heads"]["api"], api_head)
         lane, _message, env, _row = self.host.calls[-1]
         self.assertEqual(env["ARCHON_FEATURE_REPO"], "api")
@@ -424,6 +425,34 @@ class FeatureChainV2(unittest.TestCase):
         self.assertEqual(latest["stages"]["api"]["status"], "verified")
         self.assertEqual(latest["stages"]["goodword-mcp"]["status"], "running")
         self.assertIn("api", latest["candidate_handoffs"])
+
+    def test_reopen_of_the_producer_is_allowed_after_a_stopped_consumer_run_but_not_a_foreign_one(self):
+        state = self.locally_verified_chain(finalize=False)
+        chain_id = state["logical_chain_id"]
+        with fc.chain_lock(self.control, chain_id):
+            latest = fc.read_state(self.control, chain_id)
+            latest["current_run"] = {"phase": "implement", "repo": "goodword-mcp", "run_id": "4" * 32}
+            fc.write_state(self.control, latest)
+        with mock.patch("builtins.print"):
+            fc.reopen(self.host, self.args, chain_id, "api", "cross-repo finding from the consumer")
+        self.assertEqual(fc.read_state(self.control, chain_id)["stages"]["api"]["status"], "running")
+
+    def test_reopen_refuses_a_foreign_stage_run_and_a_live_run(self):
+        state = self.locally_verified_chain(finalize=False)
+        chain_id = state["logical_chain_id"]
+        with fc.chain_lock(self.control, chain_id):
+            latest = fc.read_state(self.control, chain_id)
+            latest["current_run"] = {"phase": "implement", "repo": "api", "run_id": "5" * 32}
+            fc.write_state(self.control, latest)
+        with self.assertRaisesRegex(fc.FeatureChainError, "would abandon the api stage run"):
+            fc.reopen(self.host, self.args, chain_id, "goodword-mcp", "x")
+        self.host.run_row_by_id = lambda db, run_id: {"status": "running"}
+        with fc.chain_lock(self.control, chain_id):
+            latest = fc.read_state(self.control, chain_id)
+            latest["current_run"] = {"phase": "integration", "run_id": "6" * 32}
+            fc.write_state(self.control, latest)
+        with self.assertRaisesRegex(fc.FeatureChainError, "still running"):
+            fc.reopen(self.host, self.args, chain_id, "goodword-mcp", "x")
 
     def test_reopen_refuses_verified_chains_pending_stages_and_empty_reasons(self):
         state = self.locally_verified_chain()
