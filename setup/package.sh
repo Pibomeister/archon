@@ -45,6 +45,7 @@ HEAD="$(resolve_bin head)" || { echo "PACKAGE=FAIL cannot resolve a head binary 
 MANIFEST=(
   # Portable lane: captured workflow resources and explicit project profile.
   docs/portable-single-repo.md
+  docs/risk-delta-v1-pilot.md
   profiles/fluxkeep-next.v1.json
   profiles/project-profile.v1.schema.json
   profiles/project-profile.v2.schema.json
@@ -157,6 +158,14 @@ MANIFEST=(
   setup/feature-budget.py
   setup/feature_estimate.py
   setup/feature_chain.py
+  setup/review_policy.py
+  setup/review_policy_cli.py
+  setup/review_delta_runtime.py
+  setup/review_delta_workflow.py
+  setup/review_session.py
+  setup/review_verification.py
+  setup/review_qualification.py
+  workflows/risk-delta-v1.md
   setup/review-yield.py
   setup/mcp-smoke.sh
   setup/codex-usage.py

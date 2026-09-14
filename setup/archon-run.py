@@ -529,7 +529,12 @@ def command_for(action: str, target: str, reason: str | None = None) -> list[str
     archon = os.environ.get("ARCHON_BIN", "archon")
     if action == "run":
         lane, spec = target.split("\0", 1)
-        return [archon, "workflow", "run", lane, "--branch", run_branch(lane, spec), spec]
+        command = [archon, "workflow", "run", lane, "--branch", run_branch(lane, spec)]
+        effective_source = os.environ.get("ARCHON_EFFECTIVE_WORKFLOW_SOURCE_ROOT")
+        if effective_source:
+            command.extend(["--workflow-source", effective_source])
+        command.append(spec)
+        return command
     if action == "resume":
         return ["bash", str(SETUP / "resume.sh"), target]
     if action == "approve":
@@ -2906,6 +2911,18 @@ def feature_scope_amend_command(args: argparse.Namespace) -> None:
     )
 
 
+def feature_review_policy_update_command(args: argparse.Namespace) -> None:
+    validate_control_location(args.control_dir)
+    row = resolve_run(args.db, args.run_id)
+    result = repository_feature_call("review_policy_update_command", args, row)
+    status = "UNCHANGED" if result.get("already_applied") else "APPLIED"
+    print(
+        f"ARCHON_FEATURE_REVIEW_POLICY_UPDATE={status} "
+        f"chain={result['chain']} run={row['id'][:8]} policy={result['policy']} "
+        f"amendment={result['amendment_id']}"
+    )
+
+
 def feature_account_provider_usage_command(args: argparse.Namespace) -> None:
     validate_control_location(args.control_dir)
     row = resolve_run(args.db, args.run_id)
@@ -3447,6 +3464,13 @@ def parser() -> argparse.ArgumentParser:
     scope_amend.add_argument("--token", required=True)
     scope_amend.add_argument("--add-file", required=True)
     scope_amend.add_argument("--reason", required=True)
+    review_policy_update = sub.add_parser("feature-review-policy-update", help="guarded review policy amendment for a stopped repository-list feature chain")
+    review_policy_update.add_argument("run_id")
+    review_policy_update.add_argument("--token", required=True)
+    review_policy_update.add_argument("--policy", choices=("risk-delta-v1",), required=True)
+    review_policy_update.add_argument("--expected-captured-source-digest", required=True)
+    review_policy_update.add_argument("--qualification-packet", type=Path)
+    review_policy_update.add_argument("--reason", required=True)
     account_usage = sub.add_parser("feature-account-provider-usage", help="guarded provider transcript usage accounting for a stopped Codex repository-list feature run")
     account_usage.add_argument("run_id")
     account_usage.add_argument("--token", required=True)
@@ -3539,6 +3563,9 @@ def main() -> None:
         return
     if args.action == "feature-scope-amend":
         feature_scope_amend_command(args)
+        return
+    if args.action == "feature-review-policy-update":
+        feature_review_policy_update_command(args)
         return
     if args.action == "feature-account-provider-usage":
         feature_account_provider_usage_command(args)

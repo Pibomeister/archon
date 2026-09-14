@@ -15,6 +15,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -25,6 +26,9 @@ from pathlib import Path
 from typing import Any, Iterator
 
 import control_contract
+import review_delta_workflow
+import review_qualification
+import yaml
 
 
 class FeatureChainError(ValueError):
@@ -65,6 +69,34 @@ CHAIN_ID_RE = re.compile(r"[0-9a-f]{24,64}", re.I)
 RUN_ID_RE = re.compile(r"(?=.{8,36}\Z)[0-9a-f]+(?:-[0-9a-f]+)*", re.I)
 SIGNED_FIELDS = {"state_mac", "approval_mac", "receipt_mac"}
 TERMINAL_OK = {"completed", "locally_verified"}
+REVIEW_POLICY_RISK_DELTA_V1 = "risk-delta-v1"
+SUPPORTED_REVIEW_POLICIES = {REVIEW_POLICY_RISK_DELTA_V1}
+REVIEW_POLICY_HELPERS = (
+    "feature_chain.py", "review_policy.py", "review_policy_cli.py",
+    "review_qualification.py", "review_delta_workflow.py", "review_session.py",
+    "review_delta_runtime.py", "review_verification.py",
+    "codex-workspace-wrapper.sh", "archon-run.py",
+)
+REVIEW_POLICY_WORKFLOWS = ("risk-delta-v1.md",)
+MUTABLE_REVIEW_STATE_KEYS = {"coverage_records", "findings", "segment_requirements", "receipts"}
+SCOPE_AUTHORITY_KEYS = (
+    "risk_areas",
+    "cross_store",
+    "impact_tooling_missing",
+    "impact_evidence_available",
+    "baseline_invalid",
+    "impact_unbounded",
+    "invariant_changed",
+    "public_contract_changed",
+    "permission_boundary_changed",
+    "shared_dependency_changed",
+    "subsystem_changed",
+    "source_changed",
+    "dependency_changed",
+    "configuration_changed",
+    "verification_environment_changed",
+    "affected_subsystems",
+)
 
 
 def canonical_bytes(data: Any) -> bytes:
@@ -181,6 +213,864 @@ def require_no_incomplete_scope_amendment(state: dict) -> None:
     amendment = state.get("scope_amendment")
     if isinstance(amendment, dict) and amendment.get("status") == "in_progress":
         raise FeatureChainError("scope amendment is incomplete; retry feature-scope-amend before dispatch")
+
+
+def require_no_incomplete_review_policy_amendment(state: dict) -> None:
+    amendment = state.get("review_policy_amendment")
+    if isinstance(amendment, dict) and amendment.get("status") == "in_progress":
+        raise FeatureChainError("review policy amendment is incomplete; retry feature-review-policy-update before dispatch")
+    activation = state.get("review_policy_activation")
+    if isinstance(activation, dict) and activation.get("status") == "in_progress":
+        raise FeatureChainError("review policy activation is incomplete; retry feature-review-policy-update before dispatch")
+
+
+def setup_dir() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def workflow_path(workflow_name: object) -> Path:
+    if not isinstance(workflow_name, str) or not workflow_name:
+        raise FeatureChainError("workflow name is required for review policy provenance")
+    if "/" in workflow_name or "\\" in workflow_name or workflow_name.startswith("."):
+        raise FeatureChainError("workflow name is unsafe for review policy provenance")
+    return setup_dir().parent / "workflows" / f"{workflow_name}.yaml"
+
+
+def current_review_policy_digests(row: dict | None = None) -> dict:
+    helpers = {}
+    for name in REVIEW_POLICY_HELPERS:
+        path = setup_dir() / name
+        if not path.is_file() or path.is_symlink():
+            raise FeatureChainError(f"review policy helper is unavailable: {name}")
+        helpers[name] = file_digest(path)
+    workflows = {}
+    if isinstance(row, dict) and row.get("workflow_name"):
+        path = workflow_path(row.get("workflow_name"))
+        if not path.is_file() or path.is_symlink():
+            raise FeatureChainError(f"review policy workflow source is unavailable: {row.get('workflow_name')}")
+        workflows[str(row["workflow_name"])] = file_digest(path)
+    workflow_root = setup_dir().parent / "workflows"
+    for name in REVIEW_POLICY_WORKFLOWS:
+        path = workflow_root / name
+        if not path.is_file() or path.is_symlink():
+            raise FeatureChainError(f"review policy workflow is unavailable: {name}")
+        workflows[name] = file_digest(path)
+    body = {
+        "helpers": helpers,
+        "workflows": workflows,
+    }
+    body["sha256"] = digest(body)
+    return body
+
+
+def read_workflow_source_metadata(db: Path, run_id: str) -> dict:
+    if not isinstance(run_id, str) or not run_id:
+        raise FeatureChainError("workflow source metadata requires a run id")
+    try:
+        with sqlite3.connect(db) as con:
+            row = con.execute(
+                "SELECT workflow_name, metadata FROM remote_agent_workflow_runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+    except sqlite3.Error as exc:
+        raise FeatureChainError(f"cannot read workflow source metadata: {exc}") from exc
+    if row is None:
+        raise FeatureChainError("workflow source metadata run is missing")
+    try:
+        metadata = json.loads(row[1] or "{}")
+    except json.JSONDecodeError as exc:
+        raise FeatureChainError("workflow source metadata is malformed") from exc
+    source = metadata.get("workflow_source")
+    if not isinstance(source, dict):
+        raise FeatureChainError("workflow source metadata is missing")
+    return verify_captured_workflow_source(source, str(row[0] or ""))
+
+
+def read_expected_predecessor_source_metadata(db: Path, run_id: str, expected_digest: str,
+                                              workflow_name: str) -> dict:
+    metadata = read_run_metadata(db, run_id)
+    if not isinstance(metadata.get("workflow_source"), dict):
+        raise FeatureChainError("workflow source metadata is missing")
+    for key in ("workflow_source", "workflow_source_predecessor"):
+        source = metadata.get(key)
+        if not isinstance(source, dict):
+            continue
+        verified = verify_captured_workflow_source(source, workflow_name)
+        if hmac.compare_digest(verified["digest"], expected_digest):
+            return verified
+    raise FeatureChainError("expected captured source digest does not match chain state")
+
+
+def verify_captured_workflow_source(source: dict, workflow_name: str | None = None) -> dict:
+    root = Path(str(source.get("root", "")))
+    if not root.is_absolute() or not root.is_dir() or root.is_symlink():
+        raise FeatureChainError("captured workflow source root is unavailable")
+    manifest_path = root / "manifest.json"
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        raise FeatureChainError("captured workflow source manifest is unavailable")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FeatureChainError("captured workflow source manifest is malformed") from exc
+    for key in ("version", "origin", "captured_at", "digest", "file_count", "byte_count"):
+        if manifest.get(key) != source.get(key):
+            raise FeatureChainError(f"captured workflow source manifest {key} does not match run metadata")
+    if workflow_name and manifest.get("workflow_name") != workflow_name:
+        raise FeatureChainError("captured workflow source workflow name does not match run metadata")
+    expected_digest = str(source.get("digest", "")).lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
+        raise FeatureChainError("captured workflow source digest is malformed")
+    file_count = source.get("file_count")
+    if type(file_count) is not int or file_count <= 0:
+        raise FeatureChainError("captured workflow source file count is malformed")
+    files = [path for path in sorted(root.rglob("*")) if path.is_file() and path.name != "manifest.json"]
+    if len(files) != file_count:
+        raise FeatureChainError("captured workflow source file count does not match manifest")
+    computed = hashlib.sha256()
+    for path in files:
+        if path.is_symlink():
+            raise FeatureChainError("captured workflow source contains a symlink file")
+        rel = path.relative_to(root).as_posix()
+        computed.update(rel.encode("utf-8"))
+        computed.update(b"\0")
+        computed.update(file_digest(path).encode("ascii"))
+        computed.update(b"\n")
+    actual_digest = computed.hexdigest()
+    if not hmac.compare_digest(actual_digest, expected_digest):
+        raise FeatureChainError("captured workflow source digest does not match file bytes")
+    return {
+        "schema_version": 1,
+        "version": source["version"],
+        "workflow_name": manifest["workflow_name"],
+        "root": str(root),
+        "origin": manifest["origin"],
+        "captured_at": manifest["captured_at"],
+        "digest": expected_digest,
+        "file_count": file_count,
+        "byte_count": source["byte_count"],
+        "manifest_sha256": file_digest(manifest_path),
+    }
+
+
+def workflow_source_digest(root: Path) -> tuple[str, int, int]:
+    files = [path for path in sorted(root.rglob("*")) if path.is_file() and path.name != "manifest.json"]
+    computed = hashlib.sha256()
+    byte_count = 0
+    for path in files:
+        if path.is_symlink():
+            raise FeatureChainError("captured workflow source contains a symlink file")
+        rel = path.relative_to(root).as_posix()
+        computed.update(rel.encode("utf-8"))
+        computed.update(b"\0")
+        computed.update(file_digest(path).encode("ascii"))
+        computed.update(b"\n")
+        byte_count += path.stat().st_size
+    return computed.hexdigest(), len(files), byte_count
+
+
+def staged_effective_workflow_source_root(predecessor_root: Path, effective_root: Path) -> Path:
+    if predecessor_root.is_symlink():
+        raise FeatureChainError("captured workflow source root must not be a symlink")
+    base = effective_root.parent
+    base.mkdir(parents=True, mode=0o700, exist_ok=True)
+    ensure_owned_not_symlink(base, "review policy amendment source directory")
+    tmp = base / (effective_root.name + f".tmp.{os.getpid()}")
+    if tmp.exists():
+        ensure_owned_not_symlink(tmp, "temporary effective workflow source root")
+        if not tmp.is_dir():
+            raise FeatureChainError("temporary effective workflow source path is not a directory")
+        shutil.rmtree(tmp)
+
+    def ignore(_directory: str, names: list[str]) -> set[str]:
+        return {"manifest.json"} & set(names)
+
+    shutil.copytree(predecessor_root, tmp, symlinks=False, ignore=ignore)
+    return tmp
+
+
+def replace_effective_workflow_source_root(staged_root: Path, effective_root: Path) -> None:
+    if effective_root.exists():
+        ensure_owned_not_symlink(effective_root, "effective workflow source root")
+        if not effective_root.is_dir():
+            raise FeatureChainError("effective workflow source path is not a directory")
+        shutil.rmtree(effective_root)
+    os.replace(staged_root, effective_root)
+
+
+def effective_source_path(state: dict, amendment_id: str) -> Path:
+    current = state.get("current_run")
+    artifacts = current.get("artifacts_dir") if isinstance(current, dict) else None
+    if not artifacts:
+        raise FeatureChainError("review policy amendment requires current run artifacts")
+    root = Path(str(artifacts))
+    if not root.is_absolute() or not root.is_dir():
+        raise FeatureChainError("review policy amendment artifacts root is unavailable")
+    return root / "review-policy-amendments" / amendment_id / "workflow-source-effective"
+
+
+def materialize_effective_workflow_source(state: dict, captured: dict, policy: str, amendment_id: str) -> dict:
+    predecessor_root = Path(captured["root"])
+    effective_root = effective_source_path(state, amendment_id)
+    existing_manifest = effective_root / "manifest.json"
+    if existing_manifest.is_file() and not existing_manifest.is_symlink():
+        existing = json.loads(existing_manifest.read_text(encoding="utf-8"))
+        lineage = existing.get("review_policy")
+        if not isinstance(lineage, dict):
+            raise FeatureChainError("effective workflow source manifest is missing review policy lineage")
+        if lineage.get("policy") != policy or lineage.get("amendment_id") != amendment_id or lineage.get("predecessor_digest") != captured["digest"]:
+            raise FeatureChainError("effective workflow source lineage does not match amendment")
+        source = {
+            "version": existing["version"],
+            "root": str(effective_root),
+            "origin": existing["origin"],
+            "captured_at": existing["captured_at"],
+            "digest": existing["digest"],
+            "file_count": existing["file_count"],
+            "byte_count": existing["byte_count"],
+            "workflow_name": captured["workflow_name"],
+        }
+        return verify_captured_workflow_source(source, captured["workflow_name"])
+    if effective_root.exists():
+        ensure_owned_not_symlink(effective_root, "effective workflow source root")
+        if not effective_root.is_dir():
+            raise FeatureChainError("effective workflow source path is not a directory")
+    workflow_name = captured["workflow_name"]
+    workflow_rel = Path("project") / ".archon" / "workflows" / f"{workflow_name}.yaml"
+    staged_root = staged_effective_workflow_source_root(predecessor_root, effective_root)
+    try:
+        workflow_file = staged_root / workflow_rel
+        if not workflow_file.is_file() or workflow_file.is_symlink():
+            raise FeatureChainError("captured project workflow is unavailable for review policy transform")
+        source_doc = yaml.safe_load(workflow_file.read_text(encoding="utf-8"))
+        transformed = review_delta_workflow.transform(source_doc, setup_dir())
+    except (OSError, yaml.YAMLError, review_delta_workflow.DeltaWorkflowError) as exc:
+        if staged_root.exists():
+            shutil.rmtree(staged_root)
+        raise FeatureChainError(f"cannot derive effective risk-delta workflow source: {exc}") from exc
+    workflow_file.write_text(yaml.safe_dump(transformed, sort_keys=False), encoding="utf-8")
+    source_manifest = json.loads((predecessor_root / "manifest.json").read_text(encoding="utf-8"))
+    source_digest, file_count, byte_count = workflow_source_digest(staged_root)
+    manifest = {
+        **source_manifest,
+        "digest": source_digest,
+        "file_count": file_count,
+        "byte_count": byte_count,
+        "review_policy": {
+            "policy": policy,
+            "amendment_id": amendment_id,
+            "predecessor_digest": captured["digest"],
+            "predecessor_root": captured["root"],
+            "transform": "review_delta_workflow.py",
+            "transform_sha256": file_digest(setup_dir() / "review_delta_workflow.py"),
+        },
+    }
+    (staged_root / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    replace_effective_workflow_source_root(staged_root, effective_root)
+    source = {
+        "version": manifest["version"],
+        "root": str(effective_root),
+        "origin": manifest["origin"],
+        "captured_at": manifest["captured_at"],
+        "digest": source_digest,
+        "file_count": file_count,
+        "byte_count": byte_count,
+        "workflow_name": workflow_name,
+    }
+    return verify_captured_workflow_source(source, workflow_name)
+
+
+def read_run_metadata(db: Path, run_id: str) -> dict:
+    try:
+        with sqlite3.connect(db) as con:
+            columns = table_columns(con, "remote_agent_workflow_runs")
+            if "metadata" not in columns:
+                raise FeatureChainError("workflow run table cannot store workflow source metadata")
+            row = con.execute("SELECT metadata FROM remote_agent_workflow_runs WHERE id = ?", (run_id,)).fetchone()
+    except sqlite3.Error as exc:
+        raise FeatureChainError(f"cannot read workflow run metadata: {exc}") from exc
+    if row is None:
+        raise FeatureChainError("workflow source metadata run is missing")
+    try:
+        metadata = json.loads(row[0] or "{}")
+    except json.JSONDecodeError as exc:
+        raise FeatureChainError("workflow source metadata is malformed") from exc
+    if not isinstance(metadata, dict):
+        raise FeatureChainError("workflow source metadata is malformed")
+    return metadata
+
+
+def write_run_metadata(db: Path, run_id: str, metadata: dict) -> None:
+    try:
+        with sqlite3.connect(db) as con:
+            columns = table_columns(con, "remote_agent_workflow_runs")
+            if "metadata" not in columns:
+                raise FeatureChainError("workflow run table cannot store workflow source metadata")
+            con.execute(
+                "UPDATE remote_agent_workflow_runs SET metadata = ? WHERE id = ?",
+                (json.dumps(metadata, sort_keys=True), run_id),
+            )
+            if con.total_changes != 1:
+                raise FeatureChainError("workflow source metadata run is missing")
+    except sqlite3.Error as exc:
+        raise FeatureChainError(f"cannot write workflow run metadata: {exc}") from exc
+
+
+def qualification_packet_path(args: Any) -> Path | None:
+    packet = getattr(args, "qualification_packet", None)
+    if packet is None or str(packet) == "":
+        return None
+    path = Path(packet)
+    if not path.is_absolute() or not path.is_file() or path.is_symlink():
+        raise FeatureChainError("qualification packet must be an existing absolute non-symlink file")
+    return path
+
+
+def sealed_payload(value: dict) -> dict:
+    return {key: item for key, item in value.items() if key != "controller_mac"}
+
+
+def require_controller_seal(state: dict, value: dict, label: str) -> None:
+    mac = value.get("controller_mac")
+    if not isinstance(mac, str) or not hmac.compare_digest(mac, hmac_sha256(state["chain_secret"], sealed_payload(value))):
+        raise FeatureChainError(f"{label} is not sealed by the feature-chain controller")
+
+
+def require_controller_owned_usage(packet: dict, root: Path, state: dict, policy_record: dict) -> None:
+    controller = packet.get("controller_evidence")
+    if not isinstance(controller, dict):
+        raise FeatureChainError("qualification packet is missing controller evidence")
+    if controller.get("predecessor_captured_source_digest") != policy_record["predecessor_captured_source_digest"]:
+        raise FeatureChainError("qualification packet predecessor digest does not match policy amendment")
+    if controller.get("effective_workflow_source_digest") != policy_record["effective_workflow_source_digest"]:
+        raise FeatureChainError("qualification packet effective source digest does not match policy amendment")
+    if controller.get("helper_workflow_digests_sha256") != policy_record["helper_workflow_digests"]["sha256"]:
+        raise FeatureChainError("qualification packet helper digest does not match policy amendment")
+    negative_ref = controller.get("offline_negative_tests")
+    negative_path = review_qualification.retained_file(root, negative_ref)
+    try:
+        negative = json.loads(negative_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FeatureChainError(f"qualification negative-test receipt is malformed: {exc}") from exc
+    if negative.get("status") != "passed":
+        raise FeatureChainError("qualification negative-test receipt did not pass")
+    require_controller_seal(state, negative, "qualification negative-test receipt")
+    pairs = packet.get("matched_repairs")
+    if not isinstance(pairs, list):
+        raise FeatureChainError("qualification packet is missing matched repairs")
+    for pair in pairs:
+        if not isinstance(pair, dict):
+            raise FeatureChainError("qualification repair entry is malformed")
+        for side in ("historical", "risk_delta"):
+            usage_ref = pair.get(side, {}).get("usage") if isinstance(pair.get(side), dict) else None
+            usage_path = review_qualification.retained_file(root, usage_ref)
+            try:
+                usage = json.loads(usage_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise FeatureChainError(f"qualification usage receipt is malformed: {exc}") from exc
+            require_controller_seal(state, usage, "qualification usage receipt")
+
+
+def qualify_review_policy(args: Any, state: dict, policy_record: dict) -> dict | None:
+    path = qualification_packet_path(args)
+    if path is None:
+        return None
+    try:
+        packet = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FeatureChainError(f"qualification packet is unavailable or malformed: {exc}") from exc
+    require_controller_owned_usage(packet, path.parent, state, policy_record)
+    try:
+        result = review_qualification.qualify(packet, path.parent)
+    except (review_qualification.QualificationError, OSError, ValueError, TypeError, KeyError) as exc:
+        raise FeatureChainError(f"review policy qualification failed: {exc}") from exc
+    if result.get("policy") != policy_record["policy"] or result.get("status") != "qualified":
+        raise FeatureChainError("qualification result does not qualify the requested review policy")
+    return {
+        "packet": str(path),
+        "packet_sha256": file_digest(path),
+        "result": result,
+        "qualified_at": now(),
+    }
+
+
+def activate_effective_workflow_source(db: Path, run_id: str, policy_record: dict, qualification: dict) -> None:
+    predecessor = policy_record["captured_workflow_source"]
+    effective = policy_record["effective_workflow_source"]
+    metadata = read_run_metadata(db, run_id)
+    current = metadata.get("workflow_source")
+    current_verified = verify_captured_workflow_source(current, effective["workflow_name"]) if isinstance(current, dict) else None
+    if current_verified == effective:
+        stored_predecessor = metadata.get("workflow_source_predecessor")
+        if stored_predecessor != predecessor:
+            raise FeatureChainError("active workflow source predecessor metadata drifted")
+    elif current_verified == predecessor:
+        metadata["workflow_source_predecessor"] = predecessor
+        metadata["workflow_source"] = effective
+    else:
+        raise FeatureChainError("workflow source metadata changed before review policy activation")
+    metadata["workflow_source_policy_amendment"] = {
+        "schema_version": 1,
+        "policy": policy_record["policy"],
+        "amendment_id": policy_record["amendment_id"],
+        "predecessor_captured_source_digest": policy_record["predecessor_captured_source_digest"],
+        "effective_workflow_source_digest": effective["digest"],
+        "qualification_packet_sha256": qualification["packet_sha256"],
+        "activated_at": qualification["qualified_at"],
+    }
+    write_run_metadata(db, run_id, metadata)
+
+
+def workflow_run_sessions(db: Path | None, run_id: str | None) -> list[dict]:
+    if db is None or not run_id:
+        return []
+    try:
+        with sqlite3.connect(db) as con:
+            columns = table_columns(con, "remote_agent_workflow_run_node_sessions")
+            required = {"workflow_run_id", "provider", "node_id", "provider_session_id"}
+            if not required.issubset(columns):
+                return []
+            rows = con.execute(
+                "SELECT provider, node_id, provider_session_id "
+                "FROM remote_agent_workflow_run_node_sessions WHERE workflow_run_id = ? "
+                "ORDER BY rowid",
+                (run_id,),
+            ).fetchall()
+    except sqlite3.Error as exc:
+        raise FeatureChainError(f"cannot read workflow session provenance: {exc}") from exc
+    sessions = []
+    for provider, node_id, session_id in rows:
+        if isinstance(session_id, str) and session_id:
+            sessions.append({"provider": provider, "node_id": node_id, "session_id": session_id})
+    return sessions
+
+
+def review_state_repo(state: dict, row: dict | None = None) -> str:
+    current = state.get("current_run") if isinstance(state.get("current_run"), dict) else {}
+    repo = current.get("repo") or (row or {}).get("repo")
+    if isinstance(repo, str) and repo in state.get("repositories", []):
+        return repo
+    repositories = state.get("repositories")
+    if isinstance(repositories, list) and repositories:
+        return str(repositories[0])
+    raise FeatureChainError("review-state seed requires a repository")
+
+
+def review_state_baseline(state: dict, repo: str) -> str:
+    worktree = state.get("worktrees", {}).get(repo, {})
+    baseline = worktree.get("baseline") or state.get("baselines", {}).get("commits", {}).get(repo)
+    if not isinstance(baseline, str) or not COMMIT_RE.fullmatch(baseline):
+        raise FeatureChainError("review-state seed requires a baseline commit")
+    return baseline
+
+
+def review_state_required_receipts(state: dict, repo: str) -> list[str]:
+    stage = state.get("stages", {}).get(repo, {})
+    plan = stage.get("plan") if isinstance(stage, dict) else None
+    verification = plan.get("verification") if isinstance(plan, dict) else None
+    if not isinstance(verification, list):
+        return []
+    receipts = []
+    for index, item in enumerate(verification):
+        if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]:
+            receipts.append(item["id"])
+        else:
+            receipts.append(f"{repo}-verification-{index + 1}")
+    return receipts
+
+
+def conservative_review_scope_inputs() -> dict:
+    return {
+        "risk_areas": ["authorization", "transactions", "query_volume", "cli_behavior"],
+        "cross_store": False,
+        "impact_tooling_missing": True,
+        "impact_evidence_available": False,
+        "baseline_invalid": None,
+        "impact_unbounded": None,
+        "invariant_changed": None,
+        "public_contract_changed": None,
+        "permission_boundary_changed": None,
+        "shared_dependency_changed": None,
+        "subsystem_changed": None,
+        "source_changed": None,
+        "dependency_changed": None,
+        "configuration_changed": None,
+        "verification_environment_changed": None,
+        "affected_subsystems": None,
+    }
+
+
+def controller_review_scope_inputs(state: dict, existing: dict | None = None) -> dict:
+    scope = conservative_review_scope_inputs()
+    assessment = state.get("review_impact_assessment")
+    if isinstance(assessment, dict) and assessment.get("controller_owned") is True:
+        for key in SCOPE_AUTHORITY_KEYS:
+            if key in assessment:
+                scope[key] = assessment[key]
+    if isinstance(existing, dict):
+        for key in SCOPE_AUTHORITY_KEYS:
+            if key not in scope and key in existing:
+                scope[key] = existing[key]
+    return scope
+
+
+def review_runtime_authority_functions() -> tuple[list[str], set[str], Any, Any]:
+    import review_delta_runtime
+
+    return (
+        list(review_delta_runtime.SCOPE_AUTHORITY_KEYS),
+        set(review_delta_runtime.MUTABLE_REVIEW_STATE_KEYS),
+        review_delta_runtime.digest_state_items,
+        review_delta_runtime.controller_seed_body,
+    )
+
+
+def review_state_seed_payload(state: dict, policy_record: dict, row: dict | None = None,
+                              author_session_ids: list[dict] | None = None) -> dict:
+    current = state.get("current_run") if isinstance(state.get("current_run"), dict) else {}
+    repo = review_state_repo(state, row)
+    baseline = review_state_baseline(state, repo)
+    approval = state.get("approval") or {}
+    required_receipts = review_state_required_receipts(state, repo)
+    receipt_expectations: dict = {}
+    scope_keys, _mutable_keys, digest_state_items, controller_seed_body = review_runtime_authority_functions()
+    scope_inputs = controller_review_scope_inputs(state)
+    policy = {
+        "name": policy_record["policy"],
+        "amendment_id": policy_record["amendment_id"],
+        "predecessor_captured_source_digest": policy_record["predecessor_captured_source_digest"],
+        "effective_workflow_source_digest": policy_record["effective_workflow_source_digest"],
+        "qualification_status": policy_record["qualification_status"],
+    }
+    payload = {
+        "schema_version": 1,
+        "kind": "risk-delta-review-state-seed",
+        "logical_chain_id": state["logical_chain_id"],
+        "run_id": (row or {}).get("id") or current.get("run_id"),
+        "phase": current.get("phase"),
+        "repo": repo,
+        "repositories": state.get("repositories", []),
+        "provider": state.get("provider"),
+        "baseline_base": baseline,
+        "author_id": f"feature-run:{(row or {}).get('id') or current.get('run_id') or state['logical_chain_id']}",
+        "captured_source_digest": policy_record["effective_workflow_source_digest"],
+        "source_digest": policy_record["effective_workflow_source_digest"],
+        "approved_plan": JOINT_PLAN_ARTIFACT,
+        "required_receipts": required_receipts,
+        "receipt_expectations": receipt_expectations,
+        **scope_inputs,
+        "production_changed": True,
+        "segment_requirements": [],
+        "coverage_records": [],
+        "findings": [],
+        "receipts": [],
+        "trusted_coverage_provenance": [],
+        "reviewer_provenance": {},
+        "baselines_sha256": digest(state.get("baselines", {})),
+        "approval_digest": approval.get("approval_digest"),
+        "approved_plan_digest": approval.get("plan_digest"),
+        "policy": policy,
+        "author_session_ids": author_session_ids or [],
+        "producer_scope": "controller-private-feature-chain",
+        "created_at": now(),
+    }
+    payload["protected_inputs"] = {
+        "repo": payload["repo"],
+        "baseline_base": payload["baseline_base"],
+        "author_id": payload["author_id"],
+        "captured_source_digest": payload["captured_source_digest"],
+        "required_checks_digest": digest_state_items(payload, ["required_receipts", "receipt_expectations"]),
+        "scope_inputs_digest": digest_state_items(payload, scope_keys),
+        "coverage_provenance_digest": digest(payload.get("trusted_coverage_provenance", [])),
+    }
+    payload["controller_mac"] = hmac_sha256(state["chain_secret"], controller_seed_body(payload))
+    return payload
+
+
+def write_review_state_seed(artifacts: Path, state: dict, policy_record: dict, row: dict | None = None,
+                            author_session_ids: list[dict] | None = None) -> None:
+    if not artifacts.is_absolute() or not artifacts.is_dir():
+        raise FeatureChainError("review-state seed artifacts directory is unavailable")
+    seed = review_state_seed_payload(state, policy_record, row, author_session_ids)
+    state_file = artifacts / "review-state.json"
+    if state_file.exists():
+        existing = read_json_artifact(state_file, "review-state.json")
+        if existing.get("policy", {}).get("amendment_id") != policy_record["amendment_id"]:
+            verify_review_state_seed_for_refresh(state, existing)
+            _scope_keys, mutable_keys, _digest_state_items, _controller_seed_body = review_runtime_authority_functions()
+            for key in mutable_keys:
+                if key in existing:
+                    seed[key] = existing[key]
+            write_json_atomic(state_file, reseal_review_state_seed(state, seed))
+            return
+        return
+    write_json_atomic(state_file, seed)
+
+
+
+def review_state_controller_body(state: dict) -> dict:
+    _scope_keys, _mutable_keys, _digest_state_items, controller_seed_body = review_runtime_authority_functions()
+    return controller_seed_body(state)
+
+
+def verify_review_state_seed_for_refresh(controller_state: dict, seed: dict) -> None:
+    if seed.get("kind") != "risk-delta-review-state-seed":
+        raise FeatureChainError("review-state seed kind is unsupported")
+    if seed.get("logical_chain_id") != controller_state.get("logical_chain_id"):
+        raise FeatureChainError("review-state seed chain mismatch")
+    mac = seed.get("controller_mac")
+    expected = hmac_sha256(controller_state["chain_secret"], review_state_controller_body(seed))
+    if not isinstance(mac, str) or not hmac.compare_digest(mac, expected):
+        raise FeatureChainError("review-state controller MAC mismatch")
+    protected = seed.get("protected_inputs")
+    if not isinstance(protected, dict):
+        raise FeatureChainError("review-state protected_inputs are required")
+    scope_keys, _mutable_keys, digest_state_items, _controller_seed_body = review_runtime_authority_functions()
+    for key in ("repo", "baseline_base", "author_id", "captured_source_digest"):
+        if protected.get(key) != seed.get(key):
+            raise FeatureChainError(f"review-state protected input mismatch: {key}")
+    expected_digests = {
+        "required_checks_digest": digest_state_items(seed, ["required_receipts", "receipt_expectations"]),
+        "scope_inputs_digest": digest_state_items(seed, scope_keys),
+        "coverage_provenance_digest": digest(seed.get("trusted_coverage_provenance", [])),
+    }
+    for key, expected_digest in expected_digests.items():
+        if protected.get(key) != expected_digest:
+            raise FeatureChainError(f"review-state protected input mismatch: {key}")
+
+
+def verification_receipt_root(control_dir: Path, run_id: str) -> Path:
+    if not isinstance(run_id, str) or not run_id:
+        raise FeatureChainError("review verification receipts require a run id")
+    return _ensure_private_dir(ensure_control_dir(control_dir) / "review-verification", "review verification directory") / run_id
+
+
+def verify_private_verification_receipt(controller_state: dict, record: dict, required_commands: set[str]) -> dict:
+    if not isinstance(record, dict):
+        raise FeatureChainError("review verification receipt record is malformed")
+    body = {key: value for key, value in record.items() if key != "receipt_mac"}
+    mac = record.get("receipt_mac")
+    expected = hmac_sha256(controller_state["chain_secret"], body)
+    if not isinstance(mac, str) or not hmac.compare_digest(mac, expected):
+        raise FeatureChainError("review verification receipt MAC mismatch")
+    receipt = body.get("receipt")
+    if not isinstance(receipt, dict):
+        raise FeatureChainError("review verification receipt body is malformed")
+    command = receipt.get("command")
+    if command not in required_commands:
+        raise FeatureChainError(f"unexpected review verification receipt command: {command}")
+    return receipt
+
+
+def current_verification_candidate(controller_state: dict, seed: dict) -> dict | None:
+    current = controller_state.get("current_run") if isinstance(controller_state.get("current_run"), dict) else {}
+    repo = current.get("repo") or seed.get("repo")
+    worktree_info = controller_state.get("worktrees", {}).get(repo) if isinstance(controller_state.get("worktrees"), dict) else None
+    if not isinstance(repo, str) or not isinstance(worktree_info, dict):
+        return None
+    worktree_value = worktree_info.get("worktree")
+    baseline = worktree_info.get("baseline") or seed.get("baseline_base")
+    if not isinstance(worktree_value, str) or not isinstance(baseline, str) or not COMMIT_RE.fullmatch(baseline):
+        return None
+    worktree = Path(worktree_value)
+    if not worktree.is_dir() or repo_is_dirty(worktree):
+        return None
+    return {"repo": repo, "base": baseline, "head": repo_head(worktree, repo)}
+
+
+def private_verification_receipts(control_dir: Path, controller_state: dict, seed: dict) -> list[dict]:
+    import review_verification
+
+    run_id = str(seed.get("run_id") or controller_state.get("current_run", {}).get("run_id") or "")
+    if not run_id:
+        return []
+    root = verification_receipt_root(control_dir, run_id)
+    if not root.is_dir():
+        return []
+    candidate = current_verification_candidate(controller_state, seed)
+    if candidate is None:
+        return []
+    repo = candidate["repo"]
+    stage = controller_state.get("stages", {}).get(repo, {}) if isinstance(controller_state.get("stages"), dict) else {}
+    plan = stage.get("plan") if isinstance(stage, dict) else None
+    commands = plan.get("verification") if isinstance(plan, dict) else None
+    if not isinstance(commands, list) or not commands:
+        return []
+    command_ids = review_state_required_receipts(controller_state, repo)
+    if len(command_ids) != len(commands):
+        raise FeatureChainError("review verification commands do not match required receipt ids")
+    worktree = Path(controller_state["worktrees"][repo]["worktree"])
+    receipts = []
+    required_commands = set(command_ids)
+    for command_id, command in zip(command_ids, commands):
+        argv = review_verification.command_argv(command)
+        expected = review_verification.fingerprint(worktree, argv)
+        key = digest({"candidate": candidate, "command": command_id, "argv": argv, **expected})
+        path = root / f"{key}.json"
+        if not path.exists():
+            continue
+        record = _secure_read(path)
+        receipt = verify_private_verification_receipt(controller_state, record, required_commands)
+        if receipt.get("exit_status") != 0:
+            continue
+        output = receipt.get("retained_output")
+        if not isinstance(output, str) or not Path(output).is_file():
+            raise FeatureChainError("review verification retained output is missing")
+        retained_digest = receipt.get("retained_output_digest")
+        if not isinstance(retained_digest, str) or not hmac.compare_digest(file_digest(Path(output)), retained_digest):
+            raise FeatureChainError("review verification retained output digest mismatch")
+        expected_fields = {"candidate": candidate, "command": command_id, "argv": argv, **expected}
+        for field, value in expected_fields.items():
+            if receipt.get(field) != value:
+                raise FeatureChainError(f"review verification receipt {field} is stale")
+        receipts.append(receipt)
+    return receipts
+
+def receipt_expectations_from_private_receipts(receipts: list[dict]) -> dict:
+    expectations = {}
+    required = (
+        "source_tree_digest",
+        "dependencies_digest",
+        "configuration_digest",
+        "environment_fingerprint",
+        "retained_output_digest",
+    )
+    for receipt in receipts:
+        command = receipt.get("command")
+        if not isinstance(command, str) or not command:
+            raise FeatureChainError("review verification receipt command is required")
+        expectations[command] = {key: receipt[key] for key in required if key in receipt}
+        missing = [key for key in required if key not in expectations[command]]
+        if missing:
+            raise FeatureChainError(f"review verification receipt missing {', '.join(missing)}")
+    return expectations
+
+
+def refresh_seed_from_controller_state(controller_state: dict, seed: dict) -> None:
+    repo = seed.get("repo")
+    if not isinstance(repo, str) or not repo:
+        try:
+            repo = review_state_repo(controller_state)
+            seed["repo"] = repo
+        except FeatureChainError:
+            return
+    try:
+        seed["baseline_base"] = review_state_baseline(controller_state, repo)
+    except FeatureChainError:
+        pass
+    try:
+        required = review_state_required_receipts(controller_state, repo)
+    except FeatureChainError:
+        required = []
+    if required:
+        seed["required_receipts"] = required
+    current = controller_state.get("current_run") if isinstance(controller_state.get("current_run"), dict) else {}
+    run_id = seed.get("run_id") or current.get("run_id")
+    if run_id:
+        seed["run_id"] = run_id
+        seed["author_id"] = f"feature-run:{run_id}"
+    policy_record = controller_state.get("review_policy")
+    if isinstance(policy_record, dict) and isinstance(policy_record.get("effective_workflow_source_digest"), str):
+        seed["captured_source_digest"] = policy_record["effective_workflow_source_digest"]
+        seed["source_digest"] = policy_record["effective_workflow_source_digest"]
+    if seed.get("producer_scope") == "controller-private-feature-chain" or isinstance(controller_state.get("review_impact_assessment"), dict):
+        seed.update(controller_review_scope_inputs(controller_state, seed))
+
+
+def reseal_review_state_seed(controller_state: dict, seed: dict) -> dict:
+    scope_keys, _mutable_keys, digest_state_items, controller_seed_body = review_runtime_authority_functions()
+    seed["protected_inputs"] = {
+        "repo": seed.get("repo"),
+        "baseline_base": seed.get("baseline_base"),
+        "author_id": seed.get("author_id"),
+        "captured_source_digest": seed.get("captured_source_digest"),
+        "required_checks_digest": digest_state_items(seed, ["required_receipts", "receipt_expectations"]),
+        "scope_inputs_digest": digest_state_items(seed, scope_keys),
+        "coverage_provenance_digest": digest(seed.get("trusted_coverage_provenance", [])),
+    }
+    seed["controller_mac"] = hmac_sha256(controller_state["chain_secret"], controller_seed_body(seed))
+    return seed
+
+
+def refresh_review_state(control_dir: Path, chain_id: str, artifacts: Path) -> dict | None:
+    artifacts = artifacts.resolve()
+    state_file = artifacts / "review-state.json"
+    if not state_file.exists():
+        return None
+    with chain_lock(control_dir, chain_id):
+        controller_state = read_state(control_dir, chain_id)
+        current = controller_state.get("current_run") if isinstance(controller_state.get("current_run"), dict) else {}
+        if current.get("artifacts_dir") and Path(str(current["artifacts_dir"])).resolve() != artifacts:
+            raise FeatureChainError("review-state refresh artifact binding mismatch")
+        seed = read_json_artifact(state_file, "review-state.json")
+        verify_review_state_seed_for_refresh(controller_state, seed)
+        refresh_seed_from_controller_state(controller_state, seed)
+        private_receipts = private_verification_receipts(control_dir, controller_state, seed)
+        if private_receipts:
+            seed["receipts"] = private_receipts
+            seed["receipt_expectations"] = receipt_expectations_from_private_receipts(private_receipts)
+        refreshed = reseal_review_state_seed(controller_state, seed)
+        write_json_atomic(state_file, refreshed)
+        return refreshed
+
+def expected_source_digest(args: Any) -> str:
+    value = str(getattr(args, "expected_captured_source_digest", "")).strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise FeatureChainError("feature-review-policy-update requires a sha256 --expected-captured-source-digest")
+    return value
+
+
+def review_policy_payload(chain_id: str, run_id: str, policy: str, predecessor_digest: str,
+                          reason: str, digests: dict, captured_source: dict, effective_source: dict,
+                          previous_policy: dict | None = None) -> dict:
+    payload = {
+        "kind": "feature-review-policy-update",
+        "logical_chain_id": chain_id,
+        "run_id": run_id,
+        "policy": policy,
+        "predecessor_captured_source_digest": predecessor_digest,
+        "captured_workflow_source": captured_source,
+        "effective_workflow_source": effective_source,
+        "helper_workflow_digests": digests,
+        "reason": reason,
+    }
+    if previous_policy is not None:
+        payload["previous_review_policy"] = previous_policy
+    return payload
+
+
+def require_review_policy_integrity(state: dict, row: dict | None = None, db: Path | None = None) -> None:
+    require_no_incomplete_review_policy_amendment(state)
+    policy_record = state.get("review_policy")
+    if not isinstance(policy_record, dict):
+        return
+    policy = policy_record.get("policy")
+    if policy not in SUPPORTED_REVIEW_POLICIES:
+        raise FeatureChainError("feature review policy is unsupported")
+    predecessor = policy_record.get("predecessor_captured_source_digest")
+    if not isinstance(predecessor, str) or not re.fullmatch(r"[0-9a-f]{64}", predecessor, re.I):
+        raise FeatureChainError("feature review policy predecessor digest is malformed")
+    stored_source = policy_record.get("captured_workflow_source")
+    if not isinstance(stored_source, dict):
+        raise FeatureChainError("feature review policy captured workflow source metadata is missing")
+    captured = verify_captured_workflow_source(stored_source, str(stored_source.get("workflow_name", "")))
+    if not hmac.compare_digest(captured["digest"], predecessor.lower()):
+        raise FeatureChainError("feature review policy predecessor captured source digest drifted")
+    if policy_record.get("qualification_status") != "qualified":
+        raise FeatureChainError("feature review policy risk-delta-v1 is not qualified for execution")
+    stored_effective = policy_record.get("effective_workflow_source")
+    if not isinstance(stored_effective, dict):
+        raise FeatureChainError("feature review policy effective workflow source metadata is missing")
+    effective = verify_captured_workflow_source(stored_effective, str(stored_effective.get("workflow_name", "")))
+    if db is not None and isinstance(row, dict) and row.get("id"):
+        db_captured = read_workflow_source_metadata(db, str(row["id"]))
+        if db_captured != effective:
+            raise FeatureChainError("feature review policy effective workflow source is not active for this run")
+    recorded = policy_record.get("helper_workflow_digests")
+    if not isinstance(recorded, dict):
+        raise FeatureChainError("feature review policy helper/workflow digests are missing")
+    current = current_review_policy_digests(row)
+    if recorded != current:
+        raise FeatureChainError("feature review policy helper or workflow digest drifted")
 
 
 def _root(host: Any) -> Path:
@@ -599,11 +1489,12 @@ def stage_env(state: dict, repo: str, phase: str = "implement") -> dict[str, str
         prefix = "ARCHON_REPO_" + dependency.upper().replace("-", "_")
         env[prefix + "_WORKTREE"] = state["worktrees"][dependency]["worktree"]
         env[prefix + "_COMMIT"] = candidate["candidate_head"]
+    env.update(effective_workflow_source_env(state))
     return env
 
 
 def planning_env(state: dict, artifacts_dir: Path) -> dict[str, str]:
-    return {
+    env = {
         "ARCHON_FEATURE_SCOPE": "repositories",
         "ARCHON_FEATURE_CHAIN_ID": state["logical_chain_id"],
         "ARCHON_FEATURE_PROVIDER": state["provider"],
@@ -612,6 +1503,23 @@ def planning_env(state: dict, artifacts_dir: Path) -> dict[str, str]:
         "ARCHON_FEATURE_REPOSITORIES": ",".join(state["repositories"]),
         "ARCHON_FEATURE_PLANNING_ARTIFACTS": str(artifacts_dir),
         "ARCHON_FEATURE_PLANNING_GENERATION": str(state.get("planning_generation", 0)),
+    }
+    env.update(effective_workflow_source_env(state))
+    return env
+
+
+def effective_workflow_source_env(state: dict) -> dict[str, str]:
+    policy_record = state.get("review_policy")
+    if not isinstance(policy_record, dict) or policy_record.get("qualification_status") != "qualified":
+        return {}
+    effective = policy_record.get("effective_workflow_source")
+    if not isinstance(effective, dict):
+        return {}
+    return {
+        "ARCHON_EFFECTIVE_WORKFLOW_SOURCE_ROOT": str(effective["root"]),
+        "ARCHON_EFFECTIVE_WORKFLOW_SOURCE_DIGEST": str(effective["digest"]),
+        "ARCHON_EFFECTIVE_WORKFLOW_SOURCE_POLICY": str(policy_record["policy"]),
+        "ARCHON_EFFECTIVE_WORKFLOW_SOURCE_PREDECESSOR": str(policy_record["predecessor_captured_source_digest"]),
     }
 
 
@@ -848,6 +1756,8 @@ def dispatch_lane(host: Any, args: Any, lane: str, message: Path, env: dict[str,
                 dispatch_state = read_state(Path(args.control_dir), env["ARCHON_FEATURE_CHAIN_ID"])
                 require_no_incomplete_amendment(dispatch_state)
                 require_no_incomplete_scope_amendment(dispatch_state)
+                db = Path(args.db) if getattr(args, "db", None) is not None else None
+                require_review_policy_integrity(dispatch_state, db=db)
                 shepherd_checkpoint(args, env["ARCHON_FEATURE_CHAIN_ID"])
                 budget_require_remaining(args, env["ARCHON_FEATURE_CHAIN_ID"])
             if hasattr(host, "dispatch_feature_phase"):
@@ -894,9 +1804,33 @@ def before_dispatch_bind(host: Any, args: Any, row: dict) -> dict | None:
         row=row,
         artifacts_dir=artifacts,
     )
+    if state.get("review_policy"):
+        verify_dispatch_workflow_source(Path(args.db), row["id"], state)
     write_phase_artifacts(artifacts, state, phase, repo if repo != "joint" else None, row)
     budget_bind_run(args, chain_id, row, stage=f"{phase}:{repo or 'all'}")
     return state
+
+
+def verify_dispatch_workflow_source(db: Path, run_id: str, state: dict) -> None:
+    policy_record = state.get("review_policy")
+    if not isinstance(policy_record, dict) or policy_record.get("qualification_status") != "qualified":
+        return
+    effective = policy_record.get("effective_workflow_source")
+    if not isinstance(effective, dict):
+        raise FeatureChainError("qualified review policy is missing effective workflow source")
+    captured = read_workflow_source_metadata(db, run_id)
+    if captured["workflow_name"] != effective["workflow_name"] or captured["digest"] != effective["digest"]:
+        raise FeatureChainError("dispatched run did not capture the qualified effective workflow source")
+    try:
+        manifest = json.loads((Path(captured["root"]) / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FeatureChainError(f"dispatched workflow source manifest is malformed: {exc}") from exc
+    lineage = manifest.get("review_policy")
+    if not isinstance(lineage, dict):
+        raise FeatureChainError("dispatched effective workflow source is missing review policy lineage")
+    if (lineage.get("policy") != policy_record["policy"]
+            or lineage.get("predecessor_digest") != policy_record["predecessor_captured_source_digest"]):
+        raise FeatureChainError("dispatched effective workflow source lineage does not match policy")
 
 
 def params_payload(state: dict, phase: str, repo: str | None, row: dict) -> dict:
@@ -957,6 +1891,8 @@ def write_phase_artifacts(artifacts: Path, state: dict, phase: str, repo: str | 
         write_json_atomic(artifacts / "budget-forecast.json", state["budget_forecast"])
     write_json_atomic(artifacts / "params.json", params_payload(state, phase, repo, row))
     write_json_atomic(artifacts / "worktrees.json", {f"{name}_worktree": data["worktree"] for name, data in state["worktrees"].items()})
+    if isinstance(state.get("review_policy"), dict):
+        write_review_state_seed(artifacts, state, state["review_policy"], row)
     if phase == "planning":
         write_planning_request(artifacts, state)
         return
@@ -1079,6 +2015,7 @@ def dispatch_integration(host: Any, args: Any, state: dict) -> dict:
         "ARCHON_FEATURE_REPOSITORIES": ",".join(state["repositories"]),
         "ARCHON_FEATURE_LANE": integration_lane(args, state),
     }
+    env.update(effective_workflow_source_env(state))
     with host_env(host, env):
         row = dispatch_lane(host, args, integration_lane(args, state), Path(state["spec"]), env)
         state = verify_dispatch_bound(Path(args.control_dir), state["logical_chain_id"], row, "integration", None)
@@ -1481,6 +2418,255 @@ def build_scope_amendment(control_dir: Path, state: dict, repo: str,
     source_artifacts = write_scope_amendment_artifacts(source_root, state, old_plan, new_plan, repo, add_file, reason, amendment_id)
     new_approval = approval_snapshot(state, new_plan, validation, source_artifacts)
     return final_scope_amendment_state(state, repo, new_plan, validation, new_approval, source_artifacts)
+
+
+def final_review_policy_state(state: dict, amendment: dict, qualification: dict | None = None,
+                              applied_at: str | None = None) -> dict:
+    applied_at = applied_at or now()
+    applied = dict(amendment)
+    applied["status"] = "applied"
+    applied["applied_at"] = applied_at
+    if qualification is not None:
+        applied["qualification"] = qualification
+    qualification_status = "qualified" if qualification is not None else "unqualified"
+    policy_record = {
+        "schema_version": 1,
+        "policy": applied["policy"],
+        "amendment_id": applied["amendment_id"],
+        "predecessor_captured_source_digest": applied["predecessor_captured_source_digest"],
+        "captured_workflow_source": applied["captured_workflow_source"],
+        "effective_workflow_source": applied["effective_workflow_source"],
+        "helper_workflow_digests": applied["helper_workflow_digests"],
+        "effective_workflow_predecessor_digest": applied["predecessor_captured_source_digest"],
+        "effective_workflow_source_digest": applied["effective_workflow_source"]["digest"],
+        "qualification_status": qualification_status,
+        "qualification_required": True,
+        "qualification": qualification,
+        "reason": applied["reason"],
+        "recorded_at": applied_at,
+    }
+    if isinstance(applied.get("previous_review_policy"), dict):
+        policy_record["previous_review_policy"] = applied["previous_review_policy"]
+    final = dict(state)
+    final.setdefault("review_policy_amendments", []).append(applied)
+    final["review_policy"] = policy_record
+    final["review_policy_amendment"] = None
+    final["review_policy_activation"] = None
+    final["updated_at"] = now()
+    return final
+
+
+def qualify_existing_review_policy_state(state: dict, qualification: dict) -> dict:
+    policy_record = state.get("review_policy")
+    if not isinstance(policy_record, dict):
+        raise FeatureChainError("feature review policy is not registered")
+    final = dict(state)
+    updated_policy = dict(policy_record)
+    updated_policy["qualification_status"] = "qualified"
+    updated_policy["qualification"] = qualification
+    final["review_policy"] = updated_policy
+    amendments = []
+    matched = False
+    for amendment in state.get("review_policy_amendments", []):
+        item = dict(amendment)
+        if item.get("amendment_id") == policy_record.get("amendment_id"):
+            item["qualification"] = qualification
+            matched = True
+        amendments.append(item)
+    if not matched:
+        raise FeatureChainError("feature review policy amendment history is missing")
+    final["review_policy_amendments"] = amendments
+    final["review_policy_activation"] = None
+    final["updated_at"] = now()
+    return final
+
+
+def provisional_review_policy_record(amendment: dict) -> dict:
+    record = {
+        "schema_version": 1,
+        "policy": amendment["policy"],
+        "amendment_id": amendment["amendment_id"],
+        "predecessor_captured_source_digest": amendment["predecessor_captured_source_digest"],
+        "captured_workflow_source": amendment["captured_workflow_source"],
+        "effective_workflow_source": amendment["effective_workflow_source"],
+        "helper_workflow_digests": amendment["helper_workflow_digests"],
+        "effective_workflow_predecessor_digest": amendment["predecessor_captured_source_digest"],
+        "effective_workflow_source_digest": amendment["effective_workflow_source"]["digest"],
+        "qualification_status": "unqualified",
+        "qualification_required": True,
+        "qualification": None,
+        "reason": amendment["reason"],
+    }
+    if isinstance(amendment.get("previous_review_policy"), dict):
+        record["previous_review_policy"] = amendment["previous_review_policy"]
+    return record
+
+
+def mark_review_policy_activation_in_progress(control_dir: Path, state: dict, policy_record: dict,
+                                              qualification: dict) -> dict:
+    activation_id = digest({
+        "kind": "feature-review-policy-activation",
+        "amendment_id": policy_record["amendment_id"],
+        "effective_workflow_source_digest": policy_record["effective_workflow_source_digest"],
+        "qualification_packet_sha256": qualification["packet_sha256"],
+    })
+    existing = state.get("review_policy_activation")
+    if isinstance(existing, dict) and existing.get("status") == "in_progress":
+        if existing.get("activation_id") != activation_id:
+            raise FeatureChainError("a different review policy activation is incomplete")
+        return state
+    marked = dict(state)
+    marked["review_policy_activation"] = {
+        "activation_id": activation_id,
+        "amendment_id": policy_record["amendment_id"],
+        "status": "in_progress",
+        "started_at": now(),
+        "qualification_packet_sha256": qualification["packet_sha256"],
+    }
+    marked["updated_at"] = now()
+    return write_state(control_dir, marked)
+
+
+def review_policy_update_command(host: Any, args: Any, row: dict) -> dict:
+    policy = str(getattr(args, "policy", "")).strip()
+    if policy not in SUPPORTED_REVIEW_POLICIES:
+        raise FeatureChainError("unsupported feature review policy")
+    reason = str(getattr(args, "reason", "")).strip()
+    if not reason:
+        raise FeatureChainError("review policy amendment requires a reason")
+    control = getattr(host, "read_control_state")(row, Path(args.control_dir))
+    feature = control_feature({"control": control})
+    if feature.get("scope") != "repositories":
+        raise FeatureChainError("feature-review-policy-update requires a repository-list feature run")
+    if feature.get("provider") != "codex":
+        raise FeatureChainError("feature-review-policy-update requires a Codex repository-list feature run")
+    chain_id = feature.get("logical_chain_id")
+    if not isinstance(chain_id, str):
+        raise FeatureChainError("run-control record is missing feature chain id")
+    with chain_lock(Path(args.control_dir), chain_id):
+        row = host.run_row_by_id(Path(args.db), row["id"])
+        if not isinstance(row, dict) or row.get("status") not in {"failed", "paused", "completed", "cancelled"}:
+            raise FeatureChainError("feature-review-policy-update requires a stopped run")
+        control = host.require_control_token(row, Path(args.control_dir), getattr(args, "token", None))
+        if control.get("feature_chain") != feature:
+            raise FeatureChainError("feature control binding changed while acquiring the chain lock")
+        require_no_live_control_processes(control)
+        state = read_state(Path(args.control_dir), chain_id)
+        if state.get("provider") != "codex":
+            raise FeatureChainError("feature-review-policy-update requires a Codex repository-list feature chain")
+        require_no_incomplete_amendment(state)
+        require_no_incomplete_scope_amendment(state)
+        pending = state.get("pending_control")
+        if pending is not None and (not isinstance(pending, dict) or process_claim_alive(pending)):
+            raise FeatureChainError("repository-list feature control already in progress")
+        if state.get("dispatch_reservation") is not None:
+            raise FeatureChainError("repository-list feature dispatch already in progress")
+        current = state.get("current_run")
+        if not isinstance(current, dict) or current.get("run_id") != row.get("id"):
+            raise FeatureChainError("feature-review-policy-update is stale for this chain")
+        expected = expected_source_digest(args)
+        captured = read_expected_predecessor_source_metadata(Path(args.db), row["id"], expected, str(row["workflow_name"]))
+        digests = current_review_policy_digests(row)
+        active_policy = state.get("review_policy")
+        identity_payload = {
+            "kind": "feature-review-policy-update",
+            "logical_chain_id": chain_id,
+            "run_id": row["id"],
+            "policy": policy,
+            "predecessor_captured_source_digest": expected,
+            "captured_workflow_source": captured,
+            "helper_workflow_digests": digests,
+            "reason": reason,
+        }
+        amendment_id = digest(identity_payload)
+        previous_policy = None
+        if isinstance(active_policy, dict) and active_policy.get("amendment_id") != amendment_id:
+            active_matches_request = (
+                active_policy.get("policy") == policy
+                and active_policy.get("predecessor_captured_source_digest") == expected
+                and active_policy.get("helper_workflow_digests") == digests
+                and active_policy.get("reason") == reason
+            )
+            if active_matches_request:
+                amendment_id = active_policy["amendment_id"]
+            elif active_policy.get("policy") != policy:
+                raise FeatureChainError("feature review policy is already bound to this chain")
+            elif active_policy.get("qualification_status") == "qualified":
+                raise FeatureChainError("qualified feature review policy cannot be replaced")
+            elif active_policy.get("qualification_status") != "unqualified":
+                raise FeatureChainError("feature review policy is already bound to this chain")
+            else:
+                previous_policy = {
+                    "amendment_id": active_policy.get("amendment_id"),
+                    "policy": active_policy.get("policy"),
+                    "qualification_status": active_policy.get("qualification_status"),
+                    "effective_workflow_source_digest": active_policy.get("effective_workflow_source_digest"),
+                    "helper_workflow_digests_sha256": active_policy.get("helper_workflow_digests", {}).get("sha256"),
+                }
+                identity_payload = {**identity_payload, "previous_review_policy": previous_policy}
+                amendment_id = digest(identity_payload)
+        effective = materialize_effective_workflow_source(state, captured, policy, amendment_id)
+        payload = review_policy_payload(chain_id, row["id"], policy, expected, reason, digests, captured, effective, previous_policy)
+        provisional = provisional_review_policy_record({**payload, "amendment_id": amendment_id})
+        qualification = qualify_review_policy(args, state, provisional)
+        existing = state.get("review_policy_amendment")
+        if isinstance(existing, dict) and existing.get("status") == "in_progress":
+            if existing.get("amendment_id") != amendment_id:
+                raise FeatureChainError("a different review policy amendment is incomplete")
+        for applied in state.get("review_policy_amendments", []):
+            if applied.get("amendment_id") != amendment_id:
+                continue
+            if applied.get("policy") != policy or applied.get("predecessor_captured_source_digest") != expected:
+                raise FeatureChainError("review policy amendment id was already used for a different policy")
+            active_policy = state.get("review_policy")
+            if qualification is not None and isinstance(active_policy, dict) and active_policy.get("qualification_status") != "qualified":
+                state = mark_review_policy_activation_in_progress(Path(args.control_dir), state, active_policy, qualification)
+                final_state = qualify_existing_review_policy_state(state, qualification)
+                activate_effective_workflow_source(Path(args.db), row["id"], final_state["review_policy"], qualification)
+                write_review_state_seed(
+                    current_stage_artifacts(final_state, row),
+                    final_state,
+                    final_state["review_policy"],
+                    row,
+                    workflow_run_sessions(Path(args.db), row["id"]),
+                )
+                write_state(Path(args.control_dir), final_state)
+                return {"chain": chain_id, "policy": policy, "amendment_id": amendment_id, "already_applied": False}
+            if qualification is not None and isinstance(active_policy, dict):
+                activate_effective_workflow_source(Path(args.db), row["id"], active_policy, qualification)
+                if active_policy.get("qualification_status") == "qualified":
+                    write_review_state_seed(
+                        current_stage_artifacts(state, row),
+                        state,
+                        active_policy,
+                        row,
+                        workflow_run_sessions(Path(args.db), row["id"]),
+                    )
+            return {"chain": chain_id, "policy": policy, "amendment_id": amendment_id, "already_applied": True}
+        if not (isinstance(existing, dict) and existing.get("status") == "in_progress"):
+            state["review_policy_amendment"] = {
+                **payload,
+                "amendment_id": amendment_id,
+                "status": "in_progress",
+                "started_at": now(),
+            }
+            state["updated_at"] = now()
+            state = write_state(Path(args.control_dir), state)
+        amendment = dict(state["review_policy_amendment"])
+        final_state = final_review_policy_state(state, amendment, qualification)
+        if qualification is not None:
+            state = mark_review_policy_activation_in_progress(Path(args.control_dir), state, final_state["review_policy"], qualification)
+            final_state = final_review_policy_state(state, amendment, qualification)
+            activate_effective_workflow_source(Path(args.db), row["id"], final_state["review_policy"], qualification)
+            write_review_state_seed(
+                current_stage_artifacts(final_state, row),
+                final_state,
+                final_state["review_policy"],
+                row,
+                workflow_run_sessions(Path(args.db), row["id"]),
+            )
+        state = write_state(Path(args.control_dir), final_state)
+    return {"chain": chain_id, "policy": policy, "amendment_id": amendment_id, "already_applied": False}
 
 
 def current_stage_artifacts(state: dict, row: dict) -> Path:
@@ -2464,6 +3650,7 @@ def before_control(host: Any, args: Any, row: dict, control: dict | None) -> dic
         stopping_action = action in {"reject", "abandon"}
         if not stopping_action:
             require_no_incomplete_scope_amendment(state)
+            require_review_policy_integrity(state, row, Path(args.db))
         phase = str(feature.get("phase") or "implement")
         if phase in {"planning", "integration"}:
             current = state.get("current_run")

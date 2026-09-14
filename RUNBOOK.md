@@ -1203,6 +1203,17 @@ unchanged historical consumption before resuming. Raising a review cap is a
 separate authorized operation: retain the round counter and all review evidence,
 and never accept findings merely to pass the cap.
 
+The experimental `risk-delta-v1` policy can be registered for a stopped Codex
+repository-list run with `feature-review-policy-update <run-id> --token
+<operator-token> --policy risk-delta-v1 --expected-captured-source-digest
+<sha256> --reason <reason>`. The controller journals the amendment under the
+chain lock and preserves the captured workflow, approvals, counters, and usage.
+An incomplete amendment blocks dispatch; retry the identical request.
+Registration does not qualify or activate the policy: unqualified execution
+is blocked. See [the policy](workflows/risk-delta-v1.md) and
+[the ENG-3866 pilot evidence and allowance proposal](docs/risk-delta-v1-pilot.md).
+Do not edit private qualification state to bypass this boundary.
+
 If a stopped repository implementation run has one verified, existing tracked
 file missing from its approved stage allowance, use the guarded scope amendment
 rather than editing `files-allowlist.json` or approval artifacts by hand:
