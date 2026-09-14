@@ -97,6 +97,11 @@ class FeatureScope(unittest.TestCase):
         args = ar.parser().parse_args(["feature-reopen", "--chain", "c" * 32, "--repo", "api", "--reason", "why"])
         self.assertEqual((args.action, args.repo, args.reason), ("feature-reopen", "api", "why"))
 
+    def test_parser_accepts_feature_reopen_verify_only(self):
+        base = ["feature-reopen", "--chain", "c" * 32, "--repo", "api", "--reason", "why"]
+        self.assertTrue(ar.parser().parse_args([*base, "--verify-only"]).verify_only)
+        self.assertFalse(ar.parser().parse_args(base).verify_only)
+
     def test_parser_accepts_feature_publish(self):
         args = ar.parser().parse_args(["feature-publish", "--chain", "c" * 32])
         self.assertEqual(args.action, "feature-publish")
