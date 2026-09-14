@@ -170,6 +170,9 @@ MANIFEST=(
   # Two-hour convergence: delta review scope, the shared finding-key
   # normalizer, and the feature-chain env carriers.
   setup/review-mode.py
+  setup/finding_key.py
+  setup/feature-env.sh
+  setup/feature_env.py
   setup/mcp-smoke.sh
   setup/codex-usage.py
   setup/codex-watchdog.sh

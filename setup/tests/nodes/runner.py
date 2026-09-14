@@ -82,7 +82,21 @@ FAIL_TOKENS = {
     "PLAN_NO_PROGRESS", "RCA_PLAN_NO_PROGRESS", "NO_PROGRESS",
     "PLAN_SCOPE_DISPUTE", "RCA_PLAN_SCOPE_DISPUTE",
     "FIXER_BLOCKED", "SCOPE_BREACH", "CROSS_REPO_FINDING",
+    # Two-hour convergence work (RUNBOOK 3). Bare-token failures, so they need
+    # enumerating; the KEY carries the meaning and the tail is detail.
+    # `REOPEN=` and `CHAIN_BUDGET=` do have a value, but NOOP and EXCEEDED are
+    # not general enough to belong in FAIL_VALUES — a future `X=NOOP` is not
+    # automatically a failure — so they are keyed instead. A happy-path
+    # `REOPEN=OK` still classifies PASS through its value, and a line that is
+    # both reads as typed either way.
+    "REVIEW_TREE_DRIFT", "REOPEN", "CHAIN_BUDGET",
 }
+# Informational, deliberately in NEITHER set: REVIEW_MODE, REVIEW_AUTOFIX_ONLY,
+# REVIEW_RERAISE, DESLOP_COMPLEXITY_DOWNGRADED, CHAIN_TIMING. Each is printed
+# alongside its node's own discriminator (`ROUND=`, `CONVERGED`,
+# `DESLOP=CLEAN`, ...), so classifying them would let a node whose real
+# discriminator went missing still read as typed. `REVIEW_SCOPE=FAIL` and
+# `PLAN_SHAPE=FAIL` need no entry: FAIL_VALUES already classifies them.
 
 # Whole-line PASS forms, for a key that is NOT on its own a PASS token.
 # `round-pre` announces success as `ROUND=N head=<sha>` — but `converge` opens
