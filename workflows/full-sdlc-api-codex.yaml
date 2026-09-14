@@ -149,10 +149,19 @@ nodes:
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-feature-phase.out") 2> >(tee -a "$ARTIFACTS_DIR/node-feature-phase.out" >&2); fi
     SCOPE="${ARCHON_FEATURE_SCOPE-legacy}"
     PHASE="${ARCHON_FEATURE_PHASE-legacy}"
+    # Verify-only reopen: the chain re-runs a stage whose code is already
+    # landed, to re-verify it against a repaired upstream. params.json is the
+    # carrier because a resume drops the chain env (see local-candidate).
+    # Read tolerantly: an absent or unparseable params.json means "not
+    # verify-only", the same answer the legacy path gives.
+    VERIFY_ONLY=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('feature_verify_only',''))" "$ARTIFACTS_DIR/params.json" 2>/dev/null || echo "")
     if [ "$SCOPE" = repositories ]; then
       case "$PHASE" in
         planning) PLAN=yes; BOOTSTRAP=no; IMPLEMENT=no; INTEGRATION=no ;;
-        implement) PLAN=no; BOOTSTRAP=yes; IMPLEMENT=yes; INTEGRATION=no ;;
+        implement) PLAN=no; BOOTSTRAP=yes; IMPLEMENT=yes; INTEGRATION=no
+                   # bootstrap still cuts the worktree so the gates below have
+                   # a tree to verify; only the implement node is skipped.
+                   if [ "$VERIFY_ONLY" = yes ]; then IMPLEMENT=no; fi ;;
         integration) PLAN=no; BOOTSTRAP=no; IMPLEMENT=no; INTEGRATION=yes ;;
         *) echo "FEATURE_PHASE=FAIL unsupported repository phase $PHASE"; exit 1 ;;
       esac
