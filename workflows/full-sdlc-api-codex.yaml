@@ -1807,12 +1807,39 @@ nodes:
         # >= 75, and a declaration that disagrees with the findings is a failure,
         # not a tie-break.
         set +e
-        python3 - "$R" "$N" <<'PY'
+        python3 - "$R" "$N" "$RD/slop.txt" <<'PY'
         import json, sys
 
         GUARDS = ["complexity", "tautological_tests", "yagni", "open_closed", "comments"]
         STATUSES = ("assessed", "not_applicable")
         path, rnd = sys.argv[1], sys.argv[2]
+
+        # check-slop.py, not the reviewer, decides complexity. It already
+        # separates a function this change made or worsened past the
+        # threshold (SLOP=FAIL) from one that was already over it and was not
+        # worsened (SLOP=REPORT, non-blocking by design). A reviewer reading
+        # the same file sees only the absolute number, so it files the
+        # pre-existing case at blocking confidence and stops the run for work
+        # the guard itself declined to demand. Such a finding is kept and
+        # reported, at confidence 50.
+        def _slop_index(kind):
+            """{repo-relative file: fn} for each `SLOP=<kind> complexity` line."""
+            out = {}
+            try:
+                text = open(sys.argv[3], encoding="utf-8").read()
+            except (IndexError, OSError):
+                return out
+            for line in text.splitlines():
+                if not line.startswith("SLOP=%s complexity" % kind):
+                    continue
+                fields = dict(p.split("=", 1) for p in line.split() if "=" in p)
+                if "file" in fields:
+                    out.setdefault(fields["file"], fields.get("fn", "?"))
+            return out
+
+        SLOP_BLOCKING = _slop_index("FAIL")
+        SLOP_REPORTED = _slop_index("REPORT")
+        downgraded = 0
 
 
         def malformed(msg):
@@ -1868,14 +1895,19 @@ nodes:
             conf = f.get("confidence")
             if isinstance(conf, bool) or conf not in (50, 75, 100):
                 malformed(f"index={i} confidence={conf!r}")
+            if f["guard"] == "complexity" and conf >= 75 and f["file"] not in SLOP_BLOCKING:
+                fn = SLOP_REPORTED.get(f["file"], "?")
+                print(f"DESLOP_COMPLEXITY_DOWNGRADED fn={fn} file={f['file']}:{line} confidence={conf}->50")
+                conf = 50
+                downgraded += 1
             if conf >= 75:
                 blocking += 1
                 print(f"DESLOP_FINDING guard={f['guard']} file={f['file']}:{line} confidence={conf}")
-        print(f"DESLOP_REVIEW_PARSE round={rnd} declared={verdict} findings={len(findings)} blocking={blocking}")
+        print(f"DESLOP_REVIEW_PARSE round={rnd} declared={verdict} findings={len(findings)} blocking={blocking} downgraded={downgraded}")
         if blocking > 0:
             print(f"DESLOP=DIRTY round={rnd} blocking={blocking}")
             sys.exit(2)
-        if verdict == "DIRTY":
+        if verdict == "DIRTY" and downgraded == 0:
             print(f"DESLOP_REVIEW=FAIL verdict inconsistent round={rnd} declared DIRTY with 0 blocking findings")
             sys.exit(5)
         print(f"DESLOP=CLEAN round={rnd}")
