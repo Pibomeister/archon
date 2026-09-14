@@ -465,6 +465,33 @@ class FeatureChainV2(unittest.TestCase):
         with self.assertRaisesRegex(fc.FeatureChainError, "requires a reason"):
             fc.reopen(self.host, self.args, launched["state"]["logical_chain_id"], "api", " ")
 
+    def test_reopen_verify_only_puts_the_previous_head_in_the_stage_params(self):
+        state = self.locally_verified_chain(finalize=False)
+        api_head = state["candidate_handoffs"]["api"]["candidate_head"]
+        with mock.patch("builtins.print"):
+            fc.reopen(self.host, self.args, state["logical_chain_id"], "api", "verify the hand fix", verify_only=True)
+        params = json.loads((Path(self.host.calls[-1][3]["output_root"]) / "params.json").read_text(encoding="utf-8"))
+        self.assertEqual(params["feature_verify_only"], "yes")
+        self.assertEqual(params["feature_previous_head"], api_head)
+        self.assertTrue(fc.read_state(self.control, state["logical_chain_id"])["reopens"][0]["verify_only"])
+
+    def test_reopen_without_verify_only_records_neither_param(self):
+        state = self.locally_verified_chain(finalize=False)
+        with mock.patch("builtins.print"):
+            fc.reopen(self.host, self.args, state["logical_chain_id"], "api", "re-implement the non-owner path")
+        params = json.loads((Path(self.host.calls[-1][3]["output_root"]) / "params.json").read_text(encoding="utf-8"))
+        self.assertNotIn("feature_verify_only", params)
+        self.assertNotIn("feature_previous_head", params)
+        self.assertFalse(fc.read_state(self.control, state["logical_chain_id"])["reopens"][0]["verify_only"])
+
+    def test_reopen_takes_verify_only_from_the_cli_flag_on_args(self):
+        state = self.locally_verified_chain(finalize=False)
+        api_head = state["candidate_handoffs"]["api"]["candidate_head"]
+        with mock.patch("builtins.print"):
+            fc.reopen(self.host, Namespace(**vars(self.args), verify_only=True), state["logical_chain_id"], "api", "x")
+        params = json.loads((Path(self.host.calls[-1][3]["output_root"]) / "params.json").read_text(encoding="utf-8"))
+        self.assertEqual(params["feature_previous_head"], api_head)
+
     def test_publish_opens_draft_prs_in_dependency_order_and_cross_links(self):
         state = self.locally_verified_chain()
         run = self.fake_gh()

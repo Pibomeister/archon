@@ -1872,6 +1872,11 @@ def params_payload(state: dict, phase: str, repo: str | None, row: dict) -> dict
                 raise FeatureChainError("approved API fixture revision drifted")
             payload["api_fixture_worktree"] = str(fixture.resolve())
             payload["api_fixture_head_sha"] = stage["api_fixture_head_sha"]
+    if phase == "implement" and repo in state["repositories"]:
+        previous_head = state["stages"][repo].get("verify_only_head")
+        if previous_head:
+            payload["feature_verify_only"] = "yes"
+            payload["feature_previous_head"] = str(previous_head)
     return payload
 
 
@@ -4017,13 +4022,19 @@ def assert_reopenable_run(host: Any, args: Any, current: object, affected: list[
             raise FeatureChainError(f"run {run_id[:8]} is still running; wait or abandon it first")
 
 
-def reopen(host: Any, args: Any, chain_id: str, repo: str, reason: str) -> dict:
+def reopen(host: Any, args: Any, chain_id: str, repo: str, reason: str, verify_only: bool = False) -> dict:
     """Reset a verified stage (and its consumers) to pending and re-dispatch it.
 
     Only between integration attempts: the chain must not be locally_verified,
     and the current run must be a terminal integration run. The stage worktree is
     kept as-is, so the re-run starts from the previous candidate plus any hand fix.
+
+    ``verify_only`` (also taken from ``--verify-only`` on args) re-verifies a hand
+    fix that is already in the worktree instead of re-implementing: each reset stage
+    records its previous candidate head so the stage params carry
+    ``feature_verify_only``/``feature_previous_head``.
     """
+    verify_only = bool(verify_only or getattr(args, "verify_only", False))
     control_dir = Path(args.control_dir)
     if not isinstance(reason, str) or not reason.strip():
         raise FeatureChainError("reopen requires a reason")
@@ -4046,10 +4057,16 @@ def reopen(host: Any, args: Any, chain_id: str, repo: str, reason: str) -> dict:
             "previous_heads": {r: state["candidate_handoffs"][r]["candidate_head"] for r in affected if r in state["candidate_handoffs"]},
             "stopped_run_id": (state.get("current_run") or {}).get("run_id"), "reopened_at": now(),
         }
+        record["verify_only"] = verify_only
         for name in affected:
             state["stages"][name]["status"] = "pending"
             state["stages"][name].pop("candidate", None)
             state["candidate_handoffs"].pop(name, None)
+            previous_head = record["previous_heads"].get(name)
+            if verify_only and previous_head:
+                state["stages"][name]["verify_only_head"] = previous_head
+            else:
+                state["stages"][name].pop("verify_only_head", None)
         state.setdefault("reopens", []).append(record)
         state["integration"] = None
         state["current_run"] = None

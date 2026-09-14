@@ -31,6 +31,13 @@ else
   echo "CANDIDATE_SQUASH=OK commits=1 head=$(git rev-parse HEAD)"
 fi
 CANDIDATE_HEAD=$(git rev-parse HEAD)
+# A --verify-only reopen re-verifies a hand fix that is already in this worktree.
+# An unchanged head means the hand fix never landed, so there is nothing to verify.
+VERIFY_ONLY=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("feature_verify_only",""))' "$AD/params.json")
+if [ "$VERIFY_ONLY" = yes ]; then
+  PREVIOUS_HEAD=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("feature_previous_head",""))' "$AD/params.json")
+  test "$PREVIOUS_HEAD" != "$CANDIDATE_HEAD" || { echo "REOPEN=NOOP head=$CANDIDATE_HEAD"; exit 1; }
+fi
 python3 "$SETUP/check-scope.py" "$AD/files-allowlist.json" "$WT" "$BASE" \
   || { echo "LOCAL_CANDIDATE=FAIL scope breach"; exit 1; }
 VERIFY_LOG="$AD/local-candidate-verify.log"

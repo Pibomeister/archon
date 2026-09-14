@@ -3483,6 +3483,8 @@ def parser() -> argparse.ArgumentParser:
     reopen.add_argument("--chain", required=True)
     reopen.add_argument("--repo", required=True)
     reopen.add_argument("--reason", required=True)
+    reopen.add_argument("--verify-only", action="store_true",
+                        help="re-verify a hand fix already in the stage worktree instead of re-implementing")
     reopen.add_argument("--no-watch", action="store_true")
     reopen.add_argument("--watch-timeout-seconds", type=int, default=86400)
     publish = sub.add_parser("feature-publish", help="push each verified candidate branch and open draft PRs in dependency order")
