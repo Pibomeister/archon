@@ -862,6 +862,32 @@ nodes:
         Then invoke the ce-code-review skill with arguments exactly:
           mode:headless base:origin/main plan:<that directory>/plan.md
         Do not expand scope beyond the diff against that base.
+        SCOPE OF THIS ROUND, which overrides the base above. Read round.txt
+        in the artifacts directory for the current round number N, then read
+        round-N/review-mode.txt there.
+        - Absent, or the word "full": invoke with base:origin/main exactly as
+          written above, and make the first line of the envelope you relay
+          read exactly "Scope: full".
+        - The word "delta": read round-N/review-base.txt in the same
+          directory, which holds a single commit sha. Invoke the skill with
+          mode:headless base:<that sha> plan:<that directory>/plan.md
+          instead, and make the first line of the envelope you relay read
+          exactly "Scope: delta base=<that same sha>".
+        A delta round reviews only what landed since that base, because
+        everything before it was already reviewed and its findings recorded.
+        The envelope's Scope line is compared mechanically against
+        review-mode.txt, and a scope that disagrees with the mode fails the
+        round's gate — so never widen or narrow the base on your own
+        judgement, and never omit the Scope line.
+        PINNED DECISIONS. If joint-plan.json in the artifacts directory
+        carries a non-empty "pinned_decisions" array, each entry names a
+        symbol the approved plan froze. A finding whose only fix would change
+        such a symbol's name, signature, or stated rule is ADVISORY, not
+        actionable: file it in the envelope under a heading reading exactly
+        "Pinned decisions", carry the field "pinned: <symbol>" on the
+        finding, and state what a re-plan would have to decide. Never raise
+        it as a P0-P2 for the fixer to apply — the plan gate, not this
+        review, is where a pin is reopened.
         The staged ce-code-review may be either contract generation: CE 3.2.0's
         markdown headless envelope, or the newer agent-JSON contract (there
         mode:headless aliases mode:agent and the skill returns ONE raw JSON
@@ -930,6 +956,29 @@ nodes:
         DEGRADED=true; test "$G2" = PASS && DEGRADED=false
         python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/write-review-summary.py \
           "$RD/review-summary.json" "$VERDICT" "$DEGRADED"
+        # A delta review that silently reviewed everything (or a full review
+        # that reviewed only a slice) costs the same budget and proves a
+        # different thing. review-mode.txt is what round-pre decided; the
+        # envelope's Scope line is what the reviewer actually did. SKIP when
+        # there is no mode file: the lite lane overlays round-pre and never
+        # writes one, and it inherits this body verbatim.
+        # A delta scope is only checkable against its BASE: an envelope that
+        # says "delta" over the wrong sha reviewed the wrong diff just as
+        # thoroughly as one that said "full". The whole envelope is searched
+        # rather than its first line, because the CE contract writes a Scope
+        # line of its own further down and the reviewer's own line has to win
+        # on content, not on position.
+        MODE=$(cat "$RD/review-mode.txt" 2>/dev/null || echo "")
+        EXPECT="Scope: $MODE"
+        test "$MODE" = delta && EXPECT="Scope: delta base=$(cat "$RD/review-base.txt" 2>/dev/null || echo MISSING)"
+        SCOPE_LINE=$(grep -m1 'Scope:' "$RD/review-envelope.txt" 2>/dev/null || true)
+        G4=SKIP
+        if [ -n "$MODE" ]; then
+          G4=FAIL
+          grep -qF "$EXPECT" "$RD/review-envelope.txt" 2>/dev/null && G4=PASS
+        fi
+        echo "GATE_4_scope_matches_mode=$G4"
+        if [ "$G4" = FAIL ]; then echo "REVIEW_SCOPE=FAIL mode=$MODE envelope=[$SCOPE_LINE]"; exit 1; fi
         test "$G1" = PASS && test "$G2" = PASS && test "$G3" = PASS || { echo "REVIEW_GATE=FAIL round=$N"; exit 1; }
         echo "REVIEW_GATE=PASS round=$N"
     - id: commit-fixes

@@ -167,6 +167,9 @@ MANIFEST=(
   setup/review_qualification.py
   workflows/risk-delta-v1.md
   setup/review-yield.py
+  # Two-hour convergence: delta review scope, the shared finding-key
+  # normalizer, and the feature-chain env carriers.
+  setup/review-mode.py
   setup/mcp-smoke.sh
   setup/codex-usage.py
   setup/codex-watchdog.sh
