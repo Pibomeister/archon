@@ -46,3 +46,17 @@ class ParseReviewEnvelope(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EmphasisedVerdict(unittest.TestCase):
+    """Live 2026-09-15 (run 8ddb9cce round 1): `Verdict: **Ready with fixes**`
+    read as no verdict and review-gate failed a complete review."""
+
+    def test_bold_verdict_parses(self):
+        out = run("Review complete\n\nScope: full\n\nVerdict: **Ready with fixes**\n")
+        self.assertEqual(out["VERDICT"], "Ready with fixes")
+        self.assertEqual(out["VSRC"], "envelope")
+
+    def test_backticked_verdict_parses(self):
+        out = run("Review complete\nVerdict: `Not ready`\n")
+        self.assertEqual(out["VERDICT"], "Not ready")
