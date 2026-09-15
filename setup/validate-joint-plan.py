@@ -249,6 +249,19 @@ def main() -> int:
         fail("joint-plan.json stages must match selected repositories exactly")
     for repo in repos:
         validate_stage(repo, stages[repo], selected)
+    # verify.json is the planning run's mirror of the anchor repo's shell gate,
+    # but the stage run is seeded from stages.<repo>.test_patterns (feature_chain
+    # dispatch), so a critic-driven fix that lands only in verify.json ships a
+    # stage that fails gate-tests. Chain 228a0717 did exactly that on
+    # 2026-09-15: verify.json held the unit pattern, the sealed stage still held
+    # an .int.spec pattern the unit jest config ignores.
+    anchor = params.get("repo")
+    verify_path = artifacts / "verify.json"
+    if anchor in stages and verify_path.exists():
+        verify = load_json(verify_path, "verify.json")
+        mirrored = verify.get("test_patterns") if isinstance(verify, dict) else None
+        if mirrored != stages[anchor]["test_patterns"]:
+            fail(f"verify.json test_patterns differ from stages.{anchor}.test_patterns")
     expected_order = ordered_repos(repos, stages)
     if "dependency_order" in doc and doc.get("dependency_order") != expected_order:
         fail("joint-plan.json dependency_order must be stable topological order")

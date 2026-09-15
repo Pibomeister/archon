@@ -299,6 +299,12 @@ nodes:
       Also write verify.json to that directory — the machine-readable mirror the
       shell gate executes: {"test_patterns": ["<pattern>", ...]} with at least
       one pattern, each matching the Verification commands exactly.
+      Every test_patterns entry (verify.json and each stages.<repo>.test_patterns
+      in joint-plan.json) runs through that repository's UNIT test command and
+      its unit jest config; api's config ignores .int.spec.ts, .ai.spec.ts and
+      .ext.spec.ts, so an integration or e2e pattern there yields "0 matches"
+      and fails gate-tests. Integration coverage belongs in the integration
+      scenarios, never in test_patterns.
       JOINT-REPOSITORY RUNS must also write joint-plan.json in that directory:
         {"schema":"archon.joint-feature-plan.v1",
          "repositories":["<canonical repo>", "..."],
