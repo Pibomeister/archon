@@ -349,7 +349,12 @@ nodes:
        "rule": "<the constraint, in the spec's own words, one line>"}, one entry
       per pinned symbol in the order the spec lists them, and [] when the spec
       has no such section. Each "file" must be a path this plan also lists under
-      ## Files. Downstream review treats a pin as settled: a finding that can
+      ## Files. A section titled "## Pinned decisions" pins symbols the same
+      way: every function, method, endpoint, or repository method it names is
+      an entry too. When "## Interface (pinned)" lists only files, the symbols
+      for those entries come from "## Pinned decisions"; a spec with either
+      section never yields an empty array.
+      Downstream review treats a pin as settled: a finding that can
       only be resolved by changing a pinned symbol is filed as advisory, so this
       plan is the only place a pin can be renegotiated.
       Joint execution contracts are executable, not prose placeholders:
