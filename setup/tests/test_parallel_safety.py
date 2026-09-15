@@ -490,7 +490,7 @@ class ParamsCarryTheRunsPorts(unittest.TestCase):
             root = td / "root"
             (root / ".archon" / "setup").mkdir(parents=True)
             for s in ("port-alloc.sh", "resolve-params.sh", "params-env.sh",
-                      "repo-profile.sh"):
+                      "repo-profile.sh", "feature-env.sh", "feature_env.py"):
                 shutil.copy(SETUP / s, root / ".archon" / "setup" / s)
             spec = td / "ENG-9999-a-report.md"
             spec.write_text("# report\n", encoding="utf-8")
@@ -517,7 +517,7 @@ class ParamsCarryTheRunsPorts(unittest.TestCase):
             root = td / "root"
             (root / ".archon" / "setup").mkdir(parents=True)
             for s in ("port-alloc.sh", "resolve-params.sh", "params-env.sh",
-                      "repo-profile.sh"):
+                      "repo-profile.sh", "feature-env.sh", "feature_env.py"):
                 shutil.copy(SETUP / s, root / ".archon" / "setup" / s)
             spec = td / "x.md"
             spec.write_text("x\n", encoding="utf-8")

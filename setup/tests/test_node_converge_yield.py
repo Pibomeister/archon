@@ -103,7 +103,11 @@ class ConvergeYield(unittest.TestCase):
                 {"applied": [{"finding": "f0", "action": "a", "severity": "P2"}],
                  "failed": [], "advisory": [], "incomplete": []}))
         if moved:
-            sh("echo b > b.ts && git add . && git commit -qm fix", wt)
+            # The subject is load-bearing since the autofix guard landed:
+            # converge derives head movement from the commit SUBJECTS in the
+            # round window, and only `apply fixer feedback` counts as progress.
+            # A placeholder subject now reads as tree drift, which is the point.
+            sh("echo b > b.ts && git add . && git commit -qm 'fix(review): apply fixer feedback'", wt)
         m = self.mirror(tmp, broken_fixer_check)
         if lane == "lite":
             body = OVERLAY.read_text(encoding="utf-8").replace(

@@ -177,7 +177,8 @@ def run_node(body, fake, env=None, timeout=None):
 class FakeRoot:
     """A throwaway <root>/.archon/setup with just the resolver's dependencies."""
 
-    FILES = ("port-alloc.sh", "resolve-params.sh", "params-env.sh", "repo-profile.sh")
+    FILES = ("port-alloc.sh", "resolve-params.sh", "params-env.sh", "repo-profile.sh",
+             "feature-env.sh", "feature_env.py")
 
     def __enter__(self):
         self.td = Path(tempfile.mkdtemp())
