@@ -280,6 +280,10 @@ nodes:
   prompt: |
     You are the planning node in an unattended workflow. Ask no questions; make
     conservative assumptions and record them in the plan.
+    Never start background agents or background shell commands: this node ends
+    when your turn ends, and anything still running then is discarded unwritten.
+    Run every sub-agent and command in the foreground and write the artifacts
+    yourself before finishing.
 
     First read params.json in the directory named by the ARTIFACTS_DIR
     environment variable (resolve via: echo "$ARTIFACTS_DIR"). Its "spec"

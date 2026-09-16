@@ -177,7 +177,7 @@ nodes:
   - bootstrap
   - kb-recon-gate
   model: sonnet
-  maxBudgetUsd: 3
+  maxBudgetUsd: 10
   timeout: 1200000
   prompt: |
     You are the planning node in an unattended workflow. Ask no questions; make
