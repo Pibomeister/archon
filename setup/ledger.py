@@ -256,7 +256,25 @@ def merge_fixer(ad, n, result_path, attempt, repo):
 
 
 def copy_forward(ad, src, dst):
+    """Carry the history into the next round.
+
+    When round `src` has no ledger at all, the nearest earlier round that does
+    is copied instead. An empty ledger is not "no findings": it satisfies the
+    positive closure requirement vacuously, so one round that failed before its
+    merge -- a killed review-gate, a round the operator opened by hand -- would
+    otherwise erase every open P0 and let the next round converge. Measured on
+    v1 run 8ddb9cce, whose round 6 wrote no fixer-result.json: a straight copy
+    carried 0 of 36 entries into round 7.
+    """
     entries = load(ad, src)
+    if not entries:
+        for back in range(int(src) - 1, 0, -1):
+            earlier = load(ad, back)
+            if earlier:
+                print(f"LEDGER_COPY_BACKFILL from={back} (round {src} has no ledger) "
+                      f"total={len(earlier)}")
+                entries = earlier
+                break
     if load(ad, dst):
         # Round N+1 already has a ledger: a resume re-opened the round after the
         # copy landed. Overwriting it would throw away this round's own merges.

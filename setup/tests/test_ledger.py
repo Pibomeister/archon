@@ -256,6 +256,28 @@ class LedgerTest(unittest.TestCase):
         self.assertIn("skipped=already-present", out)
         self.assertEqual(len(self.ledger(2)), 2)
 
+    def test_a_round_with_no_ledger_does_not_erase_the_history(self):
+        # Measured on v1 run 8ddb9cce: round 6 wrote no fixer-result.json, so a
+        # straight copy-forward carried 0 of 36 entries into round 7 and closure
+        # passed on an empty set. An empty ledger is not "no findings".
+        env = self.write_envelope(findings=[finding("a race in the share path"),
+                                            finding("a nit", "P3")])
+        self.run_ledger("merge-envelope", 1, env)
+        (self.ad / "round-2").mkdir()
+        (self.ad / "round-3").mkdir()
+        out = self.run_ledger("copy-forward", 2, 3)
+        self.assertIn("LEDGER_COPY_BACKFILL from=1", out)
+        self.assertEqual(len(self.ledger(3)), 2)
+        self.run_ledger("closure", 3, expect=1)
+
+    def test_round_1_copying_from_nothing_is_still_empty(self):
+        # Negative control for the backfill: a genuinely empty history must not
+        # invent entries, or every round 1 would inherit a phantom ledger.
+        (self.ad / "round-2").mkdir()
+        out = self.run_ledger("copy-forward", 1, 2)
+        self.assertNotIn("LEDGER_COPY_BACKFILL", out)
+        self.assertEqual(self.ledger(2), [])
+
     def test_residuals_carry_p2_p3_dispositions_and_never_a_blocker(self):
         env = self.write_envelope(findings=[finding("a race in the share path"),
                                             finding("a nit", "P3"),
