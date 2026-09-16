@@ -67,8 +67,11 @@ printf '# plan\n\nOne step.\n' > "$AD/plan.md"
 cat > "$AD/params.json" <<JSON
 {"repo":"api","worktree":"$WT","slug":"injection","apiport":"","has_smoke":""}
 JSON
+# A bare JSON array, which is the shape check-scope.py and the lanes actually
+# write. An object with a "files" key parses and then matches nothing, so the
+# allowlist reads as empty and every path is a breach.
 cat > "$AD/files-allowlist.json" <<'JSON'
-{"files": ["src/f.ts"]}
+["src/f.ts"]
 JSON
 cat > "$AD/joint-plan.json" <<'JSON'
 {"pinned_decisions": []}
@@ -230,7 +233,9 @@ BROKE=$(grep -E 'FAILED:|stand-in failed' "$LOG" || true)
 if [ -n "$BROKE" ]; then
   echo "INJECTION_LOG"; sed 's/^/  /' "$LOG"
   echo "INJECTION=FAIL a node failed; the duplicate count below would be vacuous"
-  printf '%s\n' "$BROKE" | sed 's/^/  broke: /'
+  # Deduplicated: one boundary's defect repeats on every pass, and sixteen
+  # copies of one line hide the second distinct cause underneath them.
+  printf '%s\n' "$BROKE" | cut -c1-400 | sort -u | sed 's/^/  broke: /'
   exit 1
 fi
 DUPES=$(grep -E '^(round-pre review=run|fix-plan fixer=run)' "$LOG" \
