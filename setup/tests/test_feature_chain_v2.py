@@ -591,19 +591,150 @@ class FeatureChainV2(unittest.TestCase):
         over_cap = self.record_timing(10801, "b" * 32)
 
         self.assertIn("CHAIN_TIMING wall=10800 planning=0 stages=api:null,goodword-mcp:null integration=10800\n", at_cap)
-        self.assertNotIn("CHAIN_BUDGET", at_cap)
+        self.assertNotIn("CHAIN_BUDGET=EXCEEDED wall=", at_cap)
         self.assertIn("CHAIN_TIMING wall=10801 planning=0 stages=api:null,goodword-mcp:null integration=10801\n", over_cap)
         self.assertIn("CHAIN_BUDGET=EXCEEDED wall=10801 cap=10800\n", over_cap)
         written = json.loads(fc.timing_path(self.control, "b" * 32).read_text(encoding="utf-8"))
         self.assertEqual(written["wall_s"], 10801)
+
+    def test_the_active_budget_is_separate_from_the_wall_budget(self):
+        """Item 9: the 2-hour claim is about active minutes.
+
+        Wall includes every human gate, so a chain that sat at a plan-gate
+        overnight blows the wall cap having done an hour of work, and a chain
+        that burned three hours of agent time inside a two-hour window does not
+        blow it at all. The active sum is the one the claim is about, and it is
+        capped separately.
+        """
+        over = self.record_timing(10801, "c" * 32)
+
+        self.assertIn("CHAIN_ACTIVE active=10801 cap=7200 wall=10801\n", over)
+        self.assertIn("CHAIN_BUDGET=EXCEEDED active=10801 cap=7200 wall=10801\n", over)
+
+    def test_the_active_cap_is_overridable(self):
+        with mock.patch.dict(fc.os.environ, {"ARCHON_CHAIN_BUDGET_S": "20000"}):
+            output = self.record_timing(10801, "e" * 32)
+        self.assertIn("CHAIN_ACTIVE active=10801 cap=20000", output)
+        self.assertNotIn("CHAIN_BUDGET=EXCEEDED active=", output)
+
+    def test_a_junk_active_cap_falls_back_to_the_default(self):
+        for junk in ("", "0", "-1", "two hours"):
+            with self.subTest(value=junk):
+                with mock.patch.dict(fc.os.environ, {"ARCHON_CHAIN_BUDGET_S": junk}):
+                    self.assertEqual(fc.active_budget_seconds(), 7200)
 
     def test_advance_writes_chain_timing_on_every_stage_transition(self):
         state = self.locally_verified_chain(finalize=False)
 
         timing = json.loads(fc.timing_path(self.control, state["logical_chain_id"]).read_text(encoding="utf-8"))
 
-        self.assertEqual(set(timing), {"wall_s", "planning_s", "stages", "integration_s", "updated_at"})
+        self.assertEqual(set(timing),
+                         {"wall_s", "planning_s", "stages", "integration_s", "activity", "updated_at"})
         self.assertEqual(timing["stages"], {"api": None, "goodword-mcp": None})
+
+    def activity_state(self, entries_by_round):
+        """A chain whose api stage has round dirs carrying an activity log."""
+        artifacts = self.root / "activity-artifacts"
+        for n, entries in entries_by_round.items():
+            round_dir = artifacts / f"round-{n}"
+            round_dir.mkdir(parents=True)
+            (round_dir / "activity.jsonl").write_text(
+                "".join(json.dumps({"round": n, **e}) + "\n" for e in entries), encoding="utf-8")
+        state = self.timing_state()
+        for item in state["phase_runs"]:
+            if item.get("repo") == "api":
+                item["artifacts_dir"] = str(artifacts)
+        return state, artifacts
+
+    def test_round_telemetry_counts_invocations_reuses_and_rounds(self):
+        _, artifacts = self.activity_state({
+            1: [{"kind": "review", "decision": "run", "id": "id1"},
+                {"kind": "review", "decision": "done", "id": "id1"},
+                {"kind": "fixer", "decision": "run", "tree": "t1"},
+                {"kind": "fixer", "decision": "done", "tree": "t1"}],
+            2: [{"kind": "review", "decision": "run", "id": "id2"},
+                {"kind": "review", "decision": "done", "id": "id2"},
+                {"kind": "review", "decision": "reuse", "id": "id2"},
+                {"kind": "fixer", "decision": "reuse-committed", "tree": "t2"}],
+        })
+
+        counts = fc.round_telemetry(artifacts)
+
+        self.assertEqual(counts, {"rounds": 2, "review_invocations": 2, "review_reused": 1,
+                                  "review_duplicates": 0, "fixer_invocations": 1,
+                                  "fixer_duplicates": 0})
+
+    def test_a_run_after_a_done_for_the_same_id_is_a_duplicate(self):
+        """The property the whole of item 1 exists to hold.
+
+        Counted by this reader from the log, not asserted by round-state.py: the
+        component whose refusal to duplicate is under measurement cannot also be
+        the one certifying it.
+        """
+        _, artifacts = self.activity_state({
+            1: [{"kind": "review", "decision": "run", "id": "id1"},
+                {"kind": "review", "decision": "done", "id": "id1"},
+                {"kind": "review", "decision": "run", "id": "id1"},
+                {"kind": "fixer", "decision": "done", "tree": "t1"},
+                {"kind": "fixer", "decision": "run", "tree": "t1"}],
+        })
+
+        counts = fc.round_telemetry(artifacts)
+
+        self.assertEqual(counts["review_duplicates"], 1)
+        self.assertEqual(counts["fixer_duplicates"], 1)
+
+    def test_a_new_round_repeating_an_activity_is_not_a_duplicate(self):
+        """A progressed decision opens a round that asks for a fresh review."""
+        _, artifacts = self.activity_state({
+            1: [{"kind": "review", "decision": "run", "id": "id1"},
+                {"kind": "review", "decision": "done", "id": "id1"}],
+            2: [{"kind": "review", "decision": "run", "id": "id1"}],
+        })
+
+        self.assertEqual(fc.round_telemetry(artifacts)["review_duplicates"], 0)
+
+    def test_an_interrupted_activity_rerun_is_not_a_duplicate(self):
+        """No `done` was ever recorded, so the second run finishes the first."""
+        _, artifacts = self.activity_state({
+            1: [{"kind": "review", "decision": "run", "id": "id1"},
+                {"kind": "review", "decision": "run", "id": "id1"},
+                {"kind": "review", "decision": "done", "id": "id1"}],
+        })
+
+        counts = fc.round_telemetry(artifacts)
+        self.assertEqual(counts["review_invocations"], 2)
+        self.assertEqual(counts["review_duplicates"], 0)
+
+    def test_a_stage_with_no_activity_log_counts_its_rounds_and_nothing_else(self):
+        artifacts = self.root / "bare-artifacts"
+        (artifacts / "round-1").mkdir(parents=True)
+        (artifacts / "round-2").mkdir(parents=True)
+
+        counts = fc.round_telemetry(artifacts)
+
+        self.assertEqual(counts["rounds"], 2)
+        self.assertEqual(counts["review_invocations"], 0)
+
+    def test_a_missing_artifacts_directory_is_all_zero(self):
+        self.assertEqual(fc.round_telemetry(self.root / "gone"),
+                         {key: 0 for key in fc.ROUND_TELEMETRY_KEYS})
+
+    def test_chain_timing_prints_the_review_counts_and_stores_them(self):
+        state, _ = self.activity_state({
+            1: [{"kind": "review", "decision": "run", "id": "id1"},
+                {"kind": "review", "decision": "done", "id": "id1"},
+                {"kind": "review", "decision": "reuse", "id": "id1"},
+                {"kind": "fixer", "decision": "run", "tree": "t1"}],
+        })
+        db = self.timing_db([("a" * 32, "2026-09-14 10:00:00", "2026-09-14 10:10:00")])
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            timing = fc.record_chain_timing(Namespace(db=db, control_dir=self.control), state)
+
+        self.assertIn("CHAIN_TIMING reviews=1/1 rounds=1 review_duplicates=0 "
+                      "fixers=1 fixer_duplicates=0\n", stream.getvalue())
+        self.assertEqual(timing["activity"]["api"]["review_invocations"], 1)
 
     def test_publish_opens_draft_prs_in_dependency_order_and_cross_links(self):
         state = self.locally_verified_chain()

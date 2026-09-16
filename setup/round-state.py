@@ -121,6 +121,22 @@ def note(*parts):
     print(*parts, file=sys.stderr, flush=True)
 
 
+def log_activity(rnd, **fields):
+    """Append one line to round-N/activity.jsonl.
+
+    This is what item 9's telemetry counts, and it is deliberately a record of
+    what was ASKED FOR rather than of what this file decided. A duplicate is
+    then derived by the reader -- a `run` whose id or tree a `done` in the same
+    round already recorded -- instead of being self-certified here. A check
+    whose pass condition is "the code that made the decision agrees with the
+    decision" cannot see the decision being wrong.
+    """
+    path = rnd.rd / "activity.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"round": rnd.n, **fields}, sort_keys=True) + "\n")
+
+
 class Round:
     """The artifacts directory, its worktree, and the current round's files."""
 
@@ -522,6 +538,9 @@ def validate_base(rnd):
 
 
 def emit_pre(rnd, review, reason, k):
+    record = read_json(rnd.rd / "review-input.json", {}) or {}
+    log_activity(rnd, kind="review", decision=review, reason=reason, attempt=k,
+                 id=record.get("id", ""))
     note(f"ROUND_REUSE round={rnd.n} review={review} attempt={k} reason={reason}")
     print(json.dumps({"round": rnd.n, "review": review, "attempt": k, "reason": reason}),
           flush=True)
@@ -620,9 +639,12 @@ def cmd_fix_plan(rnd, _args):
     decision = fixer_decision(rnd)
     if decision["fixer"] == "unauthorized":
         note(f"REVIEW_UNAUTHORIZED round={rnd.n} (no gated envelope for this candidate)")
+        log_activity(rnd, kind="fixer", decision="unauthorized", tree="")
     else:
         note(f"FIX_PLAN round={rnd.n} fixer={decision['fixer']} "
              f"reason={decision.get('reason', '-')}")
+        log_activity(rnd, kind="fixer", decision=decision["fixer"],
+                     reason=decision.get("reason", ""), tree=rnd.tree())
     print(json.dumps(decision), flush=True)
     return 0
 
@@ -798,6 +820,8 @@ def cmd_mark(rnd, args):
         if not text.strip():
             raise Stop(f"ROUND_STATE=FAIL review envelope is empty: {args.envelope}")
         write_atomic(rnd.rd / "review-envelope.txt", text)
+        record = read_json(rnd.rd / "review-input.json", {}) or {}
+        log_activity(rnd, kind="review", decision="done", id=record.get("id", ""))
         print(f"REVIEW_ENVELOPE=WRITTEN round={rnd.n} bytes={len(text)}", flush=True)
         return 0
     auth = authorization(rnd)
@@ -813,10 +837,12 @@ def cmd_mark(rnd, args):
         sha = fixer_result_sha(rnd)
         if sha is None:
             raise Stop(f"FIXER_INCOMPLETE round={rnd.n} attempt={k} (no fixer-result.json)")
+        tree = rnd.tree()
         write_json_atomic(rnd.rd / "repair.json", {
             "attempt": k, "review_id": review_id, "review_gen": gen,
-            "result_sha256": sha, "tree": rnd.tree(),
+            "result_sha256": sha, "tree": tree,
         })
+        log_activity(rnd, kind="fixer", decision="done", tree=tree)
         print(f"REPAIR_DONE round={rnd.n} attempt={k} gen={gen}", flush=True)
         return 0
     raise Stop(f"ROUND_STATE=FAIL unknown marker: {marker}")
