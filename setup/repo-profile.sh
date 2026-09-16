@@ -51,6 +51,18 @@ PROFILES = {
         "env_src":   ".env",
         "smoke":     "1",
         "browser":   "1",
+        # Paths with NO browser-reachable surface (browser-exemption.py). Only
+        # these may carry a not_applicable browser policy; every other path is
+        # presumed reachable. Migrations alone change no page; scripts/tools/
+        # the CLI/e2e harness are operator-side; the three async lambdas never
+        # run in the local smoke stack a browser check would hit. `*` crosses /.
+        "browser_exempt": [
+            "libs/data-access/src/lib/rds/migrations/*",
+            "scripts/*", "tools/*", "docs/*",
+            "apps/utilities-cli/*", "apps/api-e2e/*",
+            "apps/analytic-service/*", "apps/enrichment-service/*", "apps/notification-service/*",
+            "*.spec.ts", "*.md",
+        ],
         "impact":    "mono",
     },
     "goodword-mcp": {
@@ -78,6 +90,7 @@ PROFILES = {
         # PREFLIGHT=FAIL. An empty value here would leave the smoke with no port.
         "smoke":     "1",
         "browser":   "",
+        "browser_exempt": [],
         "impact":    "",
     },
     # web-app is NOT speculative future scope: bind-repo.py accepts it and
@@ -92,6 +105,8 @@ PROFILES = {
         "env_src":   "",
         "smoke":     "1",
         "browser":   "1",
+        # Every web-app path is presumed page-reachable.
+        "browser_exempt": [],
         "impact":    "",
     },
 }

@@ -29,7 +29,6 @@ except Exception:
 " "$AD/params.json")
 PS_PROFILE=$(bash "$HERE_PS/repo-profile.sh" "$PS_REPO") || { echo "PLAN_SHAPE=FAIL repo-profile.sh failed for repo $PS_REPO"; exit 1; }
 eval "$PS_PROFILE"
-PS_HAS_BROWSER="$HAS_BROWSER"
 
 test -s "$AD/plan.md" || { echo "PLAN_SHAPE=FAIL no plan.md"; exit 1; }
 for h in "## Goal" "## Files" "## Approach" "## Test scenarios" "## Verification"; do
@@ -50,9 +49,9 @@ python3 -c "import json,sys; a=json.load(open(sys.argv[1])); assert isinstance(a
 python3 -c "import json,sys; a=json.load(open(sys.argv[1])); assert isinstance(a,list) and all(isinstance(x,str) and x.strip() for x in a)" "$AD/web-files-allowlist.json" || { echo "PLAN_SHAPE=FAIL web-files-allowlist.json missing or malformed"; exit 1; }
 python3 -c "import json,sys; c=json.load(open(sys.argv[1]))['columns']; assert isinstance(c,list)" "$AD/reader-audit.json" || { echo "PLAN_SHAPE=FAIL reader-audit.json missing or malformed"; exit 1; }
 python3 -c "import json,sys; c=json.load(open(sys.argv[1]))['columns']; assert isinstance(c,list)" "$AD/web-reader-audit.json" 2>/dev/null || { echo "PLAN_SHAPE=FAIL web-reader-audit.json missing or malformed"; exit 1; }
-python3 - "$AD/browser-evidence.json" "$AD/browser-evidence.sha256" "$PS_HAS_BROWSER" <<'PY' 2>/dev/null || { echo "PLAN_SHAPE=FAIL browser-evidence.json/.sha256 missing or malformed (or a not_applicable disposition from a repo that HAS a browser surface)"; exit 1; }
+python3 - "$AD/browser-evidence.json" "$AD/browser-evidence.sha256" <<'PY' 2>/dev/null || { echo "PLAN_SHAPE=FAIL browser-evidence.json/.sha256 missing or malformed"; exit 1; }
 import hashlib, json, re, sys
-policy_path, digest_path, has_browser = sys.argv[1], sys.argv[2], sys.argv[3]
+policy_path, digest_path = sys.argv[1], sys.argv[2]
 policy = json.load(open(policy_path, encoding="utf-8"))
 required = policy.get("required")
 # A repository whose changes are not reachable through a browser cannot write an
@@ -63,10 +62,8 @@ required = policy.get("required")
 # quietly widen. Anything else with an empty list still fails.
 not_applicable = policy.get("not_applicable")
 if isinstance(not_applicable, str) and not_applicable.strip():
-    # Gated on the REPO, not on the file's own say-so. Without this the api and
-    # web-app gates could be switched off by adding one string to the artifact.
-    assert not has_browser, (
-        "not_applicable is only valid for a repo with no browser surface")
+    # Whether the disposition is ALLOWED is decided below by browser-exemption.py
+    # from the repo profile and the hashed allowlists -- never by this string.
     assert required == [], "not_applicable browser policy must carry required: []"
     required = []
 else:
@@ -90,6 +87,13 @@ approved = open(digest_path, encoding="utf-8").read().strip().split()[0].lower()
 actual = hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 assert re.fullmatch(r"[0-9a-f]{64}", approved) and approved == actual
 PY
+# Gated on the REPO PROFILE and the allowlists, not on the file's own say-so.
+# Without this the api and web-app gates could be switched off by adding one
+# string to the artifact (P11). A browser repo may carry not_applicable only
+# when every allowlisted path matches its profile's browser_exempt globs.
+# Silent on success: callers compare stdout to the literal PLAN_SHAPE=OK.
+PS_EXEMPT=$(python3 "$HERE_PS/browser-exemption.py" plan "$AD") \
+  || { echo "PLAN_SHAPE=FAIL not_applicable browser disposition for a browser-surface change: $PS_EXEMPT"; exit 1; }
 
 if grep -q '^## Premises to verify' "$SPEC"; then
   python3 - "$AD/premises.json" "$WT" <<'PY' || { echo "PLAN_SHAPE=FAIL premises.json missing, empty, or uncited"; exit 1; }

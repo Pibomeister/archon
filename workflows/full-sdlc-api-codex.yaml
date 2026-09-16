@@ -509,14 +509,20 @@ nodes:
                        "value":"<expected value>","text":"<fill text when type=fill>"}]}]}
     Use stable criterion ids, same-origin paths only, and assertions that can be
     executed mechanically.
-    REPOSITORIES WITH NO BROWSER SURFACE: when params.json's "repo" is one whose
-    changes are not reachable through a browser at all (anything other than "api"
-    or "web-app"), a populated policy would be fiction. Write instead the typed
+    CHANGES WITH NO BROWSER SURFACE: when the change is not reachable through a
+    browser at all, a populated policy would be fiction. Write instead the typed
     disposition {"not_applicable":"<one-line reason>","required":[]} — the ONLY
     form in which "required" may be empty. It is hashed and frozen exactly like a
-    populated policy, so the disposition is fixed at approval and cannot be
-    loosened afterwards. Never use it to avoid writing a policy for a repository
-    that does have a browser surface.
+    populated policy. It is accepted only when the repository has no browser
+    surface (anything other than "api" or "web-app"), or when EVERY path in
+    files-allowlist.json, web-files-allowlist.json and joint-plan.json stage
+    allowlists matches that repository's `browser_exempt` globs in
+    .archon/setup/repo-profile.sh (for api: migrations, scripts/, tools/,
+    apps/utilities-cli/, apps/api-e2e/, the async analytic/enrichment/
+    notification lambdas, *.spec.ts, *.md). Any other path is a browser surface
+    and needs a populated policy. The exemption is re-checked against the actual
+    diff after implement and at exit, so it cannot survive a change that later
+    touches a surface path.
     browser-evidence.sha256 must contain the lowercase
     SHA-256 of the canonical JSON bytes (sort keys, separators ',', ':') of
     browser-evidence.json. This policy is web-scoped and frozen by the shared
@@ -1468,6 +1474,10 @@ nodes:
     python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py \
       "$ARTIFACTS_DIR/files-allowlist.json" "$WT" "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" \
       || { echo "GATE_TESTS=FAIL scope breach"; exit 1; }
+    # A not_applicable browser policy was derived at plan time from the
+    # allowlist; what ships is the diff, so re-derive it from the diff.
+    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/browser-exemption.py diff \
+      "$ARTIFACTS_DIR" "$WT" "$BASE" || { echo "GATE_TESTS=FAIL browser exemption void"; exit 1; }
     echo "GATE_TESTS=PASS"
 - id: deslop
   depends_on:
@@ -2530,6 +2540,11 @@ nodes:
     python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py \
       "$ARTIFACTS_DIR/files-allowlist.json" "$WT" "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" \
       || { echo "EXIT_GATE=FAIL scope breach"; exit 1; }
+    # Browser exemption belt: the fixer and a widened allowlist can both move
+    # the diff onto a browser surface after gate-tests derived the exemption.
+    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/browser-exemption.py diff \
+      "$ARTIFACTS_DIR" "$WT" "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" \
+      || { echo "EXIT_GATE=FAIL browser exemption void"; exit 1; }
     # Reader-audit belt: declared columns must have a passing result on disk.
     NC=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))['columns']))" "$ARTIFACTS_DIR/reader-audit.json" 2>/dev/null || echo 0)
     if [ "$NC" != 0 ]; then

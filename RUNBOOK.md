@@ -152,6 +152,8 @@ unblock path. If it cannot, treat that as a workflow defect. This is not an
 override mechanism: the correction must preserve or replace the gate's actual
 safety purpose with tested evidence.
 
+**Browser policy `not_applicable` on api/web-app** is derived, never declared: `plan-shape.sh` accepts it only when every allowlisted path (files-allowlist, web-files-allowlist, joint-plan stages) matches that repo's `browser_exempt` globs in `setup/repo-profile.sh`, and `gate-tests`/`exit-gate` re-derive it from the actual diff (`BROWSER_EXEMPTION=FAIL … path=<p>`). The fix for that stop is a populated policy or reverting the surface edit, not a glob edit.
+
 Knowledge capture follows the same boundary: the required artifact is
 run-local `kb-capture.md`. Promotion to `goodword-kb` or another external sink
 is optional operator work and cannot retroactively fail a delivered PR.
