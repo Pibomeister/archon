@@ -459,7 +459,10 @@ nodes:
     by the spec itself and is not the implementation's to redesign. Add to
     joint-plan.json the key "pinned_decisions": a JSON array of
     {"symbol": "<exact symbol name>", "file": "<repo-relative path>",
-     "rule": "<the constraint, in the spec's own words, one line>"}, one entry
+     "rule": "<the constraint, in the spec's own words, one line>",
+     "spec_line": <the 1-based line number of that bullet in the spec>,
+     "allowed_change": "<none, or the exception the spec itself states>"},
+    one entry
     per pinned symbol in the order the spec lists them, and [] when the spec
     has no such section. Each "file" must be a path this plan also lists under
     ## Files. A section titled "## Pinned decisions" pins symbols the same
@@ -467,6 +470,19 @@ nodes:
     an entry too. When "## Interface (pinned)" lists only files, the symbols
     for those entries come from "## Pinned decisions"; a spec with either
     section never yields an empty array.
+    "rule" is the COMPLETE bullet text from the spec, copied verbatim, not a
+    paraphrase and not the part of it you judge relevant. A guard compares
+    every pinned bullet against these entries and fails the plan when a bullet
+    has no entry whose rule equals it, whitespace aside. Summarising is what
+    broke the v1 run: a spec bullet reading "No other change to
+    POST /group/share" was recorded as its managed-group sentence alone, the
+    rest of the constraint stopped existing, and four review rounds were spent
+    on code the pin had already forbidden.
+    "allowed_change" is "none" unless the spec states an exception in that same
+    bullet, in which case it is that exception in the spec's words. It is not
+    your judgement about what would be reasonable to change: a pin is
+    renegotiated at this gate and nowhere else, and "none" is the default
+    precisely because an unstated exception is not an exception.
     Downstream review treats a pin as settled: a finding that can
     only be resolved by changing a pinned symbol is filed as advisory, so this
     plan is the only place a pin can be renegotiated.
@@ -2189,6 +2205,14 @@ nodes:
     fi
     python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
     git diff --cached --name-only
+    # Pin guard, AFTER git add and BEFORE git commit, so it reads the STAGED
+    # blob -- what will actually be committed, not what happens to be sitting
+    # in the worktree. A symbol the approved plan froze and this diff changed
+    # fails here with the edit left staged, which is the state the recovery
+    # recipes in RUNBOOK 3c expect. A symbol the guard cannot find is
+    # PIN_UNRESOLVED and also a stop: a silently missed span is the worse
+    # failure of the two.
+    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/pin-guard.py "$ARTIFACTS_DIR" "$BASE" || exit 1
     if git diff --cached --quiet; then echo "COMMIT_IMPL=SKIP already committed"; else git commit -m "$MSG"; fi
     test -z "$(git status --porcelain | grep -v '^?? \.env')" || { echo "COMMIT_IMPL=FAIL dirty"; exit 1; }
     echo "COMMIT_IMPL=OK sha=$(git rev-parse HEAD)"
@@ -2217,7 +2241,7 @@ nodes:
         # validation -- lives in the helper, because every one of those steps
         # has to be idempotent across a resume and bash is the wrong place to
         # own that. The node is the call site, not the logic.
-        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py "$ARTIFACTS_DIR" pre
+        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py pre "$ARTIFACTS_DIR"
     - id: review
       depends_on:
       - round-pre
@@ -2234,10 +2258,10 @@ nodes:
         Resolve the artifacts directory by running: echo "$ARTIFACTS_DIR"
 
         YOUR FIRST ACTION, before reading anything else, is to run exactly:
-          python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py "$ARTIFACTS_DIR" mark review-start
+          python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py mark "$ARTIFACTS_DIR" review-start
         YOUR LAST ACTION, after your output is complete, is to save the
         envelope and run exactly:
-          python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py "$ARTIFACTS_DIR" mark review-done <path to the envelope you wrote>
+          python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py mark "$ARTIFACTS_DIR" review-done <path to the envelope you wrote>
         The envelope on disk is what every downstream gate reads; a review
         that ends without that second call is an interrupted review and the
         next round re-runs it, so the whole invocation is wasted.
@@ -2351,9 +2375,21 @@ nodes:
         # then diffs against a foreign list — silently picking the wrong
         # ce-code-review run directory to read the verdict from.
         ls -1d "${CE_REVIEW_ROOT:-/tmp/compound-engineering/ce-code-review}"/*/ 2>/dev/null | LC_ALL=C sort > "$RD/post-dirs.txt" || true
-        NEW=$(comm -13 "$RD/prerun-dirs.txt" "$RD/post-dirs.txt")
+        # No baseline, no scan. prerun-dirs.txt is the list of ce-code-review
+        # run directories that existed BEFORE the reviewer started, and the
+        # whole point of the comm is that a directory is only this round's if
+        # it appeared after that moment. Treating a missing baseline as an
+        # empty one would make every directory on the host look new, which is
+        # precisely the foreign-verdict failure the comment above describes —
+        # so the scan is skipped instead and the verdict comes from the
+        # envelope, which is the skill's primary handoff anyway.
         PREHEAD=$(cat "$RD/pre-head.txt")
-        VERDICT=""; RUNDIR=""
+        VERDICT=""; RUNDIR=""; NEW=""
+        if [ -f "$RD/prerun-dirs.txt" ]; then
+          NEW=$(comm -13 "$RD/prerun-dirs.txt" "$RD/post-dirs.txt")
+        else
+          echo "GATE_3_baseline_absent=SKIP (no prerun-dirs.txt; verdict from the envelope)"
+        fi
         for d in $NEW; do
           M="$d/metadata.json"; test -f "$M" || continue
           SHA=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('head_sha',''))" "$M" 2>/dev/null)
@@ -2385,8 +2421,16 @@ nodes:
         printf '%s\n' "$VERDICT" > "$RD/review-verdict.txt"
         # Envelope shape first: an envelope that is incomplete, degraded, or
         # carries a verdict outside the enum is not a review, so it must never
-        # reach the identity gate and must never leave a review.ok behind.
-        test "$G1" = PASS && test "$G2" = PASS && test "$G3" = PASS || { echo "REVIEW_GATE=FAIL round=$N"; exit 1; }
+        # reach the identity gate. And it must not leave a STALE review.ok
+        # behind either -- a previous attempt's authorization outliving the
+        # attempt that replaced it is how a repair gets made for one envelope
+        # generation and committed under another. The failure is therefore
+        # recorded THROUGH the helper (`gate --fail`), which writes gate.txt
+        # and deletes review.ok, rather than by exiting here.
+        if ! { test "$G1" = PASS && test "$G2" = PASS && test "$G3" = PASS; }; then
+          python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py gate "$ARTIFACTS_DIR" --fail "envelope g1=$G1 g2=$G2 g3=$G3"
+          exit 1
+        fi
         # Everything that is state rather than parsing: GATE_5 (the envelope's
         # Input: is this round's review identity and its Head: is the recorded
         # candidate -- v1's GATE_4 compared a Scope STRING, which since 789b2a1
@@ -2395,7 +2439,7 @@ nodes:
         # ledger merge, and review.ok -- the ONLY artifact downstream nodes
         # accept as authorization. review-summary.json stays readable either
         # way, which is exactly why a readable Ready summary is not enough.
-        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py "$ARTIFACTS_DIR" gate || exit 1
+        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py gate "$ARTIFACTS_DIR" || exit 1
         echo "REVIEW_GATE=PASS round=$N"
     - id: fix-plan
       depends_on:
@@ -2412,7 +2456,7 @@ nodes:
         # before a rejection or a failed gate -- is never reused even when the
         # review identity is unchanged, and an unaccounted edit to the tree is
         # FIXER_TREE_DRIFT rather than a silent re-run over someone's work.
-        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py "$ARTIFACTS_DIR" fix-plan
+        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py fix-plan "$ARTIFACTS_DIR"
     - id: fixer
       depends_on:
       - fix-plan
@@ -2422,13 +2466,13 @@ nodes:
         You are the fixer node in an unattended review-fix pipeline. Ask no questions.
         Resolve the artifacts directory by running: echo "$ARTIFACTS_DIR"
         YOUR FIRST ACTION, before reading or editing anything, is to run exactly:
-          python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py "$ARTIFACTS_DIR" mark repair-start
+          python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py mark "$ARTIFACTS_DIR" repair-start
         From that call onwards the worktree is yours: partial edits are your
         provenance, which is what lets an interrupted repair RESUME over its
         own half-finished tree instead of being read as an unreviewed change.
         Skipping it means your first edit fails the round.
         YOUR LAST ACTION, after the result file is written, is to run exactly:
-          python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py "$ARTIFACTS_DIR" mark repair-done
+          python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py mark "$ARTIFACTS_DIR" repair-done
         That records the durable completion of this repair. Without it the
         commit step reports FIXER_INCOMPLETE and your work is re-attempted.
         Read the current round number from round.txt in that directory, then read
@@ -2447,6 +2491,20 @@ nodes:
           manual, write the JSON result with all arrays empty (advisory may list P3
           waivers) and stop. Do not invent work.
         - Fix unresolved P0-P2 gated_auto/manual findings by editing repository files.
+        - P0 and P1 are ALWAYS applied. P2 is applied ONLY when the finding
+          carries a "suggested_fix" and that fix adds no method, no exported
+          symbol, and no call into a pinned symbol. Every other P2 goes in
+          "advisory" with its action starting "Deferred:" and one line saying
+          which of those three it would have added. This is not triage by
+          taste: a P2 whose repair grows the design turns the next round into
+          a full re-discovery, and in v1 that is what turned a two-round loop
+          into seven.
+        - When a P0/P1 repair DOES add a method, an exported symbol, or a call
+          into a pinned symbol, apply it and set "design_expanded": true on
+          that entry. Saying so costs the next round a full review instead of
+          a verification pass, which is the correct price: a verification pass
+          re-checks the findings it was given and cannot see an assumption the
+          new behaviour broke outside its hunks.
         - P3/advisory: do NOT fix; record each as a waiver with one line of rationale.
         - "failed" means BLOCKED — it halts the whole pipeline for a human. Reserve it
           for a P0-P2 that must be fixed in this diff and that you attempted but could
@@ -2463,6 +2521,18 @@ nodes:
           blocker nor work to attempt: a pin is reopened at the plan gate and
           nowhere else, so applying it here would land a change the approved
           plan does not cover.
+          ONE EXCEPTION, and it gets its own partition. A P0 or P1 whose only
+          repair would change a pinned symbol whose "allowed_change" is
+          "none" goes in "pin_conflict", entries {"finding", "action",
+          "symbol", "severity"}, naming the symbol. It is not advisory,
+          because a P0/P1 is not something this run may quietly carry, and it
+          is not "failed", because nothing here can fix it: the plan and the
+          finding genuinely disagree and only a human can settle which one
+          moves. The run stops so that decision gets made.
+          A pinned symbol whose "allowed_change" names an exception is NOT a
+          conflict when your repair is that exception. Apply it; the pin guard
+          reports PIN_CHANGED and the next review verifies the change is the
+          one the spec allowed.
         - If waivers.json exists in the artifacts directory, a finding whose
           normalized key matches one of its entries is "advisory" by default —
           record it as a waiver again rather than re-fixing or failing on
@@ -2489,10 +2559,17 @@ nodes:
           the round's clarity.
         Write JSON to round-<N>/fixer-result.json in the artifacts directory:
           {"applied": [...], "failed": [...], "advisory": [...], "incomplete": [...], "cross_repo": [...]}
+        plus, on this lane, a sixth key "pin_conflict": [...] alongside them.
         each entry {"finding": "<one-line>", "action": "<what/why>"}.
         Every "applied", "advisory" and "incomplete" entry also carries
         "severity": "P0|P1|P2|P3". An omitted severity reads as P0, which
         keeps the loop running.
+        An "applied" entry also carries "design_expanded": true when that
+        repair added a method, an exported symbol, or a call into a pinned
+        symbol, and the flag is omitted or false otherwise.
+        "pin_conflict" entries are {"finding", "action", "symbol",
+        "severity"} — see the pinned-decisions rule above. Write the key even
+        when it is empty, exactly as you do for the others.
         "cross_repo" is for a finding whose defect lives in a DIFFERENT
         repository of this chain: entries are {"finding", "action",
         "producer_repo", "severity"}. Such a finding is neither advisory nor
@@ -2516,7 +2593,7 @@ nodes:
         # be committed, not what happens to be in the worktree), then either
         # attest a no-change result without an empty commit or commit and
         # attest the new HEAD. check-scope.py still stages and quarantines.
-        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py "$ARTIFACTS_DIR" commit-fixer
+        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py commit-fixer "$ARTIFACTS_DIR"
     - id: converge
       depends_on:
       - commit-fixer
@@ -2536,7 +2613,7 @@ nodes:
         # fixer's attestation on a clean candidate come first; then the
         # closure table, first match wins; then decision.json and, on a
         # converged decision, the promise.
-        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py "$ARTIFACTS_DIR" converge
+        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py converge "$ARTIFACTS_DIR"
 - id: exit-gate
   depends_on:
   - review-loop

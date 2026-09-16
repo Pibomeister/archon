@@ -78,11 +78,15 @@ export CE_REVIEW_ROOT="$TMP/ce-root"; mkdir -p "$CE_REVIEW_ROOT"
 
 # --- node bodies, extracted from the shipped YAML --------------------------
 body() {
+  # review-gate references $review.output. The engine substitutes it; here the
+  # reviewer stand-in has already written the envelope to disk, so the empty
+  # string is the honest value -- it forces the same disk-read path a reuse
+  # round takes, which is the path under test.
   python3 - "$TESTS" "$LANE" "$1" <<'PY'
 import sys
 sys.path.insert(0, sys.argv[1])
 from nodes.extract import runnable_body
-sys.stdout.write(runnable_body(sys.argv[2], sys.argv[3]))
+sys.stdout.write(runnable_body(sys.argv[2], sys.argv[3], outputs={"review": ""}))
 PY
 }
 for n in round-pre review-gate fix-plan commit-fixer converge; do
@@ -97,12 +101,23 @@ jfield() { python3 -c 'import json,sys;print(json.loads(sys.stdin.read().strip()
 
 round_now() { cat "$AD/round.txt" 2>/dev/null || echo 0; }
 
+# Three of the eight boundaries are INSIDE commit-fixer, which is one call into
+# the helper, so reaching them honestly needs the helper's own test hook. Without
+# it the harness still runs those passes but says so: a boundary it cannot reach
+# is reported, never quietly counted as covered.
+KILL_HOOK=no
+grep -q ROUND_STATE_KILL_AFTER "$HELPER" && KILL_HOOK=yes
+
 # --- AI stand-ins ----------------------------------------------------------
 # Each does exactly what its prompt instructs, and nothing else.
 reviewer() { # $1 verdict
-  python3 "$HELPER" "$AD" mark review-start >/dev/null 2>&1 || return 1
+  python3 "$HELPER" mark "$AD" review-start >/dev/null 2>&1 || return 1
   local n id env
-  n=$(round_now); id=$(python3 "$HELPER" "$AD" id 2>/dev/null)
+  # The expected identity is recorded IN review-input.json by round-pre, so the
+  # stand-in reads it rather than recomputing the sha256 formula here -- a second
+  # copy of that formula would drift silently the first time it changed.
+  n=$(round_now)
+  id=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("id",""))' "$AD/round-$n/review-input.json" 2>/dev/null)
   env="$TMP/envelope.txt"
   {
     echo "Scope: full"
@@ -114,10 +129,10 @@ reviewer() { # $1 verdict
     echo "Verdict: $1"
     echo "Review complete"
   } > "$env"
-  python3 "$HELPER" "$AD" mark review-done "$env" >/dev/null 2>&1
+  python3 "$HELPER" mark "$AD" review-done "$env" >/dev/null 2>&1
 }
 fixer() { # $1 = "edit" | "nochange"
-  python3 "$HELPER" "$AD" mark repair-start >/dev/null 2>&1 || return 1
+  python3 "$HELPER" mark "$AD" repair-start >/dev/null 2>&1 || return 1
   local n; n=$(round_now)
   if [ "$1" = edit ]; then
     printf 'export function f(a: number) { if (!Number.isFinite(a)) throw new Error("a"); return a; }\n' > "$WT/src/f.ts"
@@ -130,7 +145,7 @@ JSON
 {"applied":[],"failed":[],"advisory":[],"incomplete":[],"cross_repo":[]}
 JSON
   fi
-  python3 "$HELPER" "$AD" mark repair-done >/dev/null 2>&1
+  python3 "$HELPER" mark "$AD" repair-done >/dev/null 2>&1
 }
 
 # --- one pass of the loop, stopping after $STOP_AFTER -----------------------
@@ -152,7 +167,7 @@ pass() { # $1 stop-after boundary, $2 verdict, $3 fixer mode
   fi
   [ "$stop" = envelope-written ] && return 0
 
-  run_node review-gate >/dev/null || { note "review-gate FAILED: $(tail -2 "$TMP/last.err")"; return 1; }
+  run_node review-gate > "$TMP/gate.out" || { note "review-gate FAILED: $(tail -3 "$TMP/gate.out" "$TMP/last.err" | tr "\n" " ")"; return 1; }
   [ "$stop" = gate-passed ] && return 0
 
   out=$(run_node fix-plan) || { note "fix-plan FAILED: $(tail -1 "$TMP/last.err")"; return 1; }
@@ -169,7 +184,12 @@ pass() { # $1 stop-after boundary, $2 verdict, $3 fixer mode
   # hook rather than by constructing a state this script invented.
   case "$stop" in
     ledger-merged|post-fix-written|committed)
-      ROUND_STATE_KILL_AFTER="$stop" run_node commit-fixer >/dev/null
+      if [ "$KILL_HOOK" = yes ]; then
+        ROUND_STATE_KILL_AFTER="$stop" run_node commit-fixer >/dev/null
+      else
+        note "SKIPPED boundary $stop (round-state.py has no ROUND_STATE_KILL_AFTER hook)"
+        run_node commit-fixer >/dev/null
+      fi
       return 0 ;;
   esac
   run_node commit-fixer >/dev/null || { note "commit-fixer FAILED: $(tail -2 "$TMP/last.err")"; return 1; }
@@ -202,6 +222,17 @@ pass "" "Ready to merge" nochange
 # --- judgement -------------------------------------------------------------
 # A `run` whose reason is neither `initial` nor `interrupted` is, by the plan's
 # definition, an activity paid for twice.
+# A node that FAILED did not complete its activity, so every decision after it
+# describes a loop that never ran. Counting duplicates over that log would report
+# zero for the best possible reason and the worst possible one identically, which
+# is the shape of check this repo has been bitten by before.
+BROKE=$(grep -E 'FAILED:|stand-in failed' "$LOG" || true)
+if [ -n "$BROKE" ]; then
+  echo "INJECTION_LOG"; sed 's/^/  /' "$LOG"
+  echo "INJECTION=FAIL a node failed; the duplicate count below would be vacuous"
+  printf '%s\n' "$BROKE" | sed 's/^/  broke: /'
+  exit 1
+fi
 DUPES=$(grep -E '^(round-pre review=run|fix-plan fixer=run)' "$LOG" \
         | grep -vE 'reason=(initial|interrupted)' || true)
 NDUP=$(printf '%s' "$DUPES" | grep -c . || true)
@@ -216,4 +247,5 @@ if [ "$NDUP" != 0 ]; then
   printf '%s\n' "$DUPES" | sed 's/^/  duplicate: /'
   exit 1
 fi
-echo "INJECTION=PASS duplicates=0 reviews=$REVIEWS fixers=$FIXERS boundaries=${#BOUNDARIES[@]}"
+SKIPPED=$(grep -c '^SKIPPED boundary' "$LOG" || true)
+echo "INJECTION=PASS duplicates=0 reviews=$REVIEWS fixers=$FIXERS boundaries=${#BOUNDARIES[@]} unreachable=$SKIPPED"

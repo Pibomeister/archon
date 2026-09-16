@@ -352,13 +352,13 @@ The pre-round cap in `round-pre` is what bounds rows 2 and 4–7 and 10; at the 
 **Rejecting a review by hand** (the recipe row 3 points at):
 
 ```bash
-python3 .archon/setup/round-state.py "$(bash .archon/setup/run-artifacts.sh <run>)" reject-review --reason "verdict contradicts its own findings"
+python3 .archon/setup/round-state.py reject-review "$(bash .archon/setup/run-artifacts.sh <run>)" --reason "verdict contradicts its own findings"
 bash .archon/setup/resume.sh <run>
 ```
 
 It writes `round-N/review-rejected.txt`, renames the envelope to `review-envelope.rejected-<k>.txt` for diagnosis, and deletes `review.ok` so nothing downstream is still authorized by it. The next `round-pre` prints `reason=rejected` and runs a fresh review.
 
-**Diagnosing a `GATE_5` failure**: `python3 .archon/setup/round-state.py <artifacts> id` prints the identity the round expects; diff it against the envelope's `Input:` line.
+**Diagnosing a `GATE_5` failure**: `python3 .archon/setup/round-state.py id <artifacts>` prints the identity the round expects; diff it against the envelope's `Input:` line.
 
 ## 3a. Planning-critic loop exits (`full-sdlc-api` `plan-loop`) — observed live 2026-08-28 (d3aa3b55: converged round 1); the failure exits below are exercised by `setup/tests` (drills + ×100 stress), not yet seen live
 

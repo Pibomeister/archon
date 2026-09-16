@@ -178,6 +178,9 @@ MANIFEST=(
   # including both lanes' round-pre -- so an install without it dies at the first
   # round on the operator's machine.
   setup/round-state.py
+  # Pin guard: commit-impl and commit-fixer both call it on the staged index,
+  # so an install without it fails at the first commit of the first stage.
+  setup/pin-guard.py
   setup/mcp-smoke.sh
   setup/codex-usage.py
   setup/codex-watchdog.sh

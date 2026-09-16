@@ -45,7 +45,7 @@ EXPECTED = [
 # purpose: the lite lane overlays that body with its own single-round contract,
 # so it is asserted separately (see the authorization test below).
 SUBCOMMAND = {
-    "round-pre": ("pre", "pre-lite"),
+    "round-pre": ("pre",),
     "review-gate": ("gate",),
     "fix-plan": ("fix-plan",),
     "commit-fixer": ("commit-fixer",),
@@ -121,11 +121,19 @@ class ReviewLoopTopology(unittest.TestCase):
                 with self.subTest(lane=lane, node=nid):
                     body = nodes[nid]["bash"]
                     self.assertIn(HELPER, body)
+                    # Subcommand first, artifacts second: round-state.py uses
+                    # argparse subparsers, so the order is not negotiable.
                     calls = re.findall(
-                        re.escape(HELPER) + r' "\$ARTIFACTS_DIR" ([a-z-]+)', body)
-                    self.assertEqual(len(calls), 1,
-                                     f"{nid} must call the helper exactly once, got {calls}")
-                    self.assertIn(calls[0], subs)
+                        re.escape(HELPER) + r' ([a-z-]+) "\$ARTIFACTS_DIR"', body)
+                    # review-gate calls it twice on purpose and exclusively:
+                    # once with --fail to record a rejected envelope, once plain
+                    # for the real gate. What must hold is that every call on
+                    # this node names THIS node's subcommand -- a body that
+                    # reaches into another node's state machine is the bug.
+                    self.assertTrue(calls, f"{nid} never calls the helper")
+                    self.assertEqual(set(calls), set(subs) & set(calls),
+                                     f"{nid} calls the wrong subcommand: {calls}")
+                    self.assertEqual(set(calls), {subs[0]}, calls)
 
     def test_the_two_marked_prompts_open_and_close_on_the_helper(self):
         # The envelope and the repair-completion record are written by the AI
@@ -133,8 +141,11 @@ class ReviewLoopTopology(unittest.TestCase):
         # invocation into an interrupted one and the next round pays for it again.
         for lane in LANES:
             _, nodes, _ = loop_nodes(lane)
-            for nid, start, done in (("review", "mark review-start", "mark review-done"),
-                                     ("fixer", "mark repair-start", "mark repair-done")):
+            for nid, start, done in (
+                ("review", 'mark "$ARTIFACTS_DIR" review-start',
+                           'mark "$ARTIFACTS_DIR" review-done'),
+                ("fixer", 'mark "$ARTIFACTS_DIR" repair-start',
+                          'mark "$ARTIFACTS_DIR" repair-done')):
                 with self.subTest(lane=lane, node=nid):
                     prompt = nodes[nid]["prompt"]
                     self.assertIn(start, prompt)
@@ -159,14 +170,18 @@ class ReviewLoopTopology(unittest.TestCase):
                 self.assertIn("REVIEW_UNAUTHORIZED", body)
                 self.assertIn("fixer.ok", body)
 
-    def test_the_lite_lane_takes_the_lite_round_pre(self):
-        # The lite overlay replaces round-pre wholesale, so it is the one body
-        # that can silently stop emitting the JSON line the inherited `review`
-        # node's `when:` reads.
-        _, nodes, _ = loop_nodes("full-sdlc-api-lite")
-        self.assertIn("pre-lite", nodes["round-pre"]["bash"])
-        _, parent, _ = loop_nodes("full-sdlc-api")
-        self.assertNotIn("pre-lite", parent["round-pre"]["bash"])
+    def test_the_lite_overlay_differs_only_in_the_cap(self):
+        # The lite overlay replaces round-pre WHOLESALE, which is the one place
+        # this lane can silently stop emitting the JSON line the inherited
+        # `review` node's `when:` reads, or grow a second implementation of
+        # reuse, identity and base validation. It does neither: it seeds the
+        # one-round cap and then calls the same `pre` the parent calls.
+        lite = loop_nodes("full-sdlc-api-lite")[1]["round-pre"]["bash"]
+        parent = loop_nodes("full-sdlc-api")[1]["round-pre"]["bash"]
+        self.assertIn('round-cap.txt" || echo 1 >', lite)
+        self.assertNotIn("round-cap.txt", parent)
+        for body in (lite, parent):
+            self.assertIn('round-state.py pre "$ARTIFACTS_DIR"', body)
 
 
 if __name__ == "__main__":

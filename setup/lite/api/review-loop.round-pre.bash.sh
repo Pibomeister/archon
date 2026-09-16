@@ -6,12 +6,18 @@ set -uo pipefail
 # unparseable, and an unparseable `when:` silently skips the reviewer while the
 # run still reports SUCCESS (RUNBOOK 3).
 if [ -n "${ARTIFACTS_DIR-}" ]; then exec 2> >(tee -a "$ARTIFACTS_DIR/node-round-pre.out" >&2); fi
-# LITE lane: one review round, so there is no reuse decision to make and no
-# decision.json to replay -- `pre-lite` always answers `review: run`, defaults
-# the durable cap to 1 to match the converge overlay, and skips the parent's
-# pending-commit reconciliation. It still writes review-input.json with the same
-# constituents as the parent, which is what makes the inherited review-gate's
-# GATE_5 identity check apply to this lane too. v1's GATE_4 had a SKIP path here
-# because the lite overlay never wrote a review-mode.txt; GATE_5 has no SKIP
-# path, because the identity is written on both lanes by the same code.
-python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py "$ARTIFACTS_DIR" pre-lite
+# The ONLY thing this lane does differently is the cap: one review round, to
+# match the converge overlay. Seed it rather than branch on it, so the decision
+# procedure below is byte-for-byte the parent's -- a second implementation of
+# reuse, identity and base validation is exactly the drift the lite overlays
+# keep producing, and it is why review-input.json has to be written by the same
+# code on both lanes for the inherited review-gate's GATE_5 to mean anything.
+# Seeded only when absent: an operator who raised the cap and resumed keeps it.
+test -f "$ARTIFACTS_DIR/round-cap.txt" || echo 1 > "$ARTIFACTS_DIR/round-cap.txt"
+# Reuse is not a lite/full distinction. A lite resume that re-reviews a candidate
+# whose envelope already matches is the same wasted invocation it is on the full
+# lane, and the lite lane inherits the gate, fix-plan and commit-fixer that make
+# the completion records meaningful. What lite does not inherit is converge, so
+# no decision.json is ever written here and the terminal-replay branch is dead
+# code on this lane rather than a behaviour difference.
+python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py pre "$ARTIFACTS_DIR"
