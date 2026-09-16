@@ -308,6 +308,20 @@ class LedgerTest(unittest.TestCase):
         self.assertIs(summary["degraded"], False)
         self.assertEqual(summary["residual_count"], 1)
 
+    def test_the_summary_is_written_by_the_one_script_every_lane_calls(self):
+        # Eleven workflows and the linux smoke run call write-review-summary.py.
+        # A second implementation of the same three keys inside the ledger would
+        # drift from it silently, and the drift surfaces as round-reclaim no
+        # longer recognising reviewed rounds. Delete the script: the merge fails
+        # loudly instead of writing a shape nothing else agrees with.
+        script = ARCHON / "setup" / "write-review-summary.py"
+        moved = self.ad / "write-review-summary.py.moved"
+        shutil.move(str(script), str(moved))
+        self.addCleanup(lambda: shutil.move(str(moved), str(script))
+                        if moved.exists() else None)
+        env = self.write_envelope(findings=[])
+        self.run_ledger("merge-envelope", 1, env, expect=1)
+
     def test_a_degraded_envelope_is_recorded_as_degraded(self):
         env = self.write_envelope(findings=[], degraded=True)
         self.run_ledger("merge-envelope", 1, env)

@@ -167,13 +167,22 @@ def envelope_scope(text):
 
 
 def write_summary(ad, n, verdict, degraded, residual):
-    """Byte-shape compatibility with write-review-summary.py:9. `round-reclaim.sh`
-    greps this file for a non-empty `"verdict": "..."` and `exit-gate` indexes
-    `['verdict']`; neither has heard of the ledger."""
+    """`round-reclaim.sh` greps this file for a non-empty `"verdict": "..."` and
+    `exit-gate` indexes `['verdict']`; neither has heard of the ledger, so the
+    file keeps being written on every envelope merge.
+
+    It is written by SHELLING OUT to write-review-summary.py rather than by
+    reproducing its json.dump here. Eleven workflows and the linux smoke run call
+    that script; a second implementation of the same three keys drifts from it
+    silently, and the drift surfaces as a round-reclaim that stops recognising
+    reviewed rounds. One writer, one shape.
+    """
     path = os.path.join(round_dir(ad, n), "review-summary.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump({"verdict": verdict, "residual_count": residual,
-                   "degraded": degraded}, f)
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "write-review-summary.py")
+    subprocess.run([sys.executable, script, path, verdict,
+                    "true" if degraded else "false", str(residual)],
+                   check=True, capture_output=True)
     return path
 
 
