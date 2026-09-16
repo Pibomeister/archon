@@ -199,6 +199,59 @@ class ReviewLoopTopology(unittest.TestCase):
                 self.assertIn("REVIEW_UNAUTHORIZED", body)
                 self.assertIn("fixer.ok", body)
 
+    def test_both_json_nodes_type_their_exits(self):
+        """A zero exit must print a PASS-class line and a non-zero exit a
+        FAIL-class one, or RUNBOOK cannot route it.
+
+        These two nodes are the ones at risk: their stdout is a bare JSON object,
+        which is not a typed line at all, so the ONLY thing that can type them is
+        what they put on stderr. Run for real rather than asserted from the body,
+        because the line that types them comes from round-state.py, not from any
+        text this file can read.
+        """
+        helper = ARCHON / HELPER
+        if not helper.is_file():
+            self.skipTest("round-state.py is not in this tree yet")
+        import json as _json
+        import os
+        import subprocess
+        import tempfile
+        from nodes.extract import runnable_body
+        from nodes.runner import classify, _typed_lines
+
+        for lane in ("full-sdlc-api", "full-sdlc-api-lite"):
+            tmp = Path(tempfile.mkdtemp(prefix="jsonnode-"))
+            ad, wt = tmp / "ad", tmp / "wt"
+            ad.mkdir(); wt.mkdir()
+            subprocess.run(
+                "git init -q && git config user.email t@t && git config user.name t"
+                " && echo a > a && git add . && git commit -qm base",
+                cwd=wt, shell=True, check=True, capture_output=True)
+            head = subprocess.run("git rev-parse HEAD", cwd=wt, shell=True,
+                                  capture_output=True, encoding="utf-8").stdout
+            (ad / "params.json").write_text(_json.dumps(
+                {"spec": "/x.md", "slug": "x", "branch": "archon/x", "worktree": str(wt)}))
+            (ad / "files-allowlist.json").write_text('["a"]')
+            (ad / "bootstrap-head.txt").write_text(head)
+            (ad / "plan.md").write_text("# plan\n")
+            env = {**os.environ, "ARTIFACTS_DIR": str(ad)}
+            for node in ("round-pre", "fix-plan"):
+                r = subprocess.run(["bash", "-c", runnable_body(lane, node)],
+                                   capture_output=True, encoding="utf-8", env=env)
+                has_pass, has_fail = classify(
+                    _typed_lines((r.stdout or "") + (r.stderr or "")))
+                with self.subTest(lane=lane, node=node):
+                    # The JSON line itself must still parse: an unparseable
+                    # `when:` skips its node while the run reports SUCCESS.
+                    _json.loads(r.stdout.strip())
+                    if r.returncode == 0:
+                        self.assertTrue(
+                            has_pass,
+                            f"{node} exited 0 with no PASS-class line; typed lines "
+                            f"were {_typed_lines((r.stdout or '') + (r.stderr or ''))}")
+                    else:
+                        self.assertTrue(has_fail, f"{node} exited {r.returncode} untyped")
+
     def test_the_lite_overlay_differs_only_in_the_cap(self):
         # The lite overlay replaces round-pre WHOLESALE, which is the one place
         # this lane can silently stop emitting the JSON line the inherited
