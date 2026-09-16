@@ -583,6 +583,21 @@ class ReuseCases(LaneCase):
         self.assertEqual((result["review"], result["reason"]), ("run", "gate-failed"))
 
 
+class AllowlistPrecondition(LaneCase):
+    def test_an_empty_allowlist_is_a_typed_stop_not_an_empty_tree(self):
+        """Otherwise T == HEAD's tree always, and every repair reads no-change."""
+        self.lane.write_json("files-allowlist.json", [])
+        result = self.lane.pre()
+        self.assertEqual(result["exit"], 1)
+        self.assertIn("files-allowlist.json is missing or empty", result["stderr"])
+
+    def test_a_missing_allowlist_is_a_typed_stop(self):
+        (self.lane.ad / "files-allowlist.json").unlink()
+        result = self.lane.pre()
+        self.assertEqual(result["exit"], 1)
+        self.assertIn("ROUND_STATE=FAIL", result["stderr"])
+
+
 class BaseValidation(LaneCase):
     def test_a_base_that_is_not_in_the_repository_fails(self):
         lane = self.lane

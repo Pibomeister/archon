@@ -189,9 +189,16 @@ class Round:
 
     # --- the candidate ---------------------------------------------------
     def allowlist(self):
-        data = read_json(self.ad / "files-allowlist.json", [])
-        if not isinstance(data, list):
-            return []
+        """The plan's allowlist. Absent is a typed stop, never an empty list.
+
+        T is `git add -A` over these paths, so an empty allowlist makes T equal
+        HEAD's tree unconditionally: every repair would read as a no-change
+        result, commit-fixer would attest without committing, and the fixer's
+        work would be silently dropped with every gate green.
+        """
+        data = read_json(self.ad / "files-allowlist.json")
+        if not isinstance(data, list) or not data:
+            raise Stop(f"ROUND_STATE=FAIL files-allowlist.json is missing or empty [{self.ad}]")
         return [p for p in data if isinstance(p, str) and p.strip()]
 
     def tree(self):
