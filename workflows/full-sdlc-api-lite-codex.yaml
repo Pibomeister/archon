@@ -799,31 +799,27 @@ nodes:
     - id: round-pre
       timeout: 120000
       bash: |
-        set -euo pipefail
-        C="$ARTIFACTS_DIR/round.txt"
-        N=$(cat "$C" 2>/dev/null || echo 0)
-        # Hand-editable counter: reject junk before it is incremented or used as a path.
-        case "$N" in '') N=0 ;; *[!0-9]*) echo "ROUND_PRE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
-        # LITE lane: default cap 1 (one review round), matching the converge overlay.
-        # Durable cap, checked BEFORE the round is spent (same doctrine as plan-round-pre,
-        # full-sdlc-api.yaml: a cap enforced only in converge is walked past by resuming
-        # after every group failure). accept-residuals.txt is the human bypass.
-        R="/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-reclaim.sh"
-        N=$(bash "$R" "$ARTIFACTS_DIR" "$N" "round-" "review-summary.json" '"verdict"[[:space:]]*:[[:space:]]*"[^"]')
-        CAP=$(cat "$ARTIFACTS_DIR/round-cap.txt" 2>/dev/null || echo 1)
-        case "$CAP" in ''|*[!0-9]*) CAP=1 ;; esac
-        if [ "$N" -ge "$CAP" ] && [ ! -f "$ARTIFACTS_DIR/accept-residuals.txt" ]; then echo "ROUND_CAP_REACHED round=$N cap=$CAP (pre-round: a resume does not buy another review; write accept-residuals.txt or raise round-cap.txt)"; exit 1; fi
-        N=$((N+1)); echo "$N" > "$C"
-        RD="$ARTIFACTS_DIR/round-$N"; mkdir -p "$RD"
-        eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
-        cd "$WT"
-        git rev-parse HEAD > "$RD/pre-head.txt"
-        ls -1d "${CE_REVIEW_ROOT:-/tmp/compound-engineering/ce-code-review}"/*/ 2>/dev/null | LC_ALL=C sort > "$RD/prerun-dirs.txt" || true
-        touch "$RD/prerun-dirs.txt"
-        echo "ROUND=$N head=$(cat "$RD/pre-head.txt")"
+        set -uo pipefail
+        # STDOUT CARRIES ONE BARE JSON LINE AND NOTHING ELSE, exactly as the parent
+        # does: this overlay replaces the parent body wholesale, but it does NOT replace
+        # the sibling `review` node, whose `when: $round-pre.review == 'run'` still
+        # parses this node's output. A human line on stdout here makes that condition
+        # unparseable, and an unparseable `when:` silently skips the reviewer while the
+        # run still reports SUCCESS (RUNBOOK 3).
+        if [ -n "${ARTIFACTS_DIR-}" ]; then exec 2> >(tee -a "$ARTIFACTS_DIR/node-round-pre.out" >&2); fi
+        # LITE lane: one review round, so there is no reuse decision to make and no
+        # decision.json to replay -- `pre-lite` always answers `review: run`, defaults
+        # the durable cap to 1 to match the converge overlay, and skips the parent's
+        # pending-commit reconciliation. It still writes review-input.json with the same
+        # constituents as the parent, which is what makes the inherited review-gate's
+        # GATE_5 identity check apply to this lane too. v1's GATE_4 had a SKIP path here
+        # because the lite overlay never wrote a review-mode.txt; GATE_5 has no SKIP
+        # path, because the identity is written on both lanes by the same code.
+        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py "$ARTIFACTS_DIR" pre-lite
     - id: review
       depends_on:
       - round-pre
+      when: $round-pre.review == 'run'
       timeout: 1800000
       prompt: |
         Use $ce-code-review explicitly for this node.
@@ -834,6 +830,19 @@ nodes:
         command). It is already on the branch to be reviewed.
 
         Resolve the artifacts directory by running: echo "$ARTIFACTS_DIR"
+
+        YOUR FIRST ACTION, before reading anything else, is to run exactly:
+          python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py "$ARTIFACTS_DIR" mark review-start
+        YOUR LAST ACTION, after your output is complete, is to save the
+        envelope and run exactly:
+          python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py "$ARTIFACTS_DIR" mark review-done <path to the envelope you wrote>
+        The envelope on disk is what every downstream gate reads; a review
+        that ends without that second call is an interrupted review and the
+        next round re-runs it, so the whole invocation is wasted.
+        YOU ARE READ-ONLY. Do not edit, create, delete or revert any file in
+        the worktree, and do not commit. The gate takes a tree snapshot
+        before you start and compares it after, so an edit made here is not
+        an unreviewed fix that slips through — it fails the round.
 
         Persona selection happens in this session, so three instructions
         BEFORE you invoke the skill:
@@ -905,18 +914,30 @@ nodes:
     - id: review-gate
       depends_on:
       - review
+      trigger_rule: all_done
       timeout: 300000
       bash: |
         set -uo pipefail
         if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-review-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-review-gate.out" >&2); fi
         N=$(cat "$ARTIFACTS_DIR/round.txt"); RD="$ARTIFACTS_DIR/round-$N"
         case "$N" in ''|*[!0-9]*) echo "REVIEW_GATE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
-        OUT=$review.output
+        # The reviewer writes the envelope itself (`mark review-done`), so the
+        # file is the primary source and the node output is the belt. The
+        # reference is made with `set +u` because `review` may have been
+        # SKIPPED this round: what the engine substitutes for a skipped node's
+        # output template is not documented, and an unset expansion under
+        # `set -u` would abort this node before it printed any typed line.
+        # Both outcomes -- substituted-empty and left-literal -- land on the
+        # short-string branch below, where the disk copy wins.
+        set +u; OUT=$review.output; set -u
         # Resume resilience: node outputs may not survive a resume; the envelope file does.
-        if [ "${#OUT}" -lt 100 ] && [ -s "$RD/review-envelope.txt" ]; then
-          OUT=$(cat "$RD/review-envelope.txt")
+        # Only a SUBSTANTIVE node output overwrites the file: on a reuse round
+        # there is no fresh output and the envelope on disk is the whole point.
+        if [ "${#OUT}" -ge 100 ]; then
+          printf '%s\n' "$OUT" > "$RD/review-envelope.txt"
         fi
-        printf '%s\n' "$OUT" > "$RD/review-envelope.txt"
+        test -s "$RD/review-envelope.txt" || { echo "REVIEW_GATE=FAIL round=$N no envelope at round-$N/review-envelope.txt"; exit 1; }
+        OUT=$(cat "$RD/review-envelope.txt")
         # Dual-contract parse: CE 3.2.0's markdown headless envelope OR the
         # newer skills' single raw JSON object (status/verdict fields).
         eval "$(python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/parse-review-envelope.py "$RD/review-envelope.txt" | sed 's/^/ENV_/')"
@@ -956,51 +977,58 @@ nodes:
         DEGRADED=true; test "$G2" = PASS && DEGRADED=false
         python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/write-review-summary.py \
           "$RD/review-summary.json" "$VERDICT" "$DEGRADED"
-        # A delta review that silently reviewed everything (or a full review
-        # that reviewed only a slice) costs the same budget and proves a
-        # different thing. review-mode.txt is what round-pre decided; the
-        # envelope's Scope line is what the reviewer actually did. SKIP when
-        # there is no mode file: the lite lane overlays round-pre and never
-        # writes one, and it inherits this body verbatim.
-        # A delta scope is only checkable against its BASE: an envelope that
-        # says "delta" over the wrong sha reviewed the wrong diff just as
-        # thoroughly as one that said "full". The whole envelope is searched
-        # rather than its first line, because the CE contract writes a Scope
-        # line of its own further down and the reviewer's own line has to win
-        # on content, not on position.
-        MODE=$(cat "$RD/review-mode.txt" 2>/dev/null || echo "")
-        EXPECT="Scope: $MODE"
-        test "$MODE" = delta && EXPECT="Scope: delta base=$(cat "$RD/review-base.txt" 2>/dev/null || echo MISSING)"
-        SCOPE_LINE=$(grep -m1 'Scope:' "$RD/review-envelope.txt" 2>/dev/null || true)
-        G4=SKIP
-        if [ -n "$MODE" ]; then
-          G4=FAIL
-          grep -qF "$EXPECT" "$RD/review-envelope.txt" 2>/dev/null && G4=PASS
-        fi
-        echo "GATE_4_scope_matches_mode=$G4"
-        if [ "$G4" = FAIL ]; then echo "REVIEW_SCOPE=FAIL mode=$MODE envelope=[$SCOPE_LINE]"; exit 1; fi
+        # The resolved verdict, so every later reader takes the SAME value
+        # this gate typed rather than re-deriving it from a ce-code-review run
+        # directory that no longer exists after a resume.
+        printf '%s\n' "$VERDICT" > "$RD/review-verdict.txt"
+        # Envelope shape first: an envelope that is incomplete, degraded, or
+        # carries a verdict outside the enum is not a review, so it must never
+        # reach the identity gate and must never leave a review.ok behind.
         test "$G1" = PASS && test "$G2" = PASS && test "$G3" = PASS || { echo "REVIEW_GATE=FAIL round=$N"; exit 1; }
+        # Everything that is state rather than parsing: GATE_5 (the envelope's
+        # Input: is this round's review identity and its Head: is the recorded
+        # candidate -- v1's GATE_4 compared a Scope STRING, which since 789b2a1
+        # labels the bootstrap-head comparison `delta` and is ambiguous), the
+        # read-only guard against the pre-review tree snapshot, gate.txt, the
+        # ledger merge, and review.ok -- the ONLY artifact downstream nodes
+        # accept as authorization. review-summary.json stays readable either
+        # way, which is exactly why a readable Ready summary is not enough.
+        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py "$ARTIFACTS_DIR" gate || exit 1
         echo "REVIEW_GATE=PASS round=$N"
-    - id: commit-fixes
+    - id: fix-plan
       depends_on:
       - review-gate
-      timeout: 300000
+      timeout: 120000
       bash: |
-        set -euo pipefail
-        eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
-        cd "$WT"
-        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
-        if git diff --cached --quiet; then echo "COMMITTED=NO"; else
-          git commit -m "fix(review): apply autofix feedback"; echo "COMMITTED=YES sha=$(git rev-parse HEAD)"
-        fi
-        echo "COMMIT_FIXES=OK"
+        set -uo pipefail
+        # JSON only on stdout: `fixer`'s `when:` parses it. Same contract, and
+        # the same silent-skip failure mode, as round-pre above.
+        if [ -n "${ARTIFACTS_DIR-}" ]; then exec 2> >(tee -a "$ARTIFACTS_DIR/node-fix-plan.out" >&2); fi
+        # Decides run / reuse-committed / reuse-uncommitted / unauthorized from
+        # the round's completion records, bound to the gated envelope
+        # generation in review.ok. A repair made for an earlier generation --
+        # before a rejection or a failed gate -- is never reused even when the
+        # review identity is unchanged, and an unaccounted edit to the tree is
+        # FIXER_TREE_DRIFT rather than a silent re-run over someone's work.
+        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py "$ARTIFACTS_DIR" fix-plan
     - id: fixer
       depends_on:
-      - commit-fixes
+      - fix-plan
+      when: $fix-plan.fixer == 'run'
       timeout: 1200000
       prompt: |
         You are the fixer node in an unattended review-fix pipeline. Ask no questions.
         Resolve the artifacts directory by running: echo "$ARTIFACTS_DIR"
+        YOUR FIRST ACTION, before reading or editing anything, is to run exactly:
+          python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py "$ARTIFACTS_DIR" mark repair-start
+        From that call onwards the worktree is yours: partial edits are your
+        provenance, which is what lets an interrupted repair RESUME over its
+        own half-finished tree instead of being read as an unreviewed change.
+        Skipping it means your first edit fails the round.
+        YOUR LAST ACTION, after the result file is written, is to run exactly:
+          python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py "$ARTIFACTS_DIR" mark repair-done
+        That records the durable completion of this repair. Without it the
+        commit step reports FIXER_INCOMPLETE and your work is re-attempted.
         Read the current round number from round.txt in that directory, then read
         the review envelope at round-<N>/review-envelope.txt there.
         The envelope is either CE 3.2.0's markdown headless envelope or the
@@ -1074,24 +1102,40 @@ nodes:
     - id: commit-fixer
       depends_on:
       - fixer
+      trigger_rule: all_done
       timeout: 300000
       bash: |
-        set -euo pipefail
-        eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
-        cd "$WT"
-        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
-        if git diff --cached --quiet; then echo "COMMITTED=NO"; else
-          git commit -m "fix(review): apply fixer feedback"; echo "COMMITTED=YES sha=$(git rev-parse HEAD)"
-        fi
-        echo "COMMIT_FIXER=OK"
+        set -uo pipefail
+        if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-commit-fixer.out") 2> >(tee -a "$ARTIFACTS_DIR/node-commit-fixer.out" >&2); fi
+        # In order, each step idempotent so a kill anywhere is recovered by
+        # re-running this node or by round-pre's pending-commit reconciliation:
+        # validate the fixer's durable completion record, merge its result into
+        # the ledger, run the pin guard ON THE STAGED INDEX (what will actually
+        # be committed, not what happens to be in the worktree), then either
+        # attest a no-change result without an empty commit or commit and
+        # attest the new HEAD. check-scope.py still stages and quarantines.
+        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py "$ARTIFACTS_DIR" commit-fixer
     - id: converge
       depends_on:
       - commit-fixer
+      trigger_rule: all_done
       timeout: 300000
       bash: |
         set -uo pipefail
         N=$(cat "$ARTIFACTS_DIR/round.txt"); RD="$ARTIFACTS_DIR/round-$N"
         exec > >(tee "$RD/converge.txt") 2>&1
+        # AUTHORIZATION, and it is load-bearing on THIS lane specifically. converge now
+        # carries trigger_rule: all_done, because the group's last node is the only one
+        # whose completion promise the engine honours (probe 4). That also means it runs
+        # after a FAILED upstream -- and v1's safety here was accidental: a failed
+        # review-gate used to skip every node behind it, converge included. It no longer
+        # does. review-summary.json is written before the gate's final checks and stays
+        # readable with a Ready verdict, so reading that alone would converge a round
+        # whose review was never gated. The parent's converge checks this inside
+        # round-state.py; this overlay replaces the parent body wholesale, so it has to
+        # check it here or not at all.
+        test -f "$RD/review.ok" || { echo "REVIEW_UNAUTHORIZED round=$N (no gated review envelope)"; exit 1; }
+        test -f "$RD/fixer.ok" || { echo "FIXER_ABSENT round=$N (commit-fixer left no attestation)"; exit 1; }
         eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
         cd "$WT"
         V=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['verdict'])" "$RD/review-summary.json" 2>/dev/null || echo UNKNOWN)

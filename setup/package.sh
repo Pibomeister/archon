@@ -173,6 +173,11 @@ MANIFEST=(
   # Two-hour convergence: review-mode.py is listed because round-pre calls it;
   # the packaging test pins every referenced script to this list.
   setup/review-mode.py
+  # Durable round checkpoints. round-state.py owns every state transition of the
+  # review loop -- five of the loop's seven nodes are now a single call to it,
+  # including both lanes' round-pre -- so an install without it dies at the first
+  # round on the operator's machine.
+  setup/round-state.py
   setup/mcp-smoke.sh
   setup/codex-usage.py
   setup/codex-watchdog.sh

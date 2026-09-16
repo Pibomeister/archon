@@ -69,6 +69,7 @@ PASS_TOKENS = {
     "PLAN_CONVERGED", "RCA_PLAN_CONVERGED",
     "PLAN_ROUND_PROGRESSED", "RCA_PLAN_ROUND_PROGRESSED",
     "CONVERGED", "ROUND_PROGRESSED",
+    "PIN_OK",                        # pin guard, clean: bare token, no =VALUE
     "CRITIQUE",                      # parse-critique.py success line
     "PRE_OK",                        # wrap-review:pre success (PRE_OK head=…)
     "GREEN_CHECK",                   # green-check ALWAYS exits 0 by design:
@@ -90,13 +91,25 @@ FAIL_TOKENS = {
     # `REOPEN=OK` still classifies PASS through its value, and a line that is
     # both reads as typed either way.
     "REVIEW_TREE_DRIFT", "REOPEN", "CHAIN_BUDGET",
+    # Durable round checkpoints and closure convergence (RUNBOOK 3c). Every one
+    # of these is a bare-token stop: the KEY carries the meaning and the tail is
+    # detail, so they need enumerating the same way the rows above do. They are
+    # in FAIL_TOKENS rather than PASS because each one EXITS the node non-zero --
+    # a round that prints any of them did not complete.
+    "REVIEW_UNAUTHORIZED", "REVIEW_WROTE_TREE",
+    "FIXER_ABSENT", "FIXER_INCOMPLETE", "FIXER_TREE_DRIFT",
+    "NOT_READY_WITHOUT_BLOCKER", "PIN_CONFLICT",
+    "PIN_BREACH", "PIN_UNRESOLVED",
 }
 # Informational, deliberately in NEITHER set: REVIEW_MODE, REVIEW_AUTOFIX_ONLY,
-# REVIEW_RERAISE, DESLOP_COMPLEXITY_DOWNGRADED, CHAIN_TIMING. Each is printed
+# REVIEW_RERAISE, DESLOP_COMPLEXITY_DOWNGRADED, CHAIN_TIMING, and the v2
+# additions ROUND_REUSE, CLOSURE, PIN_CHANGED, BASELINE_BEHIND. Each is printed
 # alongside its node's own discriminator (`ROUND=`, `CONVERGED`,
 # `DESLOP=CLEAN`, ...), so classifying them would let a node whose real
-# discriminator went missing still read as typed. `REVIEW_SCOPE=FAIL` and
-# `PLAN_SHAPE=FAIL` need no entry: FAIL_VALUES already classifies them.
+# discriminator went missing still read as typed. `REVIEW_SCOPE=FAIL`,
+# `PLAN_SHAPE=FAIL`, `GATE_5_input_matches=FAIL` and `REVIEW_BASE=FAIL` need no
+# entry: FAIL_VALUES already classifies them by their value. The `PIN_` lines
+# carry no `=VALUE` at all, so they are enumerated in the two sets instead.
 
 # Whole-line PASS forms, for a key that is NOT on its own a PASS token.
 # `round-pre` announces success as `ROUND=N head=<sha>` — but `converge` opens

@@ -1,6 +1,18 @@
 set -uo pipefail
 N=$(cat "$ARTIFACTS_DIR/round.txt"); RD="$ARTIFACTS_DIR/round-$N"
 exec > >(tee "$RD/converge.txt") 2>&1
+# AUTHORIZATION, and it is load-bearing on THIS lane specifically. converge now
+# carries trigger_rule: all_done, because the group's last node is the only one
+# whose completion promise the engine honours (probe 4). That also means it runs
+# after a FAILED upstream -- and v1's safety here was accidental: a failed
+# review-gate used to skip every node behind it, converge included. It no longer
+# does. review-summary.json is written before the gate's final checks and stays
+# readable with a Ready verdict, so reading that alone would converge a round
+# whose review was never gated. The parent's converge checks this inside
+# round-state.py; this overlay replaces the parent body wholesale, so it has to
+# check it here or not at all.
+test -f "$RD/review.ok" || { echo "REVIEW_UNAUTHORIZED round=$N (no gated review envelope)"; exit 1; }
+test -f "$RD/fixer.ok" || { echo "FIXER_ABSENT round=$N (commit-fixer left no attestation)"; exit 1; }
 eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
 cd "$WT"
 V=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['verdict'])" "$RD/review-summary.json" 2>/dev/null || echo UNKNOWN)

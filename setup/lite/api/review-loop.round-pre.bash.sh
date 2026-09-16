@@ -1,22 +1,17 @@
-set -euo pipefail
-C="$ARTIFACTS_DIR/round.txt"
-N=$(cat "$C" 2>/dev/null || echo 0)
-# Hand-editable counter: reject junk before it is incremented or used as a path.
-case "$N" in '') N=0 ;; *[!0-9]*) echo "ROUND_PRE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
-# LITE lane: default cap 1 (one review round), matching the converge overlay.
-# Durable cap, checked BEFORE the round is spent (same doctrine as plan-round-pre,
-# full-sdlc-api.yaml: a cap enforced only in converge is walked past by resuming
-# after every group failure). accept-residuals.txt is the human bypass.
-R="/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-reclaim.sh"
-N=$(bash "$R" "$ARTIFACTS_DIR" "$N" "round-" "review-summary.json" '"verdict"[[:space:]]*:[[:space:]]*"[^"]')
-CAP=$(cat "$ARTIFACTS_DIR/round-cap.txt" 2>/dev/null || echo 1)
-case "$CAP" in ''|*[!0-9]*) CAP=1 ;; esac
-if [ "$N" -ge "$CAP" ] && [ ! -f "$ARTIFACTS_DIR/accept-residuals.txt" ]; then echo "ROUND_CAP_REACHED round=$N cap=$CAP (pre-round: a resume does not buy another review; write accept-residuals.txt or raise round-cap.txt)"; exit 1; fi
-N=$((N+1)); echo "$N" > "$C"
-RD="$ARTIFACTS_DIR/round-$N"; mkdir -p "$RD"
-eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
-cd "$WT"
-git rev-parse HEAD > "$RD/pre-head.txt"
-ls -1d "${CE_REVIEW_ROOT:-/tmp/compound-engineering/ce-code-review}"/*/ 2>/dev/null | LC_ALL=C sort > "$RD/prerun-dirs.txt" || true
-touch "$RD/prerun-dirs.txt"
-echo "ROUND=$N head=$(cat "$RD/pre-head.txt")"
+set -uo pipefail
+# STDOUT CARRIES ONE BARE JSON LINE AND NOTHING ELSE, exactly as the parent
+# does: this overlay replaces the parent body wholesale, but it does NOT replace
+# the sibling `review` node, whose `when: $round-pre.review == 'run'` still
+# parses this node's output. A human line on stdout here makes that condition
+# unparseable, and an unparseable `when:` silently skips the reviewer while the
+# run still reports SUCCESS (RUNBOOK 3).
+if [ -n "${ARTIFACTS_DIR-}" ]; then exec 2> >(tee -a "$ARTIFACTS_DIR/node-round-pre.out" >&2); fi
+# LITE lane: one review round, so there is no reuse decision to make and no
+# decision.json to replay -- `pre-lite` always answers `review: run`, defaults
+# the durable cap to 1 to match the converge overlay, and skips the parent's
+# pending-commit reconciliation. It still writes review-input.json with the same
+# constituents as the parent, which is what makes the inherited review-gate's
+# GATE_5 identity check apply to this lane too. v1's GATE_4 had a SKIP path here
+# because the lite overlay never wrote a review-mode.txt; GATE_5 has no SKIP
+# path, because the identity is written on both lanes by the same code.
+python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py "$ARTIFACTS_DIR" pre-lite
