@@ -113,7 +113,7 @@ def fail(reason: str) -> NoReturn:
     raise SystemExit(1)
 
 
-def resolve_run(db: Path, prefix: str) -> dict:
+def resolve_run(db: Path, prefix: str, lanes: set[str] = LANES) -> dict:
     if not ID_RE.fullmatch(prefix):
         fail(f"bad-id-format [{prefix}]")
     con = sqlite3.connect(db)
@@ -129,7 +129,7 @@ def resolve_run(db: Path, prefix: str) -> dict:
     if len(rows) != 1:
         fail(f"ambiguous prefix={prefix} matches={len(rows)}")
     row = dict(rows[0])
-    if row["workflow_name"] not in LANES:
+    if row["workflow_name"] not in lanes:
         fail(f"run {row['id'][:8]} is {row['workflow_name']}, not a guarded Codex lane")
     return row
 
@@ -3544,7 +3544,10 @@ def main() -> None:
     args = parser().parse_args()
     if args.action == "feature-replan":
         validate_control_location(args.control_dir)
-        row = resolve_run(args.db, args.run_id)
+        # A claude chain's planning run is a claude feature lane, which the
+        # codex-only guard would reject before the chain's own provider check.
+        claude_lanes = LANES | set(FEATURE_LANES["claude"].values()) if args.chain else LANES
+        row = resolve_run(args.db, args.run_id, claude_lanes)
         if args.chain:
             replanned = repository_feature_call("restart_planning_unguarded", args, row, args.chain)
             if isinstance(replanned, dict) and replanned.get("result") is None:

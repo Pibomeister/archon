@@ -110,6 +110,30 @@ class FeatureScope(unittest.TestCase):
         args = ar.parser().parse_args(["feature-replan", "abc12345", "--chain", "c" * 32])
         self.assertEqual((args.chain, args.token), ("c" * 32, None))
 
+    def test_claude_chain_replan_reaches_the_chain_with_a_claude_lane_run(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "archon.db"
+            import sqlite3
+            con = sqlite3.connect(db)
+            con.execute("CREATE TABLE remote_agent_workflow_runs (id TEXT, workflow_name TEXT, "
+                        "user_message TEXT, status TEXT, output_root TEXT, started_at TEXT)")
+            con.execute("INSERT INTO remote_agent_workflow_runs VALUES "
+                        "('abc12345-0000-0000-0000-000000000000', 'full-sdlc-api', '', 'failed', '', '1')")
+            con.commit()
+            con.close()
+            argv = ["archon-run.py", "--db", str(db), "feature-replan", "abc12345", "--chain", "c" * 32]
+            with mock.patch("sys.argv", argv), \
+                 mock.patch.object(ar, "validate_control_location"), \
+                 mock.patch.object(ar, "repository_feature_call", return_value={"result": None}) as call, \
+                 mock.patch.object(ar, "print_feature_chain_pause"):
+                ar.main()
+            self.assertEqual(call.call_args.args[0], "restart_planning_unguarded")
+            with mock.patch("sys.argv", argv[:-2] + ["--token", "t"]), \
+                 mock.patch.object(ar, "validate_control_location"), \
+                 contextlib.redirect_stdout(io.StringIO()), \
+                 self.assertRaises(SystemExit):
+                ar.main()
+
     def test_parser_accepts_feature_advance(self):
         args = ar.parser().parse_args(["feature-advance", "--chain", "c" * 32])
         self.assertEqual(args.action, "feature-advance")
