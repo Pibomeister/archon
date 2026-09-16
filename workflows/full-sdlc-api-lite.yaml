@@ -360,7 +360,7 @@ nodes:
   depends_on:
   - lite-envelope
   model: sonnet
-  maxBudgetUsd: 3
+  maxBudgetUsd: 5
   timeout: 900000
   prompt: |
     You are the plan-presentation node on the LITE lane. The human plan review
@@ -799,7 +799,7 @@ nodes:
       depends_on:
       - round-pre
       model: sonnet
-      maxBudgetUsd: 15
+      maxBudgetUsd: 20
       timeout: 1800000
       skills:
       - ce-code-review
@@ -974,7 +974,7 @@ nodes:
       depends_on:
       - commit-fixes
       model: sonnet
-      maxBudgetUsd: 5
+      maxBudgetUsd: 8
       timeout: 1200000
       prompt: |
         You are the fixer node in an unattended review-fix pipeline. Ask no questions.
