@@ -8,6 +8,7 @@ strict transitions needed for repository-list feature runs.
 """
 from __future__ import annotations
 
+import datetime
 import fcntl
 import hashlib
 import hmac
@@ -1872,6 +1873,11 @@ def params_payload(state: dict, phase: str, repo: str | None, row: dict) -> dict
                 raise FeatureChainError("approved API fixture revision drifted")
             payload["api_fixture_worktree"] = str(fixture.resolve())
             payload["api_fixture_head_sha"] = stage["api_fixture_head_sha"]
+    if phase == "implement" and repo in state["repositories"]:
+        previous_head = state["stages"][repo].get("verify_only_head")
+        if previous_head:
+            payload["feature_verify_only"] = "yes"
+            payload["feature_previous_head"] = str(previous_head)
     return payload
 
 
@@ -3425,6 +3431,145 @@ def finalize_integration(control_dir: Path, chain_id: str, evidence: dict, artif
         return finalize_integration_unlocked(control_dir, read_state(control_dir, chain_id), evidence, artifacts)
 
 
+# --- chain timing: report-only wall accounting across the chain's own run rows ---
+
+CHAIN_WALL_BUDGET_SECONDS = 10800
+
+
+def timing_path(control_dir: Path, chain_id: str) -> Path:
+    return state_dir(control_dir) / f"{chain_id}-chain-timing.json"
+
+
+def parse_run_timestamp(value: object) -> float | None:
+    """`remote_agent_workflow_runs` stores `YYYY-MM-DD HH:MM:SS`; ISO-8601 also reads."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        stamp = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=datetime.timezone.utc)
+    return stamp.timestamp()
+
+
+def run_intervals(db: Path, run_ids: list[str]) -> dict[str, tuple[float | None, float | None]]:
+    """Start/end epoch seconds per run id. An unreadable database yields nothing."""
+    if not run_ids:
+        return {}
+    try:
+        with sqlite3.connect(db) as con:
+            if not {"id", "started_at", "completed_at"} <= table_columns(con, "remote_agent_workflow_runs"):
+                return {}
+            placeholders = ",".join("?" for _ in run_ids)
+            rows = con.execute(
+                f"SELECT id, started_at, completed_at FROM remote_agent_workflow_runs WHERE id IN ({placeholders})",
+                run_ids,
+            ).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {str(row[0]): (parse_run_timestamp(row[1]), parse_run_timestamp(row[2])) for row in rows}
+
+
+SEGMENT_END_EVENTS = ("approval_requested", "workflow_paused", "workflow_failed", "workflow_completed")
+
+
+def run_segments(db: Path, run_ids: list[str]) -> dict[str, list[tuple[float, float | None]]]:
+    """Active segments per run from the event log: each `workflow_started` up to the
+    next gate/failure/completion (or the next start). A run row's started_at is
+    overwritten on every resume, so the runs table alone reports only the last
+    resume segment (chain 3460c074 read api=1482 s for a 3.5 h stage) and a gate
+    wait would count as work. Runs with no events yield nothing here."""
+    if not run_ids:
+        return {}
+    try:
+        with sqlite3.connect(db) as con:
+            if not {"workflow_run_id", "event_type", "created_at"} <= table_columns(con, "remote_agent_workflow_events"):
+                return {}
+            placeholders = ",".join("?" for _ in run_ids)
+            rows = con.execute(
+                "SELECT workflow_run_id, event_type, created_at FROM remote_agent_workflow_events "
+                f"WHERE workflow_run_id IN ({placeholders}) AND event_type IN ({','.join('?' for _ in SEGMENT_END_EVENTS)}, 'workflow_started') "
+                "ORDER BY workflow_run_id, created_at, rowid",
+                [*run_ids, *SEGMENT_END_EVENTS],
+            ).fetchall()
+    except sqlite3.Error:
+        return {}
+    segments: dict[str, list[tuple[float, float | None]]] = {}
+    for run_id, event_type, created_at in rows:
+        stamp = parse_run_timestamp(created_at)
+        if stamp is None:
+            continue
+        current = segments.setdefault(str(run_id), [])
+        if event_type == "workflow_started":
+            if current and current[-1][1] is None:
+                current[-1] = (current[-1][0], stamp)
+            current.append((stamp, None))
+        elif current and current[-1][1] is None:
+            current[-1] = (current[-1][0], stamp)
+    return segments
+
+
+def chain_timing(state: dict, db: Path) -> dict:
+    """Wall and per-phase seconds for the chain. A run row we cannot read stays null."""
+    records = [item for item in state.get("phase_runs") or [] if isinstance(item, dict)]
+    run_ids = [item["run_id"] for item in records if isinstance(item.get("run_id"), str)]
+    intervals = run_intervals(db, run_ids)
+    segments = run_segments(db, run_ids)
+    starts: list[float] = []
+    ends: list[float] = []
+    totals: dict[str, float] = {}
+    for item in records:
+        run_id = str(item.get("run_id"))
+        spans = segments.get(run_id) or [intervals.get(run_id, (None, None))]
+        phase, repo = item.get("phase"), item.get("repo")
+        key = phase if phase in {"planning", "integration"} else repo
+        for started, completed in spans:
+            if started is not None:
+                starts.append(started)
+            if completed is not None:
+                ends.append(completed)
+            if started is None or completed is None:
+                continue
+            if isinstance(key, str):
+                totals[key] = totals.get(key, 0.0) + max(0.0, completed - started)
+
+    def seconds(key: str) -> int | None:
+        return None if key not in totals else round(totals[key])
+
+    return {
+        "wall_s": round(max(ends) - min(starts)) if starts and ends and max(ends) >= min(starts) else None,
+        "planning_s": seconds("planning"),
+        "stages": {repo: seconds(repo) for repo in state.get("repositories") or []},
+        "integration_s": seconds("integration"),
+        "updated_at": now(),
+    }
+
+
+def timing_field(value: object) -> str:
+    return "null" if value is None else str(value)
+
+
+def record_chain_timing(args: Any, state: dict) -> dict | None:
+    """Write chain-timing.json and print the typed lines. Report only: never blocks a transition."""
+    try:
+        timing = chain_timing(state, Path(args.db))
+        write_json_atomic(timing_path(Path(args.control_dir), state["logical_chain_id"]), timing)
+    except (OSError, KeyError, ValueError, sqlite3.Error):
+        return None
+    stages = ",".join(f"{repo}:{timing_field(value)}" for repo, value in timing["stages"].items())
+    print(
+        f"CHAIN_TIMING wall={timing_field(timing['wall_s'])} planning={timing_field(timing['planning_s'])} "
+        f"stages={stages} integration={timing_field(timing['integration_s'])}"
+    )
+    if isinstance(timing["wall_s"], int) and timing["wall_s"] > CHAIN_WALL_BUDGET_SECONDS:
+        print(f"CHAIN_BUDGET=EXCEEDED wall={timing['wall_s']} cap={CHAIN_WALL_BUDGET_SECONDS}")
+    return timing
+
+
 def advance(host: Any, args: Any, row: dict, result: dict) -> dict:
     control_dir = Path(args.control_dir)
     feature = (result.get("feature_chain") if isinstance(result, dict) else None) or {}
@@ -3495,6 +3640,7 @@ def advance(host: Any, args: Any, row: dict, result: dict) -> dict:
             artifacts = Path(str(current.get("artifacts_dir") or result.get("artifacts") or row.get("output_root", "")))
             evidence = read_json_artifact(artifacts / INTEGRATION_EVIDENCE_ARTIFACT, INTEGRATION_EVIDENCE_ARTIFACT)
             state = finalize_integration_unlocked(control_dir, state, evidence, artifacts)
+            record_chain_timing(args, state)
             receipt_path = artifacts / "feature-chain-receipt.json"
             write_json_atomic(receipt_path, state["integration"])
             launcher = getattr(host, "__file__", "archon-run.py")
@@ -3534,6 +3680,7 @@ def advance(host: Any, args: Any, row: dict, result: dict) -> dict:
                 "reserved_at": now(),
             }
             state = write_state(control_dir, state)
+            record_chain_timing(args, state)
     if dispatch_repo is not None:
         dispatched = dispatch_repository_stage(host, args, state, dispatch_repo)
         if dispatched.get("result") is not None:
@@ -4017,13 +4164,20 @@ def assert_reopenable_run(host: Any, args: Any, current: object, affected: list[
             raise FeatureChainError(f"run {run_id[:8]} is still running; wait or abandon it first")
 
 
-def reopen(host: Any, args: Any, chain_id: str, repo: str, reason: str) -> dict:
+def reopen(host: Any, args: Any, chain_id: str, repo: str, reason: str, verify_only: bool = False) -> dict:
     """Reset a verified stage (and its consumers) to pending and re-dispatch it.
 
     Only between integration attempts: the chain must not be locally_verified,
     and the current run must be a terminal integration run. The stage worktree is
     kept as-is, so the re-run starts from the previous candidate plus any hand fix.
+
+    ``verify_only`` (also taken from ``--verify-only`` on args) re-verifies a hand
+    fix that is already in the reopened stage's worktree instead of re-implementing:
+    that stage records its previous candidate head, so its params carry
+    ``feature_verify_only``/``feature_previous_head``. Reset consumers are not
+    marked; their verified input changed, so they are implemented again.
     """
+    verify_only = bool(verify_only or getattr(args, "verify_only", False))
     control_dir = Path(args.control_dir)
     if not isinstance(reason, str) or not reason.strip():
         raise FeatureChainError("reopen requires a reason")
@@ -4046,10 +4200,18 @@ def reopen(host: Any, args: Any, chain_id: str, repo: str, reason: str) -> dict:
             "previous_heads": {r: state["candidate_handoffs"][r]["candidate_head"] for r in affected if r in state["candidate_handoffs"]},
             "stopped_run_id": (state.get("current_run") or {}).get("run_id"), "reopened_at": now(),
         }
+        record["verify_only"] = verify_only
         for name in affected:
             state["stages"][name]["status"] = "pending"
             state["stages"][name].pop("candidate", None)
             state["candidate_handoffs"].pop(name, None)
+            # Only the reopened stage holds a hand fix. A consumer was reset because its
+            # verified input changed, so it has to be implemented again, not re-verified.
+            previous_head = record["previous_heads"].get(name) if name == repo else None
+            if verify_only and previous_head:
+                state["stages"][name]["verify_only_head"] = previous_head
+            else:
+                state["stages"][name].pop("verify_only_head", None)
         state.setdefault("reopens", []).append(record)
         state["integration"] = None
         state["current_run"] = None

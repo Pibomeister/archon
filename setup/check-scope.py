@@ -38,6 +38,8 @@ import shutil
 import subprocess
 import sys
 
+from feature_env import feature_env
+
 args = sys.argv[1:]
 allowlist_path, worktree, base = args[0], args[1], args[2]
 round_no = None
@@ -110,7 +112,11 @@ def stem(path):
 
 
 def repository_list_scope():
-    return os.environ.get("ARCHON_FEATURE_SCOPE") == "repositories"
+    # params.json lives beside the allowlist; a plain resume drops the env.
+    return feature_env(
+        "ARCHON_FEATURE_SCOPE",
+        artifacts=os.path.dirname(os.path.abspath(allowlist_path)),
+    ) == "repositories"
 
 
 def adoptable(path):

@@ -99,6 +99,8 @@ MANIFEST=(
   setup/package.sh
   setup/params-env.sh
   setup/repo-profile.sh
+  setup/feature-env.sh
+  setup/feature_env.py
   setup/parse-critique.py
   setup/parse-review-envelope.py
   setup/plan-shape.sh
@@ -132,6 +134,7 @@ MANIFEST=(
   setup/strip-premise-answers.py
   setup/thread-lane.py
   setup/update-waivers.py
+  setup/finding_key.py
   setup/write-review-summary.py
   # Lite lanes: the two YAMLs above are GENERATED from these by derive-lite.py.
   # package.sh regenerates and diffs them (LITE_DRIFT) before the secret gate.
@@ -167,6 +170,9 @@ MANIFEST=(
   setup/review_qualification.py
   workflows/risk-delta-v1.md
   setup/review-yield.py
+  # Two-hour convergence: review-mode.py is listed because round-pre calls it;
+  # the packaging test pins every referenced script to this list.
+  setup/review-mode.py
   setup/mcp-smoke.sh
   setup/codex-usage.py
   setup/codex-watchdog.sh

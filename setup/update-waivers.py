@@ -6,12 +6,16 @@ scope decision without new evidence. An entry is skipped when its normalized
 key is already in waivers.json OR its raw 80-char prefix is already present in
 waivers.md: ledgers written before waivers.json existed carry only the raw
 prefix, and a multi-line heading from such a ledger back-fills to a key that
-cannot match.
+cannot match. The key itself lives in finding_key.py, shared with review-yield.py:
+it drops the provenance suffix and file:line a reviewer restates a waived finding
+with, so a re-raise back-fills onto the existing entry instead of minting a new one.
 Usage: update-waivers.py <round-N/fixer-result.json> <waivers.md>"""
 import json
 import os
 import re
 import sys
+
+from finding_key import key_of
 
 PREFIX_LEN = 80
 SCHEMA = "archon.waiver-ledger.v1"
@@ -20,10 +24,6 @@ HEADING = re.compile(r"^## (?:\[round ([^\]]*)\] )?(.*)$")
 
 def collapse(text):
     return " ".join(text.split())
-
-
-def key_of(text):
-    return collapse(re.sub(r"[^a-z0-9\s]", "", text.casefold()))[:PREFIX_LEN]
 
 
 result_path, ledger_path = sys.argv[1], sys.argv[2]

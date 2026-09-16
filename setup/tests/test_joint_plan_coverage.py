@@ -108,3 +108,29 @@ class JointPlanCoverageTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VerifyMirrorTest(unittest.TestCase):
+    """verify.json must mirror stages.<anchor>.test_patterns: the stage run is
+    seeded from the joint plan, not from verify.json (chain 228a0717, 2026-09-15)."""
+
+    def _run(self, verify_patterns):
+        plan = base_plan(
+            [scenario("negative: unauthorized access rejected", covers=["AC1"])],
+            acceptance_criteria=[{"id": "AC1", "text": "unauthorized access is rejected"}],
+        )
+        with tempfile.TemporaryDirectory() as td:
+            ad = Path(td)
+            (ad / "params.json").write_text(json.dumps({"repositories": plan["repositories"], "repo": "goodword-mcp"}), encoding="utf-8")
+            (ad / "joint-plan.json").write_text(json.dumps(plan), encoding="utf-8")
+            (ad / "verify.json").write_text(json.dumps({"test_patterns": verify_patterns}), encoding="utf-8")
+            return subprocess.run(["python3", str(VALIDATOR), str(ad)], capture_output=True, encoding="utf-8")
+
+    def test_matching_mirror_passes(self):
+        result = self._run(["groups.test.ts"])
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_drifted_mirror_fails(self):
+        result = self._run(["groups.test.ts", "groups\\.int\\.spec"])
+        self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+        self.assertIn("JOINT_PLAN=FAIL verify.json test_patterns differ from stages.goodword-mcp.test_patterns", result.stdout)
