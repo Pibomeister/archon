@@ -113,6 +113,19 @@ class FixerDiscipline(unittest.TestCase):
                 p = flat(prompt(lane, "fixer"))
                 self.assertIn('A pinned symbol whose "allowed_change" names an exception is NOT a conflict', p)
 
+    def test_every_entry_carries_the_reviewers_finding_id(self):
+        # Without it a repair mints a NEW ledger entry instead of moving the
+        # reviewer's to applied, and a finding that never reaches applied can
+        # never reach closed -- so positive closure deadlocks on findings that
+        # were in fact fixed. Measured on a replay of v1's api run: 36 ledger
+        # entries from a much smaller real population, three repaired P1s
+        # unclosed at the cap.
+        for lane in V2_LANES:
+            with self.subTest(lane=lane):
+                p = flat(prompt(lane, "fixer"))
+                self.assertIn('EVERY entry, in EVERY partition, also carries "finding_id" '
+                              'copied VERBATIM', p)
+
     def test_the_shared_result_shape_line_was_not_edited(self):
         # Doctrine across all five lanes. pin_conflict is declared BESIDE it, not
         # inside it; rewriting it here would drift this lane from bugfix and

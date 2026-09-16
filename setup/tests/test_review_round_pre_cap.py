@@ -2,6 +2,7 @@
 """review-loop/round-pre: the durable round cap is checked BEFORE a round is
 spent, in both parents and both lite lanes (retained bytes), with
 accept-residuals.txt as the human bypass. Mirrors plan-round-pre's doctrine."""
+import json
 import os
 import shutil
 import subprocess
@@ -13,6 +14,15 @@ import yaml
 
 ARCHON = Path(__file__).resolve().parent.parent.parent
 LANES = {"full-sdlc-api.yaml": 4, "bugfix.yaml": 2, "full-sdlc-web.yaml": 4, "full-sdlc-api-lite.yaml": 1, "bugfix-lite.yaml": 2}
+# The v2 lanes keep the cap in the node and hand everything else to
+# round-state.py, which changed two things the assertions below have to
+# distinguish. (1) The counter advances only on a `progressed` decision, so
+# round-pre no longer prints `ROUND=<N+1>` on entry -- its stdout is the bare
+# JSON line the sibling `review` node's `when:` parses. (2) The reclaim is
+# consulted but its answer is NOT written back to round.txt, because a counter
+# that never over-advances has nothing to give back. The CAP itself is
+# unchanged on every lane, which is what this file is really about.
+V2 = {"full-sdlc-api.yaml", "full-sdlc-api-lite.yaml"}
 
 
 def round_pre(workflow):
@@ -31,6 +41,15 @@ class RoundPreCap(unittest.TestCase):
         wt.mkdir()
         subprocess.run("git init -q && git config user.email t@t && git config user.name t && echo a > a && git add . && git commit -qm base", cwd=wt, shell=True, check=True, capture_output=True)
         (self.ad / "params.json").write_text('{"spec": "/x.md", "slug": "x", "branch": "archon/x", "worktree": "%s"}' % wt)
+        # The v2 lanes' round-pre hands off to round-state.py once the cap
+        # passes, and that refuses to open a round without an allowlist (an
+        # absent one used to read as "allow nothing", which empties the tree).
+        # A bare JSON array is the shape check-scope.py and every lane write.
+        (self.ad / "files-allowlist.json").write_text('["a"]')
+        (self.ad / "bootstrap-head.txt").write_text(
+            subprocess.run("git rev-parse HEAD", cwd=wt, shell=True,
+                           capture_output=True, encoding="utf-8").stdout)
+        (self.ad / "plan.md").write_text("# plan\n")
 
     def run_pre(self, workflow, round_txt, cap=None, accept=False, proven=None, reset=True):
         # round-pre reclaims a round that decided nothing: a review killed by
@@ -70,7 +89,18 @@ class RoundPreCap(unittest.TestCase):
         for wf, default in LANES.items():
             r = self.run_pre(wf, default - 1)
             self.assertEqual(r.returncode, 0, wf + r.stdout + r.stderr)
-            self.assertIn(f"ROUND={default}", r.stdout)
+            if wf in V2:
+                # Stdout is the decision, and the contract this asserts is that it
+                # parses as ONE bare JSON object carrying `review` -- an
+                # unparseable `when:` silently skips the reviewer while the run
+                # still reports SUCCESS. Which round number it names is
+                # round-state.py's counter logic and is tested there; it legally
+                # differs between staying on an open round and opening the next.
+                decision = json.loads(r.stdout.strip())
+                self.assertIn(decision["review"], ("run", "reuse"), wf)
+                self.assertGreaterEqual(decision["round"], 1, wf)
+            else:
+                self.assertIn(f"ROUND={default}", r.stdout)
 
     def test_at_default_cap_stops_before_spending(self):
         for wf, default in LANES.items():
@@ -86,6 +116,17 @@ class RoundPreCap(unittest.TestCase):
         # durably wrong, not unlucky, so the cap holds and the human gate is
         # reached with the run's rounds actually spent on reviews.
         for wf, default in LANES.items():
+            if wf in V2:
+                # v2 does not reclaim. round-state.py consults the script for its
+                # typed line and its ledger but never writes the answer back,
+                # because its counter advances only on a progressed decision and
+                # so cannot over-count a round that died before it was spent. The
+                # cap therefore holds on the FIRST unproven round rather than the
+                # second -- stricter, and for a reason that no longer applies.
+                r = self.run_pre(wf, default, proven=default - 1)
+                self.assertEqual(r.returncode, 1, wf + r.stdout + r.stderr)
+                self.assertIn(f"ROUND_CAP_REACHED round={default} cap={default}", r.stdout, wf)
+                continue
             r = self.run_pre(wf, default, proven=default - 1)
             self.assertEqual(r.returncode, 0, wf + r.stdout + r.stderr)
             self.assertIn(f"ROUND_RECLAIM=round-{default}", r.stderr, wf)

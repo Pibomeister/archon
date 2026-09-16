@@ -181,6 +181,15 @@ MANIFEST=(
   # Pin guard: commit-impl and commit-fixer both call it on the staged index,
   # so an install without it fails at the first commit of the first stage.
   setup/pin-guard.py
+  # The closure ledger and the review contract whose digest is part of the review
+  # identity. NOTE: the reverse check below cannot find these -- it scans workflow
+  # YAMLs for setup/ references, and round-state.py shells into ledger.py,
+  # pin-guard.py, check-fixer-result.py, review-mode.py and round-reclaim.sh from
+  # Python. Anything reached only that way has to be listed by hand.
+  setup/ledger.py
+  setup/review-contract.md
+  # The live-acceptance checker, moved into the repo from the Goodword root.
+  setup/chain-acceptance.py
   setup/mcp-smoke.sh
   setup/codex-usage.py
   setup/codex-watchdog.sh

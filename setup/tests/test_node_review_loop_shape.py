@@ -54,6 +54,26 @@ SUBCOMMAND = {
 JSON_ONLY = ("round-pre", "fix-plan")
 
 
+_SUBST = re.compile(r"\$\([^()]*\)")
+
+
+def _emitting(line):
+    """`line` with comments and command substitutions removed.
+
+    An `echo` inside `$( ... )` writes to a subshell's stdout, which the caller
+    captures; an `echo` in a comment writes nothing. Neither reaches the node's
+    stdout, and a naive search for the word matched both -- reporting three
+    findings in a body that emits nothing, which is the same defect as reporting
+    none in a body that does.
+    """
+    line = line.split("#", 1)[0]
+    while True:
+        stripped = _SUBST.sub("", line)
+        if stripped == line:
+            return line
+        line = stripped
+
+
 def loop_nodes(lane):
     doc = yaml.safe_load((ARCHON / "workflows" / f"{lane}.yaml").read_text(encoding="utf-8"))
     loop = next(n for n in doc["nodes"] if n["id"] == "review-loop")["loop_group"]
@@ -107,9 +127,18 @@ class ReviewLoopTopology(unittest.TestCase):
             for nid in JSON_ONLY:
                 with self.subTest(lane=lane, node=nid):
                     body = nodes[nid]["bash"]
+                    # An echo whose line also exits non-zero is fine: the engine
+                    # never evaluates a failed node's `when:`, so a typed stop on
+                    # stdout cannot corrupt a decision that will not be read. Any
+                    # OTHER write to stdout can, and must not be here. Matching
+                    # `echo` anywhere in the line, not just at its start, because
+                    # the two typed stops in these bodies live inside a `case` arm
+                    # and an `if`, and a start-anchored match walked straight past
+                    # them while claiming to have checked.
                     bare = [ln.strip() for ln in body.splitlines()
-                            if re.match(r"^\s*(echo|printf)\b", ln)
-                            and ">&2" not in ln and ">>" not in ln and "> \"" not in ln]
+                            if re.search(r"\b(echo|printf)\b", _emitting(ln))
+                            and ">&2" not in ln and ">>" not in ln and '> "' not in ln
+                            and "exit 1" not in ln]
                     self.assertEqual(bare, [], f"{nid} writes to stdout: {bare}")
                     self.assertNotIn("exec > >(", body,
                                      f"{nid} tees stdout, which corrupts the JSON line")
@@ -178,10 +207,16 @@ class ReviewLoopTopology(unittest.TestCase):
         # one-round cap and then calls the same `pre` the parent calls.
         lite = loop_nodes("full-sdlc-api-lite")[1]["round-pre"]["bash"]
         parent = loop_nodes("full-sdlc-api")[1]["round-pre"]["bash"]
+        # Both keep the durable cap in the node -- round.txt is the only bound
+        # that survives a resume, since a loop_group re-enters with a fresh
+        # iteration counter. The overlay exists for the DEFAULT, nothing else.
         self.assertIn('round-cap.txt" || echo 1 >', lite)
-        self.assertNotIn("round-cap.txt", parent)
+        self.assertIn("CAP=1", lite.replace('echo 1)', 'CAP=1)'))
+        self.assertIn("|| echo 4)", parent)
+        self.assertNotIn("|| echo 4)", lite)
         for body in (lite, parent):
             self.assertIn('round-state.py pre "$ARTIFACTS_DIR"', body)
+            self.assertIn("ROUND_CAP_REACHED", body)
 
 
 if __name__ == "__main__":

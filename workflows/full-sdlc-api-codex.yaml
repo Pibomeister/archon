@@ -2236,11 +2236,26 @@ nodes:
         # tee therefore go to stderr; round-state.py holds that contract on
         # the other side.
         if [ -n "${ARTIFACTS_DIR-}" ]; then exec 2> >(tee -a "$ARTIFACTS_DIR/node-round-pre.out" >&2); fi
-        # The whole decision procedure -- counter and cap, the pending-commit
-        # reconciliation, review identity, the reuse decision and base
-        # validation -- lives in the helper, because every one of those steps
-        # has to be idempotent across a resume and bash is the wrong place to
-        # own that. The node is the call site, not the logic.
+        C="$ARTIFACTS_DIR/round.txt"
+        N=$(cat "$C" 2>/dev/null || echo 0)
+        # Hand-editable counter: reject junk before it is compared or used as a path.
+        case "$N" in '') N=0 ;; *[!0-9]*) echo "ROUND_PRE=FAIL round.txt is not an integer: [$N]" | tee -a "$ARTIFACTS_DIR/node-round-pre.out"; exit 1 ;; esac
+        # THE DURABLE CAP, and it stays in the node rather than moving into the
+        # helper with the rest of the decision. A resumed loop_group re-enters
+        # with a fresh iteration counter, so `max_iterations` bounds one
+        # invocation and nothing else; round.txt is the only number that
+        # survives. It is also checked BEFORE the round is spent, because a cap
+        # enforced in converge alone is walked past by resuming after every
+        # group failure. accept-residuals.txt is the human bypass and stays a
+        # human act: agents never write that file.
+        CAP=$(cat "$ARTIFACTS_DIR/round-cap.txt" 2>/dev/null || echo 4)
+        case "$CAP" in ''|*[!0-9]*) CAP=4 ;; esac
+        if [ "$N" -ge "$CAP" ] && [ ! -f "$ARTIFACTS_DIR/accept-residuals.txt" ]; then echo "ROUND_CAP_REACHED round=$N cap=$CAP (pre-round: a resume does not buy another review; write accept-residuals.txt or raise round-cap.txt)" | tee -a "$ARTIFACTS_DIR/node-round-pre.out"; exit 1; fi
+        # Everything else -- the counter itself, the pending-commit
+        # reconciliation, review identity, the reuse decision, review-mode and
+        # base validation -- is the helper's. It advances round.txt only on a
+        # progressed decision, so the counter no longer over-counts a round that
+        # died before it was spent, and it consults round-reclaim.sh itself.
         python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py pre "$ARTIFACTS_DIR"
     - id: review
       depends_on:
@@ -2561,6 +2576,17 @@ nodes:
           {"applied": [...], "failed": [...], "advisory": [...], "incomplete": [...], "cross_repo": [...]}
         plus, on this lane, a sixth key "pin_conflict": [...] alongside them.
         each entry {"finding": "<one-line>", "action": "<what/why>"}.
+        EVERY entry, in EVERY partition, also carries "finding_id" copied
+        VERBATIM from the envelope entry it is repairing. This is not
+        bookkeeping. The ledger keys findings by that id, and you rewrite a
+        finding's wording as you repair it, so an entry without the id is
+        filed as a NEW finding rather than moving the reviewer's entry to
+        applied. A finding that never reaches applied can never reach closed,
+        and convergence requires every P0/P1 that ever entered the ledger to
+        be closed -- so a dropped id deadlocks the run on a finding you
+        actually fixed. Replaying v1's api run through the ledger produced 36
+        entries from a much smaller real population, and three P1s that were
+        repaired sat unclosed at the cap, for exactly this reason.
         Every "applied", "advisory" and "incomplete" entry also carries
         "severity": "P0|P1|P2|P3". An omitted severity reads as P0, which
         keeps the loop running.
@@ -2592,7 +2618,14 @@ nodes:
         # the ledger, run the pin guard ON THE STAGED INDEX (what will actually
         # be committed, not what happens to be in the worktree), then either
         # attest a no-change result without an empty commit or commit and
-        # attest the new HEAD. check-scope.py still stages and quarantines.
+        # attest the new HEAD.
+        eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+        cd "$WT"
+        # Staging comes FIRST and stays in the node: check-scope.py is what
+        # decides which paths may be staged at all, and the pin guard inside
+        # the helper reads the staged index. A pin guard run before staging
+        # would be reading the wrong tree.
+        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
         python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py commit-fixer "$ARTIFACTS_DIR"
     - id: converge
       depends_on:
