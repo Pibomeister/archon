@@ -1607,7 +1607,7 @@ nodes:
             # committed until commit-impl, so a HEAD-anchored diff would be empty.
             SL=0
             python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-slop.py \
-              "$WT" "$BASE" --max-complexity 10 > "$RD/slop.txt" 2>&1 || SL=$?
+              "$WT" "$BASE" --max-complexity 10 --repo "$REPO" > "$RD/slop.txt" 2>&1 || SL=$?
             python3 - "$RD/recheck.json" "$TC" "$LT" "$UT" "$SC" "$SL" "$LINT_APPLICABLE" <<'PY'
             import json, sys
             path, tc, lt, ut, sc, sl, lint_applicable = sys.argv[1:8]

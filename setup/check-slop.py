@@ -17,12 +17,19 @@ Four guards, each delta-only (pre-existing debt is reported, never blocking):
                      subset of the next code line's tokens; banner comments;
                      an added TODO/FIXME/XXX.
   yagni              an added `export` identifier with zero references
-                     outside the file that defines it.
-Usage: check-slop.py <worktree> <base-sha> [--max-complexity N] [--exclude <path> ...]
+                     anywhere but its own declaration line. A use elsewhere in
+                     the SAME file counts (a DTO used as a property type in its
+                     own file is not dead), and a file matching the repo
+                     profile's `framework_loaded` globs is skipped: TypeORM
+                     loads migrations by directory glob, so no import ever
+                     names their class (run 48c1c1c5).
+Usage: check-slop.py <worktree> <base-sha> [--max-complexity N] [--exclude <path> ...] [--repo <name>]
 Prints one line per finding: `SLOP=FAIL <guard> file=<f> line=<n> ...` (blocking)
 or `SLOP=REPORT <guard> ...` (non-blocking), then a final summary line:
 `SLOP=OK files=N` (exit 0) or `SLOP=FAIL count=N` (exit 1)."""
 import difflib
+import fnmatch
+import json
 import re
 import subprocess
 import sys
@@ -86,7 +93,10 @@ def changed_ts_files(worktree, base, excludes):
     for path in git(worktree, "diff", "--name-only", "-z", base).split("\0"):
         if path:
             changed.add(path)
-    records = [r for r in git(worktree, "status", "--porcelain", "-z").split("\0") if r]
+    # --untracked-files=all: the default collapses a NEW directory to one
+    # `?? dir/` record, which fails the .ts suffix test, so every file in a new
+    # module was silently never scanned.
+    records = [r for r in git(worktree, "status", "--porcelain", "-z", "--untracked-files=all").split("\0") if r]
     i = 0
     while i < len(records):
         rec = records[i]
@@ -238,7 +248,22 @@ def check_comments(file, added, cur_lines, fails):
             fails.append(f"SLOP=FAIL narrating_comment file={file} line={no} reason=restates-code")
 
 
-def check_yagni(worktree, file, added, fails):
+def framework_loaded_globs(repo):
+    if not repo:
+        return []
+    out = subprocess.run(["bash", str(Path(__file__).resolve().parent / "repo-profile.sh"), "--json"],
+                         capture_output=True, encoding="utf-8")
+    if out.returncode != 0:
+        sys.exit(f"SLOP=FAIL repo-profile.sh --json failed for --repo {repo}")
+    profile = json.loads(out.stdout)["profiles"].get(repo)
+    if profile is None:
+        sys.exit(f"SLOP=FAIL unknown --repo {repo}")
+    return profile.get("framework_loaded") or []
+
+
+def check_yagni(worktree, file, added, fails, cur_lines=(), framework_loaded=()):
+    if any(fnmatch.fnmatchcase(file, g) for g in framework_loaded):
+        return
     names = []
     for no, text in added:
         m = EXPORT_DECL_RE.match(text)
@@ -258,7 +283,9 @@ def check_yagni(worktree, file, added, fails):
             cmd += ["--exclude-dir", d]
         r = subprocess.run(cmd, capture_output=True, encoding="utf-8")
         hit_files = {Path(line).resolve() for line in r.stdout.splitlines() if line.strip()}
-        if not (hit_files - {target}):
+        word = re.compile(rf"\b{re.escape(name)}\b")
+        same_file = any(word.search(text) for i, text in enumerate(cur_lines, 1) if i != no)
+        if not (hit_files - {target}) and not same_file:
             fails.append(f"SLOP=FAIL yagni file={file} line={no} export={name} reason=unreferenced")
 
 
@@ -269,6 +296,7 @@ def main():
     worktree, base = args[0], args[1]
     threshold = 10
     excludes = set()
+    repo = None
     i = 2
     while i < len(args):
         if args[i] == "--max-complexity":
@@ -277,9 +305,13 @@ def main():
         elif args[i] == "--exclude":
             excludes.add(args[i + 1])
             i += 2
+        elif args[i] == "--repo":
+            repo = args[i + 1]
+            i += 2
         else:
             sys.exit(f"SLOP=FAIL unknown argument {args[i]}")
 
+    framework_loaded = framework_loaded_globs(repo)
     files = changed_ts_files(worktree, base, excludes)
     fails, reports = [], []
     for f in files:
@@ -294,7 +326,7 @@ def main():
         if f.endswith(".spec.ts") or f.endswith(".test.ts"):
             check_tautological(f, added, cur_lines, fails)
         check_comments(f, added, cur_lines, fails)
-        check_yagni(worktree, f, added, fails)
+        check_yagni(worktree, f, added, fails, cur_lines, framework_loaded)
 
     for line in fails + reports:
         print(line)

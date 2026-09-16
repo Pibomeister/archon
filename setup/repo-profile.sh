@@ -68,6 +68,9 @@ PROFILES = {
             "apps/analytic-service/*", "apps/enrichment-service/*", "apps/notification-service/*",
             "*.spec.ts", "*.md",
         ],
+        # Files a framework loads by glob, so no import names their exports
+        # (check-slop.py yagni). TypeORM: rds/utils.ts `migrations/*{.ts,.js}`.
+        "framework_loaded": ["libs/data-access/src/lib/rds/migrations/*"],
         "impact":    "mono",
     },
     "goodword-mcp": {

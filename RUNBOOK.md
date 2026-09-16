@@ -156,6 +156,8 @@ safety purpose with tested evidence.
 
 **`verify.json` / joint-plan `test_patterns` are unit-runner-only.** `plan-shape.sh` runs `setup/check-unit-patterns.py`, which rejects (`UNIT_PATTERNS=FAIL repo=<r> pattern=<p>`) a pattern the repo's unit command ignores per its profile's `unit_test_excludes` (api `.int/.ai/.ext.spec.ts`, mcp `.e2e/.smoke.test.ts`, web `tests/`), so the "No tests found" failure lands before approval instead of at `gate-tests`.
 
+**`SLOP=FAIL yagni … reason=unreferenced`** counts a use anywhere in the defining file (other than the declaration line) and skips files matching the repo profile's `framework_loaded` globs (api: TypeORM migrations); both lanes pass `--repo "$REPO"`. The slop scan also lists untracked files inside new directories, which it previously never scanned.
+
 Knowledge capture follows the same boundary: the required artifact is
 run-local `kb-capture.md`. Promotion to `goodword-kb` or another external sink
 is optional operator work and cannot retroactively fail a delivered PR.
