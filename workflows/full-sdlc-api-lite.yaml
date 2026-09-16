@@ -634,8 +634,10 @@ nodes:
     artifacts with sha256 hashes. Consume those exact local inputs only; do not
     require or assume an upstream PR, merge, publication, deployment, or newer
     repository state.
-    SINGLE-REPO RUNS: when params.json's "repo" is not "api", the two sentences
-    above are scoped to api runs. files-allowlist.json is then the entire scope,
+    OTHER REPOSITORIES: when params.json's "repo" is not "api", the opening
+    "Implement the API portion" sentence and the "Scope:" line are scoped to api
+    runs (the JOINT-REPOSITORY RUNS paragraph applies to every repository).
+    files-allowlist.json is then the entire scope,
     its paths are relative to that repository's root, and there is no web-app
     prong to avoid. Use that repository's own commands, listed below.
     Do not edit the plan file. Do not create commits — a later node commits.
