@@ -28,8 +28,14 @@ from pathlib import Path
 
 ARCHON = Path(__file__).resolve().parents[2]
 SCRIPT = ARCHON / "setup/round-reclaim.sh"
-REVIEW_LANES = ["bugfix", "bugfix-lite", "full-sdlc-api", "full-sdlc-web",
-                "full-sdlc-api-lite"]
+# Lanes whose round-pre body still CALLS round-reclaim.sh itself. full-sdlc-api
+# and full-sdlc-api-lite moved their whole round-pre decision procedure into
+# setup/round-state.py (RUNBOOK 3c), which consults the reclaim from
+# `consult_reclaim`. The property did not go away; its owner changed, and
+# V2_LANES below asserts the new owner rather than dropping the check.
+REVIEW_LANES = ["bugfix", "bugfix-lite", "full-sdlc-web"]
+V2_LANES = ["full-sdlc-api", "full-sdlc-api-lite"]
+HELPER = "setup/round-state.py"
 
 
 VERDICT_PATTERN = r'"verdict"[[:space:]]*:[[:space:]]*"[^"]'
@@ -171,16 +177,28 @@ class RoundReclaimWiringTest(unittest.TestCase):
                 self.assertEqual(owner, "round-pre",
                                  f"{lane}: reclaim owned by {owner}, not round-pre")
 
+    def test_the_v2_lanes_reclaim_through_the_helper(self):
+        # Their round-pre bodies no longer call the script; round-state.py does,
+        # from consult_reclaim. Assert BOTH halves, because either one alone is
+        # satisfiable while the round goes unreclaimed: the lane must call the
+        # helper, and the helper must call the script.
+        for lane in V2_LANES:
+            with self.subTest(lane=lane):
+                text = (ARCHON / f"workflows/{lane}.yaml").read_text()
+                self.assertIn('round-state.py pre "$ARTIFACTS_DIR"', text)
+        helper = ARCHON / HELPER
+        if not helper.is_file():
+            self.skipTest("round-state.py is not in this tree yet")
+        self.assertIn("round-reclaim.sh", helper.read_text())
+
     def test_lite_api_overlay_is_the_source(self):
         # full-sdlc-api-lite.yaml is generated; patching it alone is undone by
-        # the next derive.
-        ov = ARCHON / "setup/lite/api/review-loop.round-pre.bash.sh"
-        # Assert the INVOCATION, not just the path: a mention of the script in
-        # an assignment is not a call, and grepping the name alone still
-        # matches after the call itself is deleted.
-        self.assertRegex(
-            ov.read_text(),
-            r'N=\$\(bash "\$R" "\$ARTIFACTS_DIR" "\$N" "round-" "review-summary\.json" ')
+        # the next derive. The overlay's job is now the one-round cap plus the
+        # same `pre` the parent calls -- assert the INVOCATION, not just a
+        # mention, because a path in an assignment is not a call.
+        ov = (ARCHON / "setup/lite/api/review-loop.round-pre.bash.sh").read_text()
+        self.assertRegex(ov, r'round-state\.py pre "\$ARTIFACTS_DIR"')
+        self.assertIn('round-cap.txt" || echo 1 >', ov)
 
 
 if __name__ == "__main__":
