@@ -7,10 +7,13 @@ already settled. When the previous round only applied P2/P3 fixes, the only new
 material in the tree is that round's own edits, so review them against the
 previous round's pre-fix HEAD and leave the rest alone.
 
-Anything that is not demonstrably cosmetic falls back to the full diff: round 1
-has no predecessor, a P0/P1 fix can change behaviour the rest of the diff
-depends on, and a previous round that cannot be read is not evidence of
-anything. An applied entry with no `severity` is the pre-2026-09-13 fixer
+Anything that is not demonstrably cosmetic falls back to the full candidate,
+reviewed as a delta from the run's bootstrap HEAD (bootstrap-head.txt): on a
+stacked chain that sha is the parent's head, so the parents are not re-reviewed,
+and on every other lane it is the fetched origin/main. Only a run with no
+readable bootstrap-head.txt reviews against origin/main. Round 1 has no
+predecessor, a P0/P1 fix can change behaviour the rest of the diff depends on,
+and a previous round that cannot be read is not evidence of anything. An applied entry with no `severity` is the pre-2026-09-13 fixer
 contract and reads as escalating here, the same worst case review-yield.py
 assumes for it.
 
@@ -28,11 +31,10 @@ COSMETIC = {"P2", "P3"}
 FULL_BASE = "origin/main"
 
 
-def head_of(round_dir):
-    """That round's pre-fix HEAD, or None when it cannot be read."""
+def read_sha(path):
+    """The sha in that file, or None when it cannot be read."""
     try:
-        return open(os.path.join(round_dir, "pre-head.txt"),
-                    encoding="utf-8").read().strip() or None
+        return open(path, encoding="utf-8").read().strip() or None
     except Exception:
         return None
 
@@ -47,7 +49,7 @@ def delta_base(prev_dir):
     for e in applied:
         if not isinstance(e, dict) or e.get("severity") not in COSMETIC:
             return None
-    return head_of(prev_dir)
+    return read_sha(os.path.join(prev_dir, "pre-head.txt"))
 
 
 def main():
@@ -60,8 +62,9 @@ def main():
     # HEAD has not moved since the previous round: a Ready verdict carrying an
     # incomplete item reaches round N with nothing committed, and a delta
     # against that base diffs nothing at all.
-    if base and base == head_of(os.path.join(ad, f"round-{n}")):
+    if base and base == read_sha(os.path.join(ad, f"round-{n}", "pre-head.txt")):
         base = None
+    base = base or (read_sha(os.path.join(ad, "bootstrap-head.txt")) if ad else None)
     mode, base = ("delta", base) if base else ("full", FULL_BASE)
     # No artifacts dir means a caller bug, not round-1 of a run in $PWD: print
     # the safe answer rather than minting a round-1/ wherever this was invoked.
