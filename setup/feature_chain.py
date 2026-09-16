@@ -3474,25 +3474,68 @@ def run_intervals(db: Path, run_ids: list[str]) -> dict[str, tuple[float | None,
     return {str(row[0]): (parse_run_timestamp(row[1]), parse_run_timestamp(row[2])) for row in rows}
 
 
+SEGMENT_END_EVENTS = ("approval_requested", "workflow_paused", "workflow_failed", "workflow_completed")
+
+
+def run_segments(db: Path, run_ids: list[str]) -> dict[str, list[tuple[float, float | None]]]:
+    """Active segments per run from the event log: each `workflow_started` up to the
+    next gate/failure/completion (or the next start). A run row's started_at is
+    overwritten on every resume, so the runs table alone reports only the last
+    resume segment (chain 3460c074 read api=1482 s for a 3.5 h stage) and a gate
+    wait would count as work. Runs with no events yield nothing here."""
+    if not run_ids:
+        return {}
+    try:
+        with sqlite3.connect(db) as con:
+            if not {"workflow_run_id", "event_type", "created_at"} <= table_columns(con, "remote_agent_workflow_events"):
+                return {}
+            placeholders = ",".join("?" for _ in run_ids)
+            rows = con.execute(
+                "SELECT workflow_run_id, event_type, created_at FROM remote_agent_workflow_events "
+                f"WHERE workflow_run_id IN ({placeholders}) AND event_type IN ({','.join('?' for _ in SEGMENT_END_EVENTS)}, 'workflow_started') "
+                "ORDER BY workflow_run_id, created_at, rowid",
+                [*run_ids, *SEGMENT_END_EVENTS],
+            ).fetchall()
+    except sqlite3.Error:
+        return {}
+    segments: dict[str, list[tuple[float, float | None]]] = {}
+    for run_id, event_type, created_at in rows:
+        stamp = parse_run_timestamp(created_at)
+        if stamp is None:
+            continue
+        current = segments.setdefault(str(run_id), [])
+        if event_type == "workflow_started":
+            if current and current[-1][1] is None:
+                current[-1] = (current[-1][0], stamp)
+            current.append((stamp, None))
+        elif current and current[-1][1] is None:
+            current[-1] = (current[-1][0], stamp)
+    return segments
+
+
 def chain_timing(state: dict, db: Path) -> dict:
     """Wall and per-phase seconds for the chain. A run row we cannot read stays null."""
     records = [item for item in state.get("phase_runs") or [] if isinstance(item, dict)]
-    intervals = run_intervals(db, [item["run_id"] for item in records if isinstance(item.get("run_id"), str)])
+    run_ids = [item["run_id"] for item in records if isinstance(item.get("run_id"), str)]
+    intervals = run_intervals(db, run_ids)
+    segments = run_segments(db, run_ids)
     starts: list[float] = []
     ends: list[float] = []
     totals: dict[str, float] = {}
     for item in records:
-        started, completed = intervals.get(str(item.get("run_id")), (None, None))
-        if started is not None:
-            starts.append(started)
-        if completed is not None:
-            ends.append(completed)
-        if started is None or completed is None:
-            continue
+        run_id = str(item.get("run_id"))
+        spans = segments.get(run_id) or [intervals.get(run_id, (None, None))]
         phase, repo = item.get("phase"), item.get("repo")
         key = phase if phase in {"planning", "integration"} else repo
-        if isinstance(key, str):
-            totals[key] = totals.get(key, 0.0) + max(0.0, completed - started)
+        for started, completed in spans:
+            if started is not None:
+                starts.append(started)
+            if completed is not None:
+                ends.append(completed)
+            if started is None or completed is None:
+                continue
+            if isinstance(key, str):
+                totals[key] = totals.get(key, 0.0) + max(0.0, completed - started)
 
     def seconds(key: str) -> int | None:
         return None if key not in totals else round(totals[key])

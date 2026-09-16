@@ -535,6 +535,37 @@ class FeatureChainV2(unittest.TestCase):
         self.assertEqual(timing["wall_s"], 3600)
         self.assertRegex(timing["updated_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 
+    def test_chain_timing_sums_resume_segments_and_excludes_the_gate_wait(self):
+        """Live 2026-09-16 (chain 3460c074): the runs table reported api=1482 s for a
+        stage resumed five times, and a planning row whose started_at was the approve."""
+        db = self.timing_db([
+            ("a" * 32, "2026-09-14 12:00:00", "2026-09-14 12:00:01"),
+            ("b" * 32, "2026-09-14 13:00:00", "2026-09-14 13:10:00"),
+            ("c" * 32, None, None),
+            ("d" * 32, None, None),
+        ])
+        with sqlite3.connect(db) as con:
+            con.execute(
+                "CREATE TABLE remote_agent_workflow_events "
+                "(workflow_run_id TEXT, event_type TEXT, created_at TEXT)"
+            )
+            con.executemany("INSERT INTO remote_agent_workflow_events VALUES (?, ?, ?)", [
+                ("a" * 32, "workflow_started", "2026-09-14 10:00:00"),
+                ("a" * 32, "approval_requested", "2026-09-14 10:20:00"),   # gate wait 10:20 -> 12:00 is not work
+                ("a" * 32, "workflow_started", "2026-09-14 12:00:00"),
+                ("a" * 32, "workflow_completed", "2026-09-14 12:00:01"),
+                ("b" * 32, "workflow_started", "2026-09-14 12:10:00"),
+                ("b" * 32, "workflow_failed", "2026-09-14 12:40:00"),
+                ("b" * 32, "workflow_started", "2026-09-14 13:00:00"),
+                ("b" * 32, "workflow_completed", "2026-09-14 13:10:00"),
+            ])
+
+        timing = fc.chain_timing(self.timing_state(), db)
+
+        self.assertEqual(timing["planning_s"], 1201)
+        self.assertEqual(timing["stages"], {"api": 2400, "goodword-mcp": None})
+        self.assertEqual(timing["wall_s"], 3 * 3600 + 600)
+
     def test_chain_timing_is_all_null_when_the_run_table_is_unreadable(self):
         timing = fc.chain_timing(self.timing_state(), self.root / "missing.db")
 
