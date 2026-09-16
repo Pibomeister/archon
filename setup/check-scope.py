@@ -81,7 +81,10 @@ changed = set()
 for line in git("diff", "--name-only", f"{base}..HEAD").splitlines():
     if line.strip():
         changed.add(line.strip())
-for line in git("status", "--porcelain").splitlines():
+# --untracked-files=all: by default a NEW directory is one `?? dir/` record, so an
+# allowlisted file in a new module read as a breach of "dir/" -- and under
+# --quarantine the whole directory was moved to strays.
+for line in git("status", "--porcelain", "--untracked-files=all").splitlines():
     if not line.strip():
         continue
     path = line[3:]
@@ -94,7 +97,7 @@ breaches = sorted(p for p in changed if p not in allowed and p not in excludes)
 
 def is_untracked(path):
     """`??` in porcelain: the file did not exist at HEAD, so nobody owns it."""
-    out = git("status", "--porcelain", "--", path)
+    out = git("status", "--porcelain", "--untracked-files=all", "--", path)
     return any(l.startswith("??") for l in out.splitlines() if l.strip())
 
 
