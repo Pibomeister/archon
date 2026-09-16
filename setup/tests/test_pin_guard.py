@@ -137,6 +137,17 @@ class TypeScript(GuardCase):
         self.assertEqual(proc.returncode, 0, proc.stdout)
         self.assertIn("PIN_CHANGED", proc.stdout)
 
+    def test_the_absolute_pin_is_recognised_however_it_is_spelled(self):
+        """The one value that means "no exception" must not fail open."""
+        for spelling in ("none", "None", "NONE", "  none  ", "", None):
+            with self.subTest(allowed=spelling):
+                self.pin("shareGroup", self.path, spelling)
+                self.write(SOURCE.replace("const link = { a: '}' };",
+                                          "const link = { a: 'x' };"))
+                proc = self.guard()
+                self.assertEqual(proc.returncode, 1, f"{spelling!r}: {proc.stdout}")
+                self.assertIn("PIN_BREACH", proc.stdout)
+
     def test_a_missing_symbol_is_unresolved_never_a_pass(self):
         self.pin("noSuchMethod", self.path)
         proc = self.guard()

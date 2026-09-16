@@ -347,7 +347,10 @@ def main(argv):
         record.update({"baseline_span": old_span, "staged_span": new_span})
         if old_body == new_body:
             record["result"] = "PIN_OK"
-        elif allowed in (None, "", "none"):
+        elif str(allowed or "").strip().lower() in ("", "none"):
+            # Normalized on purpose: a planner that writes "None" or " none "
+            # would otherwise fall through to PIN_CHANGED, and this guard would
+            # fail OPEN on the one value that means the pin is absolute.
             record["result"] = "PIN_BREACH"
             breaches.append(record)
         else:
