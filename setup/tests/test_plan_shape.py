@@ -138,6 +138,20 @@ class PlanShapeWithPremisesTest(unittest.TestCase):
         r = run(self.ad, self.wt, self.spec)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_premise_cited_from_another_selected_repo_worktree_passes(self):
+        # A joint planning run anchors WT on one repo; a premise about the other
+        # repo's code used to be searched for under the anchor only.
+        other = self.tmp / "other-repo"
+        shutil.copytree(self.wt, other)
+        empty_anchor = self.tmp / "anchor"
+        empty_anchor.mkdir()
+        shutil.copyfile(WITH_PREMISES / "premises-cited.json", self.ad / "premises.json")
+        self.assertEqual(1, run(self.ad, empty_anchor, self.spec).returncode, "control: anchor alone lacks the quote")
+        (self.ad / "params.json").write_text(json.dumps({"repo": "api", "worktrees_by_repo": {
+            "api": str(empty_anchor), "goodword-mcp": str(other)}}), encoding="utf-8")
+        r = run(self.ad, empty_anchor, self.spec)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
     def test_missing_premises_json_fails(self):
         r = run(self.ad, self.wt, self.spec)  # premises.json never copied in
         self.assertEqual(r.returncode, 1)

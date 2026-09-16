@@ -1062,7 +1062,9 @@ nodes:
     Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
     Read ONLY premises-questions.json there, plus params.json for the
     "worktree" field — the repository checkout to read (you are NOT cwd'd
-    there). You are FORBIDDEN from opening premises.json or plan.md until
+    there). When params.json also has "worktrees_by_repo" (a joint run), a
+    question may concern any of those checkouts; read the one it names.
+    You are FORBIDDEN from opening premises.json or plan.md until
     step 2 below.
 
     If premises-questions.json is an empty array, write an empty array []

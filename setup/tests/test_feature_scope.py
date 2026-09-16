@@ -88,6 +88,28 @@ class FeatureScope(unittest.TestCase):
             pause.assert_called_once_with(args, "c" * 32)
             legacy.assert_not_called()
 
+    def pause_line(self, probe_state, status):
+        args = Namespace(control_dir=Path("/c"), db=Path("/db"))
+        state = {"status": "running", "current_run": {"run_id": "r" * 32, "phase": "implement"}}
+        controller = mock.Mock(read_state=mock.Mock(return_value=state))
+        out = io.StringIO()
+        with mock.patch.object(ar, "feature_repository_controller", return_value=controller), \
+                mock.patch.object(ar, "run_row_by_id", return_value={"id": "r" * 32, "workflow_name": "full-sdlc-api"}), \
+                mock.patch.object(ar, "supervise_exact_run", return_value={"state": probe_state, "status": status}), \
+                contextlib.redirect_stdout(out):
+            ar.print_feature_chain_pause(args, "c" * 32)
+        return out.getvalue()
+
+    def test_pause_line_says_approve_only_at_a_gate(self):
+        self.assertIn('next="archon workflow approve rrrrrrrr"', self.pause_line("gate", "paused"))
+        failed = self.pause_line("terminal", "failed")
+        self.assertNotIn("approve", failed)
+        self.assertIn("resume.sh rrrrrrrr", failed)
+
+    def test_replan_parser_accepts_chain_without_token(self):
+        args = ar.parser().parse_args(["feature-replan", "abc12345", "--chain", "c" * 32])
+        self.assertEqual((args.chain, args.token), ("c" * 32, None))
+
     def test_parser_accepts_feature_advance(self):
         args = ar.parser().parse_args(["feature-advance", "--chain", "c" * 32])
         self.assertEqual(args.action, "feature-advance")

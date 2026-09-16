@@ -97,9 +97,17 @@ PS_EXEMPT=$(python3 "$HERE_PS/browser-exemption.py" plan "$AD") \
   || { echo "PLAN_SHAPE=FAIL not_applicable browser disposition for a browser-surface change: $PS_EXEMPT"; exit 1; }
 
 if grep -q '^## Premises to verify' "$SPEC"; then
-  python3 - "$AD/premises.json" "$WT" <<'PY' || { echo "PLAN_SHAPE=FAIL premises.json missing, empty, or uncited"; exit 1; }
+  python3 - "$AD/premises.json" "$WT" "$AD/params.json" <<'PY' || { echo "PLAN_SHAPE=FAIL premises.json missing, empty, or uncited"; exit 1; }
 import json, os, re, subprocess, sys
 prem = json.load(open(sys.argv[1]))
+# A joint planning run is anchored on one repo's worktree, but a premise may be
+# answered from another selected repo's code. Search the anchor first, then every
+# worktree the controller pinned for this chain (params.json worktrees_by_repo).
+try:
+    roots = [sys.argv[2]] + [w for w in (json.load(open(sys.argv[3])).get("worktrees_by_repo") or {}).values()
+                             if w != sys.argv[2]]
+except Exception:
+    roots = [sys.argv[2]]
 assert isinstance(prem, list) and prem, "empty premises list though spec declares premises"
 def cited(q, path):
     if subprocess.run(["grep", "-qF", q, path]).returncode == 0:
@@ -118,8 +126,8 @@ for p in prem:
     ok = False
     for e in ev:
         # a "path:N" / "path:N-M" suffix is a formatting habit, not a different file
-        f = os.path.join(sys.argv[2], re.sub(r":[0-9]+(?:-[0-9]+)?$", "", e["file"]))
-        if os.path.isfile(f) and cited(e["quote"], f):
+        rel = re.sub(r":[0-9]+(?:-[0-9]+)?$", "", e["file"])
+        if any(os.path.isfile(os.path.join(r, rel)) and cited(e["quote"], os.path.join(r, rel)) for r in roots):
             ok = True
             break
     assert ok, f"premise {p.get('id')}: no evidence quote found verbatim in the worktree"

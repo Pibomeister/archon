@@ -2695,11 +2695,15 @@ def print_feature_chain_pause(args: argparse.Namespace, chain_id: str) -> None:
     gate = probe.get("gate") or probe.get("status")
     advance_command = f"python3 {Path(__file__).resolve()} feature-advance --chain {chain_id}"
     label = {"gate": "PAUSED", "handoff": "RUNNING"}.get(probe["state"], probe["state"].upper())
+    # approve only releases a paused gate; a failed/cancelled run is resumed after
+    # its cause is fixed (or its planning is replanned), never approved.
+    next_step = (f"archon workflow approve {row['id'][:8]}" if probe["state"] == "gate"
+                 else f"bash {SETUP / 'resume.sh'} {row['id'][:8]}")
     print(
         f"ARCHON_FEATURE_REPOSITORY_CHAIN={label} "
         f"chain={chain_id} phase={(current or {}).get('phase')} run={row['id'][:8]} "
         f"lane={row['workflow_name']} status={probe.get('status')} gate={gate} "
-        f"next=\"archon workflow approve {row['id'][:8]}\" then=\"{advance_command}\""
+        f"next=\"{next_step}\" then=\"{advance_command}\""
     )
 
 
