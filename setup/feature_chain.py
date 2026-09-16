@@ -1858,7 +1858,12 @@ def params_payload(state: dict, phase: str, repo: str | None, row: dict) -> dict
     }
     if "executable_plan_contract" in state:
         payload["executable_plan_contract"] = state["executable_plan_contract"]
-    if "api" in state["repositories"]:
+    # The smoke port follows the repository PROFILE, not the name "api": the
+    # lane preflight requires APIPORT for any repo declaring HAS_SMOKE, so a
+    # single-repo goodword-mcp (or web-app) chain keyed on "api" got no port
+    # and died at PREFLIGHT=FAIL params.json carries no smoke port.
+    profiles = repo_profiles()
+    if any(profiles.get(name, {}).get("smoke") for name in state["repositories"]):
         payload["api_port"] = allocate_port(4123, slug)
     if "web-app" in state["repositories"]:
         payload["web_port"] = allocate_port(3127, slug)
@@ -1879,6 +1884,17 @@ def params_payload(state: dict, phase: str, repo: str | None, row: dict) -> dict
             payload["feature_verify_only"] = "yes"
             payload["feature_previous_head"] = str(previous_head)
     return payload
+
+
+def repo_profiles() -> dict:
+    result = subprocess.run(
+        ["bash", str(Path(__file__).resolve().parent / "repo-profile.sh"), "--json"],
+        capture_output=True,
+        encoding="utf-8",
+    )
+    if result.returncode != 0:
+        raise FeatureChainError((result.stderr or result.stdout).strip() or "cannot read repository profiles")
+    return json.loads(result.stdout)["profiles"]
 
 
 def allocate_port(base: int, slug: str) -> int:

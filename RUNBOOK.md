@@ -1111,6 +1111,9 @@ JWT through the whitelisted local OTP flow, runs the goodword-mcp jest pattern,
 and emits that line. Contract `artifact` values must be repository-relative file
 paths (`validate-joint-plan.py` rejects prose), and `expected_tests` entries
 must correspond to real jest tests (the runner requires reported >= declared).
+Chain params carry `api_port` whenever any selected repository's profile declares
+`HAS_SMOKE` (not only when `api` is selected), so a single-repo `goodword-mcp` chain
+passes preflight.
 `feature-advance` waits for the current run, seals the approval from the
 completed planning run's `joint-plan.json`/`plan.md` digests, dispatches the next
 stage, and prints `ARCHON_FEATURE_REPOSITORY_CHAIN=PAUSED chain=… phase=… run=…
