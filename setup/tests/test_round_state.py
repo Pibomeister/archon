@@ -397,6 +397,25 @@ class Converge(LaneCase):
         self.assertEqual(decision["result"], "progressed")
         self.assertEqual(decision["next_mode"], "verify")
 
+    def test_a_ready_envelope_whose_head_is_stale_is_tree_drift(self):
+        """Row 9: nothing was applied, and the tree moved anyway.
+
+        The reviewer said Ready about a sha that is no longer the candidate, so
+        the verdict describes code nobody is shipping.
+        """
+        lane = self.lane
+        lane.pre()
+        lane.review("Ready to merge")
+        lane.gate()
+        lane.fix_plan()
+        # An all-empty result over an edited tree: applied == 0, HEAD still moves.
+        lane.fixer(edit=SEED + "// landed without an applied entry\n")
+        commit = lane.commit_fixer()
+        self.assertIn("COMMITTED=YES", commit.stdout)
+        converge = lane.converge({"closure_ok": True})
+        self.assertEqual(converge.returncode, 1, converge.stdout)
+        self.assertIn("REVIEW_TREE_DRIFT round=1", converge.stdout)
+
     def test_not_ready_with_no_open_blocker_is_a_contract_violation(self):
         _, _, _, converge = self.full_round(verdict="Not ready",
                                             closure={"blockers_open": 0})
