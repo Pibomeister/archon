@@ -5,6 +5,7 @@ each finding, and did it break anything reaching it.
 
 Read `{{SETUP}}/review-contract.md` now, sections 1, 4, 6, 7 and 8 in
 particular. It is the contract; everything below is how this mode implements it.
+Where the two disagree, the contract wins.
 
 YOUR FIRST ACTION, before reading anything else, is exactly:
 
