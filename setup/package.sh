@@ -66,6 +66,7 @@ MANIFEST=(
   workflows/portable/single-repo-feature/scripts/repo_policy.py
   workflows/portable/single-repo-feature/scripts/review_envelope.py
   config.yaml
+  .env
   RUNBOOK.md
   workflows/babysit.yaml
   workflows/bugfix.yaml
@@ -106,6 +107,7 @@ MANIFEST=(
   setup/plan-shape.sh
   setup/browser-exemption.py
   setup/check-unit-patterns.py
+  setup/node-no-output.py
   setup/validate-joint-plan.py
   setup/rca-shape.sh
   setup/probe-shape.py

@@ -496,6 +496,10 @@ nodes:
       # apart, and the drift would show up as a plan that passes here and fails
       # after the critic loop, or worse, the reverse.
       eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+      # A planner that ended its turn waiting on background work is recorded
+      # COMPLETED with nothing written; say so here, not as a bare "no plan.md".
+      test -s "$ARTIFACTS_DIR/plan.md" || python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/node-no-output.py \
+        "$ARTIFACTS_DIR" ralplan plan.md
       SHAPE=0
       OUT=$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/plan-shape.sh \
         "$ARTIFACTS_DIR" "$WT" "$SPEC" 2>&1) || SHAPE=$?
@@ -1432,7 +1436,9 @@ nodes:
         exit 0
       fi
       printf '{"outcome":"CHANGED","repo":"%s","basis":"baseline-to-candidate content","baseline":"%s","head":"%s"}\n' "$REPO" "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
-      test -s "$ARTIFACTS_DIR/commit-msg.txt" || { echo "GATE_TESTS=FAIL no commit-msg.txt from implement"; exit 1; }
+      test -s "$ARTIFACTS_DIR/commit-msg.txt" || {
+        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/node-no-output.py "$ARTIFACTS_DIR" implement commit-msg.txt
+        echo "GATE_TESTS=FAIL no commit-msg.txt from implement"; exit 1; }
       # Scope guard: catch implement-node creep before the first review round.
       python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py \
         "$ARTIFACTS_DIR/files-allowlist.json" "$WT" "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" \

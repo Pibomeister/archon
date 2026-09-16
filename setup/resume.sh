@@ -262,7 +262,9 @@ if [ "${#CHAIN_ENV[@]}" -gt 0 ]; then
 elif [ -z "$RUN_AD" ]; then
   echo "RESUME_CHAIN_ENV=NONE reason=no-artifacts-dir run=$(short "$RUN_ID") (a bugfix resume will fail at its first attestation node)"
 fi
-env "${CHAIN_ENV[@]}" DISABLE_OMC=1 archon workflow resume "$RUN_ID" "$@" </dev/null
+# Also set here, not only in .archon/.env: archon loads that file from the CWD,
+# and this wrapper can be called from anywhere (see .archon/.env for why).
+env "${CHAIN_ENV[@]}" DISABLE_OMC=1 CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 archon workflow resume "$RUN_ID" "$@" </dev/null
 ARCHON_RC=$?
 set -e
 
