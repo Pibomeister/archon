@@ -92,6 +92,9 @@ Return ONE raw JSON object:
 
 ## Step 4 — write the envelope
 
+Not before now: after the validator has returned. An envelope written before it
+is a billed round whose gate cannot tell it from a finished one.
+
 Write it to `$ARTIFACTS_DIR/round-$N/review-envelope.txt` and relay it verbatim.
 Its body carries the disposition table (one row per ledger entry: id, severity,
 state, cited line), the new findings as JSON, and a Coverage note naming what

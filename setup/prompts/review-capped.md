@@ -76,6 +76,10 @@ that proves nothing.
 
 ## Step 4 — write the envelope
 
+Not before now: after the skill has returned and its validator pass has run. An
+envelope written mid-fan-out is a billed round whose gate cannot tell it from a
+finished one.
+
 Relay the skill's full return verbatim, write it to
 `$ARTIFACTS_DIR/round-$N/review-envelope.txt`, and append the footer below. Its
 final six lines are exactly, one per line, nothing after them:

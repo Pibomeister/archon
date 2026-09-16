@@ -110,6 +110,12 @@ Its output is final. Do not re-add what it dropped.
 
 ## Step 6 — write the envelope
 
+Not before now. The envelope is written once, after the validator has returned,
+and `mark review-done` is run once, after the envelope file exists. A session
+that writes an envelope at step 4 and marks the round done has billed a review
+whose validator pass had not happened yet, and the gate cannot tell that apart
+from a finished one.
+
 Write the full envelope to `$ARTIFACTS_DIR/round-$N/review-envelope.txt` and
 relay it verbatim as your output. Its body carries the surviving findings as
 JSON, the validator's drops and downgrades with reasons, the `Pinned decisions`

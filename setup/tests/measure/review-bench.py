@@ -91,14 +91,27 @@ def stage_skills(worktree, skills):
         exclude.write_text(text + "\n.claude/\n", encoding="utf-8")
 
 
+SCHEMA = Path("vendor/ce-skills/3.2.0/ce-code-review/references/findings-schema.json")
+
+
 def scratch_setup(root):
-    """`<root>/setup` with the real contract and a marker-only round-state.py,
-    beside `<root>/vendor` -> the real vendor tree, so every `{{SETUP}}`-relative
-    path in a prompt resolves."""
+    """`<root>/setup` with the contract, the findings schema and a marker-only
+    round-state.py, so every `{{SETUP}}`-relative path in a prompt resolves
+    without leaving this directory.
+
+    Copies, not symlinks, and `root` belongs outside every checkout. A symlink
+    into the real tree is a path the session follows: measured 2026-09-16, the
+    first trio run resolved `{{SETUP}}` back into the .archon worktree, spent
+    four minutes reading this harness's own source, and billed it to the review.
+    A bench whose subject can read the bench is measuring the wrong thing.
+    """
     setup = root / "setup"
     setup.mkdir(parents=True, exist_ok=True)
-    (setup / "review-contract.md").symlink_to(ARCHON / "setup" / "review-contract.md")
-    (root / "vendor").symlink_to(ARCHON / "vendor")
+    shutil.copyfile(ARCHON / "setup" / "review-contract.md",
+                    setup / "review-contract.md")
+    schema = root / SCHEMA
+    schema.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(ARCHON / SCHEMA, schema)
     (setup / "round-state.py").write_text(
         "#!/usr/bin/env python3\n"
         "# Bench stub: record the mark and its timestamp. The lane's helper does\n"
