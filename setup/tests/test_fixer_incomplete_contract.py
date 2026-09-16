@@ -107,5 +107,78 @@ class CrossRepoPartition(unittest.TestCase):
         self.assertIn("FIXER_BLOCKED: cross_repo entry missing producer_repo", r.stderr)
 
 
+class PinConflictPartition(unittest.TestCase):
+    """A P0/P1 whose only repair changes a symbol the spec pinned shut.
+
+    It passes this gate and blocks in converge (row 1), because the resolution is
+    a human act -- revert the hunk, `feature-pin-amend`, or re-plan -- and not
+    another round of the same fixer arguing with the same pin.
+    """
+
+    def run_check(self, obj):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(obj, f)
+            path = f.name
+        try:
+            return subprocess.run(["python3", str(CHECK_FIXER_RESULT), path],
+                                  capture_output=True, encoding="utf-8")
+        finally:
+            Path(path).unlink()
+
+    def base(self, **extra):
+        return {"applied": [], "failed": [], "advisory": [], **extra}
+
+    def test_a_valid_pin_conflict_passes_and_is_counted(self):
+        r = self.run_check(self.base(pin_conflict=[
+            {"finding": "revocation must clear the link", "action": "needs shareGroup",
+             "symbol": "GroupService.shareGroup", "severity": "P1"}]))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("PIN_CONFLICT=1", r.stdout)
+
+    def test_an_absent_partition_counts_zero(self):
+        r = self.run_check(self.base())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("PIN_CONFLICT=0", r.stdout)
+
+    def test_an_entry_without_a_symbol_blocks(self):
+        r = self.run_check(self.base(pin_conflict=[{"finding": "f", "action": "a"}]))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("FIXER_BLOCKED: pin_conflict entry missing symbol", r.stderr)
+
+    def test_a_non_list_partition_blocks(self):
+        r = self.run_check(self.base(pin_conflict={"symbol": "x"}))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("FIXER_BLOCKED: pin_conflict must be a list", r.stderr)
+
+
+class DesignExpandedFlag(unittest.TestCase):
+    """The flag that forces the next round full. A wrong type downgrades it."""
+
+    def run_check(self, applied):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump({"applied": applied, "failed": [], "advisory": []}, f)
+            path = f.name
+        try:
+            return subprocess.run(["python3", str(CHECK_FIXER_RESULT), path],
+                                  capture_output=True, encoding="utf-8")
+        finally:
+            Path(path).unlink()
+
+    def test_a_boolean_flag_passes(self):
+        r = self.run_check([{"finding": "f", "action": "a", "severity": "P1",
+                             "design_expanded": True}])
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_an_absent_flag_passes(self):
+        r = self.run_check([{"finding": "f", "action": "a", "severity": "P1"}])
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_the_string_false_is_not_a_boolean(self):
+        r = self.run_check([{"finding": "f", "action": "a", "severity": "P1",
+                             "design_expanded": "false"}])
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("design_expanded must be a boolean", r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

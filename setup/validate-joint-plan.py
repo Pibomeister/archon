@@ -10,6 +10,11 @@ KNOWN_REPOS = {"api", "goodword-mcp", "web-app"}
 SCHEMA = "archon.joint-feature-plan.v1"
 PATHISH = re.compile(r"(^/)|(\.\.)|[/\\]|(^~)")
 NEGATIVE_SCENARIO = re.compile(r"(?i)(denied|reject|forbidden|unauthori[sz]ed|403|negative)")
+# A spec's pinned sections. `### <repo>` subsections stay inside the section that
+# opened them, so a per-repository pin list is covered by the same walk.
+PIN_HEADINGS = ("## Interface (pinned)", "## Pinned decisions")
+BACKTICKED = re.compile(r"`([^`]+)`")
+BULLET = re.compile(r"^\s*[-*]\s+")
 
 
 def fail(message: str) -> None:
@@ -224,6 +229,93 @@ def validate_acceptance_coverage(doc: dict, scenarios: list) -> None:
             fail(f"acceptance criterion {cid} is uncovered")
 
 
+def normalize_rule(text: str) -> str:
+    return " ".join(str(text).split())
+
+
+def pinned_bullets(spec_text: str) -> list[str]:
+    """Every bullet under a pinned heading that names a backticked symbol or file.
+
+    Continuation lines are folded in, because a pin whose sentence wraps is the
+    same pin; a bullet with nothing backticked names no symbol to guard and is
+    prose, not a pin.
+    """
+    lines = spec_text.splitlines()
+    bullets: list[str] = []
+    inside = False
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if stripped.startswith("## "):
+            inside = stripped in PIN_HEADINGS
+            i += 1
+            continue
+        if inside and BULLET.match(lines[i]):
+            body = [BULLET.sub("", lines[i]).rstrip()]
+            j = i + 1
+            while j < len(lines) and lines[j].strip() and not BULLET.match(lines[j]) \
+                    and not lines[j].strip().startswith("#"):
+                body.append(lines[j].strip())
+                j += 1
+            text = normalize_rule(" ".join(body))
+            if BACKTICKED.search(text):
+                bullets.append(text)
+            i = j
+            continue
+        i += 1
+    return bullets
+
+
+def declared_pins(doc: dict) -> list[dict]:
+    pools = [doc.get("pinned_decisions")]
+    stages = doc.get("stages")
+    if isinstance(stages, dict):
+        pools.extend(body.get("pinned_decisions") for body in stages.values()
+                     if isinstance(body, dict))
+    elif isinstance(stages, list):
+        pools.extend(body.get("pinned_decisions") for body in stages if isinstance(body, dict))
+    return [entry for pool in pools if isinstance(pool, list)
+            for entry in pool if isinstance(entry, dict)]
+
+
+def validate_pin_coverage(doc: dict, params: dict) -> None:
+    """Coverage, not substring: every pinned bullet must have an entry whose
+    `rule` IS that bullet.
+
+    v1's planner carried a paraphrase of the spec's pin -- it kept the managed-group
+    sentence and dropped the rest -- so the reviewer re-derived the same objection
+    for four rounds against a rule the plan no longer stated. A substring check
+    would have accepted that paraphrase. Equality is what makes the plan quote the
+    spec.
+
+    Gated on the spec actually declaring a pinned section, so plans written before
+    this contract keep validating.
+    """
+    spec = Path(str(params.get("spec") or ""))
+    try:
+        text = spec.read_text(encoding="utf-8") if spec.is_file() else ""
+    except OSError:
+        text = ""
+    if not text or not any(heading in text for heading in PIN_HEADINGS):
+        return
+    entries = declared_pins(doc)
+    rules = {normalize_rule(entry["rule"]) for entry in entries
+             if isinstance(entry.get("rule"), str)}
+    for bullet in pinned_bullets(text):
+        if bullet not in rules:
+            symbol = BACKTICKED.search(bullet).group(1)
+            fail(f"pin coverage symbol={symbol}")
+    # A pin with no symbol or no file is a pin nothing guards: pin-guard.py skips
+    # it and the plan still reads as covered.
+    for entry in entries:
+        for key in ("symbol", "file"):
+            if not isinstance(entry.get(key), str) or not entry[key].strip():
+                fail(f"pinned decision is missing {key}: {entry.get('rule', '?')!r}")
+        if not isinstance(entry.get("allowed_change"), str):
+            fail(f"pinned decision is missing allowed_change: {entry['symbol']}")
+    print(f"JOINT_PLAN=PINS declared={len(entries)} covered={len(pinned_bullets(text))}")
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         fail("usage: validate-joint-plan.py <artifacts-dir>")
@@ -249,6 +341,7 @@ def main() -> int:
         fail("joint-plan.json stages must match selected repositories exactly")
     for repo in repos:
         validate_stage(repo, stages[repo], selected)
+    validate_pin_coverage(doc, params)
     # verify.json is the planning run's mirror of the anchor repo's shell gate,
     # but the stage run is seeded from stages.<repo>.test_patterns (feature_chain
     # dispatch), so a critic-driven fix that lands only in verify.json ships a
