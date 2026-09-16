@@ -1528,13 +1528,34 @@ def restart_planning(host: Any, args: Any, row: dict, control: dict) -> dict:
     feature = control.get("feature_chain", {})
     if feature.get("scope") != "repositories" or feature.get("phase") != "planning":
         raise FeatureChainError("feature-replan requires a repository-list planning run")
+    return _restart_planning(host, args, row, feature["logical_chain_id"], guarded=True)
+
+
+def restart_planning_unguarded(host: Any, args: Any, row: dict, chain_id: str) -> dict:
+    """Claude chain replan: no control token exists for a Claude launch.
+
+    A Claude planning node can be recorded COMPLETED with no plan written (run
+    f07acb10), and archon never re-runs a completed AI node on resume, so without
+    this the only recovery was a whole new chain. Authority matches
+    feature-advance: the operator names the chain, whose private state is sealed;
+    every other refusal (terminal run, stale action, approved or implemented work,
+    budget) is the guarded path's, verbatim.
+    """
+    return _restart_planning(host, args, row, chain_id, guarded=False)
+
+
+def _restart_planning(host: Any, args: Any, row: dict, chain_id: str, *, guarded: bool) -> dict:
     if row.get("status") not in {"failed", "completed"}:
         raise FeatureChainError("feature-replan requires a terminal planning run")
-    chain_id = feature["logical_chain_id"]
     with chain_lock(Path(args.control_dir), chain_id):
-        revalidate_control_token(host, args, row)
+        if guarded:
+            revalidate_control_token(host, args, row)
         state = read_state(Path(args.control_dir), chain_id)
+        if not guarded and state.get("provider") != "claude":
+            raise FeatureChainError("feature-replan --chain is for claude chains; codex chains require --token")
         current = state.get("current_run")
+        if not guarded and isinstance(current, dict) and current.get("phase") != "planning":
+            raise FeatureChainError("feature-replan requires a repository-list planning run")
         reservation = state.get("dispatch_reservation")
         retry = (not current and isinstance(reservation, dict)
                  and reservation.get("phase") == "planning"

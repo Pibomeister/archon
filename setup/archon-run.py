@@ -3491,7 +3491,8 @@ def parser() -> argparse.ArgumentParser:
     publish.add_argument("--chain", required=True)
     replan = sub.add_parser("feature-replan")
     replan.add_argument("run_id")
-    replan.add_argument("--token", required=True)
+    replan.add_argument("--token", help="codex chains: CONTROL_TOKEN_FROM_LAST_LAUNCH")
+    replan.add_argument("--chain", help="claude chains (no control token): the chain id")
     replan.add_argument("--no-watch", action="store_true")
     replan.add_argument("--watch-timeout-seconds", type=int, default=86400)
     bugfix = sub.add_parser("bugfix")
@@ -3540,8 +3541,14 @@ def main() -> None:
     if args.action == "feature-replan":
         validate_control_location(args.control_dir)
         row = resolve_run(args.db, args.run_id)
-        control = require_control_token(row, args.control_dir, args.token)
-        replanned = repository_feature_call("restart_planning", args, row, control)
+        if args.chain:
+            replanned = repository_feature_call("restart_planning_unguarded", args, row, args.chain)
+            if isinstance(replanned, dict) and replanned.get("result") is None:
+                print_feature_chain_pause(args, args.chain)
+                return
+        else:
+            control = require_control_token(row, args.control_dir, args.token)
+            replanned = repository_feature_call("restart_planning", args, row, control)
         result = replanned.get("result")
         if isinstance(result, dict):
             print("ARCHON_FEATURE_SUPERVISION=" + result["state"].upper() + " " + redact_control_tokens(str(result)))
