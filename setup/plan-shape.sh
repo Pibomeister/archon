@@ -45,6 +45,7 @@ elif [ "${ARCHON_FEATURE_SCOPE-}" = repositories ]; then
   echo "PLAN_SHAPE=FAIL repository feature run missing params.json"; exit 1
 fi
 python3 -c "import json,sys; p=json.load(open(sys.argv[1]))['test_patterns']; assert isinstance(p,list) and p and all(isinstance(x,str) and x.strip() for x in p)" "$AD/verify.json" || { echo "PLAN_SHAPE=FAIL verify.json missing or empty"; exit 1; }
+PS_UNIT=$(python3 "$HERE_PS/check-unit-patterns.py" "$AD") || { echo "PLAN_SHAPE=FAIL $PS_UNIT"; exit 1; }
 python3 -c "import json,sys; a=json.load(open(sys.argv[1])); assert isinstance(a,list) and a and all(isinstance(x,str) and x.strip() for x in a)" "$AD/files-allowlist.json" || { echo "PLAN_SHAPE=FAIL files-allowlist.json missing or empty"; exit 1; }
 python3 -c "import json,sys; a=json.load(open(sys.argv[1])); assert isinstance(a,list) and all(isinstance(x,str) and x.strip() for x in a)" "$AD/web-files-allowlist.json" || { echo "PLAN_SHAPE=FAIL web-files-allowlist.json missing or malformed"; exit 1; }
 python3 -c "import json,sys; c=json.load(open(sys.argv[1]))['columns']; assert isinstance(c,list)" "$AD/reader-audit.json" || { echo "PLAN_SHAPE=FAIL reader-audit.json missing or malformed"; exit 1; }

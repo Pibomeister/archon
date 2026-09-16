@@ -73,6 +73,36 @@ class PlanShapeTest(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("browser-evidence.json/.sha256 missing or malformed", r.stdout)
 
+    def test_integration_spec_pattern_is_rejected_before_approval(self):
+        # api's unit jest config ignores .int.spec.ts: gate-tests would exit
+        # "No tests found" after implement, where no resume can repair it.
+        (self.ad / "verify.json").write_text(json.dumps(
+            {"test_patterns": ["apps/api/src/x/foo.int.spec.ts"]}), encoding="utf-8")
+        r = run(self.ad, self.wt, self.spec)
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("UNIT_PATTERNS=FAIL repo=api pattern=apps/api/src/x/foo.int.spec.ts", r.stdout)
+
+    def test_stem_selecting_only_excluded_tracked_specs_is_rejected(self):
+        subprocess.run(["git", "init", "-q", str(self.wt)], check=True)
+        for rel in ("src/home-airports.int.spec.ts", "src/other.spec.ts"):
+            (self.wt / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.wt / rel).write_text("x\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.wt), "add", "."], check=True)
+        (self.ad / "params.json").write_text(json.dumps(
+            {"repo": "api", "worktree": str(self.wt)}), encoding="utf-8")
+        (self.ad / "verify.json").write_text(json.dumps({"test_patterns": ["home-airports"]}), encoding="utf-8")
+        r = run(self.ad, self.wt, self.spec)
+        self.assertIn("UNIT_PATTERNS=FAIL repo=api pattern=home-airports", r.stdout)
+        (self.ad / "verify.json").write_text(json.dumps({"test_patterns": ["other"]}), encoding="utf-8")
+        self.assertNotIn("UNIT_PATTERNS=FAIL", run(self.ad, self.wt, self.spec).stdout,
+                         "control: a pattern selecting a unit spec is accepted")
+
+    def test_joint_stage_patterns_use_their_own_repo_excludes(self):
+        (self.ad / "joint-plan.json").write_text(json.dumps({"stages": {
+            "goodword-mcp": {"test_patterns": ["tests/tool.e2e.test.ts"]}}}), encoding="utf-8")
+        r = run(self.ad, self.wt, self.spec)
+        self.assertIn("UNIT_PATTERNS=FAIL repo=goodword-mcp", r.stdout)
+
 
 class PlanShapeWithPremisesTest(unittest.TestCase):
     def setUp(self):

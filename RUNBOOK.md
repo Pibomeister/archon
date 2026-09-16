@@ -154,6 +154,8 @@ safety purpose with tested evidence.
 
 **Browser policy `not_applicable` on api/web-app** is derived, never declared: `plan-shape.sh` accepts it only when every allowlisted path (files-allowlist, web-files-allowlist, joint-plan stages) matches that repo's `browser_exempt` globs in `setup/repo-profile.sh`, and `gate-tests`/`exit-gate` re-derive it from the actual diff (`BROWSER_EXEMPTION=FAIL … path=<p>`). The fix for that stop is a populated policy or reverting the surface edit, not a glob edit.
 
+**`verify.json` / joint-plan `test_patterns` are unit-runner-only.** `plan-shape.sh` runs `setup/check-unit-patterns.py`, which rejects (`UNIT_PATTERNS=FAIL repo=<r> pattern=<p>`) a pattern the repo's unit command ignores per its profile's `unit_test_excludes` (api `.int/.ai/.ext.spec.ts`, mcp `.e2e/.smoke.test.ts`, web `tests/`), so the "No tests found" failure lands before approval instead of at `gate-tests`.
+
 Knowledge capture follows the same boundary: the required artifact is
 run-local `kb-capture.md`. Promotion to `goodword-kb` or another external sink
 is optional operator work and cannot retroactively fail a delivered PR.

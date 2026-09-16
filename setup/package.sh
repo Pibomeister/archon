@@ -105,6 +105,7 @@ MANIFEST=(
   setup/parse-review-envelope.py
   setup/plan-shape.sh
   setup/browser-exemption.py
+  setup/check-unit-patterns.py
   setup/validate-joint-plan.py
   setup/rca-shape.sh
   setup/probe-shape.py

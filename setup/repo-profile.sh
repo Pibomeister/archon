@@ -48,6 +48,11 @@ PROFILES = {
         # jest's positional arg is a testPathPattern; the `--` keeps it out of
         # bun's own argument parsing. Pattern is appended by the call site.
         "test":      ["bun", "run", "test", "--"],
+        # Regexes for spec paths the unit config above IGNORES (api/jest.config.js
+        # testPathIgnorePatterns). check-unit-patterns.py rejects a verify.json
+        # pattern that can only select these: jest exits "No tests found".
+        "unit_test_excludes": [r"\.int\.spec\.ts$", r"\.ai\.spec\.ts$", r"\.ext\.spec\.ts$",
+                               r"apps/api-e2e/src/load-tests"],
         "env_src":   ".env",
         "smoke":     "1",
         "browser":   "1",
@@ -83,6 +88,7 @@ PROFILES = {
                       "pnpm", "exec", "jest",
                       "--testPathIgnorePatterns", r"\.(e2e|smoke)\.test\.ts$",
                       "--testPathPatterns"],
+        "unit_test_excludes": [r"\.(e2e|smoke)\.test\.ts$"],
         "env_src":   "",
         # setup/mcp-smoke.sh. Declaring it is what allocates APIPORT: the port is
         # allocated only when HAS_SMOKE is non-empty (resolve-params.sh:113), and
@@ -102,6 +108,8 @@ PROFILES = {
         "typecheck": ["mise", "x", "node@20", "--", "pnpm", "typecheck"],
         "lint":      ["mise", "x", "node@20", "--", "pnpm", "lint"],
         "test":      ["mise", "x", "node@20", "--", "pnpm", "test", "--run"],
+        # vite.config.ts test.exclude: tests/ holds the Playwright suites.
+        "unit_test_excludes": [r"(^|/)tests/"],
         "env_src":   "",
         "smoke":     "1",
         "browser":   "1",

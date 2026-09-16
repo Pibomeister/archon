@@ -356,10 +356,14 @@ nodes:
     one pattern, each matching the Verification commands exactly.
     Every test_patterns entry (verify.json and each stages.<repo>.test_patterns
     in joint-plan.json) runs through that repository's UNIT test command and
-    its unit jest config; api's config ignores .int.spec.ts, .ai.spec.ts and
-    .ext.spec.ts, so an integration or e2e pattern there yields "0 matches"
-    and fails gate-tests. Integration coverage belongs in the integration
-    scenarios, never in test_patterns.
+    its unit config, which ignores some spec kinds (the `unit_test_excludes`
+    regexes in .archon/setup/repo-profile.sh): api ignores .int.spec.ts,
+    .ai.spec.ts and .ext.spec.ts; goodword-mcp ignores .e2e.test.ts and
+    .smoke.test.ts; web-app ignores tests/. Such a pattern yields "No tests
+    found" and fails gate-tests, so plan-shape rejects it before approval.
+    test_patterns = unit specs only. Integration/e2e specs go in the stage's
+    "verification" list or an integration scenario command, never in
+    test_patterns.
     JOINT-REPOSITORY RUNS must also write joint-plan.json in that directory:
       {"schema":"archon.joint-feature-plan.v1",
        "repositories":["<canonical repo>", "..."],
