@@ -301,6 +301,45 @@ class Authorization(LaneCase):
         self.assertEqual(lane.fix_plan(), {"fixer": "run", "reason": "initial", "exit": 0})
 
 
+class InputGate(LaneCase):
+    """GATE_5: the envelope must name the review it was issued for.
+
+    v1's GATE_4 compared a `Scope:` string, which stopped discriminating once
+    789b2a1 labelled the bootstrap-head comparison `delta`. The id binds the
+    head, base, scope, contract, plan and allowlist together, so an envelope
+    that echoes it is provably about this candidate under this contract.
+    """
+
+    def test_an_envelope_that_echoes_the_wrong_id_fails_the_gate(self):
+        lane = self.lane
+        lane.pre()
+        lane.review(input_id="0" * 64)
+        proc = lane.gate()
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("GATE_5_input_matches=FAIL", proc.stdout)
+        self.assertIn("REVIEW_INPUT=FAIL round=1", proc.stdout)
+        self.assertFalse((lane.rd / "review.ok").is_file())
+
+    def test_an_envelope_that_echoes_the_wrong_head_fails_the_gate(self):
+        lane = self.lane
+        lane.pre()
+        lane.review(head="0" * 40)
+        proc = lane.gate()
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("GATE_5_input_matches=FAIL", proc.stdout)
+
+    def test_a_matching_envelope_passes_and_writes_the_authorization(self):
+        lane = self.lane
+        lane.pre()
+        lane.review()
+        proc = lane.gate()
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("GATE_5_input_matches=PASS", proc.stdout)
+        authorization = json.loads((lane.rd / "review.ok").read_text(encoding="utf-8"))
+        self.assertEqual(authorization["gen"], lane.review_input()["attempt"])
+        self.assertEqual(authorization["guard"], "PASS")
+
+
 class ReadOnlyGuard(LaneCase):
     def test_a_reviewer_that_edited_the_tree_fails_the_gate(self):
         lane = self.lane
