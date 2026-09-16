@@ -80,10 +80,66 @@ nodes:
       # (round-pre/converge default 4, plan-round-pre/plan-converge default 3).
       # Written only when absent: an operator who raised a cap and resumed keeps
       # the raise even if this node re-runs. Legacy runs get no file at all.
+      # The planning cap is 3, not 2: BOTH v1 repository-scope attempts hit the
+      # 2-cap and needed a hand raise to 3, where they converged or were
+      # accepted. A cap every real run has to be raised past is a hand stop
+      # dressed as a bound, and each raise costs a resume. This buys no active
+      # minutes -- the critic gate's blocking rule (P0/P1 at >= 75) and the
+      # human plan-accept.txt are unchanged -- it removes the stop.
       if [ "${ARCHON_FEATURE_SCOPE-}" = repositories ]; then
         test -f "$ARTIFACTS_DIR/round-cap.txt" || echo 3 > "$ARTIFACTS_DIR/round-cap.txt"
-        test -f "$ARTIFACTS_DIR/plan-round-cap.txt" || echo 2 > "$ARTIFACTS_DIR/plan-round-cap.txt"
+        test -f "$ARTIFACTS_DIR/plan-round-cap.txt" || echo 3 > "$ARTIFACTS_DIR/plan-round-cap.txt"
         echo "ROUND_CAPS=OK review=$(cat "$ARTIFACTS_DIR/round-cap.txt") plan=$(cat "$ARTIFACTS_DIR/plan-round-cap.txt")"
+      fi
+      # Session lifetime: a repository-scope chain is budgeted at ~2 h active and
+      # runs unattended, so a login that dies mid-run costs a replay of whatever
+      # AI node was in flight (v1: 5 of 13 review invocations were replays, one of
+      # them an OAuth expiry). The gate is on the REFRESH token, not the access
+      # token: measured 2026-09-16 on this machine, claudeAiOauth.expiresAt sat
+      # 186 min out with a ~3 h access-token lifetime that Claude Code renews
+      # silently, so a 3 h bar on THAT field fails a healthy login most of the
+      # time. refreshTokenExpiresAt (measured 39279 min) is what a re-login
+      # actually resets, and its lapse is what ends the session. The credential
+      # blob never reaches argv or stdout -- only the derived minute count does.
+      CRED=""
+      if command -v security >/dev/null 2>&1; then
+        CRED=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || true)
+      fi
+      if [ -z "$CRED" ] && [ -f "$HOME/.claude/.credentials.json" ]; then
+        CRED=$(cat "$HOME/.claude/.credentials.json" 2>/dev/null || true)
+      fi
+      # Clamped at 0 so the shell never parses a sign: an already-expired session
+      # reads as 0 minutes away, which fails the bar exactly as it should. Any
+      # parse failure (no store, empty blob, unexpected shape) exits non-zero and
+      # the `|| echo UNREADABLE` makes it a WARN, never a FAIL.
+      OAUTH_MIN=$(printf '%s' "$CRED" | python3 -c 'import json,sys,time; o=json.load(sys.stdin)["claudeAiOauth"]; v=o.get("refreshTokenExpiresAt") or o.get("expiresAt"); print(max(0,int((v/1000-time.time())/60)) if isinstance(v,(int,float)) else "UNREADABLE")' 2>/dev/null || echo UNREADABLE)
+      unset CRED
+      case "$OAUTH_MIN" in
+        ''|*[!0-9]*) echo "PREFLIGHT_WARN claude session expiry unreadable - a mid-run login lapse will cost a replay" ;;
+        *) if [ "$OAUTH_MIN" -lt 180 ]; then
+             echo "PREFLIGHT=FAIL claude session expires in $OAUTH_MIN min (need >= 180; run /login and restart)"; exit 1
+           fi
+           echo "PREFLIGHT_SESSION=OK claude session expires in $OAUTH_MIN min" ;;
+      esac
+      # Integration identity: joint-api-mcp-e2e.sh mints a JWT for BOTH of its
+      # identities through the local OTP flow, and the api refuses an address the
+      # stage .env does not whitelist. Both are checked, not just the second one:
+      # they are the same class of failure and only one of them was ever named.
+      # An unreadable .env is a WARN -- a repo with no smoke stack has none.
+      OTP_ENV=/Users/eduardopicazo/Documents/Workspace/Goodword/api/.env
+      if [ -r "$OTP_ENV" ]; then
+        OTP_WL=$(grep -m1 '^OTP_TEST_WHITELIST_EMAILS=' "$OTP_ENV" | cut -d= -f2- || true)
+        for pair in "ARCHON_OTP_TEST_EMAIL:${ARCHON_OTP_TEST_EMAIL:-edy@goodword.com}" \
+                    "ARCHON_OTP_SECOND_EMAIL:${ARCHON_OTP_SECOND_EMAIL:-edy+archon2@goodword.com}"; do
+          var=${pair%%:*}; addr=${pair#*:}
+          case ",$OTP_WL," in
+            *",$addr,"*) ;;
+            *) echo "PREFLIGHT=FAIL $var=$addr is not in OTP_TEST_WHITELIST_EMAILS ($OTP_ENV)"; exit 1 ;;
+          esac
+        done
+        echo "PREFLIGHT_OTP=OK both integration identities whitelisted"
+      else
+        echo "PREFLIGHT_WARN api .env unreadable - OTP whitelist for the joint integration not checked"
       fi
       echo "PREFLIGHT=PASS"
 
