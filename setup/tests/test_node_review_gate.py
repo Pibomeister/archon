@@ -70,5 +70,22 @@ class ReviewGateVerdictQuoting(unittest.TestCase):
         self.check("bugfix")
 
 
+class ReviewGateKeepsTheMarkedEnvelope(unittest.TestCase):
+    """mode:ce reviewers write the envelope and `mark review-done`; their session
+    output is narration. Run 44483cda (2026-09-17): the gate copied that
+    narration over the file, erased every footer line, and GATE_5 failed on
+    envelope_input=[]. The node output may only fill a MISSING envelope."""
+
+    NARRATION = ("Production churn is 52 lines, so I capped the conditional personas at 3. "
+                 "Now dispatching the persona agents in parallel. Now marking review-done. "
+                 "Review complete. Verdict: **Not ready**. Full findings are in the envelope.")
+
+    def test_substantive_narration_does_not_overwrite_the_envelope_on_disk(self):
+        self.assertGreaterEqual(len(self.NARRATION), 100)
+        p = run_gate("full-sdlc-api", review_output=self.NARRATION)
+        self.assertIn("GATE_3_verdict_in_enum=PASS verdict=[Ready with fixes] source=envelope",
+                      p.stdout, p.stdout + p.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

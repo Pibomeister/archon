@@ -2863,9 +2863,13 @@ nodes:
         # short-string branch below, where the disk copy wins.
         set +u; OUT=$review.output; set -u
         # Resume resilience: node outputs may not survive a resume; the envelope file does.
-        # Only a SUBSTANTIVE node output overwrites the file: on a reuse round
-        # there is no fresh output and the envelope on disk is the whole point.
-        if [ "${#OUT}" -ge 100 ]; then
+        # The node output only fills a MISSING envelope. In mode:ce the reviewer
+        # writes the file and marks it done while its session output is
+        # narration; overwriting the file with that output erased every
+        # footer line and failed GATE_5 on run 44483cda. A stale envelope from
+        # an earlier attempt cannot pass instead: GATE_5 binds the file to the
+        # current review id and generation.
+        if [ ! -s "$RD/review-envelope.txt" ] && [ "${#OUT}" -ge 100 ]; then
           printf '%s\n' "$OUT" > "$RD/review-envelope.txt"
         fi
         test -s "$RD/review-envelope.txt" || { echo "REVIEW_GATE=FAIL round=$N no envelope at round-$N/review-envelope.txt"; exit 1; }
