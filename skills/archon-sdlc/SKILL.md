@@ -561,7 +561,8 @@ Three rules that decide most supervision calls:
 - **`round.txt` is the only number that means anything.** A failed `loop_group`
   resumes with a fresh iteration counter; `max_iterations` bounds per-invocation
   work only. The durable counter is `round.txt` in the artifacts dir (RUNBOOK §4).
-- **Resume is cheap.** Completed AI nodes never re-run; only failed bash gates
+- **Resume is cheap.** Completed AI nodes never re-run, except the body nodes of
+  a failed `loop_group`, which re-enters with a fresh iteration; only failed bash gates
   re-execute. Resume does not restore AI session context, and it does not need to -
   every post-gate node re-reads its inputs from disk.
 - **A disproved cause is not automatically a resolved ticket.** For a report

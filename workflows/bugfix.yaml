@@ -3577,13 +3577,19 @@ nodes:
             by a byte. Your edits are declared only in deslop-fix-result.json below,
             which the recheck copies into the next round for the reviewer.
 
+            The gates own their state. Do not create, edit or delete deslop-review.json,
+            deslop-round.txt, deslop-dirty.txt, deslop-fix-pending.txt, deslop-tree.txt,
+            deslop-result.sha256 or anything under a deslop-round-* directory; a
+            rewound counter fails the run.
+
             Write deslop-fix-result.json to the artifacts directory with exactly this shape:
               {"round": <R as an int>,
                "fixed": [{"guard": "<finding guard>", "file": "<repo-relative>", "line": <int>,
                           "action": "deleted|rewrote|reverted"}],
                "not_fixed": [{"guard": "<finding guard>", "file": "<repo-relative>", "line": <int>,
                               "reason": "<one line>"}]}
-            Every blocking finding appears in exactly one of the two arrays. Writing this
+            Every blocking finding appears in exactly one of the two arrays, with its
+            guard, file and line copied unchanged; the next node fails the run otherwise. Writing this
             file is MANDATORY and comes BEFORE your final line — ending without it stops
             the pipeline. Then end with the single line: DESLOP_FIX_DONE
 
@@ -3618,6 +3624,9 @@ nodes:
             case "$N" in '') N=0 ;; *[!0-9]*) echo "DESLOP_RECHECK=FAIL deslop-round.txt is not an integer: [$N]"; exit 1 ;; esac
             N=$((N+1)); echo "$N" > "$C"
             RD="$ARTIFACTS_DIR/deslop-round-$N"; mkdir -p "$RD"
+            # Every recheck writes recheck.json into the round it opens, so finding one
+            # means deslop-round.txt was rewound (the fixer runs between two rounds).
+            test ! -e "$RD/recheck.json" || { echo "DESLOP_RECHECK=FAIL deslop-round.txt rewound: round=$N was already checked"; exit 1; }
             # Pending automatic fix (deslop-review-gate recorded DIRTY last round):
             # the fixer must have recorded its result for THAT round before the
             # marker is consumed. Left in place on failure, so a resume re-runs the
@@ -3625,10 +3634,31 @@ nodes:
             PENDING="$ARTIFACTS_DIR/deslop-fix-pending.txt"
             if [ -f "$PENDING" ]; then
               PR=$(cat "$PENDING")
+              case "$PR" in ''|*[!0-9]*) echo "DESLOP_FIX=FAIL deslop-fix-pending.txt is not an integer: [$PR]"; exit 1 ;; esac
               FR="$ARTIFACTS_DIR/deslop-fix-result.json"
               test -s "$FR" || { echo "DESLOP_GATE=FAIL no deslop-fix-result.json round=$N"; exit 1; }
-              python3 -c "import json,sys; d=json.load(open(sys.argv[1], encoding='utf-8')); assert isinstance(d, dict); assert str(d.get('round')) == sys.argv[2]; assert isinstance(d.get('fixed'), list); assert isinstance(d.get('not_fixed'), list)" \
-                "$FR" "$PR" 2>/dev/null || { echo "DESLOP_GATE=FAIL deslop-fix-result.json unparseable round=$N"; exit 1; }
+              # An integer round, and every blocking finding answered exactly once: a
+              # finding the fixer skipped must not reach the reviewer looking handled.
+              FRC=0
+              python3 - "$FR" "$PR" "$ARTIFACTS_DIR/deslop-round-$PR/blocking-findings.json" 2>/dev/null <<'PY' || FRC=$?
+            import json, sys
+            from collections import Counter
+            doc = json.load(open(sys.argv[1], encoding="utf-8"))
+            assert isinstance(doc, dict)
+            assert type(doc.get("round")) is int and doc["round"] == int(sys.argv[2])
+            assert isinstance(doc.get("fixed"), list) and isinstance(doc.get("not_fixed"), list)
+            entries = doc["fixed"] + doc["not_fixed"]
+            assert all(isinstance(e, dict) for e in entries)
+            def key(x):
+                return (x.get("guard"), x.get("file"), x.get("line"))
+            want = Counter(key(f) for f in json.load(open(sys.argv[3], encoding="utf-8"))["findings"])
+            sys.exit(0 if Counter(key(e) for e in entries) == want else 3)
+            PY
+              case "$FRC" in
+                0) ;;
+                3) echo "DESLOP_GATE=FAIL deslop-fix-result.json does not answer each blocking finding exactly once round=$N"; exit 1 ;;
+                *) echo "DESLOP_GATE=FAIL deslop-fix-result.json unparseable round=$N"; exit 1 ;;
+              esac
               # The reviewed checkpoint recorded HEAD. A fixer commit would take its
               # edits out of every working-tree diff below, so HEAD must not move.
               SAVEDHEAD=$(sed -n 's/^head=//p' "$ARTIFACTS_DIR/deslop-tree.txt" 2>/dev/null || true)
@@ -3805,6 +3835,9 @@ nodes:
               echo "index=$CKINDEX"
               echo "checkpoint=$CKTREE"
             } > "$ARTIFACTS_DIR/deslop-tree.txt"
+            # The reviewer writes deslop-review.json fresh each round; the previous
+            # round's file must not stand in for a reviewer that wrote nothing.
+            rm -f "$ARTIFACTS_DIR/deslop-review.json"
             FILES=$(sed -n 's/^SLOP=OK files=\([0-9]*\)$/\1/p' "$RD/slop.txt" | tail -1)
             test -n "$FILES" || FILES=0
             echo "DESLOP_GATE=PASS files=$FILES round=$N checkpoint=$CKTREE"
@@ -4113,8 +4146,14 @@ nodes:
                 # corrupt counter costs one extra round, never the cap itself.
                 D=$(cat "$ARTIFACTS_DIR/deslop-dirty.txt" 2>/dev/null || echo 0)
                 case "$D" in ''|*[!0-9]*) D=0 ;; esac
+                # The fixer runs between two verdicts and could rewind this file to buy a
+                # pass past the cap, so it may not fall below the per-round record.
+                REC=$(cat "$ARTIFACTS_DIR"/deslop-round-*/dirty-count.txt 2>/dev/null | sort -n | tail -1 || true)
+                case "$REC" in ''|*[!0-9]*) REC=0 ;; esac
+                if [ "$D" -lt "$REC" ]; then echo "DESLOP_REVIEW=FAIL deslop-dirty.txt rewound: file=$D recorded=$REC round=$N"; exit 1; fi
                 D=$((D+1))
                 echo "$D" > "$ARTIFACTS_DIR/deslop-dirty.txt"
+                echo "$D" > "$RD/dirty-count.txt"
                 if [ "$D" -ge 2 ]; then echo "DESLOP_ROUND_CAP round=$N dirty_rounds=$D"; exit 1; fi
                 # Below the cap DIRTY is a retry, not a failure: archon fails the whole
                 # loop_group on any failed body node, so exiting non-zero here would

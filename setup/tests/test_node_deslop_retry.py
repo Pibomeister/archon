@@ -181,6 +181,17 @@ class FixPre(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertEqual(p.stdout.strip(), '{"fix":"none"}')
 
+    def test_every_lane_body_runs(self):
+        art = self.tmp / "artifacts"
+        (art / "deslop-fix-pending.txt").write_text("1\n")
+        (art / "deslop-round-1").mkdir()
+        jdump(art / "deslop-round-1" / "blocking-findings.json", {"round": 1, "findings": []})
+        for workflow in ("full-sdlc-api", "full-sdlc-api-codex", "bugfix", "bugfix-codex"):
+            with self.subTest(workflow=workflow):
+                p = run_fix_pre(self.tmp, workflow)
+                self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+                self.assertEqual(p.stdout.strip(), '{"fix":"pending","round":"1"}')
+
     def test_marker_runs_the_fixer_and_clears_a_stale_result(self):
         art = self.tmp / "artifacts"
         (art / "deslop-fix-pending.txt").write_text("3\n")
@@ -214,6 +225,32 @@ class FixerCannotRewriteTheRecord(unittest.TestCase):
             out[workflow] = run_node(workflow, "deslop-recheck", fixer_then_recheck(workflow, lane, fixer))
         return out
 
+    def test_result_must_answer_each_blocking_finding_exactly_once(self):
+        def skipped(tmp):
+            jdump(tmp / "artifacts" / "deslop-fix-result.json", {"round": 1, "fixed": [], "not_fixed": []})
+
+        def twice(tmp):
+            doc = fix_result(1)
+            doc["not_fixed"] = [dict(doc["fixed"][0], reason="also")]
+            jdump(tmp / "artifacts" / "deslop-fix-result.json", doc)
+        for label, fixer in (("skipped", skipped), ("twice", twice)):
+            for workflow, r in self.recheck_after(fixer).items():
+                with self.subTest(case=label, workflow=workflow):
+                    self.assertEqual(r["rc"], 1, r["output"])
+                    self.assertIn("DESLOP_GATE=FAIL deslop-fix-result.json does not answer each blocking "
+                                  "finding exactly once round=2", r["output"])
+                    self.assertEqual(r["files"]["deslop-fix-pending.txt"].strip(), "1")
+
+    def test_string_round_is_rejected(self):
+        def stringly(tmp):
+            doc = fix_result(1)
+            doc["round"] = "1"
+            jdump(tmp / "artifacts" / "deslop-fix-result.json", doc)
+        for workflow, r in self.recheck_after(stringly).items():
+            with self.subTest(workflow=workflow):
+                self.assertEqual(r["rc"], 1, r["output"])
+                self.assertIn("DESLOP_GATE=FAIL deslop-fix-result.json unparseable round=2", r["output"])
+
     def test_writer_declaration_is_frozen(self):
         def declares(tmp):
             path = tmp / "artifacts" / "deslop-result.json"
@@ -231,6 +268,8 @@ class FixerCannotRewriteTheRecord(unittest.TestCase):
                 self.assertEqual(r["rc"], 0, r["output"])
                 self.assertIn("DESLOP_FIX_CONSUMED round=2 fixed_round=1", r["output"])
                 self.assertIn("DESLOP_GATE=PASS", r["output"])
+                # A reviewer that writes nothing must not be judged by round 1's file.
+                self.assertNotIn("deslop-review.json", r["files"])
 
     def test_fixer_commit_is_caught(self):
         def commits(tmp):
@@ -239,6 +278,35 @@ class FixerCannotRewriteTheRecord(unittest.TestCase):
             with self.subTest(workflow=workflow):
                 self.assertEqual(r["rc"], 1, r["output"])
                 self.assertIn("DESLOP_GATE=FAIL fixer moved HEAD round=2", r["output"])
+
+    def test_rewound_round_counter_is_caught(self):
+        def rewinds(tmp):
+            (tmp / "artifacts" / "deslop-round.txt").write_text("0\n")
+        for workflow, r in self.recheck_after(rewinds).items():
+            with self.subTest(workflow=workflow):
+                self.assertEqual(r["rc"], 1, r["output"])
+                self.assertIn("DESLOP_RECHECK=FAIL deslop-round.txt rewound: round=1 was already checked",
+                              r["output"])
+
+    def test_out_of_scope_fixer_edit_reaches_check_scope(self):
+        def strays(tmp):
+            (tmp / "wt" / "src" / "rogue.ts").write_text("export const rogue = 1;\n")
+        for workflow, r in self.recheck_after(strays).items():
+            with self.subTest(workflow=workflow):
+                self.assertEqual(r["rc"], 1, r["output"])
+                self.assertIn("DESLOP_FIX_CONSUMED round=2 fixed_round=1", r["output"])
+                self.assertIn("DESLOP_GATE=FAIL scope round=2", r["output"])
+
+    def test_rewound_dirty_counter_cannot_buy_a_second_fix(self):
+        def rewinds(tmp):
+            (tmp / "artifacts" / "deslop-dirty.txt").write_text("0\n")
+        for workflow, lane in LANES:
+            with self.subTest(workflow=workflow):
+                r = run_node(workflow, "deslop-review-gate",
+                             dirty_then_fixed(workflow, lane, deslop_review("DIRTY", blocking=1), fixer=rewinds))
+                self.assertEqual(r["rc"], 1, r["output"])
+                self.assertIn("DESLOP_REVIEW=FAIL deslop-dirty.txt rewound: file=0 recorded=1 round=2", r["output"])
+                self.assertNotIn("deslop-fix-pending.txt", r["files"])
 
 
 FIXED_FOO = ("export function foo(x: number): number {\n  return x + 1 + k4 + k5 + k6 + k7 + k8 + k9 + k10;\n}\n"
