@@ -25,6 +25,7 @@ from pathlib import Path
 import yaml
 
 from nodes.extract import WORKFLOWS, runnable_body
+from nodes.gitutil import git
 from nodes.runner import _isolation_env
 from test_node_stress import (deslop_common, deslop_review, deslop_review_gate_fixture,
                               jdump, prerun, run_node)
@@ -39,24 +40,41 @@ def fix_result(round_no=1):
             "not_fixed": []}
 
 
-def run_fix_pre(tmp):
-    body = runnable_body("full-sdlc-api", "deslop-fix-pre")
+def run_fix_pre(tmp, workflow="full-sdlc-api"):
+    body = runnable_body(workflow, "deslop-fix-pre")
     env = dict(os.environ, **_isolation_env(tmp), ARTIFACTS_DIR=str(tmp / "artifacts"))
     return subprocess.run(["bash", "-c", body], capture_output=True, encoding="utf-8",
                           env=env, cwd=str(tmp))
 
 
-def dirty_then_fixed(workflow, lane, second_review):
-    """Round 1 DIRTY -> fixer result -> round 2 recheck, then `second_review`."""
+def round_one_dirty(workflow, lane, tmp):
+    """Round 1 recheck -> DIRTY verdict -> the fixer is owed round 1."""
+    deslop_review_gate_fixture(lane, deslop_review("DIRTY", blocking=1))(tmp)
+    prerun(workflow, "deslop-review-gate", tmp)
+    pre = prerun(workflow, "deslop-fix-pre", tmp)
+    assert json.loads(pre.stdout.strip().splitlines()[-1]) == {"fix": "pending", "round": "1"}, pre.stdout
+
+
+def dirty_then_fixed(workflow, lane, second_review, fixer=None):
+    """Round 1 DIRTY -> fixer result -> round 2 recheck, then `second_review`.
+    `fixer(tmp)` stands in for the fixer session's side effects."""
     def build(tmp):
-        deslop_review_gate_fixture(lane, deslop_review("DIRTY", blocking=1))(tmp)
-        prerun(workflow, "deslop-review-gate", tmp)
+        round_one_dirty(workflow, lane, tmp)
         art = tmp / "artifacts"
-        pre = prerun(workflow, "deslop-fix-pre", tmp)
-        assert json.loads(pre.stdout.strip().splitlines()[-1]) == {"fix": "pending", "round": "1"}, pre.stdout
         jdump(art / "deslop-fix-result.json", fix_result(1))
+        if fixer:
+            fixer(tmp)
         prerun(workflow, "deslop-recheck", tmp)
         jdump(art / "deslop-review.json", second_review)
+    return build
+
+
+def fixer_then_recheck(workflow, lane, fixer):
+    """Round 1 DIRTY, then `fixer(tmp)`; the node under test is the round 2 recheck."""
+    def build(tmp):
+        round_one_dirty(workflow, lane, tmp)
+        jdump(tmp / "artifacts" / "deslop-fix-result.json", fix_result(1))
+        fixer(tmp)
     return build
 
 
@@ -114,9 +132,13 @@ class DirtyRetriesBelowTheCap(unittest.TestCase):
 class RecheckConsumesTheMarker(unittest.TestCase):
     def pending(self, lane, result=True):
         def build(tmp):
-            deslop_common(tmp, lane)
+            base = deslop_common(tmp, lane)
             art = tmp / "artifacts"
             (art / "deslop-fix-pending.txt").write_text("1\n")
+            (art / "deslop-round-1").mkdir()
+            jdump(art / "deslop-round-1" / "blocking-findings.json", {"round": 1, "findings": [
+                {"guard": "comments", "file": "src/foo.ts", "line": 2, "confidence": 75, "evidence": "x"}]})
+            (art / "deslop-tree.txt").write_text(f"head={base}\n")
             if result:
                 jdump(art / "deslop-fix-result.json", fix_result(1))
         return build
@@ -181,6 +203,82 @@ class FixPre(unittest.TestCase):
         p = run_fix_pre(self.tmp)
         self.assertEqual(p.returncode, 1)
         self.assertIn("DESLOP_FIX=FAIL no blocking-findings.json for round=2", p.stdout)
+
+
+class FixerCannotRewriteTheRecord(unittest.TestCase):
+    """The fixer runs between two gates and can write any artifact; the gates check."""
+
+    def recheck_after(self, fixer):
+        out = {}
+        for workflow, lane in LANES:
+            out[workflow] = run_node(workflow, "deslop-recheck", fixer_then_recheck(workflow, lane, fixer))
+        return out
+
+    def test_fixer_commit_is_caught(self):
+        def commits(tmp):
+            commit(tmp / "wt", "fixer")
+        for workflow, r in self.recheck_after(commits).items():
+            with self.subTest(workflow=workflow):
+                self.assertEqual(r["rc"], 1, r["output"])
+                self.assertIn("DESLOP_GATE=FAIL fixer moved HEAD round=2", r["output"])
+
+
+FIXED_FOO = ("export function foo(x: number): number {\n  return x + 1 + k4 + k5 + k6 + k7 + k8 + k9 + k10;\n}\n"
+             + "".join(f"const k{i} = 0;\n" for i in range(4, 11)))
+
+
+def commit(wt, message):
+    # Pinned dates: the node output is compared across stress runs.
+    env = dict(os.environ, GIT_AUTHOR_DATE="2026-01-01T00:00:00Z", GIT_COMMITTER_DATE="2026-01-01T00:00:00Z")
+    subprocess.run(["git", "-C", str(wt), "-c", "user.name=f", "-c", "user.email=f@x",
+                    "commit", "-qam", message], check=True, env=env, capture_output=True)
+
+
+def beyond_guards(fixer):
+    """bugfix: red-sha holds the repro, HEAD is the fix commit on top of it, and the
+    deslop pass edited line 2 (a guard) and line 10 (beyond the five guards)."""
+    def build(tmp):
+        deslop_common(tmp, "bugfix")
+        wt, art = tmp / "wt", tmp / "artifacts"
+        (wt / "src" / "foo.ts").write_text(FIXED_FOO)
+        commit(wt, "fix")
+        desloped = FIXED_FOO.replace("x + 1", "x + 2").replace("k10 = 0", "k10 = 1")
+        (wt / "src" / "foo.ts").write_text(desloped)
+        prerun("bugfix", "deslop-recheck", tmp)
+        review = deslop_review("DIRTY", blocking=1)
+        review["findings"][0].update(guard="beyond_five_guards", line=10, confidence=100)
+        jdump(art / "deslop-review.json", review)
+        prerun("bugfix", "deslop-review-gate", tmp)
+        prerun("bugfix", "deslop-fix-pre", tmp)
+        jdump(art / "deslop-fix-result.json", {"round": 1, "fixed": [
+            {"guard": "beyond_five_guards", "file": "src/foo.ts", "line": 10, "action": "reverted"}],
+            "not_fixed": []})
+        fixer(wt, desloped)
+    return build
+
+
+class BeyondFiveGuardsRevertsToHead(unittest.TestCase):
+    def recheck(self, fixer):
+        return run_node("bugfix", "deslop-recheck", beyond_guards(fixer))
+
+    def test_region_restored_to_head_passes(self):
+        r = self.recheck(lambda wt, d: (wt / "src" / "foo.ts").write_text(d.replace("k10 = 1", "k10 = 0")))
+        self.assertEqual(r["rc"], 0, r["output"])
+        self.assertIn("DESLOP_GATE=PASS", r["output"])
+
+    def test_restoring_red_sha_content_is_caught(self):
+        # The reviewer's P2b case: red-sha predates the fix, so this drops lines 4-10 of it.
+        r = self.recheck(lambda wt, d: (wt / "src" / "foo.ts").write_text(
+            git(wt, "show", "HEAD~1:src/foo.ts").stdout.replace("x + 1", "x + 2")))
+        self.assertEqual(r["rc"], 1, r["output"])
+        self.assertIn("DESLOP_GATE=FAIL beyond_five_guards edit not reverted to HEAD file=src/foo.ts:10 round=2",
+                      r["output"])
+
+    def test_a_fixer_that_only_claimed_the_revert_is_caught(self):
+        r = self.recheck(lambda wt, d: None)
+        self.assertEqual(r["rc"], 1, r["output"])
+        self.assertIn("DESLOP_GATE=FAIL beyond_five_guards edit not reverted to HEAD file=src/foo.ts:10 round=2",
+                      r["output"])
 
 
 class LoopShape(unittest.TestCase):

@@ -1849,6 +1849,11 @@ nodes:
               test -s "$FR" || { echo "DESLOP_GATE=FAIL no deslop-fix-result.json round=$N"; exit 1; }
               python3 -c "import json,sys; d=json.load(open(sys.argv[1], encoding='utf-8')); assert isinstance(d, dict); assert str(d.get('round')) == sys.argv[2]; assert isinstance(d.get('fixed'), list); assert isinstance(d.get('not_fixed'), list)" \
                 "$FR" "$PR" 2>/dev/null || { echo "DESLOP_GATE=FAIL deslop-fix-result.json unparseable round=$N"; exit 1; }
+              # The reviewed checkpoint recorded HEAD. A fixer commit would take its
+              # edits out of every working-tree diff below, so HEAD must not move.
+              SAVEDHEAD=$(sed -n 's/^head=//p' "$ARTIFACTS_DIR/deslop-tree.txt" 2>/dev/null || true)
+              test -n "$SAVEDHEAD" && test "$(git rev-parse HEAD)" = "$SAVEDHEAD" \
+                || { echo "DESLOP_GATE=FAIL fixer moved HEAD round=$N expected=[$SAVEDHEAD]"; exit 1; }
               cp "$FR" "$RD/fix-result.json"
               rm -f "$PENDING"
               echo "DESLOP_FIX_CONSUMED round=$N fixed_round=$PR"
