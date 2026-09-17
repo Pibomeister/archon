@@ -1570,7 +1570,7 @@ nodes:
   depends_on:
   - feature-phase
   when: $feature-phase.integration == 'yes'
-  timeout: 1800000
+  timeout: 3600000
   bash: |
     set -euo pipefail
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-joint-integration.out") 2> >(tee -a "$ARTIFACTS_DIR/node-joint-integration.out" >&2); fi
@@ -1620,6 +1620,19 @@ nodes:
     Do not create branches or worktrees — you are already on the correct branch.
     If the unit's work already exists and satisfies Verification, say so and stop;
     do not reimplement.
+    REOPENED STAGES: when reopen-context.json exists in ARTIFACTS_DIR, this run
+    was dispatched by feature-reopen and that file is MANDATORY work, not
+    background. The worktree HEAD is the previous candidate ("previous_head"):
+    the approved plan is already implemented there, so the "already exists, say
+    so and stop" rule above does NOT apply to it. Read "reason" and every file
+    under "evidence" (the stopped run's failing output) first, then change the
+    candidate so the stated failure cannot recur, with a test that fails
+    without your change. gate-tests fails this run with
+    "IMPLEMENT=FAIL reopen produced no change" if the worktree is unchanged.
+    The fix stays inside files-allowlist.json. If it genuinely needs a file
+    outside that list, do not edit that file: write its repo-relative path (one
+    per line) to reopen-blocked.txt in ARTIFACTS_DIR and stop; a human decides
+    whether to amend scope.
 
     <repo-conventions repo="api">
     Package manager: bun@1.3.10. Node 22.16.0.
@@ -1628,7 +1641,14 @@ nodes:
     breaks the suite's mocks (api/CLAUDE.md:32 documents the bare form; it is wrong).
     Typecheck: `bun run typecheck` (tsgo) — NOT build:fast (esbuild-only).
     Lint: `bun run lint` (biome).
-    Integration tests: do NOT run any in this node.
+    Integration tests: do NOT run any in this node, except that a REOPENED stage whose
+    reopen-context.json evidence is an integration failure may re-run THAT spec, and
+    only through the host e2e mutex (use a long Bash timeout; it may print
+    E2E_MUTEX=WAITING while another run holds the stack):
+      bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/e2e-mutex.sh run "$ARTIFACTS_DIR" -- bun run test:integration -- <spec>
+    Never run `bun run test:integration`, `test:e2e`, or `docker-compose -f
+    local-env-compose.e2e.yaml` directly: jest's globalSetup runs `down -v` then
+    `up` on ONE machine-global e2e stack (54322/8001) that concurrent runs share.
     Nest Swagger: always explicit request/response DTO classes; never generic Object
     schemas. TypeScript strict; no `any`; unit specs live in `__tests__/` dirs.
     </repo-conventions>
@@ -1702,7 +1722,9 @@ nodes:
     # No lockfile is noise here: every repo this lane serves (repo-profile.sh) installs
     # frozen, so lockfile-only drift is content, and check-scope.py calls it a breach.
     CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$' || true)
+    # A feature-reopen'd stage must change its previous candidate (reopen-gate.py).
     if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- .; then
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/reopen-gate.py "$ARTIFACTS_DIR" NO_CHANGE
       printf '{"outcome":"NO_CHANGE","repo":"%s","basis":"baseline-to-candidate content","baseline":"%s","head":"%s","pr_url":null}\n' "$REPO" "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
       echo "GATE_TESTS=PASS outcome=NO_CHANGE"
       exit 0
@@ -1711,6 +1733,8 @@ nodes:
     test -s "$ARTIFACTS_DIR/commit-msg.txt" || {
       python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/node-no-output.py "$ARTIFACTS_DIR" implement commit-msg.txt
       echo "GATE_TESTS=FAIL no commit-msg.txt from implement"; exit 1; }
+    # Before scope: a declared reopen-blocked.txt is the actionable stop, not a breach.
+    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/reopen-gate.py "$ARTIFACTS_DIR" CHANGED
     # Scope guard: catch implement-node creep before the first review round.
     python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py \
       "$ARTIFACTS_DIR/files-allowlist.json" "$WT" "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" \
@@ -1769,6 +1793,9 @@ nodes:
        DELETE the test and say so.
     3. YAGNI — parameters, options, branches, exports, types and config with
        no caller in the diff or anywhere in the repo: delete them.
+       APPROVED CONTRACTS: a symbol listed for its file in contract-symbols.json
+       in the artifacts directory (when present) is declared by the approved
+       plan's contract and counts as referenced: never delete it.
     4. OPEN/CLOSED — where the change special-cases an existing dispatch
        (a switch, an if-chain, a registry) and an extension point already
        exists, use the extension point. Do NOT *introduce* an extension point
@@ -1802,7 +1829,9 @@ nodes:
                             verify.json in the artifacts directory.
     NEVER run bare `bun test`: `test` is a bun builtin, so the bare form runs
     bun's own runner instead of jest and silently breaks the suite's mocks.
-    Do not run integration tests in this node.
+    Do not run integration tests in this node. If any other node ever must, it runs
+    them only as `bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/e2e-mutex.sh run "$ARTIFACTS_DIR" -- bun run test:integration -- <spec>`
+    (never bare: jest globalSetup tears down the machine-global e2e stack).
 
     Write deslop-result.json to the artifacts directory, with exactly this shape:
       {"changed_files": ["<repo-relative>", ...],
@@ -1882,6 +1911,8 @@ nodes:
             delete the test.
           yagni — delete the parameter, option, branch, export, type or config
             that has no caller.
+            APPROVED CONTRACTS: a symbol contract-symbols.json lists for that
+            file is an approved plan contract: put it under "not_fixed".
           open_closed — use the extension point that already exists.
           comments — delete the comment that restates the code, narrates the
             change or preserves task history. Keep comments that explain *why*.
@@ -1905,7 +1936,8 @@ nodes:
         For a run whose params.json "repo" is not "api", use that repository's
         commands, listed under ## Verification in plan.md, and omit any command the
         repository does not have. NEVER run bare `bun test`. Do not run integration
-        tests. The next node re-runs every check authoritatively either way.
+        tests (bare `bun run test:integration` tears down the machine-global e2e
+        stack other runs are using). The next node re-runs every check authoritatively either way.
 
         Do NOT edit deslop-result.json. It is the writer's declaration and is
         frozen after the first recheck: the next node fails the run if it changed
@@ -2030,8 +2062,18 @@ nodes:
         # (untracked included), never base..HEAD — the implementation is not
         # committed until commit-impl, so a HEAD-anchored diff would be empty.
         SL=0
+        # Repository-chain stages carry contract-symbols.json (the approved plan's
+        # declared contract symbols); an export named there is not yagni.
+        CONTRACT_ARGS=()
+        if [ -s "$ARTIFACTS_DIR/contract-symbols.json" ]; then
+          # Bound by the controller in params.json: an altered list is refused, never used.
+          python3 -c "import hashlib,json,sys; e=json.load(open(sys.argv[1])).get('feature_contract_symbols_sha256'); sys.exit(0 if not e or e == hashlib.sha256(open(sys.argv[2],'rb').read()).hexdigest() else 1)" \
+            "$ARTIFACTS_DIR/params.json" "$ARTIFACTS_DIR/contract-symbols.json" \
+            || { echo "DESLOP_GATE=FAIL contract-symbols.json altered round=$N"; exit 1; }
+          CONTRACT_ARGS=(--contract-symbols "$ARTIFACTS_DIR/contract-symbols.json")
+        fi
         python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-slop.py \
-          "$WT" "$BASE" --max-complexity 10 --repo "$REPO" > "$RD/slop.txt" 2>&1 || SL=$?
+          "$WT" "$BASE" --max-complexity 10 --repo "$REPO" ${CONTRACT_ARGS[@]+"${CONTRACT_ARGS[@]}"} > "$RD/slop.txt" 2>&1 || SL=$?
         python3 - "$RD/recheck.json" "$TC" "$LT" "$UT" "$SC" "$SL" "$LINT_APPLICABLE" <<'PY'
         import json, sys
         path, tc, lt, ut, sc, sl, lint_applicable = sys.argv[1:8]
@@ -2151,6 +2193,11 @@ nodes:
            on a mock's return value, or that has no assertion.
         3. yagni — parameters, options, branches, exports, types or config added
            by this change with no caller in the diff or in the repo.
+           APPROVED CONTRACTS: when contract-symbols.json exists in the artifacts
+           directory, a symbol it lists for that file is declared by the approved
+           plan's contract and is referenced by the plan: it is NOT a yagni
+           finding, even with no caller yet. The gate downgrades such a finding
+           to 50 (DESLOP_CONTRACT_DOWNGRADE).
         4. open_closed — the change special-cases an existing dispatch (switch,
            if-chain, registry) where an extension point already exists; or it
            introduces an extension point for a single consumer. This guard is
@@ -2265,8 +2312,8 @@ nodes:
         # >= 75, and a declaration that disagrees with the findings is a failure,
         # not a tie-break.
         set +e
-        python3 - "$R" "$N" "$RD/slop.txt" "$RD/blocking-findings.json" <<'PY'
-        import json, sys
+        python3 - "$R" "$N" "$RD/slop.txt" "$RD/blocking-findings.json" "$ARTIFACTS_DIR/contract-symbols.json" "$ARTIFACTS_DIR/params.json" <<'PY'
+        import hashlib, json, re, sys
 
         GUARDS = ["complexity", "tautological_tests", "yagni", "open_closed", "comments"]
         STATUSES = ("assessed", "not_applicable")
@@ -2299,6 +2346,76 @@ nodes:
         SLOP_BLOCKING = _slop_index("FAIL")
         SLOP_REPORTED = _slop_index("REPORT")
         downgraded = 0
+
+        # The approved plan's contract symbols (contract-symbols.json, derived at
+        # dispatch from the approval-bound joint plan) are referenced by the plan
+        # even before any caller exists: chain 42b42a13 capped on a reserved
+        # optional DTO field the fixer rightly refused to delete. A yagni finding
+        # on such a symbol is kept and downgraded to 50.
+        def _contracts():
+            # The controller binds the file's sha256 in params.json; a fixer or
+            # reviewer that widened the list must not buy a downgrade with it.
+            try:
+                expected = json.load(open(sys.argv[6], encoding="utf-8")).get("feature_contract_symbols_sha256")
+            except (IndexError, OSError, ValueError, AttributeError):
+                expected = None
+            if expected:
+                try:
+                    actual = hashlib.sha256(open(sys.argv[5], "rb").read()).hexdigest()
+                except OSError:
+                    actual = None
+                if actual != expected:
+                    print(f"DESLOP_REVIEW=FAIL contract-symbols.json altered round={rnd}")
+                    sys.exit(6)
+            try:
+                doc = json.load(open(sys.argv[5], encoding="utf-8"))
+            except (IndexError, OSError, ValueError):
+                return {}
+            out = {}
+            for c in (doc.get("contracts") if isinstance(doc, dict) else None) or []:
+                if isinstance(c, dict) and isinstance(c.get("artifact"), str):
+                    out.setdefault(c["artifact"], set()).update(
+                        s for s in c.get("symbols") or [] if isinstance(s, str))
+            return out
+
+        CONTRACTS = _contracts()
+        EXPORT_DECL = re.compile(r"^\s*export\s+(?:default\s+)?(?:abstract\s+|declare\s+|async\s+)*"
+                                 r"(?:class|interface|type|const|let|function|enum)\s+([A-Za-z_$][\w$]*)")
+        MEMBER_DECL = re.compile(r"^\s*(?:(?:public|private|protected|readonly|static|declare)\s+)*"
+                                 r"([A-Za-z_$][\w$]*)\s*[?!]?\s*[:(=]")
+
+        def _declared(text, symbols):
+            m = EXPORT_DECL.match(text) or MEMBER_DECL.match(text)
+            return m.group(1) if m and m.group(1) in symbols else None
+
+        def contract_symbol(file, line):
+            """The listed symbol a finding's line declares. A closing-brace line
+            resolves to the declaration that brace closes; a decorator line to the
+            declaration it decorates. Any other line (a statement in a body, a
+            later export) resolves to nothing, so it still blocks."""
+            symbols = CONTRACTS.get(file)
+            try:
+                lines = open(file, encoding="utf-8", errors="replace").read().splitlines() if symbols else []
+            except OSError:
+                return None
+            if not 1 <= line <= len(lines):
+                return None
+            text = lines[line - 1].strip()
+            if text in ("}", "};"):
+                depth = 0
+                for i in range(line - 1, -1, -1):
+                    depth += lines[i].count("}") - lines[i].count("{")
+                    if depth <= 0:
+                        return _declared(lines[i], symbols)
+                return None
+            if text.startswith("@"):
+                depth = 0
+                for i in range(line - 1, len(lines)):
+                    if depth == 0 and i > line - 1 and not lines[i].strip().startswith("@"):
+                        return _declared(lines[i], symbols)
+                    depth += lines[i].count("(") - lines[i].count(")")
+                return None
+            return _declared(lines[line - 1], symbols)
 
 
         def malformed(msg):
@@ -2367,6 +2484,11 @@ nodes:
                 print(f"DESLOP_COMPLEXITY_DOWNGRADED fn={fn} file={f['file']}:{line} confidence={conf}->50")
                 conf = 50
                 downgraded += 1
+            symbol = contract_symbol(f["file"], line) if f["guard"] == "yagni" and conf >= 75 else None
+            if symbol:
+                print(f"DESLOP_CONTRACT_DOWNGRADE symbol={symbol} file={f['file']}:{line} confidence={conf}->50")
+                conf = 50
+                downgraded += 1
             if conf >= 75:
                 blocking += 1
                 blocking_findings.append(dict(f, confidence=conf))
@@ -2416,7 +2538,7 @@ nodes:
             echo "DESLOP_RETRY=PASS round=$N dirty_rounds=$D"
             exit 0
             ;;
-          3|4|5) exit 1 ;;
+          3|4|5|6) exit 1 ;;
           *) echo "DESLOP_REVIEW=FAIL validator error rc=$RC round=$N"; exit 1 ;;
         esac
 - id: reader-audit
@@ -2966,6 +3088,11 @@ nodes:
         "producer_repo", "severity"}. Such a finding is neither advisory nor
         failed — it is not waivable and not fixable here, and it stops the
         run so the chain can route it to the repository that owns it.
+          If cross-repo-filed.json exists in the artifacts directory, a human has
+          filed some cross-repo findings; when you raise one of those same defects
+          again, copy its "finding" and "producer_repo" VERBATIM from
+          cross-repo-findings.json or the earlier round's fixer-result.json so its
+          acknowledgement still matches. Never create or edit cross-repo-filed.json.
         Writing the JSON result file is MANDATORY and comes BEFORE your final line —
         ending without it aborts the pipeline. Write it even when all arrays are
         empty. Then end with the single line: FIXER_DONE
@@ -3026,8 +3153,10 @@ nodes:
     case "$N" in ''|*[!0-9]*) echo "EXIT_GATE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
     # Cross-repo belt: converge's stop is bypassable by a resume, and the
     # accept-residuals branch below skips the fixer re-check entirely.
-    CROSSN=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1])).get('cross_repo') or []))" "$RD/fixer-result.json" 2>/dev/null || echo 0)
-    test "$CROSSN" = 0 || { echo "EXIT_GATE=FAIL CROSS_REPO_FINDING round=$N count=$CROSSN"; exit 1; }
+    # Only a human acknowledgement in cross-repo-filed.json resolves an entry.
+    CROSS=$(python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --gate "$RD/fixer-result.json") \
+      || { printf '%s\n' "$CROSS" | sed '$d'; echo "EXIT_GATE=FAIL CROSS_REPO_FINDING round=$N $(printf '%s\n' "$CROSS" | tail -n 1)"; exit 1; }
+    [ -z "$CROSS" ] || printf '%s\n' "$CROSS"
     # A human accepting residuals waives the verdict and fixer checks — never
     # the clean-tree, scope, or unit-test checks (accepted findings, not a broken tree).
     if [ -f "$ARTIFACTS_DIR/accept-residuals.txt" ]; then
@@ -3169,6 +3298,10 @@ nodes:
     must say exactly: "No additional operational monitoring required."
     Mention verification evidence: unit gate, typecheck, lint, and the live
     smoke result exactly as recorded in smoke-result.txt in that directory.
+    After those sections, run: python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --prbody
+    When it prints anything, append that output VERBATIM as the last section of
+    pr-body.md (the "## Cross-repo findings filed" section: defects in other
+    repositories a human filed instead of fixing here).
     No co-author or attribution lines. End with the single line: PRBODY_WRITTEN
 - id: ship
   depends_on:
