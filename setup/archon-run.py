@@ -2896,8 +2896,8 @@ def resolve_feature_control_run(args: argparse.Namespace) -> dict:
 
 def feature_budget_update_command(args: argparse.Namespace) -> None:
     validate_control_location(args.control_dir)
-    row = resolve_run(args.db, args.run_id)
-    result = repository_feature_call("budget_update_command", args, row)
+    row = resolve_feature_control_run(args)
+    result = repository_feature_call("budget_update_command", args, row, args.chain)
     active_part = ""
     if result.get("total_active_minutes") is not None:
         active_part = f"total_active_minutes={result['total_active_minutes']} "
@@ -3465,7 +3465,8 @@ def parser() -> argparse.ArgumentParser:
     shepherd.add_argument("--json", action="store_true")
     budget_update = sub.add_parser("feature-budget-update", help="guarded token allowance amendment for an existing repository-list feature chain")
     budget_update.add_argument("run_id")
-    budget_update.add_argument("--token", required=True)
+    budget_update.add_argument("--token", help="codex chains: CONTROL_TOKEN_FROM_LAST_LAUNCH")
+    budget_update.add_argument("--chain", help="claude chains (no control token): the chain id")
     budget_update.add_argument("--total-tokens", type=int, required=True)
     budget_update.add_argument("--total-active-minutes", type=int)
     budget_update.add_argument("--enable-shepherd", action="store_true")

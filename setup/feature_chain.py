@@ -2928,7 +2928,13 @@ def scope_amend_command(host: Any, args: Any, row: dict, chain_id: str | None = 
     return applied
 
 
-def budget_update_command(host: Any, args: Any, row: dict) -> dict:
+def budget_update_command(host: Any, args: Any, row: dict, chain_id: str | None = None) -> dict:
+    """Raise a chain's shared allowance.
+
+    ``chain_id`` selects the Claude path (``--chain``): the chain ledger is
+    amended, but there is no private run-control record to update and no
+    budget shepherd to enable, since both exist only for codex launches.
+    """
     total_tokens = int(getattr(args, "total_tokens", 0))
     total_active_minutes = getattr(args, "total_active_minutes", None)
     if total_active_minutes is not None:
@@ -2939,15 +2945,13 @@ def budget_update_command(host: Any, args: Any, row: dict) -> dict:
         raise FeatureChainError("total token allowance must be positive")
     if not str(getattr(args, "reason", "")).strip():
         raise FeatureChainError("budget amendment requires a reason")
-    control = getattr(host, "read_control_state")(row, Path(args.control_dir))
-    feature = control_feature({"control": control})
-    if feature.get("scope") != "repositories":
-        raise FeatureChainError("feature-budget-update requires a repository-list feature run")
-    if feature.get("provider") != "codex":
-        raise FeatureChainError("feature-budget-update requires a Codex repository-list feature run")
-    chain_id = feature.get("logical_chain_id")
-    if not isinstance(chain_id, str):
-        raise FeatureChainError("run-control record is missing feature chain id")
+    feature = None
+    if chain_id is None:
+        feature, chain_id = guarded_feature_binding(host, args, row, "feature-budget-update")
+        if feature.get("provider") != "codex":
+            raise FeatureChainError("feature-budget-update requires a Codex repository-list feature run")
+    elif getattr(args, "enable_shepherd", False):
+        raise FeatureChainError("feature-budget-update --enable-shepherd is codex-only")
     amendment_payload = {
         "kind": "feature-budget-update",
         "logical_chain_id": chain_id,
@@ -2960,15 +2964,11 @@ def budget_update_command(host: Any, args: Any, row: dict) -> dict:
         amendment_payload["total_active_minutes"] = total_active_minutes
     amendment_id = digest(amendment_payload)
     with chain_lock(Path(args.control_dir), chain_id):
-        row = host.run_row_by_id(Path(args.db), row["id"])
-        if not isinstance(row, dict) or row.get("status") not in {"failed", "paused", "completed", "cancelled"}:
-            raise FeatureChainError("feature-budget-update requires a stopped run")
-        control = host.require_control_token(row, Path(args.control_dir), getattr(args, "token", None))
-        if control.get("feature_chain") != feature:
-            raise FeatureChainError("feature control binding changed while acquiring the chain lock")
-        require_no_live_control_processes(control)
+        row = authorize_stopped_run(host, args, row, "feature-budget-update", feature)
         state = read_state(Path(args.control_dir), chain_id)
-        if state.get("provider") != "codex":
+        if feature is None:
+            require_claude_chain(state, "feature-budget-update")
+        elif state.get("provider") != "codex":
             raise FeatureChainError("feature-budget-update requires a Codex repository-list feature chain")
         pending = state.get("pending_control")
         if pending is not None and (not isinstance(pending, dict) or process_claim_alive(pending)):
@@ -2996,8 +2996,9 @@ def budget_update_command(host: Any, args: Any, row: dict) -> dict:
                 continue
             if applied.get("total_tokens") != total_tokens or applied.get("total_active_minutes") != total_active_minutes:
                 raise FeatureChainError("amendment id was already used for a different allowance")
-            control = getattr(host, "require_control_token")(row, Path(args.control_dir), getattr(args, "token", None))
-            update_run_control_allowance(host, args, row, control, total_tokens, total_active_minutes)
+            if feature is not None:
+                control = getattr(host, "require_control_token")(row, Path(args.control_dir), getattr(args, "token", None))
+                update_run_control_allowance(host, args, row, control, total_tokens, total_active_minutes)
             return {"chain": chain_id, "total_tokens": total_tokens, "total_active_minutes": total_active_minutes, "amendment_id": amendment_id}
         if total_tokens < current_limit:
             raise FeatureChainError("feature-budget-update may only increase the token ceiling")
@@ -3023,8 +3024,9 @@ def budget_update_command(host: Any, args: Any, row: dict) -> dict:
             state["updated_at"] = now()
             state = write_state(Path(args.control_dir), state)
         budget_amend_allowance(args, chain_id, total_tokens, total_active_minutes, amendment_id, getattr(args, "reason", ""))
-        control = getattr(host, "require_control_token")(row, Path(args.control_dir), getattr(args, "token", None))
-        update_run_control_allowance(host, args, row, control, total_tokens, total_active_minutes)
+        if feature is not None:
+            control = getattr(host, "require_control_token")(row, Path(args.control_dir), getattr(args, "token", None))
+            update_run_control_allowance(host, args, row, control, total_tokens, total_active_minutes)
         amendment = dict(state["budget_amendment"])
         state.setdefault("budget", {})["max_total_tokens"] = total_tokens
         if total_active_minutes is not None:
