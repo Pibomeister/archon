@@ -81,6 +81,8 @@ MANIFEST=(
   setup/run-tests.py
   setup/joint-api-mcp-e2e.sh
   setup/run-joint-integration.py
+  setup/candidate_env.py
+  setup/jest-count.py
   setup/trusted-local-candidate.sh
   setup/write-local-candidate.py
   setup/export-candidate.py

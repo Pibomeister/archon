@@ -58,6 +58,13 @@ PROFILES = {
         "unit_test_excludes": [r"\.int\.spec\.ts$", r"\.ai\.spec\.ts$", r"\.ext\.spec\.ts$",
                                r"apps/api-e2e/src/load-tests"],
         "env_src":   ".env",
+        # What a checkout needs before its own commands run, beyond tracked files
+        # (candidate_env.py). A detached candidate outside <repo>/.worktrees/ has
+        # no ancestor node_modules, and ignored env files never follow a checkout.
+        # .env.e2e is what apps/api-e2e/src/setup-tests.ts loads for
+        # `bun run test:integration`.
+        "runtime_deps":      ["node_modules"],
+        "runtime_env_files": [".env", ".env.e2e"],
         "smoke":     "1",
         "browser":   "1",
         # Paths with NO browser-reachable surface (browser-exemption.py). Only
@@ -99,6 +106,8 @@ PROFILES = {
                       "--testPathPatterns"],
         "unit_test_excludes": [r"\.(e2e|smoke)\.test\.ts$"],
         "env_src":   "",
+        "runtime_deps":      ["node_modules"],
+        "runtime_env_files": [],
         # setup/mcp-smoke.sh. Declaring it is what allocates APIPORT: the port is
         # allocated only when HAS_SMOKE is non-empty (resolve-params.sh:113), and
         # the lane treats a missing APIPORT for a smoke-bearing repo as a hard
@@ -125,6 +134,8 @@ PROFILES = {
         # vite.config.ts test.exclude: tests/ holds the Playwright suites.
         "unit_test_excludes": [r"(^|/)tests/"],
         "env_src":   "",
+        "runtime_deps":      ["node_modules"],
+        "runtime_env_files": [],
         "smoke":     "1",
         "browser":   "1",
         # Every web-app path is presumed page-reachable.

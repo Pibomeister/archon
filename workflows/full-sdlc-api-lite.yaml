@@ -166,6 +166,14 @@ nodes:
       cp "$REPO_DIR/$ENV_SRC" "$WT/$ENV_SRC"
     fi
     cd "$WT" && "${CMD_INSTALL[@]}" >/dev/null
+    # A chain stage's implement node runs the approved stage verification,
+    # integration commands included, in this worktree. Resolve the profile's
+    # runtime files the same way joint-integration candidates get them (api:
+    # .env.e2e, which ENV_SRC never seeded).
+    if [ "${ARCHON_FEATURE_SCOPE-}" = repositories ]; then
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/candidate_env.py "$REPO" "$WT" "$WT" \
+        || { echo "BOOTSTRAP=FAIL stage runtime environment unresolved (CANDIDATE_ENV line above)"; exit 1; }
+    fi
     git -C "$WT" rev-parse HEAD > "$ARTIFACTS_DIR/bootstrap-head.txt"
     # api_worktree is the key archon-run.py:2054 and resolve-web-params.sh:75
     # read; it keeps its name. "repo" is additive so the artifact stops
@@ -824,6 +832,7 @@ nodes:
       depends_on:
       - round-pre
       when: $round-pre.review == 'run'
+      context: fresh
       model: sonnet
       maxBudgetUsd: 20
       timeout: 1800000
@@ -859,11 +868,11 @@ nodes:
 
         YOUR FIRST ACTION, before reading anything else, is exactly:
 
-            python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py "$ARTIFACTS_DIR" mark review-start
+            python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py mark "$ARTIFACTS_DIR" review-start
 
         YOUR LAST ACTION, after the envelope file is written, is exactly:
 
-            python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py "$ARTIFACTS_DIR" mark review-done "$ARTIFACTS_DIR/round-$N/review-envelope.txt"
+            python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py mark "$ARTIFACTS_DIR" review-done "$ARTIFACTS_DIR/round-$N/review-envelope.txt"
 
         You are read-only in the candidate worktree (contract section 1). `review-gate`
         compares the tree before and after this session; an edit fails the round.

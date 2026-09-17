@@ -1026,14 +1026,16 @@ class DeslopStress(unittest.TestCase):
     def test_deslop_review_gate_api_dirty(self):
         r = run_node("full-sdlc-api", "deslop-review-gate",
                      deslop_review_gate_fixture("api", deslop_review("DIRTY", blocking=1)))
-        self.assertEqual(r["rc"], 1)
+        self.assertEqual(r["rc"], 0, r["output"])
         self.assertIn("DESLOP=DIRTY round=1 blocking=1", r["output"])
+        self.assertIn("DESLOP_RETRY=PASS round=1 dirty_rounds=1", r["output"])
 
     def test_deslop_review_gate_bugfix_dirty(self):
         r = run_node("bugfix", "deslop-review-gate",
                      deslop_review_gate_fixture("bugfix", deslop_review("DIRTY", blocking=1)))
-        self.assertEqual(r["rc"], 1)
+        self.assertEqual(r["rc"], 0, r["output"])
         self.assertIn("DESLOP=DIRTY round=1 blocking=1", r["output"])
+        self.assertIn("DESLOP_RETRY=PASS round=1 dirty_rounds=1", r["output"])
 
     def test_deslop_review_gate_junk_counter_fails_closed(self):
         # The READER half of the same guard: deslop-review-gate builds

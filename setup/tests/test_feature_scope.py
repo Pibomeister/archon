@@ -109,6 +109,8 @@ class FeatureScope(unittest.TestCase):
     def test_replan_parser_accepts_chain_without_token(self):
         args = ar.parser().parse_args(["feature-replan", "abc12345", "--chain", "c" * 32])
         self.assertEqual((args.chain, args.token), ("c" * 32, None))
+        args = ar.parser().parse_args(["feature-replan", "abc12345", "--chain", "c" * 32, "--guidance-file", "/g.md"])
+        self.assertEqual("/g.md", args.guidance_file)
 
     def test_claude_chain_replan_reaches_the_chain_with_a_claude_lane_run(self):
         with tempfile.TemporaryDirectory() as td:

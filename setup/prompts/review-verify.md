@@ -9,11 +9,11 @@ Where the two disagree, the contract wins.
 
 YOUR FIRST ACTION, before reading anything else, is exactly:
 
-    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py "$ARTIFACTS_DIR" mark review-start
+    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py mark "$ARTIFACTS_DIR" review-start
 
 YOUR LAST ACTION, after the envelope file is written, is exactly:
 
-    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py "$ARTIFACTS_DIR" mark review-done "$ARTIFACTS_DIR/round-$N/review-envelope.txt"
+    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py mark "$ARTIFACTS_DIR" review-done "$ARTIFACTS_DIR/round-$N/review-envelope.txt"
 
 You are read-only in the candidate worktree (contract section 1).
 

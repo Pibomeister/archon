@@ -58,12 +58,15 @@ DEFAULT_INTEGRATION_LANE = {"claude": "full-sdlc-api", "codex": "full-sdlc-api-c
 JOINT_PLAN_ARTIFACT = "joint-plan.json"
 PLANNING_REQUEST_ARTIFACT = "feature-chain-request.json"
 PRIOR_PLANNING_EVIDENCE_ARTIFACT = "prior-planning-evidence.json"
+OPERATOR_GUIDANCE_ARTIFACT = "operator-guidance.md"
+OPERATOR_GUIDANCE_MAX_BYTES = 32_000
 INTEGRATION_EVIDENCE_ARTIFACT = "integration-evidence.json"
 PLANNING_SUPPORT_ARTIFACTS = (
     "plan.md", "premises.json", "reader-audit.json", "web-premises.json",
     "web-reader-audit.json", "browser-evidence.json", "browser-evidence.sha256",
     "smoke-probe.json", "kb-context.md", "docreview-envelope.txt", "docreview.diff",
     "plan-review.html", "plan-round.txt", "plan.post-critic.md", "plan.post-docreview.md",
+    OPERATOR_GUIDANCE_ARTIFACT,
 )
 PLANNING_ROUND_EVIDENCE = ("critique.json", "revision.json", "impact.json")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}", re.I)
@@ -1449,6 +1452,22 @@ def write_prior_planning_evidence(artifacts_dir: Path, state: dict) -> dict | No
     }
 
 
+def write_operator_guidance(artifacts_dir: Path, state: dict) -> dict | None:
+    guidance = state.get("operator_guidance")
+    if not guidance:
+        return None
+    path = artifacts_dir / OPERATOR_GUIDANCE_ARTIFACT
+    path.write_bytes(guidance["content_text"].encode("utf-8"))
+    if file_digest(path) != guidance["sha256"]:
+        raise FeatureChainError("operator guidance artifact does not match its recorded sha256")
+    return {
+        "artifact": OPERATOR_GUIDANCE_ARTIFACT,
+        "sha256": guidance["sha256"],
+        "planning_generation": guidance["planning_generation"],
+        "authority": "below the spec for scope and requirements; above prior planning evidence and planner judgment for approach",
+    }
+
+
 def prior_planning_attempt_summary(item: dict) -> dict:
     summary = {"run_id": item.get("run_id"), "spec_sha256": item.get("spec_sha256")}
     if item.get("evidence_sha256"):
@@ -1545,9 +1564,29 @@ def restart_planning_unguarded(host: Any, args: Any, row: dict, chain_id: str) -
     return _restart_planning(host, args, row, chain_id, guarded=False)
 
 
+def read_operator_guidance(path_value: Any) -> dict | None:
+    """Operator guidance for a replan: approach direction that must not edit the
+    immutable spec snapshot. Read and validated before any state changes."""
+    if not path_value:
+        return None
+    path = Path(str(path_value)).expanduser()
+    try:
+        data = path.read_bytes()
+        text = data.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise FeatureChainError(f"operator guidance file unreadable: {path}: {exc}") from exc
+    if not text.strip():
+        raise FeatureChainError(f"operator guidance file is empty: {path}")
+    if len(data) > OPERATOR_GUIDANCE_MAX_BYTES:
+        raise FeatureChainError(f"operator guidance file exceeds {OPERATOR_GUIDANCE_MAX_BYTES} bytes: {path}")
+    return {"sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data), "content_text": text,
+            "source_path": str(path.resolve())}
+
+
 def _restart_planning(host: Any, args: Any, row: dict, chain_id: str, *, guarded: bool) -> dict:
     if row.get("status") not in {"failed", "completed"}:
         raise FeatureChainError("feature-replan requires a terminal planning run")
+    guidance = read_operator_guidance(getattr(args, "guidance_file", None))
     with chain_lock(Path(args.control_dir), chain_id):
         if guarded:
             revalidate_control_token(host, args, row)
@@ -1575,6 +1614,10 @@ def _restart_planning(host: Any, args: Any, row: dict, chain_id: str, *, guarded
             )
             state["planning_generation"] = state.get("planning_generation", 0) + 1
             state["spec_sha256"] = file_digest(Path(state["spec"]))
+        if guidance:
+            # Replaces any earlier guidance; a replan without the flag keeps it.
+            state["operator_guidance"] = dict(guidance, planning_generation=state.get("planning_generation", 0),
+                                              recorded_at=now())
         state["current_run"] = None
         state["dispatch_reservation"] = {
             "phase": "planning", "repo": None, "source_run_id": row["id"],
@@ -1585,14 +1628,16 @@ def _restart_planning(host: Any, args: Any, row: dict, chain_id: str, *, guarded
     args.wall_minutes = state["budget"]["wall_minutes"]
     args.max_total_tokens = state["budget"]["max_total_tokens"]
     result = dispatch_planning(host, args, state)
+    carried = state.get("operator_guidance")
     print(
-        f"ARCHON_FEATURE_REPLAN=STARTED chain={chain_id} predecessor={row['id']} run={result['row']['id']}",
+        f"ARCHON_FEATURE_REPLAN=STARTED chain={chain_id} predecessor={row['id']} run={result['row']['id']} "
+        f"guidance={carried['sha256'] if carried else 'none'}",
         flush=True,
     )
     return result
 
 
-def planning_request_payload(state: dict, prior_evidence: dict | None = None) -> dict:
+def planning_request_payload(state: dict, prior_evidence: dict | None = None, guidance: dict | None = None) -> dict:
     return {
         "schema_version": 1,
         "kind": "repository-list-feature-planning-request",
@@ -1613,6 +1658,7 @@ def planning_request_payload(state: dict, prior_evidence: dict | None = None) ->
             "integration": "object with non-empty scenarios",
         },
         "prior_planning_evidence": prior_evidence,
+        "operator_guidance": guidance,
         "write_policy": "planning workers may write only planning artifacts; repository worktrees are read-only until approval",
         "created_at": now(),
     }
@@ -1621,9 +1667,10 @@ def planning_request_payload(state: dict, prior_evidence: dict | None = None) ->
 def write_planning_request(artifacts_dir: Path, state: dict) -> Path:
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     prior_evidence = write_prior_planning_evidence(artifacts_dir, state)
+    guidance = write_operator_guidance(artifacts_dir, state)
     path = artifacts_dir / PLANNING_REQUEST_ARTIFACT
     tmp = path.with_suffix(f".tmp.{os.getpid()}")
-    tmp.write_text(json.dumps(planning_request_payload(state, prior_evidence), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.write_text(json.dumps(planning_request_payload(state, prior_evidence, guidance), indent=2, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(path)
     return path
 
@@ -2781,28 +2828,63 @@ def refresh_current_stage_artifacts(state: dict, row: dict, repo: str) -> None:
         (artifacts_path / "plan.md").write_text(plan_md, encoding="utf-8")
 
 
-def scope_amend_command(host: Any, args: Any, row: dict) -> dict:
-    add_file_arg = str(getattr(args, "add_file", ""))
-    reason = str(getattr(args, "reason", "")).strip()
-    if not reason:
-        raise FeatureChainError("scope amendment requires a reason")
+def guarded_feature_binding(host: Any, args: Any, row: dict, command: str) -> tuple[dict, str]:
+    """Codex path: the run-control record names the repository-list chain."""
     control = getattr(host, "read_control_state")(row, Path(args.control_dir))
     feature = control_feature({"control": control})
     if feature.get("scope") != "repositories":
-        raise FeatureChainError("feature-scope-amend requires a repository-list feature run")
+        raise FeatureChainError(f"{command} requires a repository-list feature run")
     chain_id = feature.get("logical_chain_id")
     if not isinstance(chain_id, str):
         raise FeatureChainError("run-control record is missing feature chain id")
-    applied: dict | None = None
-    with chain_lock(Path(args.control_dir), chain_id):
-        row = host.run_row_by_id(Path(args.db), row["id"])
-        if not isinstance(row, dict) or row.get("status") not in {"failed", "paused", "completed", "cancelled"}:
-            raise FeatureChainError("feature-scope-amend requires a stopped run")
+    return feature, chain_id
+
+
+def authorize_stopped_run(host: Any, args: Any, row: dict, command: str, feature: dict | None) -> dict:
+    """Under the chain lock: the run must be stopped, then prove operator authority.
+
+    Codex (``feature`` set): the control token, the unchanged run-control binding,
+    and no live launcher/watchdog process group. Claude (``feature`` None): a
+    Claude launch writes no control token or process record; authority is naming
+    the chain (as feature-advance and feature-replan --chain do), and liveness is
+    the archon run status plus the chain's pending-control and dispatch claims,
+    which every caller still checks.
+    """
+    row = host.run_row_by_id(Path(args.db), row["id"])
+    if not isinstance(row, dict) or row.get("status") not in {"failed", "paused", "completed", "cancelled"}:
+        raise FeatureChainError(f"{command} requires a stopped run")
+    if feature is not None:
         control = host.require_control_token(row, Path(args.control_dir), getattr(args, "token", None))
         if control.get("feature_chain") != feature:
             raise FeatureChainError("feature control binding changed while acquiring the chain lock")
         require_no_live_control_processes(control)
+    return row
+
+
+def require_claude_chain(state: dict, command: str) -> None:
+    if state.get("provider") != "claude":
+        raise FeatureChainError(f"{command} --chain is for claude chains; codex chains require --token")
+
+
+def scope_amend_command(host: Any, args: Any, row: dict, chain_id: str | None = None) -> dict:
+    """Add one tracked file to the current stage allowlist.
+
+    ``chain_id`` selects the Claude path (``--chain``); omitted, the codex
+    run-control record and ``--token`` authorize it.
+    """
+    add_file_arg = str(getattr(args, "add_file", ""))
+    reason = str(getattr(args, "reason", "")).strip()
+    if not reason:
+        raise FeatureChainError("scope amendment requires a reason")
+    feature = None
+    if chain_id is None:
+        feature, chain_id = guarded_feature_binding(host, args, row, "feature-scope-amend")
+    applied: dict | None = None
+    with chain_lock(Path(args.control_dir), chain_id):
+        row = authorize_stopped_run(host, args, row, "feature-scope-amend", feature)
         state = read_state(Path(args.control_dir), chain_id)
+        if feature is None:
+            require_claude_chain(state, "feature-scope-amend")
         require_no_incomplete_amendment(state)
         pending = state.get("pending_control")
         if pending is not None and (not isinstance(pending, dict) or process_claim_alive(pending)):
@@ -2846,7 +2928,13 @@ def scope_amend_command(host: Any, args: Any, row: dict) -> dict:
     return applied
 
 
-def budget_update_command(host: Any, args: Any, row: dict) -> dict:
+def budget_update_command(host: Any, args: Any, row: dict, chain_id: str | None = None) -> dict:
+    """Raise a chain's shared allowance.
+
+    ``chain_id`` selects the Claude path (``--chain``): the chain ledger is
+    amended, but there is no private run-control record to update and no
+    budget shepherd to enable, since both exist only for codex launches.
+    """
     total_tokens = int(getattr(args, "total_tokens", 0))
     total_active_minutes = getattr(args, "total_active_minutes", None)
     if total_active_minutes is not None:
@@ -2857,15 +2945,13 @@ def budget_update_command(host: Any, args: Any, row: dict) -> dict:
         raise FeatureChainError("total token allowance must be positive")
     if not str(getattr(args, "reason", "")).strip():
         raise FeatureChainError("budget amendment requires a reason")
-    control = getattr(host, "read_control_state")(row, Path(args.control_dir))
-    feature = control_feature({"control": control})
-    if feature.get("scope") != "repositories":
-        raise FeatureChainError("feature-budget-update requires a repository-list feature run")
-    if feature.get("provider") != "codex":
-        raise FeatureChainError("feature-budget-update requires a Codex repository-list feature run")
-    chain_id = feature.get("logical_chain_id")
-    if not isinstance(chain_id, str):
-        raise FeatureChainError("run-control record is missing feature chain id")
+    feature = None
+    if chain_id is None:
+        feature, chain_id = guarded_feature_binding(host, args, row, "feature-budget-update")
+        if feature.get("provider") != "codex":
+            raise FeatureChainError("feature-budget-update requires a Codex repository-list feature run")
+    elif getattr(args, "enable_shepherd", False):
+        raise FeatureChainError("feature-budget-update --enable-shepherd is codex-only")
     amendment_payload = {
         "kind": "feature-budget-update",
         "logical_chain_id": chain_id,
@@ -2878,15 +2964,11 @@ def budget_update_command(host: Any, args: Any, row: dict) -> dict:
         amendment_payload["total_active_minutes"] = total_active_minutes
     amendment_id = digest(amendment_payload)
     with chain_lock(Path(args.control_dir), chain_id):
-        row = host.run_row_by_id(Path(args.db), row["id"])
-        if not isinstance(row, dict) or row.get("status") not in {"failed", "paused", "completed", "cancelled"}:
-            raise FeatureChainError("feature-budget-update requires a stopped run")
-        control = host.require_control_token(row, Path(args.control_dir), getattr(args, "token", None))
-        if control.get("feature_chain") != feature:
-            raise FeatureChainError("feature control binding changed while acquiring the chain lock")
-        require_no_live_control_processes(control)
+        row = authorize_stopped_run(host, args, row, "feature-budget-update", feature)
         state = read_state(Path(args.control_dir), chain_id)
-        if state.get("provider") != "codex":
+        if feature is None:
+            require_claude_chain(state, "feature-budget-update")
+        elif state.get("provider") != "codex":
             raise FeatureChainError("feature-budget-update requires a Codex repository-list feature chain")
         pending = state.get("pending_control")
         if pending is not None and (not isinstance(pending, dict) or process_claim_alive(pending)):
@@ -2914,8 +2996,9 @@ def budget_update_command(host: Any, args: Any, row: dict) -> dict:
                 continue
             if applied.get("total_tokens") != total_tokens or applied.get("total_active_minutes") != total_active_minutes:
                 raise FeatureChainError("amendment id was already used for a different allowance")
-            control = getattr(host, "require_control_token")(row, Path(args.control_dir), getattr(args, "token", None))
-            update_run_control_allowance(host, args, row, control, total_tokens, total_active_minutes)
+            if feature is not None:
+                control = getattr(host, "require_control_token")(row, Path(args.control_dir), getattr(args, "token", None))
+                update_run_control_allowance(host, args, row, control, total_tokens, total_active_minutes)
             return {"chain": chain_id, "total_tokens": total_tokens, "total_active_minutes": total_active_minutes, "amendment_id": amendment_id}
         if total_tokens < current_limit:
             raise FeatureChainError("feature-budget-update may only increase the token ceiling")
@@ -2941,8 +3024,9 @@ def budget_update_command(host: Any, args: Any, row: dict) -> dict:
             state["updated_at"] = now()
             state = write_state(Path(args.control_dir), state)
         budget_amend_allowance(args, chain_id, total_tokens, total_active_minutes, amendment_id, getattr(args, "reason", ""))
-        control = getattr(host, "require_control_token")(row, Path(args.control_dir), getattr(args, "token", None))
-        update_run_control_allowance(host, args, row, control, total_tokens, total_active_minutes)
+        if feature is not None:
+            control = getattr(host, "require_control_token")(row, Path(args.control_dir), getattr(args, "token", None))
+            update_run_control_allowance(host, args, row, control, total_tokens, total_active_minutes)
         amendment = dict(state["budget_amendment"])
         state.setdefault("budget", {})["max_total_tokens"] = total_tokens
         if total_active_minutes is not None:

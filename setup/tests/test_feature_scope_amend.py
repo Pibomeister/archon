@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+import contextlib
 import importlib.util
+import io
 import json
 import sqlite3
 import subprocess
@@ -128,7 +130,7 @@ class FeatureScopeAmend(unittest.TestCase):
             con.execute("INSERT INTO remote_agent_workflow_runs VALUES (?,?,?,?,?,?)", (RUN, self.row["workflow_name"], self.row["user_message"], status, str(self.output_root), "2026-09-13 00:00:00"))
 
     def prepare_state(self) -> None:
-        args = Namespace(spec=str(self.spec), provider="codex", control_dir=self.control, wall_minutes=240, max_total_tokens=30_000_000)
+        args = Namespace(spec=str(self.spec), provider=getattr(self, "provider", "codex"), control_dir=self.control, wall_minutes=240, max_total_tokens=30_000_000)
         state = fc.make_initial_state(self.host, args, ["api", "goodword-mcp"])
         state["logical_chain_id"] = CHAIN
         state["chain_secret"] = "s" * 48
@@ -387,6 +389,100 @@ class FeatureScopeAmend(unittest.TestCase):
 
         self.assertEqual("feature-scope-amend", parsed.action)
         self.assertEqual("src/api.ts", parsed.add_file)
+
+
+class ClaudeChainScopeAmend(unittest.TestCase):
+    """feature-scope-amend --chain through ar.main(): Claude launches have no control token."""
+
+    def setUp(self):
+        self.fx = FeatureScopeAmend("test_parser_registers_feature_scope_amend")
+        self.fx.provider = "claude"
+        self.fx.setUp()
+        self.addCleanup(self.fx.doCleanups)
+        ar.control_state_path(self.fx.row, self.fx.control).unlink()
+        self.set_run("full-sdlc-api", "failed")
+
+    def set_run(self, workflow: str, status: str) -> None:
+        with sqlite3.connect(self.fx.db) as con:
+            con.execute("UPDATE remote_agent_workflow_runs SET workflow_name=?, status=? WHERE id=?", (workflow, status, RUN))
+
+    def set_provider(self, provider: str) -> None:
+        state = self.fx.state()
+        state["provider"] = provider
+        fc.write_state(self.fx.control, state)
+
+    def main(self, *auth: str) -> str:
+        argv = ["archon-run.py", "--db", str(self.fx.db), "--control-dir", str(self.fx.control),
+                "feature-scope-amend", RUN, *auth, "--add-file", self.fx.args.add_file, "--reason", self.fx.args.reason]
+        out = io.StringIO()
+        with mock.patch("sys.argv", argv), mock.patch.object(ar, "validate_control_location"), \
+             contextlib.redirect_stdout(out):
+            ar.main()
+        return out.getvalue()
+
+    def assert_refused(self, *auth: str, message: str) -> None:
+        before = self.fx.state()
+        out = io.StringIO()
+        with mock.patch.object(ar, "fail", side_effect=SystemExit) as failed, contextlib.redirect_stdout(out):
+            with self.assertRaises(SystemExit):
+                self.main(*auth)
+        self.assertIn(message, failed.call_args.args[0])
+        after = self.fx.state()
+        self.assertNotIn("scope_amendments", after)
+        self.assertEqual(before["approval"], after["approval"])
+
+    def test_claude_chain_amend_adds_file_and_refreshes_bound_artifacts(self):
+        before = self.fx.state()
+        out = self.main("--chain", CHAIN)
+        state = self.fx.state()
+
+        self.assertIn("ARCHON_FEATURE_SCOPE_AMEND=APPLIED", out)
+        self.assertEqual(["src/api.ts", self.fx.args.add_file], state["stages"]["api"]["plan"]["files_allowlist"])
+        self.assertEqual(["src/tool.ts"], state["stages"]["goodword-mcp"]["plan"]["files_allowlist"])
+        self.assertEqual([before["approval"]], state["approval_history"])
+        fc.verify_approval(state)
+        artifacts = self.fx.artifacts
+        self.assertEqual(["src/api.ts", self.fx.args.add_file], json.loads((artifacts / "files-allowlist.json").read_text()))
+        revisions = json.loads((artifacts / "candidate-revisions.json").read_text())
+        self.assertEqual(state["approval"]["plan_digest"], revisions["approved_plan_digest"])
+        self.assertNotEqual(before["approval"]["plan_digest"], revisions["approved_plan_digest"])
+        self.assertIn(self.fx.args.add_file, json.loads((artifacts / fc.JOINT_PLAN_ARTIFACT).read_text())["stages"]["api"]["files_allowlist"])
+        self.assertIn("ARCHON_FEATURE_SCOPE_AMEND=UNCHANGED", self.main("--chain", CHAIN))
+
+    def test_codex_chain_is_refused_without_its_token(self):
+        self.set_provider("codex")
+        self.assert_refused("--chain", CHAIN, message="codex chains require --token")
+        self.set_run("full-sdlc-api-codex", "failed")
+        self.fx.write_control()
+        self.assert_refused(message="requires --token")
+
+    def test_claude_lane_run_requires_the_chain_flag(self):
+        self.assert_refused(message="not a guarded Codex lane")
+
+    def test_live_run_and_live_claims_are_refused(self):
+        self.set_run("full-sdlc-api", "running")
+        self.assert_refused("--chain", CHAIN, message="requires a stopped run")
+        self.set_run("full-sdlc-api", "failed")
+        state = self.fx.state()
+        state["pending_control"] = {"owner_pid": fc.os.getpid(), "owner_fingerprint": fc.process_fingerprint()}
+        fc.write_state(self.fx.control, state)
+        self.assert_refused("--chain", CHAIN, message="control already in progress")
+        state = self.fx.state()
+        state["pending_control"] = None
+        state["dispatch_reservation"] = {"phase": "implement"}
+        fc.write_state(self.fx.control, state)
+        self.assert_refused("--chain", CHAIN, message="dispatch already in progress")
+
+    def test_incomplete_budget_amendment_and_stale_run_are_refused(self):
+        state = self.fx.state()
+        state["budget_amendment"] = {"status": "in_progress"}
+        fc.write_state(self.fx.control, state)
+        self.assert_refused("--chain", CHAIN, message="budget amendment is incomplete")
+        state = self.fx.state()
+        state["budget_amendment"] = None
+        state["current_run"]["run_id"] = "e" * 32
+        fc.write_state(self.fx.control, state)
+        self.assert_refused("--chain", CHAIN, message="stale")
 
 
 if __name__ == "__main__":

@@ -28,6 +28,7 @@ FEATURE_BUDGET = Path(__file__).resolve().parent / "feature-budget.py"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from feature_env import feature_env_all  # noqa: E402
+from candidate_env import CandidateEnvError, prepare as prepare_candidate_env  # noqa: E402
 
 
 def fail(message: str) -> None:
@@ -146,6 +147,19 @@ def create_worktrees(rows: dict, repos: list[str], root: Path) -> dict[str, Path
         shutil.rmtree(root, ignore_errors=True)
         raise
     return worktrees
+
+
+def prepare_environments(rows: dict, worktrees: dict[str, Path]) -> dict:
+    """Make each candidate runnable by its repository's own commands before any
+    scenario runs, so plans never carry bootstrap scripts of their own."""
+    prepared = {}
+    for repo, worktree in worktrees.items():
+        try:
+            prepared[repo] = prepare_candidate_env(repo, worktree, Path(rows[repo]["source_worktree"]))
+        except CandidateEnvError as exc:
+            fail(f"CANDIDATE_ENV=FAIL {exc}")
+        print(f"CANDIDATE_ENV=PASS repo={repo} {json.dumps(prepared[repo], sort_keys=True)}")
+    return prepared
 
 
 def integration_scenarios(plan: dict) -> list[dict]:
@@ -561,7 +575,7 @@ def candidate_revisions(rows: dict, repos: list[str]) -> dict:
     return {repo: rows[repo]["commit"] for repo in repos}
 
 
-def write_result(artifacts: Path, status: str, rows: list[dict], tests: list[dict], repos: list[str], candidates: dict, plan_digest: str) -> None:
+def write_result(artifacts: Path, status: str, rows: list[dict], tests: list[dict], repos: list[str], candidates: dict, plan_digest: str, environments: dict) -> None:
     counters = {
         "repositories": len(repos),
         "scenarios": len(tests),
@@ -580,6 +594,7 @@ def write_result(artifacts: Path, status: str, rows: list[dict], tests: list[dic
         "approved_plan_digest": plan_digest,
         "candidate_heads": candidate_revisions(candidates, repos),
         "candidate_revisions": candidate_revisions(candidates, repos),
+        "candidate_environments": environments,
         "repositories": repos,
         "counters": counters,
         "tests": tests,
@@ -605,6 +620,7 @@ def run(artifacts: Path) -> int:
     tests: list[dict] = []
     try:
         worktrees = create_worktrees(rows, repos, root)
+        environments = prepare_environments(rows, worktrees)
         command_rows, tests = run_commands(artifacts, plan, worktrees, rows)
         status = (
             "passed"
@@ -614,7 +630,7 @@ def run(artifacts: Path) -> int:
             and all(row["status"] == "passed" and row["expected_tests"] for row in tests)
             else "failed"
         )
-        write_result(artifacts, status, command_rows, tests, repos, rows, plan_digest)
+        write_result(artifacts, status, command_rows, tests, repos, rows, plan_digest, environments)
         if status != "passed":
             fail("approved integration command failed")
     finally:

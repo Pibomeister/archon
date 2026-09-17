@@ -47,6 +47,13 @@ class JointIntegrationRunnerTest(unittest.TestCase):
         (repo / "candidate.txt").write_text(contents, encoding="utf-8")
         subprocess.run(["git", "-C", str(repo), "add", "candidate.txt"], env=self.env, check=True)
         subprocess.run(["git", "-C", str(repo), "commit", "-qm", "candidate"], env=self.env, check=True)
+        # The root clone's untracked runtime state, as on a real machine: what
+        # candidate_env.py resolves for each repo profile's runtime_deps and
+        # runtime_env_files.
+        (repo / "node_modules").mkdir()
+        (repo / "node_modules" / "marker").write_text(name, encoding="utf-8")
+        for env_file in (".env", ".env.e2e"):
+            (repo / env_file).write_text(f"{name}{env_file}\n", encoding="utf-8")
         return subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], env=self.env, text=True).strip()
 
     def write_candidates(self, **overrides):
@@ -254,6 +261,50 @@ class JointIntegrationRunnerTest(unittest.TestCase):
         self.assertEqual(str(integration_root / "api"), command["command"]["argv"][3])
         self.assertEqual(self.api_commit, command["command"]["argv"][4])
         self.assertEqual(str(integration_root / "goodword-mcp"), command["command"]["argv"][6])
+        self.assertFalse((self.artifacts / "joint-integration-worktrees").exists())
+
+    def test_candidates_get_profile_runtime_state_before_commands_and_cleanup_spares_the_source(self):
+        # Chain e35b7bd5: candidates had no node_modules/.env.e2e, so the planner
+        # invented per-feature bootstrap scripts and the critic capped the loop.
+        self.write_plan({
+            "repo": "api",
+            "argv": [
+                "python3", "-c",
+                (
+                    "import pathlib, sys\n"
+                    "cwd = pathlib.Path.cwd()\n"
+                    "assert (cwd / 'node_modules' / 'marker').read_text() == 'api'\n"
+                    "assert (cwd / '.env.e2e').read_text() == 'api.env.e2e\\n'\n"
+                    "assert (pathlib.Path(sys.argv[1]) / 'node_modules' / 'marker').read_text() == 'goodword-mcp'\n"
+                    "print('ARCHON_INTEGRATION_TESTS=1')\n"
+                ),
+                "${ARCHON_REPO_GOODWORD_MCP_WORKTREE}",
+            ],
+        })
+        self.write_candidates()
+        result = self.run_runner()
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("CANDIDATE_ENV=PASS repo=api", result.stdout)
+        report = json.loads((self.artifacts / "joint-integration-result.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            {"node_modules": "linked:" + str(self.root.resolve() / "api" / "node_modules")},
+            report["candidate_environments"]["api"]["deps"],
+        )
+        self.assertEqual([], list(report["candidate_environments"]["goodword-mcp"]["env_files"]))
+        # Removing the candidate must unlink, never follow, the links.
+        self.assertFalse((self.artifacts / "joint-integration-worktrees").exists())
+        self.assertEqual("api", (self.root / "api" / "node_modules" / "marker").read_text(encoding="utf-8"))
+        self.assertTrue((self.root / "api" / ".env.e2e").is_file())
+
+    def test_unresolvable_candidate_environment_fails_before_any_command(self):
+        (self.root / "api" / ".env.e2e").unlink()
+        self.write_plan("touch command-ran; printf 'ARCHON_INTEGRATION_TESTS=1\\n'")
+        self.write_candidates()
+        result = self.run_runner()
+        self.assertEqual(1, result.returncode)
+        self.assertIn("CANDIDATE_ENV=FAIL repo=api .env.e2e: not found in", result.stdout)
+        self.assertFalse((self.artifacts / "command-ran").exists())
+        self.assertFalse((self.artifacts / "joint-integration-result.json").exists())
         self.assertFalse((self.artifacts / "joint-integration-worktrees").exists())
 
     def test_structured_command_rejects_unknown_environment_reference(self):
