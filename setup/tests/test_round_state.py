@@ -16,6 +16,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ARCHON = Path(__file__).resolve().parent.parent.parent
 ROUND_STATE = ARCHON / "setup" / "round-state.py"
@@ -695,6 +696,67 @@ class AllowlistPrecondition(LaneCase):
         result = self.lane.pre()
         self.assertEqual(result["exit"], 1)
         self.assertIn("ROUND_STATE=FAIL", result["stderr"])
+
+
+class PrerunBaseline(LaneCase):
+    """prerun-dirs.txt must sort exactly as the gate's post-dirs.txt does.
+
+    review-gate builds the post list with `ls -1d …/*/ | LC_ALL=C sort` and then
+    `comm -13`s the two. comm assumes both inputs are in the SAME order and says
+    nothing when they are not -- it just reports the wrong difference, which
+    picks the wrong ce-code-review run directory to read a verdict from. The
+    baseline is written by Python here and the other side by the shell, so the
+    two orderings are compared against each other rather than each being
+    assumed correct.
+    """
+
+    def seed_root(self, names):
+        root = self.lane.root / "ce-runs"
+        for name in names:
+            (root / name).mkdir(parents=True)
+        return root
+
+    def shell_listing(self, root, locale="C"):
+        proc = subprocess.run(
+            f'ls -1d "{root}"/*/ 2>/dev/null | LC_ALL=C sort',
+            shell=True, capture_output=True, encoding="utf-8",
+            env=dict(os.environ, LC_ALL=locale))
+        return proc.stdout
+
+    # Uppercase sorts before lowercase in C collation and interleaves in most
+    # UTF-8 ones, so this fixture discriminates the two. No case-only pair: the
+    # macOS filesystem is case-insensitive and would collide them.
+    NAMES = ["Beta-run", "alpha-run", "20260916-zz", "_under", "élan"]
+
+    def test_the_baseline_matches_the_shell_listing_the_gate_uses(self):
+        root = self.seed_root(self.NAMES)
+        with mock.patch.dict(os.environ, {"CE_REVIEW_ROOT": str(root)}):
+            self.assertEqual(self.lane.run("pre", self.lane.ad).returncode, 0)
+        written = (self.lane.rd / "prerun-dirs.txt").read_text(encoding="utf-8")
+        self.assertEqual(written, self.shell_listing(root))
+
+    def test_a_utf8_locale_does_not_reorder_the_baseline(self):
+        root = self.seed_root(self.NAMES)
+        with mock.patch.dict(os.environ, {"CE_REVIEW_ROOT": str(root),
+                                                   "LC_ALL": "en_US.UTF-8"}):
+            self.assertEqual(self.lane.run("pre", self.lane.ad).returncode, 0)
+        written = (self.lane.rd / "prerun-dirs.txt").read_text(encoding="utf-8")
+        self.assertEqual(written, self.shell_listing(root))
+
+    def test_an_empty_root_writes_an_empty_file_not_a_missing_one(self):
+        root = self.lane.root / "ce-empty"
+        root.mkdir()
+        with mock.patch.dict(os.environ, {"CE_REVIEW_ROOT": str(root)}):
+            self.lane.run("pre", self.lane.ad)
+        baseline = self.lane.rd / "prerun-dirs.txt"
+        self.assertTrue(baseline.is_file())
+        self.assertEqual(baseline.read_text(encoding="utf-8"), "")
+
+    def test_a_root_that_does_not_exist_is_also_an_empty_file(self):
+        with mock.patch.dict(os.environ,
+                                      {"CE_REVIEW_ROOT": str(self.lane.root / "gone")}):
+            self.lane.run("pre", self.lane.ad)
+        self.assertTrue((self.lane.rd / "prerun-dirs.txt").is_file())
 
 
 class BaseValidation(LaneCase):
