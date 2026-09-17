@@ -14,6 +14,12 @@ from pathlib import Path
 
 from nodes.extract import runnable_body
 
+# full-sdlc-api's round-pre keeps the counter guard and the durable cap in the
+# NODE even though the rest of its decision procedure moved into
+# setup/round-state.py (RUNBOOK 3c). Both read round.txt before the helper is
+# called, and both have to: a resumed loop_group re-enters with a fresh
+# iteration counter, so round.txt is the only bound that survives, and a path
+# built from a junk counter has to be rejected before anything uses it.
 SITES = [
     ("full-sdlc-api", "round-pre", "round.txt", "ROUND_PRE"),
     ("full-sdlc-web", "round-pre", "round.txt", "ROUND_PRE"),

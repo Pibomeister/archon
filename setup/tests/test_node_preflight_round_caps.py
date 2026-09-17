@@ -8,6 +8,10 @@ edited or deleted in the YAML, this test runs the edit or fails to find it.
 
 The readers already existed (round-pre, plan-round-pre, converge, exit-gate all
 fall back to 4 and 3); writing the two files is the entire change.
+
+The planning cap is 3, not the 2 v1 shipped: both v1 repository-scope attempts
+hit 2 and needed a hand raise to 3 before they converged or were accepted, so
+the 2 was a hand stop rather than a bound.
 """
 import os
 import re
@@ -50,8 +54,8 @@ class PreflightRoundCaps(unittest.TestCase):
         p, art = run_block()
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertEqual((art / "round-cap.txt").read_text().strip(), "3")
-        self.assertEqual((art / "plan-round-cap.txt").read_text().strip(), "2")
-        self.assertIn("ROUND_CAPS=OK review=3 plan=2", p.stdout)
+        self.assertEqual((art / "plan-round-cap.txt").read_text().strip(), "3")
+        self.assertIn("ROUND_CAPS=OK review=3 plan=3", p.stdout)
 
     def test_the_legacy_scope_gets_no_cap_file(self):
         p, art = run_block(scope="legacy")
@@ -73,8 +77,8 @@ class PreflightRoundCaps(unittest.TestCase):
         p, art = run_block(preset={"round-cap.txt": "6\n"})
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertEqual((art / "round-cap.txt").read_text().strip(), "6")
-        self.assertEqual((art / "plan-round-cap.txt").read_text().strip(), "2")
-        self.assertIn("ROUND_CAPS=OK review=6 plan=2", p.stdout)
+        self.assertEqual((art / "plan-round-cap.txt").read_text().strip(), "3")
+        self.assertIn("ROUND_CAPS=OK review=6 plan=3", p.stdout)
 
 
 if __name__ == "__main__":

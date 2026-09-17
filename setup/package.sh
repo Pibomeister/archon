@@ -176,8 +176,24 @@ MANIFEST=(
   # read by every review session -- its sha256 is the identity's contract digest,
   # so an install that ships the prompts without it cannot compute a review id.
   setup/review-mode.py
+  # Durable round checkpoints. round-state.py owns every state transition of the
+  # review loop -- five of the loop's seven nodes are now a single call to it,
+  # including both lanes' round-pre -- so an install without it dies at the first
+  # round on the operator's machine.
+  setup/round-state.py
+  # Pin guard: commit-impl and commit-fixer both call it on the staged index,
+  # so an install without it fails at the first commit of the first stage.
+  setup/pin-guard.py
+  # The closure ledger and the review contract whose digest is part of the review
+  # identity. NOTE: the reverse check below cannot find these -- it scans workflow
+  # YAMLs for setup/ references, and round-state.py shells into ledger.py,
+  # pin-guard.py, check-fixer-result.py, review-mode.py and round-reclaim.sh from
+  # Python. Anything reached only that way has to be listed by hand.
   setup/ledger.py
   setup/review-contract.md
+  # The live-acceptance checker, moved into the repo from the Goodword root.
+  setup/chain-acceptance.py
+  # Review prompt bodies (item 2/3/7), embedded by the lane nodes at derive time.
   setup/prompts/review-trio.md
   setup/prompts/review-capped.md
   setup/prompts/review-verify.md
