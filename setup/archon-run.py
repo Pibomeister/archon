@@ -537,10 +537,13 @@ def command_for(action: str, target: str, reason: str | None = None) -> list[str
         return command
     if action == "resume":
         return ["bash", str(SETUP / "resume.sh"), target]
+    # SQLITE_BUSY under concurrent runs: retried while the run row is untouched;
+    # a recorded decision whose resume hit the lock continues via resume.sh.
+    retry = ["bash", str(SETUP / "archon-lock-retry.sh"), action.upper(), target, "--"]
     if action == "approve":
-        return [archon, "workflow", "approve", target]
+        return [*retry, archon, "workflow", "approve", target]
     if action == "reject":
-        return [archon, "workflow", "reject", target, reason or ""]
+        return [*retry, archon, "workflow", "reject", target, reason or ""]
     if action == "abandon":
         return [archon, "workflow", "abandon", target, "--json"]
     fail(f"unknown action {action}")
@@ -3776,6 +3779,9 @@ def main() -> None:
     env = dict(os.environ)
     env.update({
         "ARCHON_DB": str(args.db),
+        # archon-lock-retry.sh must give up before wait_for_watchdog_arm's 15 s
+        # window, or the timeout path terminates the launcher mid-attempt.
+        "ARCHON_LOCK_RETRY_DEADLINE_S": "10",
         "ARCHON_CONTROL_DIR": str(args.control_dir),
         "DISABLE_OMC": "1",
         "CODEX_HOME": str(args.codex_home),

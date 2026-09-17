@@ -116,8 +116,10 @@ class ConvergeYield(unittest.TestCase):
             body = runnable_body(lane, "converge", root=str(tmp))
         return tmp, ad, body
 
-    def run_converge(self, lane, scope="repositories", **kw):
+    def run_converge(self, lane, scope="repositories", ack=None, **kw):
         tmp, ad, body = self.build(lane, **kw)
+        if ack is not None:
+            (ad / "cross-repo-filed.json").write_text(json.dumps(ack))
         env = dict(os.environ, ARTIFACTS_DIR=str(ad), ARCHON_FEATURE_SCOPE=scope)
         p = subprocess.run(["bash", "-c", body], capture_output=True,
                            encoding="utf-8", env=env, cwd=str(tmp))
@@ -202,6 +204,57 @@ class ConvergeYield(unittest.TestCase):
                     "goodword-mcp")
                 self.assertFalse((ad / "waivers.md").exists(),
                                  "a cross-repo finding must never reach update-waivers.py")
+
+    # ------------------------------------------- operator acknowledgement
+    # A cross_repo entry resolves only by a human recording where it was filed,
+    # keyed to that exact finding. The key comes from the operator helper, the
+    # same way the operator gets it; the literal pins the digest recipe.
+    FINDING = {"finding": "mcp returns 500", "action": "route",
+               "producer_repo": "goodword-mcp", "severity": "P1"}
+    KEY = "583b294310459c02"
+
+    def converge_with_ack(self, lane, ack):
+        # moved=False + Ready to merge: the only possible stop left is cross-repo.
+        return self.run_converge(lane, n=1, cross_repo=[self.FINDING], ack=ack,
+                                 verdict="Ready to merge", moved=False, yield_stop=False)
+
+    def test_an_acknowledged_cross_repo_finding_converges_every_lane(self):
+        for lane in LANES + ("lite",):
+            with self.subTest(lane=lane):
+                p, ad = self.converge_with_ack(lane, [
+                    {"key": self.KEY, "filed": "https://github.com/o/goodword-mcp/issues/7", "by": "operator"}])
+                self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+                self.assertIn(f"CROSS_REPO_ACKED key={self.KEY} repo=goodword-mcp "
+                              "filed=https://github.com/o/goodword-mcp/issues/7", p.stdout)
+                self.assertNotIn("CROSS_REPO_FINDING", p.stdout)
+                self.assertIn("CONVERGED round=1", p.stdout)
+
+    def test_an_invalid_acknowledgement_still_stops_every_lane(self):
+        cases = {
+            "wrong key": [{"key": "0000000000000000", "filed": "https://x.test/1", "by": "op"}],
+            "missing url": [{"key": self.KEY, "filed": "", "by": "op"}],
+            "not a url": [{"key": self.KEY, "filed": "filed it in slack", "by": "op"}],
+            "missing by": [{"key": self.KEY, "filed": "https://x.test/1", "by": " "}],
+            "not a list": {"key": self.KEY, "filed": "https://x.test/1", "by": "op"},
+        }
+        for lane in LANES + ("lite",):
+            for name, ack in cases.items():
+                with self.subTest(lane=lane, case=name):
+                    p, ad = self.converge_with_ack(lane, ack)
+                    self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+                    self.assertIn("CROSS_REPO_FINDING round=1 count=1 repos=goodword-mcp", p.stdout)
+                    self.assertNotIn("REVIEW_CONVERGED", p.stdout)
+                    self.assertEqual(json.loads((ad / "cross-repo-findings.json").read_text())[0]["key"],
+                                     self.KEY)
+
+    def test_the_operator_helper_prints_the_key_the_gate_matches(self):
+        p, ad = self.converge_with_ack("full-sdlc-api", None)
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        out = subprocess.run(["python3", str(SETUP / "cross-repo-keys.py"), str(ad)],
+                             capture_output=True, encoding="utf-8")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn(f"key={self.KEY} severity=P1 repo=goodword-mcp OPEN: mcp returns 500", out.stdout)
+        self.assertIn(f'"key": "{self.KEY}"', out.stdout)
 
     def test_an_empty_cross_repo_partition_is_not_a_stop(self):
         p, ad = self.run_converge("full-sdlc-api", n=1, cross_repo=[])

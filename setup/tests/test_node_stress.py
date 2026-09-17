@@ -16,6 +16,7 @@ External tools are stubbed through a PATH-prepended shim dir (see SHIMS):
 No covered node calls gh, aws, or archon.
 """
 import atexit
+import hashlib
 import json
 import os
 import shutil
@@ -766,6 +767,49 @@ class GateTestsStress(unittest.TestCase):
         self.assertIn("SCOPE_OK files=1", r["output"])
         self.assertIn("GATE_TESTS=PASS", r["output"])
 
+    # A feature-reopen'd stage (reopen-context.json bound by params.json) must
+    # change its previous candidate. Chain 42b42a13 run aab1f254 re-implemented a
+    # plan already in the worktree, changed nothing, and passed as NO_CHANGE.
+    @staticmethod
+    def with_reopen(fixture, dirty=True):
+        def build(tmp):
+            fixture(tmp)
+            art, wt = tmp / "artifacts", tmp / "wt"
+            if not dirty:
+                git(wt, "checkout", "--", ".")
+            body = b'{"reason": "GET /briefing?window=bogus returned 500"}\n'
+            (art / "reopen-context.json").write_bytes(body)
+            doc = json.loads((art / "params.json").read_text(encoding="utf-8"))
+            doc["feature_reopen_context_sha256"] = hashlib.sha256(body).hexdigest()
+            jdump(art / "params.json", doc)
+        return build
+
+    def test_reopen_with_no_change_fails_typed(self):
+        for lane, fixture in (("full-sdlc-api", gate_tests_api_fixture), ("full-sdlc-web", gate_tests_web_fixture)):
+            with self.subTest(lane=lane):
+                r = run_node(lane, "gate-tests", self.with_reopen(fixture, dirty=False))
+                self.assertEqual(r["rc"], 1, r["output"])
+                self.assertIn("IMPLEMENT=FAIL reopen produced no change", r["output"])
+                self.assertNotIn("GATE_TESTS=PASS", r["output"])
+
+    def test_reopen_with_a_change_passes(self):
+        for lane, fixture in (("full-sdlc-api", gate_tests_api_fixture), ("full-sdlc-web", gate_tests_web_fixture)):
+            with self.subTest(lane=lane):
+                r = run_node(lane, "gate-tests", self.with_reopen(fixture))
+                self.assertEqual(r["rc"], 0, r["output"])
+                self.assertIn("REOPEN_GATE=PASS", r["output"])
+                self.assertIn("GATE_TESTS=PASS", r["output"])
+
+    def test_no_change_without_reopen_context_still_passes(self):
+        # Negative control for the reopen failure: the same clean tree with no
+        # reopen context is an ordinary NO_CHANGE outcome.
+        def build(tmp):
+            gate_tests_api_fixture(tmp)
+            git(tmp / "wt", "checkout", "--", ".")
+        r = run_node("full-sdlc-api", "gate-tests", build)
+        self.assertEqual(r["rc"], 0, r["output"])
+        self.assertIn("GATE_TESTS=PASS outcome=NO_CHANGE", r["output"])
+
 
 # ==========================================================================
 # uat-gate (web feature-derived browser evidence)
@@ -979,6 +1023,38 @@ class DeslopStress(unittest.TestCase):
                     r = run_node(workflow, "deslop-recheck", build)
                     self.assertEqual(r["rc"], 1, r["output"])
                     self.assertIn(f"DESLOP_RECHECK=FAIL deslop-round.txt is not an integer: [{bad}]", r["output"])
+
+    def test_deslop_recheck_api_treats_an_approved_contract_export_as_referenced(self):
+        def build(tmp, contract):
+            deslop_common(tmp, "api")
+            foo = tmp / "wt" / "src" / "foo.ts"
+            foo.write_text(foo.read_text(encoding="utf-8") + "export class ReservedDto {}\n", encoding="utf-8")
+            if contract:
+                jdump(tmp / "artifacts" / "contract-symbols.json",
+                      {"contracts": [{"artifact": "src/foo.ts", "symbols": ["ReservedDto"]}]})
+        r = run_node("full-sdlc-api", "deslop-recheck", lambda tmp: build(tmp, True))
+        self.assertEqual(r["rc"], 0, r["output"])
+        self.assertIn("reason=approved-contract", r["output"])
+        # Negative control: without the stage's contract file the export is yagni.
+        r = run_node("full-sdlc-api", "deslop-recheck", lambda tmp: build(tmp, False))
+        self.assertEqual(r["rc"], 1, r["output"])
+        self.assertIn("DESLOP_GATE=FAIL slop round=1", r["output"])
+
+    def test_deslop_recheck_api_refuses_a_contract_file_altered_after_dispatch(self):
+        def build(tmp, digest):
+            deslop_common(tmp, "api")
+            art = tmp / "artifacts"
+            jdump(art / "contract-symbols.json", {"contracts": []})
+            doc = json.loads((art / "params.json").read_text(encoding="utf-8"))
+            doc["feature_contract_symbols_sha256"] = digest(art / "contract-symbols.json")
+            jdump(art / "params.json", doc)
+        r = run_node("full-sdlc-api", "deslop-recheck", lambda tmp: build(tmp, lambda p: "0" * 64))
+        self.assertEqual(r["rc"], 1, r["output"])
+        self.assertIn("DESLOP_GATE=FAIL contract-symbols.json altered round=1", r["output"])
+        # Negative control: the digest of the real bytes passes.
+        r = run_node("full-sdlc-api", "deslop-recheck",
+                     lambda tmp: build(tmp, lambda p: hashlib.sha256(p.read_bytes()).hexdigest()))
+        self.assertEqual(r["rc"], 0, r["output"])
 
     def test_deslop_recheck_api_lint_failure_is_typed(self):
         r = run_node("full-sdlc-api", "deslop-recheck", deslop_recheck_fixture("api"),

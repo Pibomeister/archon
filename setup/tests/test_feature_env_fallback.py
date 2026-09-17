@@ -265,7 +265,8 @@ class JointIntegrationFallbackTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.env = clean_env()
+        # The runner takes the host e2e mutex; never the machine's real lock.
+        self.env = clean_env(ARCHON_E2E_LOCK=str(self.root / "e2e.lock"))
         self.artifacts = self.root / "artifacts"
         self.artifacts.mkdir()
         self.commits = {name: self.init_repo(name) for name in ("api", "goodword-mcp")}

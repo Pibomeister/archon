@@ -48,6 +48,21 @@ class ReviewPromptContract(unittest.TestCase):
                 self.assertIn("waivers.json", p)
                 self.assertNotIn("waivers.md", p)
 
+    def test_every_prbody_appends_the_filed_cross_repo_section(self):
+        overlays = sorted((ARCHON / "setup" / "lite").glob("*/prbody.prompt.md"))
+        sources = [(lane, prompt(lane, "prbody")) for lane in LANES]
+        sources += [(str(f.relative_to(ARCHON)), f.read_text(encoding="utf-8")) for f in overlays]
+        for name, text in sources:
+            with self.subTest(source=name):
+                self.assertIsNotNone(text, f"{name} declares no prbody prompt")
+                self.assertIn('/.archon/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --prbody', text)
+                self.assertIn("## Cross-repo findings filed", text)
+
+    def test_every_fixer_prompt_forbids_writing_the_acknowledgement(self):
+        for lane in LANES:
+            with self.subTest(lane=lane):
+                self.assertIn("Never create or edit cross-repo-filed.json.", prompt(lane, "fixer"))
+
     def test_every_review_overlay_reads_the_json_ledger(self):
         self.assertTrue(OVERLAYS, "no lite review overlay found")
         for f in OVERLAYS:

@@ -216,6 +216,8 @@ class FeatureScopeAmend(unittest.TestCase):
         self.assertIn("Guarded scope amendment", (amend_root / "plan.md").read_text(encoding="utf-8"))
         self.assertIn("Guarded scope amendment approval packet", (amend_root / "approval-packet-notice.md").read_text(encoding="utf-8"))
         self.assertEqual(["src/api.ts", self.args.add_file], json.loads((self.artifacts / "files-allowlist.json").read_text(encoding="utf-8")))
+        symbols = json.loads((self.artifacts / "contract-symbols.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["approval"]["plan_digest"], symbols["plan_digest"])
         revisions = json.loads((self.artifacts / "candidate-revisions.json").read_text(encoding="utf-8"))
         self.assertEqual(state["approval"]["plan_digest"], revisions["plan_digest"])
         self.assertEqual(state["approval"]["plan_digest"], revisions["approved_plan_digest"])

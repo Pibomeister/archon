@@ -22,8 +22,13 @@ Four guards, each delta-only (pre-existing debt is reported, never blocking):
                      own file is not dead), and a file matching the repo
                      profile's `framework_loaded` globs is skipped: TypeORM
                      loads migrations by directory glob, so no import ever
-                     names their class (run 48c1c1c5).
+                     names their class (run 48c1c1c5). An export the approved
+                     plan declares as a contract symbol for that file
+                     (--contract-symbols, the stage's contract-symbols.json) is
+                     referenced by the plan: REPORT, not FAIL (chain 42b42a13
+                     reserved an optional DTO field for a later ticket).
 Usage: check-slop.py <worktree> <base-sha> [--max-complexity N] [--exclude <path> ...] [--repo <name>]
+                     [--contract-symbols <contract-symbols.json>]
 Prints one line per finding: `SLOP=FAIL <guard> file=<f> line=<n> ...` (blocking)
 or `SLOP=REPORT <guard> ...` (non-blocking), then a final summary line:
 `SLOP=OK files=N` (exit 0) or `SLOP=FAIL count=N` (exit 1)."""
@@ -261,7 +266,25 @@ def framework_loaded_globs(repo):
     return profile.get("framework_loaded") or []
 
 
-def check_yagni(worktree, file, added, fails, cur_lines=(), framework_loaded=()):
+def load_contract_symbols(path):
+    """{file: {symbol}} from contract-symbols.json. Absent or unreadable is no
+    contracts: a legacy run without the file keeps the strict guard."""
+    if not path:
+        return {}
+    try:
+        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    contracts = doc.get("contracts") if isinstance(doc, dict) else None
+    for contract in contracts or []:
+        if isinstance(contract, dict) and isinstance(contract.get("artifact"), str):
+            out.setdefault(contract["artifact"], set()).update(
+                s for s in contract.get("symbols") or [] if isinstance(s, str))
+    return out
+
+
+def check_yagni(worktree, file, added, fails, cur_lines=(), framework_loaded=(), contract=(), reports=None):
     if any(fnmatch.fnmatchcase(file, g) for g in framework_loaded):
         return
     names = []
@@ -285,8 +308,13 @@ def check_yagni(worktree, file, added, fails, cur_lines=(), framework_loaded=())
         hit_files = {Path(line).resolve() for line in r.stdout.splitlines() if line.strip()}
         word = re.compile(rf"\b{re.escape(name)}\b")
         same_file = any(word.search(text) for i, text in enumerate(cur_lines, 1) if i != no)
-        if not (hit_files - {target}) and not same_file:
-            fails.append(f"SLOP=FAIL yagni file={file} line={no} export={name} reason=unreferenced")
+        if hit_files - {target} or same_file:
+            continue
+        if name in contract:
+            if reports is not None:
+                reports.append(f"SLOP=REPORT yagni file={file} line={no} export={name} reason=approved-contract")
+            continue
+        fails.append(f"SLOP=FAIL yagni file={file} line={no} export={name} reason=unreferenced")
 
 
 def main():
@@ -297,6 +325,7 @@ def main():
     threshold = 10
     excludes = set()
     repo = None
+    contract_path = None
     i = 2
     while i < len(args):
         if args[i] == "--max-complexity":
@@ -308,10 +337,14 @@ def main():
         elif args[i] == "--repo":
             repo = args[i + 1]
             i += 2
+        elif args[i] == "--contract-symbols":
+            contract_path = args[i + 1]
+            i += 2
         else:
             sys.exit(f"SLOP=FAIL unknown argument {args[i]}")
 
     framework_loaded = framework_loaded_globs(repo)
+    contracts = load_contract_symbols(contract_path)
     files = changed_ts_files(worktree, base, excludes)
     fails, reports = [], []
     for f in files:
@@ -326,7 +359,7 @@ def main():
         if f.endswith(".spec.ts") or f.endswith(".test.ts"):
             check_tautological(f, added, cur_lines, fails)
         check_comments(f, added, cur_lines, fails)
-        check_yagni(worktree, f, added, fails, cur_lines, framework_loaded)
+        check_yagni(worktree, f, added, fails, cur_lines, framework_loaded, contracts.get(f, ()), reports)
 
     for line in fails + reports:
         print(line)

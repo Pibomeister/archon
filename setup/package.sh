@@ -100,6 +100,7 @@ MANIFEST=(
   setup/install.sh
   setup/negcontrol.sh
   setup/no-change-closure.py
+  setup/reopen-gate.py
   setup/package.sh
   setup/params-env.sh
   setup/repo-profile.sh
@@ -131,6 +132,7 @@ MANIFEST=(
   setup/port-alloc.sh
   setup/e2e-mutex.sh
   setup/resume.sh
+  setup/archon-lock-retry.sh
   setup/chain-env.py
   setup/gate-approve.sh
   setup/run-artifacts.sh
@@ -142,6 +144,7 @@ MANIFEST=(
   setup/thread-lane.py
   setup/update-waivers.py
   setup/finding_key.py
+  setup/cross-repo-keys.py
   setup/write-review-summary.py
   # Lite lanes: the two YAMLs above are GENERATED from these by derive-lite.py.
   # package.sh regenerates and diffs them (LITE_DRIFT) before the secret gate.

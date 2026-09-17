@@ -25,6 +25,7 @@ SCHEMA = "archon.joint-candidates.v1"
 RESULT = "joint-integration-result.json"
 EVIDENCE = "integration-evidence.json"
 FEATURE_BUDGET = Path(__file__).resolve().parent / "feature-budget.py"
+E2E_MUTEX = Path(__file__).resolve().parent / "e2e-mutex.sh"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from feature_env import feature_env_all  # noqa: E402
@@ -474,6 +475,15 @@ def run_commands(artifacts: Path, plan: dict, worktrees: dict[str, Path], candid
     # with the feature budget. params.json is the durable copy.
     env.update(feature_env_all(artifacts))
     env["ARCHON_INTEGRATION_ROOT"] = str(artifacts / "joint-integration-worktrees")
+    # Concurrent chains each get their own smoke port in params.json; without
+    # exporting it every joint e2e booted on the script's fixed default and the
+    # second chain died with "port already in use".
+    try:
+        api_port = json.loads((artifacts / "params.json").read_text(encoding="utf-8")).get("api_port")
+    except (OSError, ValueError):
+        api_port = None
+    if isinstance(api_port, int):
+        env["ARCHON_API_PORT"] = str(api_port)
     for repo, worktree in worktrees.items():
         env[safe_env_name(repo, "WORKTREE")] = str(worktree)
         env[safe_env_name(repo, "COMMIT")] = candidates[repo]["commit"]
@@ -618,9 +628,18 @@ def run(artifacts: Path) -> int:
     worktrees: dict[str, Path] = {}
     command_rows: list[dict] = []
     tests: list[dict] = []
+    locked = False
     try:
         worktrees = create_worktrees(rows, repos, root)
         environments = prepare_environments(rows, worktrees)
+        # Any approved command may reach the shared goodword-e2e stack: the api
+        # integration suite's jest globalSetup runs `docker-compose -f
+        # local-env-compose.e2e.yaml down -v` then `up`, tearing down a concurrent
+        # chain's stack mid-run. Hold the host mutex for the whole matrix.
+        sys.stdout.flush()
+        if subprocess.run(["bash", str(E2E_MUTEX), "wait", str(artifacts)], stdin=subprocess.DEVNULL).returncode != 0:
+            fail("E2E_MUTEX=FAIL timeout waiting for the shared e2e stack")
+        locked = True
         command_rows, tests = run_commands(artifacts, plan, worktrees, rows)
         status = (
             "passed"
@@ -634,6 +653,9 @@ def run(artifacts: Path) -> int:
         if status != "passed":
             fail("approved integration command failed")
     finally:
+        if locked:
+            sys.stdout.flush()
+            subprocess.run(["bash", str(E2E_MUTEX), "release", str(artifacts)], stdin=subprocess.DEVNULL)
         remove_worktrees(rows, worktrees)
         shutil.rmtree(root, ignore_errors=True)
     print("JOINT_INTEGRATION=PASS")

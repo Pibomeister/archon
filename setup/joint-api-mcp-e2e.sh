@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Joint api + goodword-mcp integration scenario command for run-joint-integration.py.
 #
-# Usage: joint-api-mcp-e2e.sh <jest-testPathPattern> [api-port]
+# Usage: joint-api-mcp-e2e.sh <jest-testPathPattern> [api-port] [extra jest args...]
+#
+# A numeric second argument is the api port; anything else (e.g. `-t debrief`)
+# is passed through to jest, and the port falls back to ARCHON_API_PORT.
 #
 # The runner hands us disposable candidate worktrees through
 # ARCHON_REPO_API_WORKTREE / ARCHON_REPO_GOODWORD_MCP_WORKTREE (cwd is the
@@ -18,8 +21,14 @@
 #      and exits non-zero on any failed test.
 set -euo pipefail
 
-PATTERN="${1:?usage: joint-api-mcp-e2e.sh <jest-testPathPattern> [api-port]}"
-PORT="${2:-4213}"
+PATTERN="${1:?usage: joint-api-mcp-e2e.sh <jest-testPathPattern> [api-port] [extra jest args...]}"
+shift
+PORT="${ARCHON_API_PORT:-4213}"
+case "${1-}" in
+  ''|*[!0-9]*) ;;
+  *) PORT="$1"; shift ;;
+esac
+JEST_EXTRA=("$@")
 API_WT="${ARCHON_REPO_API_WORKTREE:?ARCHON_REPO_API_WORKTREE is required}"
 MCP_WT="${ARCHON_REPO_GOODWORD_MCP_WORKTREE:?ARCHON_REPO_GOODWORD_MCP_WORKTREE is required}"
 ENV_SRC="${ARCHON_REPO_API_SOURCE_WORKTREE:-$API_WT}"
@@ -111,7 +120,7 @@ RC=0
 (cd "$MCP_WT" && GOODWORD_API_URL="$URL" GOODWORD_API_TOKEN="$TOKEN" \
   GOODWORD_API_TOKEN_SECOND="$TOKEN_SECOND" \
   mise x node@20 -- env NODE_OPTIONS=--experimental-vm-modules pnpm exec jest \
-  --testPathPatterns "$PATTERN" --json --outputFile "$OUT/jest-result.json" 2>&1 | tee "$OUT/jest.log") || RC=$?
+  --testPathPatterns "$PATTERN" ${JEST_EXTRA[@]+"${JEST_EXTRA[@]}"} --json --outputFile "$OUT/jest-result.json" 2>&1 | tee "$OUT/jest.log") || RC=$?
 
 read -r PASSED FAILED <<<"$(python3 - "$OUT/jest-result.json" <<'PY'
 import json, sys

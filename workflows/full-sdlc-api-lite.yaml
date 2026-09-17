@@ -652,6 +652,19 @@ nodes:
     Do not create branches or worktrees — you are already on the correct branch.
     If the unit's work already exists and satisfies Verification, say so and stop;
     do not reimplement.
+    REOPENED STAGES: when reopen-context.json exists in ARTIFACTS_DIR, this run
+    was dispatched by feature-reopen and that file is MANDATORY work, not
+    background. The worktree HEAD is the previous candidate ("previous_head"):
+    the approved plan is already implemented there, so the "already exists, say
+    so and stop" rule above does NOT apply to it. Read "reason" and every file
+    under "evidence" (the stopped run's failing output) first, then change the
+    candidate so the stated failure cannot recur, with a test that fails
+    without your change. gate-tests fails this run with
+    "IMPLEMENT=FAIL reopen produced no change" if the worktree is unchanged.
+    The fix stays inside files-allowlist.json. If it genuinely needs a file
+    outside that list, do not edit that file: write its repo-relative path (one
+    per line) to reopen-blocked.txt in ARTIFACTS_DIR and stop; a human decides
+    whether to amend scope.
 
     <repo-conventions repo="api">
     Package manager: bun@1.3.10. Node 22.16.0.
@@ -660,7 +673,14 @@ nodes:
     breaks the suite's mocks (api/CLAUDE.md:32 documents the bare form; it is wrong).
     Typecheck: `bun run typecheck` (tsgo) — NOT build:fast (esbuild-only).
     Lint: `bun run lint` (biome).
-    Integration tests: do NOT run any in this node.
+    Integration tests: do NOT run any in this node, except that a REOPENED stage whose
+    reopen-context.json evidence is an integration failure may re-run THAT spec, and
+    only through the host e2e mutex (use a long Bash timeout; it may print
+    E2E_MUTEX=WAITING while another run holds the stack):
+      bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/e2e-mutex.sh run "$ARTIFACTS_DIR" -- bun run test:integration -- <spec>
+    Never run `bun run test:integration`, `test:e2e`, or `docker-compose -f
+    local-env-compose.e2e.yaml` directly: jest's globalSetup runs `down -v` then
+    `up` on ONE machine-global e2e stack (54322/8001) that concurrent runs share.
     Nest Swagger: always explicit request/response DTO classes; never generic Object
     schemas. TypeScript strict; no `any`; unit specs live in `__tests__/` dirs.
     </repo-conventions>
@@ -734,7 +754,9 @@ nodes:
     # No lockfile is noise here: every repo this lane serves (repo-profile.sh) installs
     # frozen, so lockfile-only drift is content, and check-scope.py calls it a breach.
     CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$' || true)
+    # A feature-reopen'd stage must change its previous candidate (reopen-gate.py).
     if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- .; then
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/reopen-gate.py "$ARTIFACTS_DIR" NO_CHANGE
       printf '{"outcome":"NO_CHANGE","repo":"%s","basis":"baseline-to-candidate content","baseline":"%s","head":"%s","pr_url":null}\n' "$REPO" "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
       echo "GATE_TESTS=PASS outcome=NO_CHANGE"
       exit 0
@@ -743,6 +765,8 @@ nodes:
     test -s "$ARTIFACTS_DIR/commit-msg.txt" || {
       python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/node-no-output.py "$ARTIFACTS_DIR" implement commit-msg.txt
       echo "GATE_TESTS=FAIL no commit-msg.txt from implement"; exit 1; }
+    # Before scope: a declared reopen-blocked.txt is the actionable stop, not a breach.
+    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/reopen-gate.py "$ARTIFACTS_DIR" CHANGED
     # Scope guard: catch implement-node creep before the first review round.
     python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py \
       "$ARTIFACTS_DIR/files-allowlist.json" "$WT" "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" \
@@ -1061,6 +1085,11 @@ nodes:
         "producer_repo", "severity"}. Such a finding is neither advisory nor
         failed — it is not waivable and not fixable here, and it stops the
         run so the chain can route it to the repository that owns it.
+        If cross-repo-filed.json exists in the artifacts directory, a human has
+        filed some cross-repo findings; when you raise one of those same defects
+        again, copy its "finding" and "producer_repo" VERBATIM from
+        cross-repo-findings.json or the earlier round's fixer-result.json so its
+        acknowledgement still matches. Never create or edit cross-repo-filed.json.
         Writing the JSON result file is MANDATORY and comes BEFORE your final line —
         ending without it aborts the pipeline. Write it even when all arrays are
         empty. Then end with the single line: FIXER_DONE
@@ -1101,13 +1130,15 @@ nodes:
           "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" --round "$N" || exit 1
         if [ "$FIXOK" = NO ]; then echo "FIXER_BLOCKED round=$N $FIXMSG"; exit 1; fi
         # Cross-repo stop: a finding owned by another repository of this chain is
-        # not waivable here, so it must never reach update-waivers.py.
-        CROSSN=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1])).get('cross_repo') or []))" "$RD/fixer-result.json" 2>/dev/null || echo 0)
-        if [ "$CROSSN" != 0 ]; then
-          REPOS=$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]))['cross_repo'];json.dump(d,open(sys.argv[2],'w'),indent=1);print(','.join(sorted({str(e.get('producer_repo','?')) for e in d})))" "$RD/fixer-result.json" "$ARTIFACTS_DIR/cross-repo-findings.json")
-          echo "CROSS_REPO_FINDING round=$N count=$CROSSN repos=$REPOS"
+        # not waivable here, so it must never reach update-waivers.py unresolved. The
+        # only resolution is a human recording where it was filed in
+        # cross-repo-filed.json (cross-repo-keys.py prints the keys).
+        if ! CROSS=$(python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --gate "$RD/fixer-result.json"); then
+          printf '%s\n' "$CROSS" | sed '$d'
+          echo "CROSS_REPO_FINDING round=$N $(printf '%s\n' "$CROSS" | tail -n 1)"
           exit 1
         fi
+        [ -z "$CROSS" ] || printf '%s\n' "$CROSS"
         # Waiver ledger: record this round's advisory declines so later rounds
         # do not re-litigate them without new evidence.
         python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/update-waivers.py \
@@ -1191,8 +1222,10 @@ nodes:
     case "$N" in ''|*[!0-9]*) echo "EXIT_GATE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
     # Cross-repo belt: converge's stop is bypassable by a resume, and the
     # accept-residuals branch below skips the fixer re-check entirely.
-    CROSSN=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1])).get('cross_repo') or []))" "$RD/fixer-result.json" 2>/dev/null || echo 0)
-    test "$CROSSN" = 0 || { echo "EXIT_GATE=FAIL CROSS_REPO_FINDING round=$N count=$CROSSN"; exit 1; }
+    # Only a human acknowledgement in cross-repo-filed.json resolves an entry.
+    CROSS=$(python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --gate "$RD/fixer-result.json") \
+      || { printf '%s\n' "$CROSS" | sed '$d'; echo "EXIT_GATE=FAIL CROSS_REPO_FINDING round=$N $(printf '%s\n' "$CROSS" | tail -n 1)"; exit 1; }
+    [ -z "$CROSS" ] || printf '%s\n' "$CROSS"
     # A human accepting residuals waives the verdict and fixer checks — never
     # the clean-tree, scope, or unit-test checks (accepted findings, not a broken tree).
     if [ -f "$ARTIFACTS_DIR/accept-residuals.txt" ]; then
@@ -1349,6 +1382,10 @@ nodes:
     must say exactly: "No additional operational monitoring required."
     Mention verification evidence: unit gate, typecheck, lint, and the live
     smoke result exactly as recorded in smoke-result.txt in that directory.
+    After those sections, run: python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --prbody
+    When it prints anything, append that output VERBATIM as the last section of
+    pr-body.md (the "## Cross-repo findings filed" section: defects in other
+    repositories a human filed instead of fixing here).
     No co-author or attribution lines. End with the single line: PRBODY_WRITTEN
 - id: prbody-gate
   depends_on:
