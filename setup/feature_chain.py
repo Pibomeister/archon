@@ -2828,28 +2828,63 @@ def refresh_current_stage_artifacts(state: dict, row: dict, repo: str) -> None:
         (artifacts_path / "plan.md").write_text(plan_md, encoding="utf-8")
 
 
-def scope_amend_command(host: Any, args: Any, row: dict) -> dict:
-    add_file_arg = str(getattr(args, "add_file", ""))
-    reason = str(getattr(args, "reason", "")).strip()
-    if not reason:
-        raise FeatureChainError("scope amendment requires a reason")
+def guarded_feature_binding(host: Any, args: Any, row: dict, command: str) -> tuple[dict, str]:
+    """Codex path: the run-control record names the repository-list chain."""
     control = getattr(host, "read_control_state")(row, Path(args.control_dir))
     feature = control_feature({"control": control})
     if feature.get("scope") != "repositories":
-        raise FeatureChainError("feature-scope-amend requires a repository-list feature run")
+        raise FeatureChainError(f"{command} requires a repository-list feature run")
     chain_id = feature.get("logical_chain_id")
     if not isinstance(chain_id, str):
         raise FeatureChainError("run-control record is missing feature chain id")
-    applied: dict | None = None
-    with chain_lock(Path(args.control_dir), chain_id):
-        row = host.run_row_by_id(Path(args.db), row["id"])
-        if not isinstance(row, dict) or row.get("status") not in {"failed", "paused", "completed", "cancelled"}:
-            raise FeatureChainError("feature-scope-amend requires a stopped run")
+    return feature, chain_id
+
+
+def authorize_stopped_run(host: Any, args: Any, row: dict, command: str, feature: dict | None) -> dict:
+    """Under the chain lock: the run must be stopped, then prove operator authority.
+
+    Codex (``feature`` set): the control token, the unchanged run-control binding,
+    and no live launcher/watchdog process group. Claude (``feature`` None): a
+    Claude launch writes no control token or process record; authority is naming
+    the chain (as feature-advance and feature-replan --chain do), and liveness is
+    the archon run status plus the chain's pending-control and dispatch claims,
+    which every caller still checks.
+    """
+    row = host.run_row_by_id(Path(args.db), row["id"])
+    if not isinstance(row, dict) or row.get("status") not in {"failed", "paused", "completed", "cancelled"}:
+        raise FeatureChainError(f"{command} requires a stopped run")
+    if feature is not None:
         control = host.require_control_token(row, Path(args.control_dir), getattr(args, "token", None))
         if control.get("feature_chain") != feature:
             raise FeatureChainError("feature control binding changed while acquiring the chain lock")
         require_no_live_control_processes(control)
+    return row
+
+
+def require_claude_chain(state: dict, command: str) -> None:
+    if state.get("provider") != "claude":
+        raise FeatureChainError(f"{command} --chain is for claude chains; codex chains require --token")
+
+
+def scope_amend_command(host: Any, args: Any, row: dict, chain_id: str | None = None) -> dict:
+    """Add one tracked file to the current stage allowlist.
+
+    ``chain_id`` selects the Claude path (``--chain``); omitted, the codex
+    run-control record and ``--token`` authorize it.
+    """
+    add_file_arg = str(getattr(args, "add_file", ""))
+    reason = str(getattr(args, "reason", "")).strip()
+    if not reason:
+        raise FeatureChainError("scope amendment requires a reason")
+    feature = None
+    if chain_id is None:
+        feature, chain_id = guarded_feature_binding(host, args, row, "feature-scope-amend")
+    applied: dict | None = None
+    with chain_lock(Path(args.control_dir), chain_id):
+        row = authorize_stopped_run(host, args, row, "feature-scope-amend", feature)
         state = read_state(Path(args.control_dir), chain_id)
+        if feature is None:
+            require_claude_chain(state, "feature-scope-amend")
         require_no_incomplete_amendment(state)
         pending = state.get("pending_control")
         if pending is not None and (not isinstance(pending, dict) or process_claim_alive(pending)):

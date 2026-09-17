@@ -2887,6 +2887,13 @@ def feature_shepherd_command(args: argparse.Namespace) -> None:
             print("BUDGET_SHEPHERD=WARN forecast exceeds allowance; continuing under the unchanged hard cap")
 
 
+def resolve_feature_control_run(args: argparse.Namespace) -> dict:
+    # A claude chain's run is a claude feature lane, which the codex-only guard
+    # would reject before the chain's own provider check.
+    lanes = LANES | set(FEATURE_LANES["claude"].values()) if args.chain else LANES
+    return resolve_run(args.db, args.run_id, lanes)
+
+
 def feature_budget_update_command(args: argparse.Namespace) -> None:
     validate_control_location(args.control_dir)
     row = resolve_run(args.db, args.run_id)
@@ -2905,8 +2912,8 @@ def feature_budget_update_command(args: argparse.Namespace) -> None:
 
 def feature_scope_amend_command(args: argparse.Namespace) -> None:
     validate_control_location(args.control_dir)
-    row = resolve_run(args.db, args.run_id)
-    result = repository_feature_call("scope_amend_command", args, row)
+    row = resolve_feature_control_run(args)
+    result = repository_feature_call("scope_amend_command", args, row, args.chain)
     status = "UNCHANGED" if result.get("already_applied") else "APPLIED"
     print(
         f"ARCHON_FEATURE_SCOPE_AMEND={status} "
@@ -3465,7 +3472,8 @@ def parser() -> argparse.ArgumentParser:
     budget_update.add_argument("--reason", required=True)
     scope_amend = sub.add_parser("feature-scope-amend", help="guarded allowlist-only scope amendment for a stopped repository-list feature chain")
     scope_amend.add_argument("run_id")
-    scope_amend.add_argument("--token", required=True)
+    scope_amend.add_argument("--token", help="codex chains: CONTROL_TOKEN_FROM_LAST_LAUNCH")
+    scope_amend.add_argument("--chain", help="claude chains (no control token): the chain id")
     scope_amend.add_argument("--add-file", required=True)
     scope_amend.add_argument("--reason", required=True)
     review_policy_update = sub.add_parser("feature-review-policy-update", help="guarded review policy amendment for a stopped repository-list feature chain")
@@ -3545,10 +3553,7 @@ def main() -> None:
     args = parser().parse_args()
     if args.action == "feature-replan":
         validate_control_location(args.control_dir)
-        # A claude chain's planning run is a claude feature lane, which the
-        # codex-only guard would reject before the chain's own provider check.
-        claude_lanes = LANES | set(FEATURE_LANES["claude"].values()) if args.chain else LANES
-        row = resolve_run(args.db, args.run_id, claude_lanes)
+        row = resolve_feature_control_run(args)
         if args.chain:
             replanned = repository_feature_call("restart_planning_unguarded", args, row, args.chain)
             if isinstance(replanned, dict) and replanned.get("result") is None:
