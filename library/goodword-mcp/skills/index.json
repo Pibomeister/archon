@@ -1,0 +1,8 @@
+{
+  "min_improvement": 0.0,
+  "repo": "goodword-mcp",
+  "schema": "archon.skill-index.v1",
+  "score_version": 1,
+  "skills": {},
+  "window_size": 3
+}

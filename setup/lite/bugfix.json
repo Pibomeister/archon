@@ -28,6 +28,7 @@
     "red-test",
     "red-gate",
     "commit-red",
+    "stage-skills",
     "fix-loop",
     "negcontrol",
     "review-loop",
@@ -471,7 +472,8 @@
         "files-allowlist.json",
         "verify.json",
         "red-sha.txt",
-        "repo.txt"
+        "repo.txt",
+        "skills.md"
       ]
     },
     "negcontrol": {
@@ -500,7 +502,8 @@
         "red-sha.txt",
         "accept-residuals.txt",
         "repo-policy.json",
-        "test-placement.json"
+        "test-placement.json",
+        "skills.md"
       ]
     },
     "exit-gate": {
@@ -660,6 +663,15 @@
       "produces": [],
       "consumes": [
         "lite-approval-manifest.json"
+      ]
+    },
+    "stage-skills": {
+      "produces": [
+        "skills.md",
+        "skills-staged.json"
+      ],
+      "consumes": [
+        "params.json"
       ]
     }
   }

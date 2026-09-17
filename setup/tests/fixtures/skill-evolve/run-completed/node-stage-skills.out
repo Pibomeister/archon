@@ -1,0 +1,2 @@
+SKILL_STAGED name=c-skill status=candidate bytes=120 sha=fixturesha00
+SKILLS_STAGE=OK repo=api active=0 candidate=1 bytes=120 head=none

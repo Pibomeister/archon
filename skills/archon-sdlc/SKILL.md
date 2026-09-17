@@ -1,11 +1,11 @@
 ---
 name: archon-sdlc
-description: Use when driving or supervising a Goodword Archon SDLC, repository-list feature, bugfix, or backfill run - starting full-sdlc-api on a feature spec, bugfix on a bug report, or backfill on a backfill spec, reading the plan-gate, RCA-gate, or backfill-packet, interpreting loop exits (CONVERGED, NO_PROGRESS, FIXER_BLOCKED, SCOPE_BREACH, ROUND_CAP_REACHED, CHAIN_CONFLICT, FIX_STALLED, ARCHITECTURE_SUSPECT, NEGCONTROL=FAIL, CLAIM_DIVERGED, SAMPLE_SUSPECT, BOUND_BREACH, RECONCILE_FAIL, PLAN_REJECTED, PLAN_NO_PROGRESS, PLAN_SCOPE_DISPUTE, PLAN_ROUND_CAP, RCA_PLAN_REJECTED, RCA_PLAN_SCOPE_DISPUTE, RCA_PLAN_SHAPE=FAIL, CRITIC_GATE=FAIL, IMPACT=UNAVAILABLE, IMPACT=SKIPPED, DESLOP=DIRTY, DESLOP_GATE=FAIL, DESLOP_REVIEW=FAIL, DESLOP_ROUND_CAP, ROUTE=FULL, LITE_FIXES_UNREVIEWED, PROOF_SELF_CONTRADICTED, RCA_PLAN_FINDING_RESTATED, RCA_PLAN_SCOPE_WIDENED, RCA_PLAN_CRITIQUE_ORPHANED, E2E_MUTEX=FAIL, CROSS_REPO_FINDING), choosing between a lite lane (full-sdlc-api-lite, bugfix-lite) and the full lane, deciding resume vs escalate, or running babysit/cleanup afterwards. Triggers on "archon run", "start the SDLC lane", "archon bugfix", "archon backfill", "the run is stuck", "resume the run", or any mention of a paused/failed archon workflow.
+description: Use when driving or supervising a Goodword Archon SDLC, repository-list feature, bugfix, or backfill run - starting full-sdlc-api on a feature spec, bugfix on a bug report, or backfill on a backfill spec, reading the plan-gate, RCA-gate, or backfill-packet, interpreting loop exits (CONVERGED, NO_PROGRESS, FIXER_BLOCKED, SCOPE_BREACH, ROUND_CAP_REACHED, CHAIN_CONFLICT, FIX_STALLED, ARCHITECTURE_SUSPECT, NEGCONTROL=FAIL, CLAIM_DIVERGED, SAMPLE_SUSPECT, BOUND_BREACH, RECONCILE_FAIL, PLAN_REJECTED, PLAN_NO_PROGRESS, PLAN_SCOPE_DISPUTE, PLAN_ROUND_CAP, RCA_PLAN_REJECTED, RCA_PLAN_SCOPE_DISPUTE, RCA_PLAN_SHAPE=FAIL, CRITIC_GATE=FAIL, IMPACT=UNAVAILABLE, IMPACT=SKIPPED, DESLOP=DIRTY, DESLOP_GATE=FAIL, DESLOP_REVIEW=FAIL, DESLOP_ROUND_CAP, ROUTE=FULL, LITE_FIXES_UNREVIEWED, PROOF_SELF_CONTRADICTED, RCA_PLAN_FINDING_RESTATED, RCA_PLAN_SCOPE_WIDENED, RCA_PLAN_CRITIQUE_ORPHANED, E2E_MUTEX=FAIL, CROSS_REPO_FINDING, SKILLS_STAGE=FAIL, SKILL_EVOLVE, SKILL_WINDOW, PROPOSAL_GATE=FAIL, WIKI_GATE=FAIL), running skill-evolve on a finished run and reading skill-impact.md, choosing between a lite lane (full-sdlc-api-lite, bugfix-lite) and the full lane, deciding resume vs escalate, or running babysit/cleanup afterwards. Triggers on "archon run", "start the SDLC lane", "archon bugfix", "archon backfill", "the run is stuck", "resume the run", or any mention of a paused/failed archon workflow.
 ---
 
 <WORKFLOW-NODE-STOP>
 If you are an Archon workflow node session (your prompt came from a `full-sdlc-*`,
-`bugfix`, `bugfix-lite`, `backfill`, `babysit`, or `cleanup` node), ignore this skill entirely. It is written for the
+`bugfix`, `bugfix-lite`, `backfill`, `babysit`, `cleanup`, or `skill-evolve` node), ignore this skill entirely. It is written for the
 operator session that drives runs from the outside. Shipped workflows declare only
 `skills: [ce-code-review]` / `[ce-doc-review]`; anything else reaching a node is
 leakage. Do what your node prompt says and nothing here.
@@ -951,6 +951,31 @@ tee, quota). Differences that decide supervision calls:
   — it re-runs the matrix's fixture-independent auto rows against
   staging-app.goodword.com, pauses once, and posts the summary as a PR
   comment (`DEPLOYED_SMOKE=...`).
+
+## 9a. Skill evolution (after KB duty)
+
+Once a run has ended - `LOCAL_CANDIDATE=PASS` with `kb-capture` done, or a
+failed run that reached the review loop - launch the post-run evolution of the
+repository skills library (RUNBOOK §17) with that run's ABSOLUTE artifacts dir:
+
+```bash
+DISABLE_OMC=1 archon workflow run skill-evolve "<ARTIFACTS_DIR of the finished run>" </dev/null 2>&1 | tee /tmp/archon-skill-evolve.log
+```
+
+It digests the run into `library/<repo>/raw/index.jsonl`, scores it against
+the open candidate window (accept or roll back happens there), lets a
+maintainer compile wiki pattern pages through a mechanical gate, and lets a
+proposer offer at most ONE skill change that a critic judges. `REJECTED`,
+`SKIP` and `no_action` are normal outcomes. Read the `SKILL_EVOLVE=OK` line
+and the `SKILL_IMPACT_TAIL` block in the log, render the last `skill-impact.md`
+section for the human, and hand back. `PREFLIGHT=FAIL ... already in the ...
+raw ledger` means the run was evolved before; nothing to do.
+
+**Guardrail:** never run `skill-admit.py rollback`, `set-window` or
+`wiki-apply.py quarantine`, never edit anything under `library/` by hand, and
+never `git commit` there. Those are the human's levers (RUNBOOK §17); your job
+is to report what the run decided and why. `SKILLS_STAGE=FAIL` on a lane means
+the library is corrupt - stop and escalate, do not resume.
 
 ## 10. The backfill lane
 

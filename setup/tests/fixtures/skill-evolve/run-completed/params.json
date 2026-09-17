@@ -1,0 +1,8 @@
+{
+  "api_port": 4123,
+  "branch": "archon/feature-x",
+  "repo": "api",
+  "slug": "feature-x",
+  "spec": "specs/feature-x.md",
+  "worktree": "wt/feature-x"
+}

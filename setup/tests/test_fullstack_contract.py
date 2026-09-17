@@ -214,7 +214,7 @@ class FullstackContractTest(unittest.TestCase):
         self.assertEqual(nodes["plan-gate"]["depends_on"], ["plan-render-gate"])
         self.assertEqual(nodes["plan-gate"]["approval"]["on_reject"]["max_attempts"], 3)
         self.assertIn("PLAN_REVISED", nodes["plan-gate"]["approval"]["on_reject"]["prompt"])
-        self.assertEqual(nodes["implement"]["depends_on"], ["plan-gate", "implementation-ready"])
+        self.assertEqual(nodes["implement"]["depends_on"], ["plan-gate", "implementation-ready", "stage-skills"])
         self.assertEqual(nodes["implement"].get("trigger_rule"), "none_failed_min_one_success")
 
     def test_bugfix_rca_gate_runs_between_render_gate_and_post_approval_integrity(self):

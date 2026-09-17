@@ -1,0 +1,30 @@
+{
+  "advisory": [
+    {
+      "action": "declined: name matches siblings",
+      "finding": "Consider renaming exportRows helper",
+      "severity": "P3"
+    }
+  ],
+  "applied": [
+    {
+      "action": "threaded cursor through",
+      "finding": "Export handler ignores pagination cursor",
+      "severity": "P1"
+    },
+    {
+      "action": "added test",
+      "finding": "Missing unit test for empty export",
+      "severity": "P2"
+    }
+  ],
+  "cross_repo": [],
+  "failed": [],
+  "incomplete": [
+    {
+      "action": "out of budget this round",
+      "finding": "Snapshot test needs fixture regeneration",
+      "severity": "P2"
+    }
+  ]
+}

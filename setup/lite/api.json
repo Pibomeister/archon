@@ -8,6 +8,7 @@
     "kb-recon",
     "kb-recon-gate",
     "bootstrap",
+    "stage-skills",
     "ralplan",
     "plan-snapshot",
     "lite-impact",
@@ -50,7 +51,8 @@
       "lite-impact-post"
     ],
     "implement": [
-      "lite-envelope-post"
+      "lite-envelope-post",
+      "stage-skills"
     ],
     "commit-impl": [
       "gate-tests"
@@ -258,7 +260,8 @@
       ],
       "consumes": [
         "params.json",
-        "plan.md"
+        "plan.md",
+        "skills.md"
       ]
     },
     "gate-tests": {
@@ -295,7 +298,8 @@
         "bootstrap-head.txt",
         "files-allowlist.json",
         "round-cap.txt",
-        "accept-residuals.txt"
+        "accept-residuals.txt",
+        "skills.md"
       ]
     },
     "post-fix-gate": {
@@ -413,6 +417,15 @@
         "smoke-result.txt",
         "lite-fixes-unreviewed.txt"
       ]
+    },
+    "stage-skills": {
+      "produces": [
+        "skills.md",
+        "skills-staged.json"
+      ],
+      "consumes": [
+        "params.json"
+      ]
     }
   },
   "remove_fields": {
@@ -432,6 +445,9 @@
     "implement": [
       "when",
       "trigger_rule"
+    ],
+    "stage-skills": [
+      "when"
     ]
   }
 }
