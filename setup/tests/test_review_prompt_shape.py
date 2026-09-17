@@ -19,8 +19,8 @@ ARCHON = Path(__file__).resolve().parents[2]
 PROMPTS = ARCHON / "setup" / "prompts"
 TRIO = (PROMPTS / "review-trio.md").read_text(encoding="utf-8")
 CAPPED = (PROMPTS / "review-capped.md").read_text(encoding="utf-8")
+CE = (PROMPTS / "review-ce.md").read_text(encoding="utf-8")
 VERIFY = (PROMPTS / "review-verify.md").read_text(encoding="utf-8")
-DOCREVIEW = (PROMPTS / "docreview-bounded.md").read_text(encoding="utf-8")
 CONTRACT = (ARCHON / "setup" / "review-contract.md").read_text(encoding="utf-8")
 
 # The v1 persona set. Any of these names in a review prompt is the cost
@@ -38,8 +38,8 @@ def flat(text):
     return " ".join(text.split())
 
 
-FLAT = {"trio": flat(TRIO), "capped": flat(CAPPED), "verify": flat(VERIFY),
-        "docreview": flat(DOCREVIEW), "contract": flat(CONTRACT)}
+FLAT = {"trio": flat(TRIO), "capped": flat(CAPPED), "ce": flat(CE), "verify": flat(VERIFY),
+        "contract": flat(CONTRACT)}
 
 
 def named_roles(text):
@@ -140,7 +140,7 @@ class ReviewPromptShape(unittest.TestCase):
     # --- shared obligations ----------------------------------------------
 
     def test_every_review_prompt_opens_and_closes_with_the_round_state_marks(self):
-        for name, text in (("trio", TRIO), ("capped", CAPPED), ("verify", VERIFY)):
+        for name, text in (("trio", TRIO), ("capped", CAPPED), ("ce", CE), ("verify", VERIFY)):
             with self.subTest(prompt=name):
                 self.assertIn('mark review-start', text)
                 self.assertIn('mark review-done', text)
@@ -150,14 +150,16 @@ class ReviewPromptShape(unittest.TestCase):
                 self.assertIn("YOUR LAST ACTION", text)
 
     def test_every_review_prompt_binds_itself_to_the_versioned_contract(self):
-        for name, text in (("trio", TRIO), ("capped", CAPPED), ("verify", VERIFY)):
+        for name, text in (("trio", TRIO), ("capped", CAPPED), ("ce", CE), ("verify", VERIFY)):
             with self.subTest(prompt=name):
-                self.assertIn("{{SETUP}}/review-contract.md", text)
+                # verify is rendered in place (read off disk by the session), so its
+                # path is absolute; the embedded modes keep the placeholder.
+                self.assertRegex(text, r"(\{\{SETUP\}\}|/setup)/review-contract\.md")
                 self.assertIn("Where the two disagree, the contract wins",
                               FLAT[name])
 
     def test_every_review_prompt_states_the_reviewer_is_read_only(self):
-        for name, text in (("trio", TRIO), ("capped", CAPPED), ("verify", VERIFY)):
+        for name, text in (("trio", TRIO), ("capped", CAPPED), ("ce", CE), ("verify", VERIFY)):
             with self.subTest(prompt=name):
                 self.assertIn("read-only in the candidate worktree", FLAT[name])
 
@@ -171,32 +173,6 @@ class ReviewPromptShape(unittest.TestCase):
 
     # --- the bounded doc review ------------------------------------------
 
-    def test_docreview_names_one_plan_reviewer_and_one_validator(self):
-        roles = named_roles(DOCREVIEW)
-        self.assertEqual(roles, {"plan-reviewer", "validator"}, roles)
+    # docreview shape cases removed: the bounded docreview prompt was not shipped (its
+    # measurement never completed), so the node keeps the ce-doc-review skill invocation.
 
-    def test_docreview_bounds_its_lenses_to_four(self):
-        lenses = re.findall(r"(?m)^\d+\. \*\*(.+?)\.\*\*", DOCREVIEW)
-        self.assertEqual(lenses, ["Spec conformance", "Verifiability",
-                                  "Internal coherence", "Consequence"], lenses)
-        self.assertIn("nothing beyond them", FLAT["docreview"])
-
-    def test_docreview_keeps_todays_envelope_terminator(self):
-        # docreview-gate greps the relayed output for this exact string and for
-        # the refusal string; changing the terminator fails the planning stage.
-        self.assertIn("```\nReview complete\n```", DOCREVIEW)
-        self.assertIn("Residual concerns:", DOCREVIEW)
-        self.assertIn("Deferred questions:", DOCREVIEW)
-
-    def test_docreview_still_revises_the_plan_because_the_gate_diffs_it(self):
-        # docreview-gate diffs plan.post-critic.md against plan.md and records
-        # DOC_CHANGED. A report-only doc review would always read DOC_CHANGED=NO.
-        self.assertIn("Apply the surviving P0 and P1 findings to `plan.md`",
-                      FLAT["docreview"])
-
-    def test_docreview_is_unattended(self):
-        self.assertIn("ask no questions", DOCREVIEW)
-
-
-if __name__ == "__main__":
-    unittest.main()

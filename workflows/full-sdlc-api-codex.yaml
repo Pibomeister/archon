@@ -1200,98 +1200,15 @@ nodes:
 - id: docreview
   depends_on:
   - plan-post-snapshot
-  timeout: 480000
+  timeout: 1800000
   prompt: |
     Use $ce-doc-review explicitly for this node.
 
-    You are the plan-review session for the planning stage, running
-    `mode:bounded`. Its job is to find what the plan gets wrong before anyone
-    implements it. Its cost is bounded by having exactly two roles: one plan
-    reviewer and one validator.
-
-    The plan is `$ARTIFACTS_DIR/plan.md`. Resolve the directory with:
-
-        echo "$ARTIFACTS_DIR"
-
-    ## Step 1 — dispatch one `plan-reviewer` subagent
-
-    Model `sonnet`. Give it `plan.md`, the source spec at
-    `$ARTIFACTS_DIR/feature-spec.md` if it exists, and the repositories the plan
-    names (their checkouts are the `repos` entries of
-    `$ARTIFACTS_DIR/joint-plan.json` when that file exists; when a checkout is not
-    reachable, say so rather than reasoning about it as though it were).
-
-    Its question is whether this plan, implemented exactly as written, produces what
-    the spec asked for. Exactly these lenses, in this order, and nothing beyond
-    them:
-
-    1. **Spec conformance.** Every acceptance criterion in the spec: does a step of
-       the plan produce it, and does a test scenario prove it? Name each criterion
-       with no step, and each step that serves no criterion.
-    2. **Verifiability.** Every claim the plan makes about existing code — a
-       signature, a line number, a helper's behaviour, a column's semantics — is a
-       hypothesis until read. Read the ones the plan depends on. Report each one
-       that is wrong, and each one that could not be checked, separately. A claim
-       that could not be checked is a residual concern, never a finding.
-    3. **Internal coherence.** Contradictions between sections, steps that depend on
-       an earlier step's output that the earlier step does not produce, ordering that
-       cannot hold, and pins the plan states in one place and violates in another.
-    4. **Consequence.** For each change the plan makes: what else reads that state,
-       calls that symbol, or depends on that behaviour, and does the plan account
-       for it. Concurrency, retries, partial failure and backward compatibility of
-       anything the plan exposes.
-
-    It does not rewrite the plan, propose alternative architectures, or raise style
-    preferences. It returns findings in this shape:
-
-        [P0|P1|P2|P3] Section: <where in the plan> — <one-line title> (<lens>, confidence <n>)
-          Why: <what breaks, concretely>
-          Suggested fix: <the smallest change to the plan that closes it>
-
-    Findings below confidence 50 are not returned. A P0 or P1 asserts the plan as
-    written produces a wrong or broken outcome, not that it could be better.
-
-    ## Step 2 — dispatch one `validator` subagent
-
-    Give it the findings and the plan. It may only **drop or downgrade**, never add
-    and never raise a severity.
-
-    It drops a finding when the plan already says the thing the finding says is
-    missing, when the cited section does not say what the finding claims, or when
-    the claim about existing code is contradicted by the code. It downgrades when
-    the concern is real but the consequence is narrower than the severity claims.
-
-    Findings it drops are listed with one reason each. Its output is final.
-
-    ## Step 3 — revise the plan
-
-    Apply the surviving P0 and P1 findings to `plan.md` directly: the smallest edit
-    that closes each, in the plan's own voice and structure. Do not restructure the
-    document, do not add sections the findings did not require, and do not soften a
-    constraint to make a finding go away.
-
-    P2 and P3 findings are reported, not applied, unless the fix is a one-line
-    correction of a factual error.
-
-    ## Step 4 — emit the envelope
-
-    Relay, as your own output:
-
-    1. The surviving findings in the shape above, severest first.
-    2. The validator's drops and downgrades with reasons.
-    3. `Residual concerns:` — one bullet per claim that could not be verified, each
-       naming why it could not be, and each lens's leftover risk.
-    4. `Deferred questions:` — one bullet per question a human must answer that the
-       plan does not settle.
-    5. A final line reading exactly:
-
-    ```
-    Review complete
-    ```
-
-    This is an unattended pipeline invocation: ask no questions, and never stop to
-    request confirmation. A relay that ends without `Review complete` fails
-    `DOCREVIEW_GATE` and the planning round is billed for nothing.
+    Resolve the artifacts directory by running: echo "$ARTIFACTS_DIR"
+    Then invoke the ce-doc-review skill with arguments exactly:
+      mode:headless <that directory>/plan.md
+    This is an unattended pipeline invocation; ask no questions.
+    Relay the skill's full output verbatim as your own output.
 - id: docreview-gate
   depends_on:
   - docreview
@@ -2354,8 +2271,11 @@ nodes:
         below, which is the `full` scope. Absent or `full`, continue here.
 
         You are the review session for one round of the Archon review loop, running
-        `mode:trio`. You own the whole round: you build one evidence packet, you
-        dispatch two discovery subagents and one validator, and you emit one envelope.
+        `mode:ce`. This mode is the existing `ce-code-review` skill invocation, with the
+        skill's own persona selection and its own validator pass, exactly as the v1
+        lane ran it. Nothing about the skill's coverage is reduced; what this mode adds
+        is the round's execution contract (the marks, the read-only rule, the envelope
+        identity lines) so the loop can reuse the review instead of re-running it.
 
         Read `/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/review-contract.md` now. It is the contract; everything below is
         how this mode implements it. Where the two disagree, the contract wins.
@@ -2369,7 +2289,9 @@ nodes:
             python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py "$ARTIFACTS_DIR" mark review-done "$ARTIFACTS_DIR/round-$N/review-envelope.txt"
 
         You are read-only in the candidate worktree (contract section 1). `review-gate`
-        compares the tree before and after this session; an edit fails the round.
+        compares the tree before and after this session; an edit fails the round. The
+        skill's autofix path is prohibited here: invoke it in report-only terms and
+        apply nothing.
 
         ## Step 1 — locate the round
 
@@ -2378,107 +2300,58 @@ nodes:
 
         Read from `$ARTIFACTS_DIR/round-$N/`:
 
-        - `review-input.json` — `{review_head, base, scope, contract_digest, plan_digest, allowlist_digest, attempt}`
-          and the review id. The envelope's `Input:` is that id, verbatim.
+        - `review-input.json` — the review id goes into the envelope's `Input:` verbatim.
         - `review-scope.txt` — `full` for this mode.
         - `review-base.txt` — the base sha.
 
         The worktree to review is the `worktree` field of `$ARTIFACTS_DIR/params.json`.
         You are NOT cwd'd there: `cd` into it for every git command.
 
-        ## Step 2 — build the evidence packet, once
+        ## Step 2 — persona selection is the skill's
 
-        Assemble one text block. Both discovery subagents get this same block verbatim,
-        so they never re-derive it and never disagree about what the candidate is.
+        Let `ce-code-review` select its always-on and conditional personas by its own
+        rules for this diff, and run its validator pass. Do not cap the set, and do not
+        add a custom lens beyond what the skill dispatches: a measured cap (three
+        personas) saved no wall time and lost a P1 the full set had found.
 
-        1. `Base: <base sha>` and `Head: <head sha>` (`git rev-parse HEAD`).
-        2. `git diff --stat <base>..HEAD` and the full `git diff <base>..HEAD`. If the
-           full diff exceeds roughly 2000 lines, include it per-file and say so.
-        3. The allowlist: `$ARTIFACTS_DIR/files-allowlist.json`. Files outside it are
-           not this candidate's change.
-        4. `pinned_decisions` from `$ARTIFACTS_DIR/joint-plan.json`, **verbatim** —
-           every entry's `rule` text, `spec_line` and `allowed_change`. Do not
-           paraphrase a pin; the paraphrase is what gets enforced.
-        5. The approved plan's acceptance criteria and interface section from
-           `$ARTIFACTS_DIR/plan.md`.
-        6. The gate-tests output already recorded for this candidate, if
-           `$ARTIFACTS_DIR/gate-tests.txt` exists. Do not re-run the suite.
-        7. The previous round's ledger, if `$ARTIFACTS_DIR/round-$((N-1))/ledger.json`
-           exists: every entry's `id`, `severity`, `state` and one-line title. A finding
-           already `closed` there is not new evidence; a finding already `waived` or
-           `pinned` goes under its own heading, not into the actionable set.
-        8. `$ARTIFACTS_DIR/waivers.json`, if present, under the same rule.
+        ## Step 3 — invoke the skill
 
-        ## Step 3 — dispatch exactly two discovery subagents, in parallel
+            ce-code-review  mode:headless  base:<the sha from review-base.txt>  plan:$ARTIFACTS_DIR/plan.md
 
-        Both on model `sonnet`. Send them in a single message so they run concurrently.
-        There are two, not three, not six: the fan-out is the cost.
+        with these instructions carried into the invocation:
 
-        **Subagent `correctness-and-spec`.** Its question is *does this code do what the
-        plan said, correctly*. It covers: logic defects, null and boundary handling,
-        error paths and what they leave behind, async ordering and unawaited work, state
-        mutation, the contract between the diff and the plan's acceptance criteria and
-        interface section, and test coverage of the behaviour the diff adds. It extracts
-        the assumptions the diff encodes — in-diff comments are the primary source — and
-        verifies each against out-of-diff code, reporting mismatches as findings.
+        - Do not expand scope beyond `<base>..HEAD`.
+        - Findings carry the extra field `finding_id` computed as contract section 4
+          defines. Every finding cites a `file` and `line` that exists at Head.
+        - Contract section 3 governs pinned decisions: read `pinned_decisions` from
+          `$ARTIFACTS_DIR/joint-plan.json` verbatim and route anything a pin covers to
+          the `Pinned decisions` heading as advisory, whatever its severity.
+        - If `$ARTIFACTS_DIR/waivers.json` or the previous round's
+          `$ARTIFACTS_DIR/round-$((N-1))/ledger.json` exists, read it first. A finding
+          whose `finding_id` matches an entry there goes under `Previously waived`, not
+          into the actionable set, unless the reviewer states specific new evidence that
+          was absent when the entry was recorded.
+        - External or cross-model review is prohibited, regardless of what the skill's
+          own references permit.
 
-        **Subagent `risk`.** Its question is *what does this break that is not in the
-        diff*. It covers: callers and readers of every changed exported symbol, security
-        and authorization posture, data exposure in logs and responses, migration and
-        persistence effects, concurrency and retry behaviour, backward compatibility of
-        any endpoint or DTO the diff touches, and every other exit of a function the
-        diff edited. It walks siblings: a guard added on one branch is checked for its
-        mirror case.
+        The staged skill may be either contract generation: CE 3.2.0's markdown headless
+        envelope, or the newer agent-JSON contract where `mode:headless` aliases
+        `mode:agent` and the skill returns one raw JSON object. Invoke with the same
+        arguments either way.
 
-        Both receive: the evidence packet, contract sections 3, 4 and 9, and this
-        instruction —
+        Do not return until every persona the skill dispatched has reported, and until
+        the validator pass has run. A relay that stops mid-fan-out is a billed round
+        that proves nothing.
 
-        > Return ONE raw JSON object and nothing else:
-        > `{"reviewer": "<your name>", "findings": [...], "residual_risks": [...], "testing_gaps": [...]}`
-        > conforming to
-        > `/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/../vendor/ce-skills/3.2.0/ce-code-review/references/findings-schema.json`,
-        > each finding carrying the extra field `finding_id` computed as contract
-        > section 4 defines. Cite `file` and `line` that exist at Head. Put what you
-        > actually read in `evidence`. Report a finding once, at its root cause, not
-        > once per call site. Do not edit any file.
+        ## Step 4 — write the envelope
 
-        If a path in the diff matches `migrations/`, `auth`, or `payments`, dispatch one
-        additional subagent named for that trigger (`migrations`, `auth`, `payments`)
-        with the same contract, scoped to those paths only. No other add-on is
-        permitted, and the trigger is the path match, not your judgement of importance.
+        Not before now: after the skill has returned and its validator pass has run. An
+        envelope written mid-fan-out is a billed round whose gate cannot tell it from a
+        finished one.
 
-        ## Step 4 — merge
-
-        Union the subagents' findings, keyed by `finding_id`. Two findings with the same
-        id are one finding: keep the higher severity and merge the evidence. Apply
-        contract section 3 to the merged set: anything whose only fix changes a pinned
-        symbol moves to the `Pinned decisions` heading and leaves the actionable set.
-
-        ## Step 5 — dispatch one `validator` subagent
-
-        Give it the merged findings and the evidence packet. It may only drop or
-        downgrade (contract section 5). It re-reads each cited line in the worktree. It
-        returns the surviving findings plus a list of drops and downgrades with one
-        reason each.
-
-        Its output is final. Do not re-add what it dropped.
-
-        ## Step 6 — write the envelope
-
-        Not before now. The envelope is written once, after the validator has returned,
-        and `mark review-done` is run once, after the envelope file exists. A session
-        that writes an envelope at step 4 and marks the round done has billed a review
-        whose validator pass had not happened yet, and the gate cannot tell that apart
-        from a finished one.
-
-        Write the full envelope to `$ARTIFACTS_DIR/round-$N/review-envelope.txt` and
-        relay it verbatim as your output. Its body carries the surviving findings as
-        JSON, the validator's drops and downgrades with reasons, the `Pinned decisions`
-        heading when section 3 applied, a `Previously waived` heading when step 2 item 7
-        or 8 applied, and a Coverage note naming the subagents dispatched and any that
-        failed.
-
-        Its final six lines are exactly, one per line, nothing after them:
+        Relay the skill's full return verbatim, write it to
+        `$ARTIFACTS_DIR/round-$N/review-envelope.txt`, and append the footer below. Its
+        final six lines are exactly, one per line, nothing after them:
 
             Scope: full
             Base: <base sha>
@@ -2487,14 +2360,14 @@ nodes:
             Verdict: <Ready to merge|Ready with fixes|Not ready>
             Review complete
 
-        `Not ready` asserts an open P0 or P1. Do not emit it otherwise — the round stops
-        with `NOT_READY_WITHOUT_BLOCKER`.
+        The verdict is the skill's, mapped into the enum unchanged. `Not ready` asserts
+        an open P0 or P1; do not emit it otherwise — the round stops with
+        `NOT_READY_WITHOUT_BLOCKER`.
 
         Then run the `mark review-done` command from the top of this prompt.
 
-        If a subagent fails or times out, say which and why in the Coverage note and
-        still emit the footer. A session that ends without the footer is a billed round
-        that proves nothing.
+        If a persona cannot finish, say which one and why in the envelope and still emit
+        the footer.
     - id: review-gate
       depends_on:
       - review

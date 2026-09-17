@@ -57,7 +57,7 @@ class PromptEmbedding(unittest.TestCase):
         # The negative control, and the only reason the assertion above is
         # evidence. Edit a prompt file, do not re-embed, require the check to
         # notice -- then put it back.
-        target = PROMPTS / "docreview-bounded.md"
+        target = PROMPTS / "review-ce.md"
         before = target.read_text(encoding="utf-8")
         try:
             target.write_text(before + "\nAn edit nobody re-embedded.\n", encoding="utf-8")

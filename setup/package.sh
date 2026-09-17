@@ -206,7 +206,7 @@ MANIFEST=(
   setup/prompts/review-trio.md
   setup/prompts/review-capped.md
   setup/prompts/review-verify.md
-  setup/prompts/docreview-bounded.md
+  setup/prompts/review-ce.md
   setup/mcp-smoke.sh
   setup/codex-usage.py
   setup/codex-watchdog.sh
