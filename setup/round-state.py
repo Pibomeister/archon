@@ -777,8 +777,14 @@ def cmd_fix_plan(rnd, _args):
 # --- commit-fixer ---------------------------------------------------------
 
 def run_pin_guard(rnd):
+    """The fixer's comparator is the head the REVIEW saw (this round's pre-head),
+    not the stage baseline: the implementer may change a pinned symbol the spec
+    itself told it to change, and commit-impl already judged that against the
+    baseline. What a fixer round must not do is redesign a pinned body after the
+    review -- rounds 2-5 of chain 3460c074 were exactly that."""
     guard = HERE / "pin-guard.py"
-    baseline = read_text(rnd.ad / "bootstrap-head.txt").strip()
+    baseline = read_text(rnd.rd / "pre-head.txt").strip() or \
+        read_text(rnd.ad / "bootstrap-head.txt").strip()
     if not guard.is_file() or not baseline:
         return
     proc = subprocess.run([sys.executable, str(guard), str(rnd.ad), baseline],

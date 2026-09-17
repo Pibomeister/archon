@@ -384,5 +384,148 @@ class Ambiguity(GuardCase):
         self.assertIn("PIN_UNRESOLVED symbol=helper", proc.stdout)
 
 
+CONTROLLER_SOURCE = """import { Controller, Get, Post, UseGuards } from '@nestjs/common';
+
+@Controller('group')
+export class GroupController {
+  @Get(':id')
+  async getGroup(@Param('id') id: string) {
+    return this.service.get(id);
+  }
+
+  @UseGuards(CompositeAuthGuard)
+  @Get(':groupId/share-link')
+  async getShareLink(@Param('groupId') groupId: string) {
+    return this.service.shareLink(groupId);
+  }
+
+  @Post('share')
+  async share() {
+    return 1;
+  }
+}
+
+export class GetGroupShareLinkResponseDto {
+  url: string | null;
+  expiresAt: string | null;
+}
+"""
+
+
+class SpecVocabulary(GuardCase):
+    """Run 9fd801f3 (2026-09-17): every one of the planner's 15 pins was
+    PIN_UNRESOLVED. The spec names symbols as `Class.member`, routes, DTO
+    classes, whole files and MCP tool ids, and half of them belonged to the
+    other repository's stage."""
+
+    def setUp(self):
+        super().setUp()
+        self.ctl = "src/group.controller.ts"
+        self.write(CONTROLLER_SOURCE, self.ctl)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "controller")
+        self.baseline = self.git("rev-parse", "HEAD")
+
+    def plan(self, pins, stages=None, own_allowlist=None):
+        doc = {"pinned_decisions": pins}
+        if stages:
+            doc["stages"] = stages
+        (self.ad / "joint-plan.json").write_text(json.dumps(doc), encoding="utf-8")
+        if own_allowlist is not None:
+            (self.ad / "files-allowlist.json").write_text(json.dumps(own_allowlist), encoding="utf-8")
+
+    def entry(self, symbol, path, allowed="none"):
+        return {"symbol": symbol, "file": path, "rule": "r", "spec_line": 1, "allowed_change": allowed}
+
+    def test_a_qualified_member_resolves_inside_its_class(self):
+        self.plan([self.entry("GroupController.getShareLink", self.ctl)])
+        self.assertIn("PIN_OK pins=1", self.guard().stdout)
+        self.write(CONTROLLER_SOURCE.replace("shareLink(groupId)", "shareLink(groupId, true)"), self.ctl)
+        p = self.guard()
+        self.assertIn("PIN_BREACH symbol=GroupController.getShareLink", p.stdout)
+        self.assertEqual(p.returncode, 1)
+
+    def test_a_route_resolves_to_the_handler_under_its_decorator(self):
+        self.plan([self.entry("GET /group/:groupId/share-link", self.ctl)])
+        self.assertIn("PIN_OK pins=1", self.guard().stdout)
+        span = self.spans()[0]["staged_span"]
+        body = CONTROLLER_SOURCE[span[0]:span[1]]
+        self.assertTrue(body.lstrip().startswith("@UseGuards(CompositeAuthGuard)"), body)
+        self.assertIn("getShareLink", body)
+        self.assertNotIn("getGroup(", body)
+        # An edit to a sibling handler does not touch the route's pin.
+        self.write(CONTROLLER_SOURCE.replace("return 1;", "return 2;"), self.ctl)
+        self.assertIn("PIN_OK pins=1", self.guard().stdout)
+        # The handler's own body does.
+        self.write(CONTROLLER_SOURCE.replace("shareLink(groupId)", "shareLink(groupId, 1)"), self.ctl)
+        self.assertIn("PIN_BREACH symbol=GET /group/:groupId/share-link", self.guard().stdout)
+
+    def test_a_class_declaration_is_a_span(self):
+        self.plan([self.entry("GetGroupShareLinkResponseDto", self.ctl)])
+        self.assertIn("PIN_OK pins=1", self.guard().stdout)
+        self.write(CONTROLLER_SOURCE.replace("expiresAt: string | null;", "expiresAt: string;"), self.ctl)
+        self.assertIn("PIN_BREACH symbol=GetGroupShareLinkResponseDto", self.guard().stdout)
+
+    def test_a_symbol_this_change_introduces_is_new_not_unresolved(self):
+        self.plan([self.entry("NewThingDto", self.ctl), self.entry("POST /group/archive", self.ctl)])
+        self.write(CONTROLLER_SOURCE + "\nexport class NewThingDto { a: number; }\n", self.ctl)
+        p = self.guard()
+        self.assertIn("PIN_NEW symbol=NewThingDto", p.stdout)
+        # Named by the plan, still absent from the staged blob: that is a stop.
+        self.assertIn("PIN_UNRESOLVED symbol=POST /group/archive", p.stdout)
+        self.assertEqual(p.returncode, 1)
+
+    def test_a_new_file_named_by_a_pin_is_new(self):
+        self.plan([self.entry("registerShareGroup", "src/share-group.ts")])
+        self.write("export function registerShareGroup() {\n  return 1;\n}\n", "src/share-group.ts")
+        p = self.guard()
+        self.assertIn("PIN_NEW symbol=registerShareGroup", p.stdout)
+        self.assertEqual(p.returncode, 0, p.stdout)
+
+    def test_a_pin_on_a_file_the_plan_changes_is_unenforceable_elsewhere_it_freezes_the_file(self):
+        self.plan([self.entry(self.ctl, self.ctl)], own_allowlist=[self.ctl])
+        self.write(CONTROLLER_SOURCE.replace("return 1;", "return 2;"), self.ctl)
+        p = self.guard()
+        self.assertIn("PIN_UNENFORCEABLE symbol=src/group.controller.ts", p.stdout)
+        self.assertEqual(p.returncode, 0, p.stdout)
+        # Negative control: the same file pin outside the allowlist is a whole-file freeze.
+        self.plan([self.entry("group.controller.ts", self.ctl)], own_allowlist=["src/other.ts"])
+        p = self.guard()
+        self.assertIn("PIN_BREACH symbol=group.controller.ts", p.stdout)
+        self.assertEqual(p.returncode, 1)
+
+    def test_a_tool_id_named_only_as_a_literal_is_unenforceable(self):
+        self.write("export const tool = { name: 'share_group', run: () => 1 };\n", "src/tool.ts")
+        self.git("add", "-A"); self.git("commit", "-qm", "tool")
+        self.baseline = self.git("rev-parse", "HEAD")
+        self.plan([self.entry("share_group", "src/tool.ts"), self.entry("no_such_thing", "src/tool.ts")])
+        p = self.guard()
+        self.assertIn("PIN_UNENFORCEABLE symbol=share_group", p.stdout)
+        self.assertIn("PIN_UNRESOLVED symbol=no_such_thing", p.stdout)
+        self.assertEqual(p.returncode, 1)
+
+    def test_another_stages_pins_are_not_checked_against_this_worktree(self):
+        stages = {"api": {"files_allowlist": [self.ctl]},
+                  "goodword-mcp": {"files_allowlist": ["src/tools/share-group.ts"]}}
+        self.plan([self.entry("share_group", "src/tools/share-group.ts"),
+                   self.entry("GroupController.getGroup", self.ctl)], stages=stages)
+        p = self.guard()
+        self.assertIn("PIN_OK pins=2 changed=0 new=0 unenforceable=0 other_repo=1", p.stdout)
+        self.assertEqual(self.spans()[0]["result"], "PIN_OTHER_REPO")
+        # Negative control: with no stage allowlists the foreign file is a stop.
+        self.plan([self.entry("share_group", "src/tools/share-group.ts")])
+        p = self.guard()
+        self.assertIn("PIN_UNRESOLVED symbol=share_group", p.stdout)
+        self.assertEqual(p.returncode, 1)
+
+    def test_a_stage_pool_is_read_only_for_its_own_repository(self):
+        stages = {"api": {"files_allowlist": [self.ctl], "pinned_decisions": [self.entry("GroupController.getGroup", self.ctl)]},
+                  "goodword-mcp": {"files_allowlist": [], "pinned_decisions": [self.entry("share_group", "src/tools/x.ts")]}}
+        self.plan([], stages=stages)
+        p = self.guard()
+        self.assertIn("PIN_OK pins=1", p.stdout)
+        self.assertEqual(p.returncode, 0, p.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -445,6 +445,47 @@ class ReadOnlyGuard(LaneCase):
         self.assertIn("REVIEW_WROTE_TREE", result["stderr"])
 
 
+class FixerPinComparator(LaneCase):
+    """commit-fixer compares pinned bodies against the head the review saw, not
+    the stage baseline. Run 9fd801f3's spec ordered a change to a pinned method;
+    commit-impl judged that against the baseline once, and every fixer round
+    would have re-breached it against the same baseline forever."""
+
+    def pinned_candidate(self):
+        lane = self.lane
+        lane.write_json("joint-plan.json", {
+            "schema": "archon.joint-feature-plan.v1", "repositories": ["api"],
+            "pinned_decisions": [{"symbol": "widen", "file": "src/a.ts", "rule": "r",
+                                  "spec_line": 1, "allowed_change": "none"}]})
+        # The implementer changed the pinned body; that commit IS the candidate.
+        (lane.wt / "src" / "a.ts").write_text(SEED.replace("a + 1", "a + 2"), encoding="utf-8")
+        lane.git("add", "-A")
+        lane.git("commit", "-qm", "impl")
+        lane.pre()
+        lane.review("Ready with fixes")
+        lane.gate()
+        lane.fix_plan()
+        return lane
+
+    def test_a_fixer_that_leaves_the_pinned_body_alone_is_not_a_breach(self):
+        lane = self.pinned_candidate()
+        lane.fixer(result={"applied": [{"finding_id": "f0000000feed", "finding": "f", "action": "a", "severity": "P2"}],
+                           "failed": [], "advisory": [], "incomplete": []},
+                   edit=SEED.replace("a + 1", "a + 2") + "// repaired elsewhere\n")
+        proc = lane.commit_fixer()
+        self.assertNotIn("PIN_BREACH", proc.stdout + proc.stderr)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_a_fixer_that_redesigns_the_pinned_body_is_a_breach(self):
+        lane = self.pinned_candidate()
+        lane.fixer(result={"applied": [{"finding_id": "f0000000feed", "finding": "f", "action": "a", "severity": "P2"}],
+                           "failed": [], "advisory": [], "incomplete": []},
+                   edit=SEED.replace("a + 1", "a + 3"))
+        proc = lane.commit_fixer()
+        self.assertIn("PIN_BREACH symbol=widen", proc.stdout + proc.stderr)
+        self.assertEqual(proc.returncode, 1)
+
+
 class FixPlan(LaneCase):
     def test_a_result_that_no_longer_matches_the_tree_is_a_typed_stop(self):
         lane = self.lane

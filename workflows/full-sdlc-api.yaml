@@ -450,6 +450,12 @@ nodes:
       an entry too. When "## Interface (pinned)" lists only files, the symbols
       for those entries come from "## Pinned decisions"; a spec with either
       section never yields an empty array.
+      "allowed_change" is "none" ONLY when the rule keeps the symbol exactly as
+      it is today. When the rule itself introduces the symbol or tells this
+      ticket to change it (a new endpoint, a check added to an existing method),
+      write that change in the rule's own words: a guard compares the symbol's
+      body across commits, and "none" on a symbol the spec orders changed stops
+      the implementation at its first commit.
       "rule" is the COMPLETE bullet text from the spec, copied verbatim, not a
       paraphrase and not the part of it you judge relevant. A guard compares
       every pinned bullet against these entries and fails the plan when a bullet
