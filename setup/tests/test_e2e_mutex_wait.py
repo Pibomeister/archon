@@ -144,6 +144,16 @@ class E2eMutexWaitTest(unittest.TestCase):
         self.assertEqual(0, waiter.returncode, out)
         self.assertIn("E2E_MUTEX=ACQUIRED owner=" + self.owner("B"), out)
 
+    def test_unwritable_lock_path_fails_fast_instead_of_waiting(self):
+        blocked = self.root / "ro"
+        blocked.mkdir(mode=0o500)
+        self.addCleanup(blocked.chmod, 0o700)
+        start = time.monotonic()
+        r = self.op("wait", self.owner("B"), ARCHON_E2E_LOCK=str(blocked / "e2e.lock"))
+        self.assertEqual(1, r.returncode, r.stdout)
+        self.assertIn("E2E_MUTEX=FAIL cannot create lock", r.stdout)
+        self.assertLess(time.monotonic() - start, 10, "waited on a lock it can never create")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -81,14 +81,20 @@ reclaim_if_stale() {
   echo "E2E_MUTEX=RECLAIMED stale owner=$OWNER status=$status"
 }
 
-try_acquire() { # $1 = holder pid ("" for none). 0 = ours (TOOK=yes|held), 1 = someone else's
-  mkdir -p "$(dirname "$LOCK")"
-  if mkdir "$LOCK" 2>/dev/null; then
+try_acquire() { # $1 = holder pid ("" for none). 0 = ours (TOOK=yes|held), 1 = someone else's, 3 = unwritable
+  mkdir -p "$(dirname "$LOCK")" 2>/dev/null
+  if mkdir "$LOCK" 2>/dev/null || { [ ! -d "$LOCK" ] && mkdir "$LOCK" 2>/dev/null; }; then
     printf '%s\n' "$AD" > "$LOCK/owner"
     if [ -n "$1" ]; then printf '%s\n' "$1" > "$LOCK/pid"; fi
     TOOK=yes
     echo "E2E_MUTEX=ACQUIRED owner=$AD"
     return 0
+  fi
+  if [ ! -d "$LOCK" ]; then
+    # Twice refused with no lock present: a sandbox or permission denies the lock
+    # path, so waiting cannot help.
+    echo "E2E_MUTEX=FAIL cannot create lock $LOCK (not writable from this process)"
+    return 3
   fi
   OWNER=$(cat "$LOCK/owner" 2>/dev/null || true)
   if [ "$OWNER" = "$AD" ]; then
@@ -96,7 +102,7 @@ try_acquire() { # $1 = holder pid ("" for none). 0 = ours (TOOK=yes|held), 1 = s
     echo "E2E_MUTEX=HELD owner=$AD (re-entrant: this run already owns it)"
     return 0
   fi
-  reclaim_if_stale && try_acquire "$1" && return 0
+  if reclaim_if_stale; then try_acquire "$1"; return $?; fi
   return 1
 }
 
@@ -104,7 +110,8 @@ wait_acquire() { # $1 = holder pid
   local start now waited last=-60
   start=$(date +%s)
   while :; do
-    try_acquire "$1" && return 0
+    try_acquire "$1"
+    case $? in 0) return 0 ;; 3) return 1 ;; esac
     now=$(date +%s); waited=$((now - start))
     if [ $((waited - last)) -ge 60 ]; then
       echo "E2E_MUTEX=WAITING owner=${OWNER:-<unknown>} waited=${waited}s"
@@ -137,7 +144,8 @@ release_lock() {
 
 case "$OP" in
   acquire)
-    try_acquire "" && exit 0
+    try_acquire ""
+    case $? in 0) exit 0 ;; 3) exit 1 ;; esac
     echo "E2E_MUTEX=FAIL the e2e stack (54322/8001, project goodword-e2e) is held by another run"
     echo "  owner artifacts: ${OWNER:-<unknown>}"
     echo "  That run's migrations and seed own the shared database; starting a second"
