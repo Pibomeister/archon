@@ -279,7 +279,11 @@ _INCOMPLETE_REASON = _alt(
 
 DESLOP_REVIEW_GATE_PATTERNS = [
     (rf"DESLOP=CLEAN round={INT}", True),
-    (rf"DESLOP=DIRTY round={INT} blocking={INT}", False),
+    # DESLOP=DIRTY is the verdict line, not the terminal one: below the cap the
+    # gate ends DESLOP_RETRY=PASS (rc 0, the loop retries), at the cap
+    # DESLOP_ROUND_CAP (rc 1).
+    (rf"DESLOP_RETRY=PASS round={INT} dirty_rounds={INT}", True),
+    (rf"DESLOP_ROUND_CAP round={INT} dirty_rounds={INT}", False),
     (r"DESLOP_REVIEW=FAIL no deslop-round\.txt \(deslop-recheck did not run\)", False),
     (rf"DESLOP_REVIEW=FAIL no checkpoint for round={INT}", False),
     (rf"DESLOP_REVIEW=FAIL no deslop-review\.json round={INT}", False),

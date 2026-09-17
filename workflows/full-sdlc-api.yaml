@@ -1714,7 +1714,109 @@ nodes:
       max_iterations: 2
       until: DESLOP_CLEAN
       nodes:
+        - id: deslop-fix-pre
+          timeout: 120000
+          bash: |
+            set -euo pipefail
+            if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-deslop-fix-pre.out") 2> >(tee -a "$ARTIFACTS_DIR/node-deslop-fix-pre.out" >&2); fi
+            # deslop-review-gate leaves deslop-fix-pending.txt (the DIRTY round) when
+            # it lets the loop continue; deslop-recheck consumes it once the fixer
+            # has recorded its result. stdout is ONLY the JSON the fixer's when: reads.
+            P="$ARTIFACTS_DIR/deslop-fix-pending.txt"
+            if [ ! -f "$P" ]; then printf '{"fix":"none"}\n'; exit 0; fi
+            R=$(cat "$P")
+            # Hand-editable marker: reject junk before it is used as a path.
+            case "$R" in ''|*[!0-9]*) echo "DESLOP_FIX=FAIL deslop-fix-pending.txt is not an integer: [$R]"; exit 1 ;; esac
+            test -s "$ARTIFACTS_DIR/deslop-round-$R/blocking-findings.json" \
+              || { echo "DESLOP_FIX=FAIL no blocking-findings.json for round=$R"; exit 1; }
+            # A result left by an earlier fixer attempt must not satisfy this one.
+            rm -f "$ARTIFACTS_DIR/deslop-fix-result.json"
+            printf '{"fix":"pending","round":"%s"}\n' "$R"
+
+        - id: deslop-fix
+          depends_on: [deslop-fix-pre]
+          when: "$deslop-fix-pre.output.fix == 'pending'"
+          model: sonnet
+          maxBudgetUsd: 4
+          timeout: 1200000
+          prompt: |
+            You are the deslop FIXER node in an unattended pipeline. The independent
+            deslop reviewer filed blocking findings against the deslop writer's
+            cleanup. You apply exactly those findings and nothing else, then the
+            recheck and a fresh reviewer run again. Ask no questions.
+
+            Resolve the artifacts directory by running: echo "$ARTIFACTS_DIR"
+
+            The working tree is the "worktree" field of params.json in that same
+            directory (you are NOT cwd'd there — cd into it for every git command).
+
+            READ:
+            - deslop-fix-pending.txt in the artifacts directory: the round number R
+              whose review blocked.
+            - deslop-round-R/blocking-findings.json there: {"round": R, "findings": [
+              {"guard", "file", "line", "confidence", "evidence"}]}. These findings are
+              the ONLY things you fix; the gate has already dropped non-blocking ones.
+            - deslop-result.json there: the writer's log of what it changed.
+
+            SCOPE — the same as the writer's: the intersection of
+              (a) files changed or untracked since the base sha in bootstrap-head.txt
+                  (git status --porcelain, and
+                   git diff --name-only "$(cat <that directory>/bootstrap-head.txt)"),
+              (b) the paths listed in files-allowlist.json in the artifacts directory.
+            The implementation is still UNCOMMITTED; the working tree is the subject.
+
+            Apply the matching guard's fix to each finding:
+              complexity — flatten the function (early returns, table dispatch).
+              tautological_tests — assert the observable value; if none exists,
+                delete the test.
+              yagni — delete the parameter, option, branch, export, type or config
+                that has no caller.
+              open_closed — use the extension point that already exists.
+              comments — delete the comment that restates the code, narrates the
+                change or preserves task history. Keep comments that explain *why*.
+
+            RULES — the writer's rules still bind you:
+            - Preserve behavior. Never simplify away a safety check. LOC removed is
+              not the metric.
+            - Do not change public API shapes (exported signatures, DTOs, route
+              contracts, response bodies); a finding that would require it goes under
+              "not_fixed".
+            - Do not touch any file outside the scope above, do not touch
+              commit-msg.txt, and do not create commits, branches or worktrees.
+            - Do not fix, rewrite or reformat anything the findings do not name. A
+              finding outside the scope above goes under "not_fixed".
+
+            VERIFICATION — after your edits, in the worktree, these must exit 0:
+              bun run typecheck     (tsgo — NOT build:fast)
+              bun run lint          (biome)
+              bun run test -- "<pattern>"  for each pattern in test_patterns in
+                                    verify.json in the artifacts directory.
+            For a run whose params.json "repo" is not "api", use that repository's
+            commands, listed under ## Verification in plan.md, and omit any command the
+            repository does not have. NEVER run bare `bun test`. Do not run integration
+            tests. The next node re-runs every check authoritatively either way.
+
+            Record your edits in deslop-result.json: append one entry per fix to
+            "passes" ({"guard", "file", "line", "action": "deleted|rewrote", "reason"})
+            and add any file you touched to "changed_files". Keep every existing entry.
+            The next reviewer reads that file as the declaration of what was changed.
+
+            Write deslop-fix-result.json to the artifacts directory with exactly this shape:
+              {"round": <R as an int>,
+               "fixed": [{"guard": "<finding guard>", "file": "<repo-relative>", "line": <int>,
+                          "action": "deleted|rewrote"}],
+               "not_fixed": [{"guard": "<finding guard>", "file": "<repo-relative>", "line": <int>,
+                              "reason": "<one line>"}]}
+            Every blocking finding appears in exactly one of the two arrays. Writing this
+            file is MANDATORY and comes BEFORE your final line — ending without it stops
+            the pipeline. Then end with the single line: DESLOP_FIX_DONE
+
         - id: deslop-recheck
+          depends_on: [deslop-fix-pre, deslop-fix]
+          # deslop-fix is skipped (when:) on every iteration that has no pending
+          # DIRTY verdict; this rule still runs the recheck then, and skips it
+          # (failing the iteration) when the fixer itself failed.
+          trigger_rule: none_failed_min_one_success
           timeout: 1200000
           bash: |
             set -euo pipefail
@@ -1734,6 +1836,21 @@ nodes:
             case "$N" in '') N=0 ;; *[!0-9]*) echo "DESLOP_RECHECK=FAIL deslop-round.txt is not an integer: [$N]"; exit 1 ;; esac
             N=$((N+1)); echo "$N" > "$C"
             RD="$ARTIFACTS_DIR/deslop-round-$N"; mkdir -p "$RD"
+            # Pending automatic fix (deslop-review-gate recorded DIRTY last round):
+            # the fixer must have recorded its result for THAT round before the
+            # marker is consumed. Left in place on failure, so a resume re-runs the
+            # fixer rather than rechecking a tree nobody fixed.
+            PENDING="$ARTIFACTS_DIR/deslop-fix-pending.txt"
+            if [ -f "$PENDING" ]; then
+              PR=$(cat "$PENDING")
+              FR="$ARTIFACTS_DIR/deslop-fix-result.json"
+              test -s "$FR" || { echo "DESLOP_GATE=FAIL no deslop-fix-result.json round=$N"; exit 1; }
+              python3 -c "import json,sys; d=json.load(open(sys.argv[1], encoding='utf-8')); assert isinstance(d, dict); assert str(d.get('round')) == sys.argv[2]; assert isinstance(d.get('fixed'), list); assert isinstance(d.get('not_fixed'), list)" \
+                "$FR" "$PR" 2>/dev/null || { echo "DESLOP_GATE=FAIL deslop-fix-result.json unparseable round=$N"; exit 1; }
+              cp "$FR" "$RD/fix-result.json"
+              rm -f "$PENDING"
+              echo "DESLOP_FIX_CONSUMED round=$N fixed_round=$PR"
+            fi
             BASE=$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")
             # Every check runs even after one fails: recheck.json is the reviewer's
             # authoritative verification record and must carry all five exit codes.
@@ -1889,7 +2006,9 @@ nodes:
             Confidence is a contract, not a mood. 100 = you read the code and the
             defect is present as described. 75 = present, with one assumption you
             could not check. 50 = suspicion worth recording that you could not
-            confirm. 75 and 100 BLOCK the pipeline for a human; 50 does not. There
+            confirm. 75 and 100 are blocking: the first blocking round gets one
+            automatic fixer pass, the second stops the pipeline for a human;
+            50 never blocks. There
             is no other allowed value.
 
             Write deslop-review.json to the artifacts directory with EXACTLY this
@@ -1986,12 +2105,13 @@ nodes:
             # >= 75, and a declaration that disagrees with the findings is a failure,
             # not a tie-break.
             set +e
-            python3 - "$R" "$N" "$RD/slop.txt" <<'PY'
+            python3 - "$R" "$N" "$RD/slop.txt" "$RD/blocking-findings.json" <<'PY'
             import json, sys
 
             GUARDS = ["complexity", "tautological_tests", "yagni", "open_closed", "comments"]
             STATUSES = ("assessed", "not_applicable")
             path, rnd = sys.argv[1], sys.argv[2]
+            blocking_path = sys.argv[4]
 
             # check-slop.py, not the reviewer, decides complexity. It already
             # separates a function this change made or worsened past the
@@ -2059,6 +2179,7 @@ nodes:
             if not isinstance(findings, list):
                 malformed("findings is not an array")
             blocking = 0
+            blocking_findings = []
             for i, f in enumerate(findings):
                 if not isinstance(f, dict):
                     malformed(f"index={i} finding is not an object")
@@ -2081,9 +2202,13 @@ nodes:
                     downgraded += 1
                 if conf >= 75:
                     blocking += 1
+                    blocking_findings.append(dict(f, confidence=conf))
                     print(f"DESLOP_FINDING guard={f['guard']} file={f['file']}:{line} confidence={conf}")
             print(f"DESLOP_REVIEW_PARSE round={rnd} declared={verdict} findings={len(findings)} blocking={blocking} downgraded={downgraded}")
             if blocking > 0:
+                # The fixer's input: exactly what this gate counted as blocking.
+                with open(blocking_path, "w", encoding="utf-8") as fh:
+                    json.dump({"round": int(rnd), "findings": blocking_findings}, fh, indent=2)
                 print(f"DESLOP=DIRTY round={rnd} blocking={blocking}")
                 sys.exit(2)
             if verdict == "DIRTY" and downgraded == 0:
@@ -2109,8 +2234,14 @@ nodes:
                 case "$D" in ''|*[!0-9]*) D=0 ;; esac
                 D=$((D+1))
                 echo "$D" > "$ARTIFACTS_DIR/deslop-dirty.txt"
-                if [ "$D" -ge 2 ]; then echo "DESLOP_ROUND_CAP round=$N dirty_rounds=$D"; fi
-                exit 1
+                if [ "$D" -ge 2 ]; then echo "DESLOP_ROUND_CAP round=$N dirty_rounds=$D"; exit 1; fi
+                # Below the cap DIRTY is a retry, not a failure: archon fails the whole
+                # loop_group on any failed body node, so exiting non-zero here would
+                # end the loop before its next iteration. Exit 0 with no promise, and
+                # leave the marker deslop-fix-pre reads to run the fixer next iteration.
+                echo "$N" > "$ARTIFACTS_DIR/deslop-fix-pending.txt"
+                echo "DESLOP_RETRY=PASS round=$N dirty_rounds=$D"
+                exit 0
                 ;;
               3|4|5) exit 1 ;;
               *) echo "DESLOP_REVIEW=FAIL validator error rc=$RC round=$N"; exit 1 ;;

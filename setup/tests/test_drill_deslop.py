@@ -324,8 +324,10 @@ class DeslopReviewGateSchemaTest(DeslopDrillBase):
         }]
         write_json(self.AD / "deslop-review.json", review)
         r = self.run_node("deslop-review-gate", self.AD)
-        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        # Below the cap DIRTY exits 0 without the promise: the loop retries.
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("DESLOP=DIRTY", r.stdout)
+        self.assertIn("DESLOP_RETRY=PASS round=1 dirty_rounds=1", r.stdout)
         self.assertNotIn("<promise>", r.stdout)
 
     def test_e3_declared_dirty_with_zero_blocking_is_inconsistent(self):
@@ -527,8 +529,10 @@ class DeslopBeyondFiveGuardsTest(DeslopDrillBase):
         }]
         write_json(self.AD / "deslop-review.json", review)
         r = self.run_node("deslop-review-gate", self.AD)
-        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("DESLOP=DIRTY", r.stdout)
+        self.assertIn("DESLOP_RETRY=PASS round=1 dirty_rounds=1", r.stdout)
+        self.assertNotIn("<promise>", r.stdout)
         self.assertIn("DESLOP_FINDING guard=beyond_five_guards", r.stdout)
 
     def test_j2_beyond_five_guards_below_confidence_75_passes(self):

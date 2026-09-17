@@ -106,13 +106,15 @@ class DeslopComplexity(unittest.TestCase):
         self.assertIn("DESLOP_FINDING guard=complexity file=src/x.ts:3 confidence=100",
                       p.stdout, p.stdout + p.stderr)
         self.assertIn("DESLOP=DIRTY round=1 blocking=1", p.stdout)
-        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("DESLOP_RETRY=PASS round=1 dirty_rounds=1", p.stdout)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
 
     def test_the_downgrade_is_scoped_to_the_complexity_guard(self):
         p = self.run_gate(slop=PREEXISTING, findings=[finding(guard="yagni")])
         self.assertNotIn("DESLOP_COMPLEXITY_DOWNGRADED", p.stdout)
         self.assertIn("DESLOP=DIRTY round=1 blocking=1", p.stdout)
-        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("DESLOP_RETRY=PASS round=1 dirty_rounds=1", p.stdout)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
 
     def test_the_downgrade_is_scoped_to_the_named_file(self):
         # A SLOP=FAIL for another file is not cover for this one.
