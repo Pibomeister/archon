@@ -34,6 +34,7 @@ round.txt itself; nodes never write these files by hand.
   round-state.py fix-plan <artifacts>         fix-plan: authorize and decide
   round-state.py commit-fixer <artifacts>     commit-fixer: merge, pin, commit
   round-state.py converge <artifacts>         converge: closure decision table
+  round-state.py exit-check <artifacts>       exit-gate: review.ok + fixer.ok
   round-state.py mark <artifacts> <marker> [envelope]
   round-state.py reject-review <artifacts> --reason <text>
 
@@ -43,6 +44,7 @@ and typed line from those two goes to stderr, which the node tees into its log.
 The other subcommands print their typed lines on stdout.
 """
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -53,6 +55,9 @@ import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+# Captured before main() redirects: for `pre` and `fix-plan` the ONLY thing that
+# may reach real stdout is the JSON line a sibling node's `when:` parses.
+REAL_STDOUT = sys.stdout
 EMPTY_SHA = hashlib.sha256(b"").hexdigest()
 JSON_ONLY = {"pre", "fix-plan"}
 READY = ("Ready to merge", "Ready with fixes")
@@ -119,6 +124,11 @@ def last(pattern, text):
 
 def note(*parts):
     print(*parts, file=sys.stderr, flush=True)
+
+
+def json_line(payload):
+    """The one bare JSON line, on real stdout whatever main() redirected."""
+    print(json.dumps(payload), file=REAL_STDOUT, flush=True)
 
 
 def log_activity(rnd, **fields):
@@ -644,8 +654,7 @@ def emit_pre(rnd, review, reason, k):
     log_activity(rnd, kind="review", decision=review, reason=reason, attempt=k,
                  id=record.get("id", ""))
     note(f"ROUND_REUSE round={rnd.n} review={review} attempt={k} reason={reason}")
-    print(json.dumps({"round": rnd.n, "review": review, "attempt": k, "reason": reason}),
-          flush=True)
+    json_line({"round": rnd.n, "review": review, "attempt": k, "reason": reason})
 
 
 def cmd_pre(rnd, _args):
@@ -761,7 +770,7 @@ def cmd_fix_plan(rnd, _args):
     else:
         log_activity(rnd, kind="fixer", decision=decision["fixer"],
                      reason=decision.get("reason", ""), tree=rnd.tree())
-    print(json.dumps(decision), flush=True)
+    json_line(decision)
     return 0
 
 
@@ -825,13 +834,19 @@ def cmd_commit_fixer(rnd, _args):
         "result_sha256": repair.get("result_sha256"), "tree": tree,
     }
     if tree == rnd.head_tree():
-        # A no-change result. v1 committed nothing here either (COMMITTED=NO);
-        # the difference is that the round now carries an attestation saying so,
-        # instead of leaving converge to guess from an unmoved sha.
-        attestation.update({"head": head, "committed": False})
+        # Two ways to reach an unmoved tree, and they attest differently. A real
+        # no-change result committed nothing (v1's COMMITTED=NO). A RE-RUN after
+        # a lost fixer.ok also lands here -- the commit already made HEAD's tree
+        # equal T -- and recording committed:false there tells converge the round
+        # never committed when it did. post-fix.json is written immediately
+        # before `git commit`, so its tree is what distinguishes them.
+        post = read_json(rnd.rd / "post-fix.json")
+        committed = isinstance(post, dict) and post.get("tree") == tree
+        attestation.update({"head": head, "committed": committed})
         write_json_atomic(rnd.rd / "fixer.ok", attestation)
-        print("COMMITTED=NO", flush=True)
-        print(f"COMMIT_FIXER=OK round={rnd.n} committed=false sha={head}", flush=True)
+        print(f"COMMITTED={'YES sha=' + head if committed else 'NO'}", flush=True)
+        print(f"COMMIT_FIXER=OK round={rnd.n} "
+              f"committed={str(committed).lower()} sha={head}", flush=True)
         return 0
     write_json_atomic(rnd.rd / "post-fix.json", {"tree": tree})
     kill_after("post-fix-written")
@@ -945,6 +960,9 @@ def converge_reports(rnd):
         return f"SCOPE_BREACH round={rnd.n}"
     helper(rnd, "update-waivers.py", rnd.rd / "fixer-result.json",
            rnd.ad / "waivers.md")
+    # Exit code deliberately discarded: review-yield is a report now. Its only
+    # consumer was the opt-in yield-stop convergence branch, which closure
+    # convergence retired, so a DIMINISHING verdict must not stop the round.
     helper(rnd, "review-yield.py", rnd.ad, rnd.n)
     return None
 
@@ -1013,6 +1031,33 @@ def cmd_converge(rnd, _args):
     return code
 
 
+def cmd_exit_check(rnd, _args):
+    """exit-gate's belt: the final round must carry its own authorization.
+
+    exit-gate reads review-summary.json's verdict, which review-gate writes
+    BEFORE its final checks and which ledger.py rewrites on every envelope
+    merge. A readable Ready verdict therefore proves nothing about whether the
+    review was gated or the repair was attested; only review.ok and fixer.ok do,
+    and only when they are bound to the candidate that is actually at HEAD.
+    """
+    auth = authorization(rnd)
+    if auth is None:
+        print(f"EXIT_GATE=FAIL REVIEW_UNAUTHORIZED round={rnd.n}", flush=True)
+        return 1
+    review_id, gen = auth
+    fok = read_json(rnd.rd / "fixer.ok")
+    if not isinstance(fok, dict):
+        print(f"EXIT_GATE=FAIL FIXER_ABSENT round={rnd.n}", flush=True)
+        return 1
+    if fok.get("head") != rnd.head():
+        print(f"EXIT_GATE=FAIL FIXER_ABSENT round={rnd.n} "
+              f"attested={fok.get('head')} head={rnd.head()}", flush=True)
+        return 1
+    print(f"EXIT_CHECK=OK round={rnd.n} gen={gen} id={review_id} head={rnd.head()}",
+          flush=True)
+    return 0
+
+
 # --- mark / reject --------------------------------------------------------
 
 def cmd_mark(rnd, args):
@@ -1069,6 +1114,7 @@ def cmd_reject_review(rnd, args):
 COMMANDS = {
     "pre": cmd_pre, "gate": cmd_gate, "fix-plan": cmd_fix_plan,
     "commit-fixer": cmd_commit_fixer, "converge": cmd_converge,
+    "exit-check": cmd_exit_check,
     "mark": cmd_mark, "reject-review": cmd_reject_review,
 }
 
@@ -1076,7 +1122,7 @@ COMMANDS = {
 def build_parser():
     parser = argparse.ArgumentParser(prog="round-state.py", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("pre", "fix-plan", "commit-fixer", "converge"):
+    for name in ("pre", "fix-plan", "commit-fixer", "converge", "exit-check"):
         sub.add_parser(name).add_argument("artifacts")
     gate = sub.add_parser("gate")
     gate.add_argument("artifacts")
@@ -1094,8 +1140,16 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    # Every helper this file shells into prints to stdout. For pre and fix-plan
+    # that channel belongs to one JSON object, so stdout is redirected wholesale
+    # rather than each call site being asked to remember -- a new helper added
+    # later cannot reintroduce the leak. Measured: a round-2 transition put
+    # ledger.py's LEDGER_COPY line ahead of the JSON and broke the `when:`.
+    redirect = contextlib.redirect_stdout(sys.stderr) if args.command in JSON_ONLY \
+        else contextlib.nullcontext()
     try:
-        return COMMANDS[args.command](Round(args.artifacts), args)
+        with redirect:
+            return COMMANDS[args.command](Round(args.artifacts), args)
     except Stop as stop:
         # stdout belongs to the JSON contract for pre and fix-plan; everywhere
         # else the typed stop IS the node's output.

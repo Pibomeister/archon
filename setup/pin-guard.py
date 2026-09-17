@@ -59,10 +59,38 @@ def blob(ref, path, cwd=None):
 
 # --- scanning -------------------------------------------------------------
 
+# A `/` starts a regex literal only where a value may begin. After an operand
+# it is division. This is the standard lexer heuristic, and it is why the list
+# is of PRECEDING tokens rather than of following ones.
+REGEX_PRECEDERS = ("(", ",", "=", ":", "[", "!", "?", "{", "}", ";", "&", "|",
+                   "+", "-", "*", "%", "^", "~", "<", ">")
+REGEX_KEYWORDS = ("return", "typeof", "instanceof", "in", "of", "new", "delete",
+                  "void", "throw", "case", "do", "else", "yield", "await")
+
+
+def starts_regex(text, i):
+    """True when the `/` at `i` opens a regex literal rather than dividing."""
+    j = i - 1
+    while j >= 0 and text[j] in " \t\n\r":
+        j -= 1
+    if j < 0:
+        return True
+    if text[j] in REGEX_PRECEDERS:
+        return True
+    k = j
+    while k >= 0 and (text[k].isalnum() or text[k] in "_$"):
+        k -= 1
+    return text[k + 1:j + 1] in REGEX_KEYWORDS
+
+
 def strip_code(text):
-    """Blank out string and comment bodies so brace matching sees only code.
+    """Blank out string, comment and regex bodies so brace matching sees code.
 
     Positions are preserved, so an offset into the result indexes the original.
+    A regex literal is the case that bit: `a.replace(/}/g, \'\')` carries an
+    unbalanced `}` that walked match_pair off the end of the definition, the
+    span truncated, and an edited pinned body compared equal and reported
+    PIN_OK -- the one outcome this guard must never produce by accident.
     """
     out = list(text)
     i, n = 0, len(text)
@@ -81,6 +109,24 @@ def strip_code(text):
                 if text[j] != "\n":
                     out[j] = " "
             i = end
+            continue
+        if ch == "/" and starts_regex(text, i):
+            j = i + 1
+            while j < n and text[j] not in "\n":
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] == "[":            # a class may hold an unescaped /
+                    while j < n and text[j] not in "]\n":
+                        j += 2 if text[j] == "\\" else 1
+                if text[j] == "/":
+                    j += 1
+                    break
+                j += 1
+            for k in range(i + 1, min(j, n)):
+                if text[k] != "\n":
+                    out[k] = " "
+            i = max(j, i + 1)
             continue
         if ch in "'\"`":
             quote, j = ch, i + 1
@@ -102,7 +148,11 @@ def strip_code(text):
 
 
 def match_pair(code, start, opener, closer):
-    """Index just past the closer that balances `code[start] == opener`."""
+    """Index just past the closer that balances `code[start] == opener`, or -1.
+
+    -1 propagates all the way to PIN_UNRESOLVED. A truncated span is worse than
+    no span: it compares two half-bodies and can report PIN_OK on a real breach.
+    """
     depth = 0
     for i in range(start, len(code)):
         if code[i] == opener:
@@ -154,7 +204,13 @@ def ts_definition_end(code, after_name):
 
 
 def ts_header(text, symbol):
-    """(match_start, offset_after_name) for the symbol's definition, or None."""
+    """(match_start, offset_after_name) for the symbol's definition, or None.
+
+    Matched against the COMMENT-STRIPPED source, so an old definition left in a
+    block comment above the live one cannot win the search and silently pin the
+    wrong body. Offsets still index the original text.
+    """
+    text = strip_code(text)
     name = re.escape(symbol)
     patterns = (
         # function / method, with any modifier prefix and optional generics
@@ -185,24 +241,25 @@ def decorator_start(text, start):
     """Extend the span up over the decorators attached to this definition.
 
     A decorator's argument list can span lines, so the walk goes up through any
-    line that closes more parens than it opens (`  )` above `@UseGuards(`). That
-    alone would also swallow a preceding multi-line call expression, so the
-    extension is kept only when an `@` line was actually reached.
+    line that closes more parens than it opens (`  )` above `@UseGuards(`). Each
+    balanced group is then kept only when the line that OPENED it is itself a
+    decorator; otherwise it is an unrelated multi-line call sitting above the
+    decorator run, and everything above stays out of the span.
     """
     lines = text[:start].splitlines(keepends=True)
-    index, pending, saw_decorator = len(lines), 0, False
+    index, pending, safe = len(lines), 0, len(lines)
     while index > 0:
-        line = lines[index - 1]
-        stripped = line.strip()
-        delta = line.count(")") - line.count("(")
-        if not (pending > 0 or stripped.startswith("@") or delta > 0):
+        stripped = lines[index - 1].strip()
+        delta = lines[index - 1].count(")") - lines[index - 1].count("(")
+        if pending == 0 and not stripped.startswith("@") and delta <= 0:
             break
-        saw_decorator = saw_decorator or stripped.startswith("@")
         pending = max(0, pending + delta)
         index -= 1
-    if not saw_decorator:
-        return start
-    return sum(len(x) for x in lines[:index])
+        if pending == 0:
+            if not lines[index].strip().startswith("@"):
+                break
+            safe = index
+    return sum(len(x) for x in lines[:safe])
 
 
 def ts_span(text, symbol):

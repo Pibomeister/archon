@@ -255,6 +255,24 @@ class CommitRecovery(LaneCase):
         self.assertEqual(lane.commit_fixer().returncode, 0)
         self.assertEqual(lane.fix_plan()["fixer"], "reuse-committed")
 
+    def test_a_rerun_after_a_lost_attestation_says_it_committed(self):
+        """Two ways to reach an unmoved tree, and they mean opposite things.
+
+        A re-run after a lost fixer.ok finds HEAD's tree already equal to T,
+        because the commit landed. Recording committed:false there tells
+        converge the round never committed when it did.
+        """
+        lane = self.prepare_repair()
+        lane.stage()
+        tree = json.loads((lane.rd / "repair.json").read_text(encoding="utf-8"))["tree"]
+        (lane.rd / "post-fix.json").write_text(json.dumps({"tree": tree}), encoding="utf-8")
+        lane.git("commit", "-qm", "fix(review): apply fixer feedback")
+        proc = lane.run("commit-fixer", lane.ad)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("committed=true", proc.stdout)
+        attestation = json.loads((lane.rd / "fixer.ok").read_text(encoding="utf-8"))
+        self.assertTrue(attestation["committed"])
+
     def test_a_no_change_result_attests_without_a_commit(self):
         lane = self.lane
         lane.pre()
@@ -343,6 +361,31 @@ class InputGate(LaneCase):
         proc = lane.gate()
         self.assertEqual(proc.returncode, 1)
         self.assertIn("GATE_5_input_matches=FAIL", proc.stdout)
+
+    def test_an_envelope_with_no_footer_fails(self):
+        """Fail-closed. The CE contract writes `Scope:` lines of its own, so the
+        absence of the round's footer must never read as nothing to check."""
+        lane = self.lane
+        lane.pre()
+        (lane.rd / "review-envelope.txt").write_text(
+            "## Findings\n\nScope: full\n\nReview complete\nVerdict: Ready to merge\n",
+            encoding="utf-8")
+        proc = lane.gate()
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("GATE_5_input_matches=FAIL", proc.stdout)
+
+    def test_a_missing_review_input_fails_rather_than_skipping(self):
+        """v1's GATE_4 had a SKIP state for the lite lane, which wrote no mode
+        file. The lite overlay writes review-input.json with the same
+        constituents now, so an absent file means the round cannot be
+        identified at all -- which is a failure, not a pass."""
+        lane = self.lane
+        lane.pre()
+        lane.review()
+        (lane.rd / "review-input.json").unlink()
+        proc = lane.gate()
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("REVIEW_GATE=FAIL round=1 reason=no-review-input", proc.stdout)
 
     def test_a_matching_envelope_passes_and_writes_the_authorization(self):
         lane = self.lane
@@ -777,6 +820,105 @@ class AllowlistPrecondition(LaneCase):
         result = self.lane.pre()
         self.assertEqual(result["exit"], 1)
         self.assertIn("ROUND_STATE=FAIL", result["stderr"])
+
+
+class JsonChannel(LaneCase):
+    """pre and fix-plan own stdout for exactly one JSON object.
+
+    Every helper this file shells into prints to stdout, and the `when:` on the
+    review node parses the whole stream as one bare object. Measured live: a
+    round-2 transition put ledger.py's LEDGER_COPY line ahead of the JSON and
+    the gate could not parse it. Round 1 never copies a ledger forward, which is
+    why the first version of these tests missed it entirely.
+    """
+
+    def progressed_round(self):
+        lane = self.lane
+        lane.pre()
+        lane.review("Ready with fixes")
+        lane.gate()
+        lane.fix_plan()
+        lane.fixer(result={"applied": [{"finding_id": "f1", "finding": "f",
+                                        "action": "a", "severity": "P2"}],
+                           "failed": [], "advisory": [], "incomplete": []},
+                   edit=SEED + "// repaired\n")
+        lane.commit_fixer()
+        lane.converge(CLOSED)
+        return lane
+
+    def assert_one_json_line(self, proc):
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        lines = proc.stdout.strip().splitlines()
+        self.assertEqual(len(lines), 1, f"stdout carried {len(lines)} lines: {lines}")
+        return json.loads(lines[0])
+
+    def test_the_round_transition_keeps_stdout_to_one_json_line(self):
+        lane = self.progressed_round()
+        payload = self.assert_one_json_line(lane.run("pre", lane.ad))
+        self.assertEqual(payload["round"], 2)
+
+    def test_the_ledger_copy_line_goes_to_stderr(self):
+        lane = self.progressed_round()
+        proc = lane.run("pre", lane.ad)
+        self.assertNotIn("LEDGER_COPY", proc.stdout)
+        self.assertIn("LEDGER_COPY", proc.stderr)
+
+    def test_the_first_round_keeps_stdout_to_one_json_line(self):
+        self.assert_one_json_line(self.lane.run("pre", self.lane.ad))
+
+    def test_fix_plan_keeps_stdout_to_one_json_line_on_every_branch(self):
+        lane = self.lane
+        payload = self.assert_one_json_line(lane.run("fix-plan", lane.ad))
+        self.assertEqual(payload["fixer"], "unauthorized")
+        lane.pre()
+        lane.review("Ready with fixes")
+        lane.gate()
+        payload = self.assert_one_json_line(lane.run("fix-plan", lane.ad))
+        self.assertEqual(payload["fixer"], "run")
+
+
+class ExitCheck(LaneCase):
+    """exit-gate authorized on review-summary.json's verdict alone.
+
+    That file is written before review-gate's final checks and rewritten by
+    every envelope merge, so a readable Ready verdict proves neither that the
+    review was gated nor that the repair was attested. review.ok and fixer.ok
+    do, and only while they are bound to the candidate at HEAD.
+    """
+
+    def test_a_gated_and_attested_round_passes(self):
+        self.full_round(ledger=CLOSED)
+        proc = self.lane.run("exit-check", self.lane.ad)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("EXIT_CHECK=OK round=1", proc.stdout)
+
+    def test_a_ready_summary_without_authorization_fails(self):
+        lane = self.lane
+        lane.pre()
+        lane.review("Ready to merge")
+        lane.run("gate", lane.ad, "--fail", "degraded")
+        proc = lane.run("exit-check", lane.ad)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("EXIT_GATE=FAIL REVIEW_UNAUTHORIZED round=1", proc.stdout)
+
+    def test_a_gated_round_with_no_attestation_fails(self):
+        lane = self.lane
+        lane.pre()
+        lane.review()
+        lane.gate()
+        proc = lane.run("exit-check", lane.ad)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("EXIT_GATE=FAIL FIXER_ABSENT round=1", proc.stdout)
+
+    def test_an_attestation_for_another_head_fails(self):
+        self.full_round(ledger=CLOSED)
+        lane = self.lane
+        (lane.wt / "src" / "a.ts").write_text(SEED + "// later\n", encoding="utf-8")
+        lane.git("add", "-A")
+        lane.git("commit", "-qm", "a later commit")
+        proc = lane.run("exit-check", lane.ad)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("FIXER_ABSENT", proc.stdout)
 
 
 class PrerunBaseline(LaneCase):

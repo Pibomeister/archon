@@ -248,6 +248,129 @@ class Python(GuardCase):
         self.assertIn("PIN_BREACH", proc.stdout)
 
 
+REGEX_SOURCE = """export class Sanitizer {
+  @Post('clean')
+  clean(a: string): string {
+    const stripped = a.replace(/}/g, '');
+    return stripped.replace(/[{}]/g, '');
+  }
+
+  other() {
+    return 1;
+  }
+}
+"""
+
+UNBALANCED_SOURCE = """export class Broken {
+  clean(a: string): string {
+    return a.replace('}', '');
+"""
+
+
+class RegexLiterals(GuardCase):
+    """A regex literal carrying a brace must not walk the span off the end.
+
+    `a.replace(/}/g, '')` is an unbalanced `}` to a brace matcher that only
+    knows strings and comments. The span truncated mid-body, both sides
+    truncated the same way, they compared equal, and an edited pinned body
+    reported PIN_OK. That is the one outcome this guard must never produce by
+    accident: a breach reported as held.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.path = "src/sanitizer.ts"
+        self.write(REGEX_SOURCE)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "regex seed")
+        self.baseline = self.git("rev-parse", "HEAD")
+        self.pin("clean", self.path)
+
+    def test_an_untouched_body_with_a_regex_literal_is_ok(self):
+        proc = self.guard()
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("PIN_OK", proc.stdout)
+
+    def test_a_body_edit_behind_a_regex_literal_is_a_breach(self):
+        self.write(REGEX_SOURCE.replace("const stripped = a.replace(/}/g, '');",
+                                        "const stripped = a.replace(/}/g, 'x');"))
+        proc = self.guard()
+        self.assertEqual(proc.returncode, 1, proc.stdout)
+        self.assertIn("PIN_BREACH symbol=clean", proc.stdout)
+
+    def test_the_span_stops_at_the_methods_own_brace(self):
+        self.guard()
+        span = self.spans()[0]["baseline_span"]
+        body = REGEX_SOURCE[span[0]:span[1]]
+        self.assertIn("@Post('clean')", body)
+        self.assertIn("[{}]", body)
+        self.assertNotIn("other()", body)
+
+    def test_a_division_is_not_read_as_a_regex(self):
+        """`/` after an operand divides. Reading it as a regex would blank out
+        the rest of the body and truncate the span just as badly."""
+        self.write(REGEX_SOURCE.replace("return stripped.replace(/[{}]/g, '');",
+                                        "return (a.length / 2) + stripped;"))
+        self.git("add", "-A")
+        self.git("commit", "-qm", "division")
+        self.baseline = self.git("rev-parse", "HEAD")
+        proc = self.guard()
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("PIN_OK", proc.stdout)
+        self.assertIn("+ stripped;", REGEX_SOURCE.replace(
+            "return stripped.replace(/[{}]/g, '');",
+            "return (a.length / 2) + stripped;")[slice(*self.spans()[0]["baseline_span"])])
+
+
+class UnbalancedSpan(GuardCase):
+    def test_a_body_that_never_closes_is_unresolved_never_ok(self):
+        """A truncated span compares two half-bodies and can report PIN_OK on a
+        real breach. No span at all is the safe answer."""
+        self.path = "src/broken.ts"
+        self.write(UNBALANCED_SOURCE)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "unbalanced")
+        self.baseline = self.git("rev-parse", "HEAD")
+        self.pin("clean", self.path)
+        proc = self.guard()
+        self.assertEqual(proc.returncode, 1, proc.stdout)
+        self.assertIn("PIN_UNRESOLVED symbol=clean", proc.stdout)
+        self.assertNotIn("PIN_OK", proc.stdout)
+
+
+class CommentedDefinition(GuardCase):
+    def test_a_commented_out_definition_does_not_win_the_search(self):
+        """An old copy in a block comment above the live one would pin the wrong
+        body, and every later edit to the real method would read as unchanged."""
+        source = ("/*\n  async shareGroup(old: Dto) {\n    return 0;\n  }\n*/\n"
+                  + SOURCE)
+        self.write(source)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "commented copy")
+        self.baseline = self.git("rev-parse", "HEAD")
+        self.write(source.replace("const link = { a: '}' };", "const link = { a: 'x' };"))
+        proc = self.guard()
+        self.assertEqual(proc.returncode, 1, proc.stdout)
+        self.assertIn("PIN_BREACH symbol=shareGroup", proc.stdout)
+
+
+class DecoratorRun(GuardCase):
+    def test_a_multi_line_call_above_the_decorators_stays_out_of_the_span(self):
+        """The walk goes up through `)` lines to reach `@UseGuards(`; without
+        checking who opened each group it swallows the statement above too."""
+        source = SOURCE.replace(
+            "  @Post('share')",
+            "  private readonly cfg = build(\n    'a',\n  );\n  @Post('share')")
+        self.write(source)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "call above decorators")
+        self.baseline = self.git("rev-parse", "HEAD")
+        self.guard()
+        body = source[slice(*self.spans()[0]["baseline_span"])]
+        self.assertTrue(body.lstrip().startswith("@Post('share')"), body[:60])
+        self.assertNotIn("build(", body)
+
+
 class Ambiguity(GuardCase):
     def test_two_definitions_of_one_name_resolve_to_unresolved(self):
         """An overload set or a reused name: guessing the span is the worse failure."""
