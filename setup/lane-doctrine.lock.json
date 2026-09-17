@@ -607,30 +607,6 @@
   "touch product code to \"make it fail\". Report exactly what you ran and",
   "what happened; a gate will halt the run for a human."
  ],
- "review": [
-  "\"Previously waived\" heading in the envelope \u2014 NOT as a new actionable",
-  "(envelope or raw JSON) as part of your output.",
-  "- If waivers.json exists in the artifacts directory, read that ledger first.",
-  "- Measure the diff first: in the worktree, run",
-  "A finding whose normalized key matches a ledger entry goes under a",
-  "A relayed envelope that stops mid-fan-out, or that carries an empty",
-  "Do not expand scope beyond the diff against that base.",
-  "Do not return until every persona the skill dispatched has reported.",
-  "Persona selection happens in this session, so three instructions",
-  "Resolve the artifacts directory by running: echo \"$ARTIFACTS_DIR\"",
-  "The staged ce-code-review may be either contract generation: CE 3.2.0's",
-  "and why in the envelope and still emit a verdict. External/cross-model",
-  "arguments either way and relay the skill's full return VERBATIM",
-  "diff to any external peer, regardless of what the skill's own",
-  "downstream gate rejects it. If a persona cannot finish, say which one",
-  "finding \u2014 unless the reviewer states specific new evidence that was",
-  "git diff --stat \"$(cat <that directory>/bootstrap-head.txt)\"..HEAD",
-  "markdown headless envelope, or the newer agent-JSON contract (there",
-  "mode:headless aliases mode:agent and the skill returns ONE raw JSON",
-  "object with status and verdict fields). Invoke with the same",
-  "review is PROHIBITED in this unattended pipeline: never send the",
-  "verdict, is not a completed review: the round is billed and every"
- ],
  "run-report": [
   "Resolve the artifacts directory via: echo \"$ARTIFACTS_DIR\"",
   "You are the final-report node: the last thing a human sees from this run,"

@@ -3,17 +3,17 @@ You are the review session for one round of the Archon review loop, running
 question about a finite list: did the previous round's repair actually close
 each finding, and did it break anything reaching it.
 
-Read `{{SETUP}}/review-contract.md` now, sections 1, 4, 6, 7 and 8 in
+Read `/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/review-contract.md` now, sections 1, 4, 6, 7 and 8 in
 particular. It is the contract; everything below is how this mode implements it.
 Where the two disagree, the contract wins.
 
 YOUR FIRST ACTION, before reading anything else, is exactly:
 
-    python3 {{SETUP}}/round-state.py "$ARTIFACTS_DIR" mark review-start
+    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py "$ARTIFACTS_DIR" mark review-start
 
 YOUR LAST ACTION, after the envelope file is written, is exactly:
 
-    python3 {{SETUP}}/round-state.py "$ARTIFACTS_DIR" mark review-done "$ARTIFACTS_DIR/round-$N/review-envelope.txt"
+    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py "$ARTIFACTS_DIR" mark review-done "$ARTIFACTS_DIR/round-$N/review-envelope.txt"
 
 You are read-only in the candidate worktree (contract section 1).
 

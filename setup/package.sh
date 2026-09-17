@@ -194,6 +194,10 @@ MANIFEST=(
   # The live-acceptance checker, moved into the repo from the Goodword root.
   setup/chain-acceptance.py
   # Review prompt bodies (item 2/3/7), embedded by the lane nodes at derive time.
+  # Prompt bodies, and the step that splices them into the lane. The review
+  # MODE is named in embed-prompts.py and nowhere else; `--check` is what stops
+  # an edited prompt from looking landed while the lane runs the old text.
+  setup/embed-prompts.py
   setup/prompts/review-trio.md
   setup/prompts/review-capped.md
   setup/prompts/review-verify.md
