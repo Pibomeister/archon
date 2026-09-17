@@ -852,6 +852,7 @@ nodes:
         # overlay at all; the seed above only bites when preflight wrote no cap file.
         CAP=$(cat "$ARTIFACTS_DIR/round-cap.txt" 2>/dev/null || echo 1)
         case "$CAP" in ''|*[!0-9]*) CAP=1 ;; esac
+        if [ "$N" -gt "$CAP" ]; then echo "ROUND_CAP_EXCEEDED round=$N cap=$CAP (acceptance covers the cap round only; raise round-cap.txt to spend more)" >&2; exit 1; fi
         if [ "$N" -ge "$CAP" ] && [ ! -f "$ARTIFACTS_DIR/accept-residuals.txt" ]; then echo "ROUND_CAP_REACHED round=$N cap=$CAP (pre-round: a resume does not buy another review; write accept-residuals.txt or raise round-cap.txt)" >&2; exit 1; fi
         python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py pre "$ARTIFACTS_DIR"
     - id: review

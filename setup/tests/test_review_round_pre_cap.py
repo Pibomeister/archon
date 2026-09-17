@@ -139,6 +139,18 @@ class RoundPreCap(unittest.TestCase):
             self.assertEqual(r.returncode, 1, wf + r.stdout + r.stderr)
             self.assertIn(f"ROUND_CAP_REACHED round={default} cap={default}", r.stdout + r.stderr, wf)
 
+    def test_acceptance_buys_the_cap_round_and_nothing_past_it(self):
+        # Chain 1f7a896a: acceptance plus a deferred P1 ran to round 6. The cap
+        # round itself is spent with the file present; the one after is not.
+        for wf, default in LANES.items():
+            if wf not in V2:
+                continue
+            r = self.run_pre(wf, default, accept=True)
+            self.assertNotIn("ROUND_CAP", r.stdout + r.stderr, wf)
+            r = self.run_pre(wf, default + 1, accept=True)
+            self.assertEqual(r.returncode, 1, wf + r.stdout + r.stderr)
+            self.assertIn(f"ROUND_CAP_EXCEEDED round={default + 1} cap={default}", r.stdout + r.stderr, wf)
+
     def test_explicit_cap_file_wins(self):
         for wf in LANES:
             r = self.run_pre(wf, 1, cap=1)

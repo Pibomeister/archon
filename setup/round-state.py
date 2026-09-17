@@ -453,9 +453,24 @@ def ledger_closure(rnd):
     # for every state but one: a finding filed against another repository and
     # acknowledged by a human is resolved, and it can never be closed HERE
     # because the defect is not in this repository. Its exit stays the fast path.
+    # accept-residuals.txt waives the VERDICT, never the bound: with it present
+    # every blocker that is not a regression counts as accepted, so the loop can
+    # converge on the round the operator accepted instead of spending rounds
+    # forever on a deferred P1 that no reviewer will ever mark closed (chain
+    # 1f7a896a ran to round 6 that way). The pre-round cap still stops the round
+    # after the cap regardless of the file.
+    accepted = []
+    if (rnd.ad / "accept-residuals.txt").is_file():
+        unclosed = [e for e in blocking if e.get("state") not in ("closed", "filed_acked")]
+        if not any(e.get("state") == "regressed" for e in unclosed):
+            accepted = unclosed
+            if accepted:
+                print(f"CLOSURE_ACCEPTED round={rnd.n} ids="
+                      + ",".join(str(e.get("id")) for e in accepted), flush=True)
     return {
-        "closure_ok": code == 0 or not [e for e in blocking
-                                        if e.get("state") not in ("closed", "filed_acked")],
+        "closure_ok": code == 0 or bool(accepted) or not [
+            e for e in blocking if e.get("state") not in ("closed", "filed_acked")],
+        "accepted": accepted,
         "pin_conflict": [str(e.get("symbol") or e.get("title") or e.get("id"))
                          for e in entries if e.get("state") == "pin_conflict"],
         "filed": [e for e in entries if e.get("state") == "filed"],
@@ -916,6 +931,9 @@ def converge_rows(rnd, closure, result, verdict, envelope_head, cross_repo):
         return "progressed", "full", "open-blocker-no-repair", \
             f"ROUND_PROGRESSED round={rnd.n} (open blocker, no repair)", 0
     if ready and closure.get("closure_ok") and envelope_head == rnd.head():
+        if closure.get("accepted"):
+            return "converged", None, "accepted-residuals", \
+                f"CONVERGED round={rnd.n} (residuals accepted: {len(closure['accepted'])} P0/P1)", 0
         return "converged", None, "closed", f"CONVERGED round={rnd.n}", 0
     if ready and closure.get("closure_ok"):
         return "blocked", None, "review-tree-drift", f"REVIEW_TREE_DRIFT round={rnd.n}", 1

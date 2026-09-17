@@ -486,6 +486,53 @@ class FixerPinComparator(LaneCase):
         self.assertEqual(proc.returncode, 1)
 
 
+class AcceptedResiduals(LaneCase):
+    """accept-residuals.txt waives the verdict, not the bound. Chain 1f7a896a
+    (2026-09-17) held a deferred P1 plus acceptance: the cap gate stood down,
+    closure could never be reached, and the loop spent six rounds."""
+
+    DEFERRED = [entry("a", state="closed"), entry("b", severity="P1", state="deferred")]
+
+    def test_acceptance_converges_a_ready_round_with_a_deferred_blocker(self):
+        lane = self.lane
+        lane.pre()
+        lane.review("Ready with fixes")
+        lane.gate()
+        lane.fix_plan()
+        lane.fixer(result={"applied": [], "failed": [], "advisory": [], "incomplete": []})
+        lane.commit_fixer()
+        (lane.ad / "accept-residuals.txt").write_text("operator: deferred P1 b is out of this ticket\n", encoding="utf-8")
+        converge = lane.converge(ledger=self.DEFERRED)
+        self.assertIn("CLOSURE_ACCEPTED round=1 ids=b", converge.stdout)
+        self.assertIn("CONVERGED round=1 (residuals accepted: 1 P0/P1)", converge.stdout)
+        self.assertEqual(converge.returncode, 0, converge.stdout + converge.stderr)
+
+    def test_without_acceptance_the_same_round_only_progresses(self):
+        lane = self.lane
+        lane.pre()
+        lane.review("Ready with fixes")
+        lane.gate()
+        lane.fix_plan()
+        lane.fixer(result={"applied": [], "failed": [], "advisory": [], "incomplete": []})
+        lane.commit_fixer()
+        converge = lane.converge(ledger=self.DEFERRED)
+        self.assertNotIn("CONVERGED", converge.stdout)
+        self.assertIn("unverified P0/P1", converge.stdout)
+
+    def test_acceptance_never_covers_a_regression(self):
+        lane = self.lane
+        lane.pre()
+        lane.review("Ready with fixes")
+        lane.gate()
+        lane.fix_plan()
+        lane.fixer(result={"applied": [], "failed": [], "advisory": [], "incomplete": []})
+        lane.commit_fixer()
+        (lane.ad / "accept-residuals.txt").write_text("operator\n", encoding="utf-8")
+        converge = lane.converge(ledger=[entry("b", severity="P1", state="regressed")])
+        self.assertNotIn("CONVERGED", converge.stdout)
+        self.assertNotIn("CLOSURE_ACCEPTED", converge.stdout)
+
+
 class FixPlan(LaneCase):
     def test_a_result_that_no_longer_matches_the_tree_is_a_typed_stop(self):
         lane = self.lane

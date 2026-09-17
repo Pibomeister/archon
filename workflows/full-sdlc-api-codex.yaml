@@ -2701,6 +2701,10 @@ nodes:
         # human act: agents never write that file.
         CAP=$(cat "$ARTIFACTS_DIR/round-cap.txt" 2>/dev/null || echo 4)
         case "$CAP" in ''|*[!0-9]*) CAP=4 ;; esac
+        # Acceptance buys the cap round, never the loop: with a deferred P1 no
+        # reviewer closes, closure cannot be reached and the bypass alone
+        # turned "stop and ask" into "run forever" (chain 1f7a896a, round 6).
+        if [ "$N" -gt "$CAP" ]; then echo "ROUND_CAP_EXCEEDED round=$N cap=$CAP (acceptance covers the cap round only; raise round-cap.txt to spend more)" >&2; exit 1; fi
         if [ "$N" -ge "$CAP" ] && [ ! -f "$ARTIFACTS_DIR/accept-residuals.txt" ]; then echo "ROUND_CAP_REACHED round=$N cap=$CAP (pre-round: a resume does not buy another review; write accept-residuals.txt or raise round-cap.txt)" >&2; exit 1; fi
         # Everything else -- the counter itself, the pending-commit
         # reconciliation, review identity, the reuse decision, review-mode and
