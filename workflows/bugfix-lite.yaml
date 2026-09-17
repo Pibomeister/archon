@@ -1771,7 +1771,10 @@ nodes:
           echo "GREEN_ACHIEVED attempt=$N sha=$(git rev-parse HEAD)"
           echo "<promise>GREEN_ACHIEVED</promise>"
         else
-          echo "FIX_ATTEMPT_FAILED attempt=$N reason=[$REASON] (controller seals this patch and opens a pristine investigation successor)"
+          # $REASON can carry a verify.json pattern. This branch exits 0 without the
+          # promise, so nothing printed here may form <tag>GREEN_ACHIEVED</tag>.
+          SHOWN=$(printf '%s' "$REASON" | LC_ALL=C tr -c '[:print:]' '?' | tr '<>' '??')
+          echo "FIX_ATTEMPT_FAILED attempt=$N reason=[$SHOWN] (controller seals this patch and opens a pristine investigation successor)"
         fi
 - id: negcontrol
   depends_on:

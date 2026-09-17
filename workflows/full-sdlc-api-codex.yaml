@@ -2225,6 +2225,12 @@ nodes:
                 val = f.get(key)
                 if not isinstance(val, str) or not val.strip():
                     malformed(f"index={i} {key}={val!r}")
+            # This gate exits 0 on a DIRTY retry, and archon ends the loop on a
+            # completion signal anywhere in that stdout (<tag>SIGNAL</tag>, or a line
+            # holding only SIGNAL). The file path is printed below, so it must not be
+            # able to carry either shape.
+            if not f["file"].isprintable() or "<" in f["file"] or ">" in f["file"]:
+                malformed(f"index={i} file holds a line break, control character or angle bracket")
             line = f.get("line")
             if isinstance(line, bool) or not isinstance(line, int):
                 malformed(f"index={i} line={line!r}")
@@ -2233,6 +2239,7 @@ nodes:
                 malformed(f"index={i} confidence={conf!r}")
             if f["guard"] == "complexity" and conf >= 75 and f["file"] not in SLOP_BLOCKING:
                 fn = SLOP_REPORTED.get(f["file"], "?")
+                fn = fn if fn.isprintable() and "<" not in fn and ">" not in fn else "?"
                 print(f"DESLOP_COMPLEXITY_DOWNGRADED fn={fn} file={f['file']}:{line} confidence={conf}->50")
                 conf = 50
                 downgraded += 1

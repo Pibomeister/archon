@@ -2474,6 +2474,12 @@ nodes:
             except Exception:
                 return None
 
+        # Critic and probe strings are printed on a path that can exit 0 without the
+        # promise, and archon ends the loop on <tag>SIGNAL</tag> or a line holding only
+        # SIGNAL anywhere in this stdout. Neither shape survives this.
+        def shown(text):
+            return "".join(c if c.isprintable() and c not in "<>" else "?" for c in text)
+
         # (i) A finding the reviser DECLINED last round, restated this round: the loop
         # asking for something the reviser is not permitted to give. It repeats to the cap.
         #
@@ -2496,8 +2502,8 @@ nodes:
             restated = [f for f in (cur.get("findings") or [])
                         if isinstance(f, dict) and key(f) in declined]
             if restated:
-                wire = "; ".join("%s/%s %s" % (f.get("severity"), f.get("confidence"), f.get("section"))
-                                 for f in restated)[:400]
+                wire = shown("; ".join("%s/%s %s" % (f.get("severity"), f.get("confidence"), f.get("section"))
+                                 for f in restated))[:400]
                 print("RCA_PLAN_FINDING_RESTATED round=%d count=%d [%s]" % (n, len(restated), wire))
                 print("  The reviser declined these last round and the critic re-raised them "
                       "unchanged. Another round cannot close them. Read round %d's revision.json "
@@ -2520,7 +2526,7 @@ nodes:
             base = risky(first)
             added = {k: v for k, v in risky(now).items() if k not in base}
             if added:
-                wire = ", ".join("%s(%s,%d d1)" % (k, v[0], v[1]) for k, v in sorted(added.items()))[:300]
+                wire = shown(", ".join("%s(%s,%d d1)" % (k, v[0], v[1]) for k, v in sorted(added.items())))[:300]
                 print("RCA_PLAN_SCOPE_WIDENED round=%d added=%d [%s]" % (n, len(added), wire))
                 print("  These were not in round 1's blast radius. Widening scope to satisfy a "
                       "critic is a human's call, not a loop's.")
@@ -3385,7 +3391,10 @@ nodes:
           echo "GREEN_ACHIEVED attempt=$N sha=$(git rev-parse HEAD)"
           echo "<promise>GREEN_ACHIEVED</promise>"
         else
-          echo "FIX_ATTEMPT_FAILED attempt=$N reason=[$REASON] (controller seals this patch and opens a pristine investigation successor)"
+          # $REASON can carry a verify.json pattern. This branch exits 0 without the
+          # promise, so nothing printed here may form <tag>GREEN_ACHIEVED</tag>.
+          SHOWN=$(printf '%s' "$REASON" | LC_ALL=C tr -c '[:print:]' '?' | tr '<>' '??')
+          echo "FIX_ATTEMPT_FAILED attempt=$N reason=[$SHOWN] (controller seals this patch and opens a pristine investigation successor)"
         fi
 - id: deslop
   depends_on:
@@ -4020,6 +4029,12 @@ nodes:
                 val = f.get(key)
                 if not isinstance(val, str) or not val.strip():
                     malformed(f"index={i} {key}={val!r}")
+            # This gate exits 0 on a DIRTY retry, and archon ends the loop on a
+            # completion signal anywhere in that stdout (<tag>SIGNAL</tag>, or a line
+            # holding only SIGNAL). The file path is printed below, so it must not be
+            # able to carry either shape.
+            if not f["file"].isprintable() or "<" in f["file"] or ">" in f["file"]:
+                malformed(f"index={i} file holds a line break, control character or angle bracket")
             line = f.get("line")
             if isinstance(line, bool) or not isinstance(line, int):
                 malformed(f"index={i} line={line!r}")
