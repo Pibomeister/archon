@@ -214,6 +214,24 @@ class FixerCannotRewriteTheRecord(unittest.TestCase):
             out[workflow] = run_node(workflow, "deslop-recheck", fixer_then_recheck(workflow, lane, fixer))
         return out
 
+    def test_writer_declaration_is_frozen(self):
+        def declares(tmp):
+            path = tmp / "artifacts" / "deslop-result.json"
+            doc = json.loads(path.read_text())
+            doc["passes"].append({"guard": "comments", "file": "src/foo.ts", "line": 9, "action": "deleted"})
+            jdump(path, doc)
+        for workflow, r in self.recheck_after(declares).items():
+            with self.subTest(workflow=workflow):
+                self.assertEqual(r["rc"], 1, r["output"])
+                self.assertIn("DESLOP_GATE=FAIL deslop-result.json changed after the writer round=2", r["output"])
+
+    def test_negative_control_an_untouched_declaration_passes(self):
+        for workflow, r in self.recheck_after(lambda tmp: None).items():
+            with self.subTest(workflow=workflow):
+                self.assertEqual(r["rc"], 0, r["output"])
+                self.assertIn("DESLOP_FIX_CONSUMED round=2 fixed_round=1", r["output"])
+                self.assertIn("DESLOP_GATE=PASS", r["output"])
+
     def test_fixer_commit_is_caught(self):
         def commits(tmp):
             commit(tmp / "wt", "fixer")

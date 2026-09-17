@@ -3618,10 +3618,10 @@ nodes:
         pnpm test --run "<pattern>". Do not run integration tests. The next node
         re-runs every check authoritatively either way.
 
-        Record your edits in deslop-result.json: append one entry per fix to
-        "passes" ({"guard", "file", "line", "action": "deleted|rewrote", "reason"})
-        and add any file you touched to "changed_files". Keep every existing entry.
-        The next reviewer reads that file as the declaration of what was changed.
+        Do NOT edit deslop-result.json. It is the writer's declaration and is
+        frozen after the first recheck: the next node fails the run if it changed
+        by a byte. Your edits are declared only in deslop-fix-result.json below,
+        which the recheck copies into the next round for the reviewer.
 
         Write deslop-fix-result.json to the artifacts directory with exactly this shape:
           {"round": <R as an int>,
@@ -3809,6 +3809,16 @@ nodes:
         test -s "$RJ" || { echo "DESLOP_GATE=FAIL no deslop-result.json round=$N"; exit 1; }
         python3 -c "import json,sys; d=json.load(open(sys.argv[1], encoding='utf-8')); assert isinstance(d, dict); assert isinstance(d.get('changed_files'), list); assert isinstance(d.get('passes'), list)" \
           "$RJ" || { echo "DESLOP_GATE=FAIL deslop-result.json unparseable round=$N"; exit 1; }
+        # deslop-result.json is the writer's declaration, the one the reviewer may
+        # excuse an edit against. It is frozen at the first recheck that gets here
+        # before any fixer ran; the fixer declares in deslop-fix-result.json.
+        FROZEN="$ARTIFACTS_DIR/deslop-result.sha256"
+        NOWSHA=$(python3 -c "import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())" "$RJ")
+        if [ ! -f "$FROZEN" ] && ! ls "$ARTIFACTS_DIR"/deslop-round-*/fix-result.json >/dev/null 2>&1; then
+          echo "$NOWSHA" > "$FROZEN"
+        elif [ "$(cat "$FROZEN" 2>/dev/null || true)" != "$NOWSHA" ]; then
+          echo "DESLOP_GATE=FAIL deslop-result.json changed after the writer round=$N"; exit 1
+        fi
         # Restorable checkpoint, not just a fingerprint. A throwaway index
         # turns the whole worktree — untracked files included — into a real
         # tree object in this repo's object DB, so a reviewer that edits or
@@ -3872,6 +3882,10 @@ nodes:
         - deslop-result.json in the artifacts directory — the writer's own log of
           what it changed. Its "verification" block is HISTORICAL and may be stale
           (a human may have hand-fixed and resumed); recheck.json overrides it.
+        - deslop-round-N/fix-result.json, present only on a round after an automatic
+          fix: the fixer's "fixed"/"not_fixed" entries for the previous round's
+          blocking findings. deslop-result.json is frozen after the writer, so this
+          file is the only declaration of the fixer's edits.
         - the change itself, in the worktree:
             git diff "$(cat <that directory>/red-sha.txt)"
             git status --porcelain
@@ -3896,6 +3910,12 @@ nodes:
         is a finding with guard "beyond_five_guards". It blocks at 75 or 100
         like any other. A cleanup the writer correctly listed under
         "reported_not_fixed" and did NOT make is not a finding.
+
+        A fixer entry never excuses an edit outside the five guards. A "fixed"
+        entry for a beyond_five_guards finding claims a revert to HEAD: if the
+        tree still differs from HEAD at that file:line (git diff HEAD -- <file>),
+        file it again as beyond_five_guards. Any other fixer edit that is not one
+        of the five guards applied to a blocking finding is beyond_five_guards.
 
         Judge the change against exactly these five guards:
         1. complexity — a new function above cyclomatic complexity 10, or a
