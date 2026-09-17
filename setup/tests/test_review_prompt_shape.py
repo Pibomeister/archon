@@ -142,10 +142,11 @@ class ReviewPromptShape(unittest.TestCase):
     def test_every_review_prompt_opens_and_closes_with_the_round_state_marks(self):
         for name, text in (("trio", TRIO), ("capped", CAPPED), ("ce", CE), ("verify", VERIFY)):
             with self.subTest(prompt=name):
-                self.assertIn('mark review-start', text)
-                self.assertIn('mark review-done', text)
-                self.assertLess(text.index("mark review-start"),
-                                text.index("mark review-done"))
+                start = 'mark "$ARTIFACTS_DIR" review-start'
+                done = 'mark "$ARTIFACTS_DIR" review-done'
+                self.assertIn(start, text)
+                self.assertIn(done, text)
+                self.assertLess(text.index(start), text.index(done))
                 self.assertIn("YOUR FIRST ACTION", text)
                 self.assertIn("YOUR LAST ACTION", text)
 
