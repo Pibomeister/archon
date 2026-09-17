@@ -8,6 +8,9 @@ re-verifies the exact candidate the integration run already failed (chain
 42b42a13, run aab1f254: GATE_TESTS=PASS outcome=NO_CHANGE).
 
 Usage: reopen-gate.py <artifacts-dir> <CHANGED|NO_CHANGE>
+A --verify-only reopen carries no context; it must differ from the previous
+candidate, which verify-only-base.py made gate-tests' base.
+
 Exit 0 with REOPEN_GATE=SKIP (no reopen) or REOPEN_GATE=PASS; exit 1 with IMPLEMENT=FAIL."""
 import hashlib
 import json
@@ -30,6 +33,12 @@ def main() -> None:
         fail(f"params.json unreadable: {exc}")
     if not isinstance(params, dict):
         fail("params.json is not an object")
+    if params.get("feature_verify_only") == "yes":
+        # bootstrap-head.txt is the previous candidate here (verify-only-base.py).
+        if outcome == "NO_CHANGE":
+            fail(f"verify-only reopen has no change since previous head {params.get('feature_previous_head')}")
+        print("REOPEN_GATE=PASS verify-only")
+        return
     expected = params.get("feature_reopen_context_sha256")
     if not expected:
         print("REOPEN_GATE=SKIP no reopen context")

@@ -52,6 +52,9 @@
     "implement": [
       "lite-envelope-post"
     ],
+    "gate-tests": [
+      "implement"
+    ],
     "commit-impl": [
       "gate-tests"
     ],
@@ -431,6 +434,9 @@
     ],
     "implement": [
       "when",
+      "trigger_rule"
+    ],
+    "gate-tests": [
       "trigger_rule"
     ]
   }

@@ -97,6 +97,8 @@ nodes:
       # Unfrozen install; the lockfile is excluded from every commit node in this lane.
       cd "$WT" && mise x node@20 -- pnpm install --no-frozen-lockfile > "$ARTIFACTS_DIR/pnpm-install.log" 2>&1 || { tail -5 "$ARTIFACTS_DIR/pnpm-install.log"; echo "BOOTSTRAP=FAIL pnpm install"; exit 1; }
       git -C "$WT" rev-parse HEAD > "$ARTIFACTS_DIR/bootstrap-head.txt"
+      # A verify-only reopen verifies previous-candidate..HEAD, not an empty diff.
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/verify-only-base.py "$ARTIFACTS_DIR" "$WT"
       printf '{"web_worktree":"%s","branch":"%s"}\n' "$WT" "$BR" > "$ARTIFACTS_DIR/worktrees.json"
       echo "WORKTREE=$WT BRANCH=$BR HEAD=$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")"
 

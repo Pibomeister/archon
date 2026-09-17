@@ -586,12 +586,47 @@ class FeatureChainV2(unittest.TestCase):
             latest["reopens"].pop()
             fc.write_state(self.control, latest)
         self.host.run_row_by_id = lambda db, run_id: {"status": "paused"}
-        with self.assertRaisesRegex(fc.FeatureChainError, "failed or cancelled, got paused"):
+        with self.assertRaisesRegex(fc.FeatureChainError, "failed, cancelled, or completed without feature-result.json, got paused"):
             fc.reopen(self.host, self.args, chain_id, "api", "x")
         # Negative control: the same chain with a failed run is admitted.
         self.host.run_row_by_id = lambda db, run_id: {"status": "failed"}
         with mock.patch("builtins.print"):
             fc.reopen(self.host, self.args, chain_id, "api", "x")
+
+    def test_reopen_again_admits_a_completed_run_that_wrote_no_feature_result(self):
+        # Run e21573ca: a verify-only stage completed with every gate skipped and no
+        # feature-result.json; feature-advance could not verify it, and reopen refused it.
+        chain_id, api_head, _dir = self.reopened_api_run()
+        stopped = Path(fc.read_state(self.control, chain_id)["current_run"]["artifacts_dir"])
+        self.host.run_row_by_id = lambda db, run_id: {"status": "completed"}
+        # Negative control: a completed run that did write its result is not stopped.
+        (stopped / "feature-result.json").write_text('{"outcome": "CHANGED"}', encoding="utf-8")
+        with self.assertRaisesRegex(fc.FeatureChainError, "got completed"):
+            fc.reopen(self.host, self.args, chain_id, "api", "x", verify_only=True)
+        (stopped / "feature-result.json").unlink()
+        with mock.patch("builtins.print"):
+            fc.reopen(self.host, self.args, chain_id, "api", "x", verify_only=True)
+        latest = fc.read_state(self.control, chain_id)
+        self.assertEqual(latest["reopens"][-1]["stopped_run_artifacts"], str(stopped))
+        self.assertEqual(latest["stages"]["api"]["verify_only_head"], api_head)
+
+    def test_a_verify_only_stage_whose_candidate_tree_is_unchanged_does_not_verify(self):
+        state = self.locally_verified_chain(finalize=False)
+        chain_id = state["logical_chain_id"]
+        api_head = state["candidate_handoffs"]["api"]["candidate_head"]
+        with mock.patch("builtins.print"):
+            fc.reopen(self.host, self.args, chain_id, "api", "verify the hand fix", verify_only=True)
+        latest = fc.read_state(self.control, chain_id)
+        artifacts = self.root / "verify-only-no-change"
+        artifacts.mkdir()
+        (artifacts / "feature-result.json").write_text(json.dumps({"outcome": "NO_CHANGE", "head": api_head}), encoding="utf-8")
+        row = {"id": latest["current_run"]["run_id"]}
+        with self.assertRaisesRegex(fc.FeatureChainError, "reopen produced no change"):
+            fc.candidate_from_artifacts("api", row, artifacts, latest)
+        # Negative control: without verify_only_head the same candidate passes the check.
+        latest["stages"]["api"].pop("verify_only_head")
+        with self.assertRaisesRegex(fc.FeatureChainError, "params.json"):
+            fc.candidate_from_artifacts("api", row, artifacts, latest)
 
     def test_a_reopened_stage_whose_candidate_tree_is_unchanged_does_not_verify(self):
         chain_id, api_head, _dir = self.reopened_api_run()

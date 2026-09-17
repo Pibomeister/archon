@@ -104,7 +104,9 @@ class ApiLaneCapsClearMeasuredCosts(unittest.TestCase):
     per-run cap scaling. Require ~1.5x headroom over each measured peak."""
 
     PEAKS = {"ralplan": 3.12, "plan-critic": 4.09, "plan-revise": 2.67, "docreview": 5.48,
-             "plan-render": 2.19, "review": 13.04, "fixer": 5.0, "implement": 3.09}
+             "plan-render": 2.19, "review": 13.04, "fixer": 5.0, "implement": 3.09,
+             # 343ad00e (joint verify-only stage): reader-audit hit its $3 cap.
+             "reader-audit": 3.0}
 
     def test_caps_have_headroom_over_measured_peaks(self):
         caps = {}

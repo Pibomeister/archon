@@ -217,6 +217,8 @@ nodes:
         || { echo "BOOTSTRAP=FAIL stage runtime environment unresolved (CANDIDATE_ENV line above)"; exit 1; }
     fi
     git -C "$WT" rev-parse HEAD > "$ARTIFACTS_DIR/bootstrap-head.txt"
+    # A verify-only reopen verifies previous-candidate..HEAD, not an empty diff.
+    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/verify-only-base.py "$ARTIFACTS_DIR" "$WT"
     # api_worktree is the key archon-run.py:2054 and resolve-web-params.sh:75
     # read; it keeps its name. "repo" is additive so the artifact stops
     # implying every run targets api.
