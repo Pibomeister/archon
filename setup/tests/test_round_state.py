@@ -530,12 +530,93 @@ class Converge(LaneCase):
         self.assertEqual(converge.returncode, 1)
         self.assertIn("PIN_CONFLICT round=1 symbol=GroupService.shareGroup", converge.stdout)
 
-    def test_a_filed_cross_repo_finding_blocks(self):
-        _, _, _, converge = self.full_round(
-            ledger=[entry("a", state="filed", producer_repo="web-app")])
-        self.assertEqual(converge.returncode, 1)
-        self.assertIn("CROSS_REPO_FINDING round=1 count=1 repos=web-app", converge.stdout)
-        self.assertTrue((self.lane.ad / "cross-repo-findings.json").is_file())
+class CrossRepoAcknowledgement(LaneCase):
+    """A cross_repo entry resolves only when a human records where it was filed.
+
+    Mirrors main's converge: round-state calls cross-repo-keys.py --gate exactly
+    as that node does. The closure allowance is the part that is ours -- a P0/P1
+    filed against ANOTHER repository can never be `closed` here, because the
+    defect is not in this repository, so `filed_acked` is what lets the round
+    converge without pretending it was fixed.
+    """
+
+    FINDING = {"finding_id": "x0000000cr00", "finding": "mcp tool drops the group id",
+               "action": "route to goodword-mcp", "producer_repo": "goodword-mcp",
+               "severity": "P1"}
+
+    def key(self):
+        import hashlib
+        text = " ".join(self.FINDING["finding"].split())
+        return hashlib.sha256(
+            f"{self.FINDING['producer_repo']}\n{text}".encode("utf-8")).hexdigest()[:16]
+
+    def round_with_cross_repo(self, ack=None):
+        lane = self.lane
+        lane.pre()
+        lane.review("Ready with fixes")
+        lane.gate()
+        lane.fix_plan()
+        lane.fixer(result={"applied": [], "failed": [], "advisory": [], "incomplete": [],
+                           "cross_repo": [self.FINDING]})
+        lane.commit_fixer()
+        if ack is not None:
+            (lane.ad / "cross-repo-filed.json").write_text(json.dumps(ack), encoding="utf-8")
+        return lane
+
+    def test_an_unacknowledged_finding_blocks(self):
+        lane = self.round_with_cross_repo()
+        proc = lane.converge([entry("x0000000cr00", state="filed")])
+        self.assertEqual(proc.returncode, 1, proc.stdout)
+        self.assertIn("CROSS_REPO_FINDING round=1 count=1 repos=goodword-mcp", proc.stdout)
+
+    def test_an_acknowledged_finding_converges_and_is_recorded_filed_acked(self):
+        lane = self.round_with_cross_repo(
+            [{"key": self.key(), "filed": "https://github.com/o/goodword-mcp/issues/7",
+              "by": "operator"}])
+        proc = lane.converge([entry("x0000000cr00", state="filed")])
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn(f"CROSS_REPO_ACKED key={self.key()} repo=goodword-mcp", proc.stdout)
+        self.assertNotIn("CROSS_REPO_FINDING", proc.stdout)
+        self.assertIn("CONVERGED round=1", proc.stdout)
+        recorded = json.loads((lane.rd / "ledger.json").read_text(encoding="utf-8"))
+        self.assertEqual(["filed_acked"], [e["state"] for e in recorded])
+
+    def test_an_acknowledged_blocker_does_not_hold_closure_open(self):
+        """ledger.py counts any P0/P1 that is not `closed` as unclosed, and this
+        one never can be. Without the allowance the round can never converge."""
+        lane = self.round_with_cross_repo(
+            [{"key": self.key(), "filed": "https://x.test/1", "by": "operator"}])
+        proc = lane.converge([entry("x0000000cr00", severity="P1", state="filed")])
+        self.assertIn("CONVERGED round=1", proc.stdout)
+
+    def test_an_invalid_acknowledgement_still_stops(self):
+        cases = {
+            "wrong key": [{"key": "0" * 16, "filed": "https://x.test/1", "by": "op"}],
+            "missing url": [{"key": self.key(), "filed": "", "by": "op"}],
+            "not a url": [{"key": self.key(), "filed": "filed it in slack", "by": "op"}],
+            "missing by": [{"key": self.key(), "filed": "https://x.test/1", "by": " "}],
+            "not a list": {"key": self.key(), "filed": "https://x.test/1", "by": "op"},
+        }
+        for name, ack in cases.items():
+            with self.subTest(case=name):
+                self.setUp()
+                lane = self.round_with_cross_repo(ack)
+                proc = lane.converge([entry("x0000000cr00", state="filed")])
+                self.assertEqual(proc.returncode, 1, proc.stdout)
+                self.assertIn("CROSS_REPO_FINDING round=1 count=1 repos=goodword-mcp",
+                              proc.stdout)
+
+    def test_a_round_with_no_cross_repo_entries_prints_nothing_extra(self):
+        """--gate is silent when there is nothing to gate. CROSS_REPO_KEYS=NONE
+        belongs to the script's operator listing mode, not to converge."""
+        _, _, _, proc = self.full_round(ledger=CLOSED)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        # CROSS_REPO=0 in check-fixer-result's summary is expected; the gate's
+        # own tokens are what must be absent.
+        self.assertNotIn("CROSS_REPO_ACKED", proc.stdout)
+        self.assertNotIn("CROSS_REPO_FINDING", proc.stdout)
+        self.assertNotIn("CROSS_REPO_KEYS", proc.stdout)
+
 
     def test_an_applied_p0_forces_a_full_next_round(self):
         _, _, _, converge = self.full_round(
