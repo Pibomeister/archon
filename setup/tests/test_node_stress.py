@@ -1024,6 +1024,22 @@ class DeslopStress(unittest.TestCase):
                     self.assertEqual(r["rc"], 1, r["output"])
                     self.assertIn(f"DESLOP_RECHECK=FAIL deslop-round.txt is not an integer: [{bad}]", r["output"])
 
+    def test_deslop_recheck_api_treats_an_approved_contract_export_as_referenced(self):
+        def build(tmp, contract):
+            deslop_common(tmp, "api")
+            foo = tmp / "wt" / "src" / "foo.ts"
+            foo.write_text(foo.read_text(encoding="utf-8") + "export class ReservedDto {}\n", encoding="utf-8")
+            if contract:
+                jdump(tmp / "artifacts" / "contract-symbols.json",
+                      {"contracts": [{"artifact": "src/foo.ts", "symbols": ["ReservedDto"]}]})
+        r = run_node("full-sdlc-api", "deslop-recheck", lambda tmp: build(tmp, True))
+        self.assertEqual(r["rc"], 0, r["output"])
+        self.assertIn("reason=approved-contract", r["output"])
+        # Negative control: without the stage's contract file the export is yagni.
+        r = run_node("full-sdlc-api", "deslop-recheck", lambda tmp: build(tmp, False))
+        self.assertEqual(r["rc"], 1, r["output"])
+        self.assertIn("DESLOP_GATE=FAIL slop round=1", r["output"])
+
     def test_deslop_recheck_api_lint_failure_is_typed(self):
         r = run_node("full-sdlc-api", "deslop-recheck", deslop_recheck_fixture("api"),
                      env={"SHIM_RC_BUN_LINT": "1"})

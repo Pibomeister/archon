@@ -1713,6 +1713,9 @@ nodes:
        DELETE the test and say so.
     3. YAGNI — parameters, options, branches, exports, types and config with
        no caller in the diff or anywhere in the repo: delete them.
+       APPROVED CONTRACTS: a symbol listed for its file in contract-symbols.json
+       in the artifacts directory (when present) is declared by the approved
+       plan's contract and counts as referenced: never delete it.
     4. OPEN/CLOSED — where the change special-cases an existing dispatch
        (a switch, an if-chain, a registry) and an extension point already
        exists, use the extension point. Do NOT *introduce* an extension point
@@ -1826,6 +1829,8 @@ nodes:
             delete the test.
           yagni — delete the parameter, option, branch, export, type or config
             that has no caller.
+            APPROVED CONTRACTS: a symbol contract-symbols.json lists for that
+            file is an approved plan contract: put it under "not_fixed".
           open_closed — use the extension point that already exists.
           comments — delete the comment that restates the code, narrates the
             change or preserves task history. Keep comments that explain *why*.
@@ -1974,8 +1979,12 @@ nodes:
         # (untracked included), never base..HEAD — the implementation is not
         # committed until commit-impl, so a HEAD-anchored diff would be empty.
         SL=0
+        # Repository-chain stages carry contract-symbols.json (the approved plan's
+        # declared contract symbols); an export named there is not yagni.
+        CONTRACT_ARGS=()
+        if [ -s "$ARTIFACTS_DIR/contract-symbols.json" ]; then CONTRACT_ARGS=(--contract-symbols "$ARTIFACTS_DIR/contract-symbols.json"); fi
         python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-slop.py \
-          "$WT" "$BASE" --max-complexity 10 --repo "$REPO" > "$RD/slop.txt" 2>&1 || SL=$?
+          "$WT" "$BASE" --max-complexity 10 --repo "$REPO" ${CONTRACT_ARGS[@]+"${CONTRACT_ARGS[@]}"} > "$RD/slop.txt" 2>&1 || SL=$?
         python3 - "$RD/recheck.json" "$TC" "$LT" "$UT" "$SC" "$SL" "$LINT_APPLICABLE" <<'PY'
         import json, sys
         path, tc, lt, ut, sc, sl, lint_applicable = sys.argv[1:8]
@@ -2095,6 +2104,11 @@ nodes:
            on a mock's return value, or that has no assertion.
         3. yagni — parameters, options, branches, exports, types or config added
            by this change with no caller in the diff or in the repo.
+           APPROVED CONTRACTS: when contract-symbols.json exists in the artifacts
+           directory, a symbol it lists for that file is declared by the approved
+           plan's contract and is referenced by the plan: it is NOT a yagni
+           finding, even with no caller yet. The gate downgrades such a finding
+           to 50 (DESLOP_CONTRACT_DOWNGRADE).
         4. open_closed — the change special-cases an existing dispatch (switch,
            if-chain, registry) where an extension point already exists; or it
            introduces an extension point for a single consumer. This guard is
@@ -2209,8 +2223,8 @@ nodes:
         # >= 75, and a declaration that disagrees with the findings is a failure,
         # not a tie-break.
         set +e
-        python3 - "$R" "$N" "$RD/slop.txt" "$RD/blocking-findings.json" <<'PY'
-        import json, sys
+        python3 - "$R" "$N" "$RD/slop.txt" "$RD/blocking-findings.json" "$ARTIFACTS_DIR/contract-symbols.json" <<'PY'
+        import json, re, sys
 
         GUARDS = ["complexity", "tautological_tests", "yagni", "open_closed", "comments"]
         STATUSES = ("assessed", "not_applicable")
@@ -2243,6 +2257,51 @@ nodes:
         SLOP_BLOCKING = _slop_index("FAIL")
         SLOP_REPORTED = _slop_index("REPORT")
         downgraded = 0
+
+        # The approved plan's contract symbols (contract-symbols.json, derived at
+        # dispatch from the approval-bound joint plan) are referenced by the plan
+        # even before any caller exists: chain 42b42a13 capped on a reserved
+        # optional DTO field the fixer rightly refused to delete. A yagni finding
+        # on such a symbol is kept and downgraded to 50.
+        def _contracts():
+            try:
+                doc = json.load(open(sys.argv[5], encoding="utf-8"))
+            except (IndexError, OSError, ValueError):
+                return {}
+            out = {}
+            for c in (doc.get("contracts") if isinstance(doc, dict) else None) or []:
+                if isinstance(c, dict) and isinstance(c.get("artifact"), str):
+                    out.setdefault(c["artifact"], set()).update(
+                        s for s in c.get("symbols") or [] if isinstance(s, str))
+            return out
+
+        CONTRACTS = _contracts()
+        EXPORT_DECL = re.compile(r"^\s*export\s+(?:default\s+)?(?:abstract\s+|declare\s+)*"
+                                 r"(?:class|interface|type|const|let|function|enum)\s+([A-Za-z_$][\w$]*)")
+        MEMBER_DECL = re.compile(r"^\s*(?:(?:public|private|protected|readonly|static|declare)\s+)*"
+                                 r"([A-Za-z_$][\w$]*)\s*[?!]?\s*[:(=]")
+
+        def contract_symbol(file, line):
+            """The symbol a finding's line declares, else (a decorator, brace or
+            blank line) its enclosing exported declaration, when the plan lists it."""
+            symbols = CONTRACTS.get(file)
+            try:
+                lines = open(file, encoding="utf-8", errors="replace").read().splitlines() if symbols else []
+            except OSError:
+                return None
+            if not 1 <= line <= len(lines):
+                return None
+            m = EXPORT_DECL.match(lines[line - 1]) or MEMBER_DECL.match(lines[line - 1])
+            if m:
+                return m.group(1) if m.group(1) in symbols else None
+            # ponytail: a non-declaring line falls back to the enclosing export, so
+            # a finding anchored on a decorator of an unlisted member of a listed DTO
+            # is downgraded too; resolve the member below if that shows up.
+            for text in reversed(lines[:line - 1]):
+                m = EXPORT_DECL.match(text)
+                if m:
+                    return m.group(1) if m.group(1) in symbols else None
+            return None
 
 
         def malformed(msg):
@@ -2309,6 +2368,11 @@ nodes:
                 fn = SLOP_REPORTED.get(f["file"], "?")
                 fn = fn if fn.isprintable() and "<" not in fn and ">" not in fn else "?"
                 print(f"DESLOP_COMPLEXITY_DOWNGRADED fn={fn} file={f['file']}:{line} confidence={conf}->50")
+                conf = 50
+                downgraded += 1
+            symbol = contract_symbol(f["file"], line) if f["guard"] == "yagni" and conf >= 75 else None
+            if symbol:
+                print(f"DESLOP_CONTRACT_DOWNGRADE symbol={symbol} file={f['file']}:{line} confidence={conf}->50")
                 conf = 50
                 downgraded += 1
             if conf >= 75:

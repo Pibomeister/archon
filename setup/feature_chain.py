@@ -62,6 +62,7 @@ OPERATOR_GUIDANCE_ARTIFACT = "operator-guidance.md"
 OPERATOR_GUIDANCE_MAX_BYTES = 32_000
 INTEGRATION_EVIDENCE_ARTIFACT = "integration-evidence.json"
 REOPEN_CONTEXT_ARTIFACT = "reopen-context.json"
+CONTRACT_SYMBOLS_ARTIFACT = "contract-symbols.json"
 # Failure evidence a reopened stage's implementer should read, when the stopped
 # run left it: an integration run's result/log, or a consumer's cross-repo finding.
 REOPEN_EVIDENCE_FILES = (
@@ -2042,12 +2043,57 @@ def write_phase_artifacts(artifacts: Path, state: dict, phase: str, repo: str | 
     plan_md = approval_plan_markdown(state)
     if plan_md:
         (artifacts / "plan.md").write_text(plan_md, encoding="utf-8")
+    write_json_atomic(artifacts / CONTRACT_SYMBOLS_ARTIFACT, contract_symbols(state, repo, plan_md))
     reopen_context = state["stages"][repo].get("reopen_context")
     if isinstance(reopen_context, dict):
         path = artifacts / REOPEN_CONTEXT_ARTIFACT
         path.write_text(reopen_context["content_text"], encoding="utf-8")
         if file_digest(path) != reopen_context["sha256"]:
             raise FeatureChainError("reopen context artifact does not match its recorded sha256")
+
+
+CONTRACT_SPAN_RE = re.compile(r"`([^`]+)`")
+CONTRACT_WORD_RE = re.compile(r"[A-Za-z_$][\w$]*")
+
+
+def _contract_identifier(word: str) -> bool:
+    # Prose around a contract is mostly English ("shape", "type", "optional");
+    # only code-shaped words name a symbol: camelCase, PascalCase or snake_case.
+    return "_" in word or any(a.islower() and b.isupper() for a, b in zip(word, word[1:]))
+
+
+def contract_symbols(state: dict, repo: str, plan_md: str) -> dict:
+    """Symbols the approved plan declares as this stage's contract, per file.
+
+    Derived only from approval-bound bytes, so a deslop reviewer reading "no
+    caller yet" on a reserved contract field is answered mechanically
+    (check-slop.py --contract-symbols, deslop-review-gate). Sources: each
+    contract this repo produces (its description, plus approved plan.md lines
+    naming the artifact path; backticked spans count whole unless they are
+    paths, prose counts only code-shaped words), and each pinned_decisions entry
+    whose file is in this stage's allowlist.
+    """
+    files: dict[str, set] = {}
+    plan = state["approved_plan"]
+    for contract in plan.get("contracts") or []:
+        artifact = contract.get("artifact") if isinstance(contract, dict) else None
+        if contract.get("producer") != repo or not isinstance(artifact, str) or not artifact:
+            continue
+        lines = [str(contract.get("description") or "")]
+        lines += [line for line in plan_md.splitlines() if artifact in line]
+        symbols = files.setdefault(artifact, set())
+        for line in lines:
+            for span in CONTRACT_SPAN_RE.findall(line):
+                if "/" not in span:
+                    symbols.update(CONTRACT_WORD_RE.findall(span))
+            symbols.update(w for w in CONTRACT_WORD_RE.findall(CONTRACT_SPAN_RE.sub(" ", line)) if _contract_identifier(w))
+    allowlist = set(plan["stages"][repo].get("files_allowlist") or [])
+    for pin in plan.get("pinned_decisions") or []:
+        if isinstance(pin, dict) and pin.get("file") in allowlist and isinstance(pin.get("symbol"), str):
+            files.setdefault(pin["file"], set()).update(CONTRACT_WORD_RE.findall(pin["symbol"]))
+    return {"schema": "archon.contract-symbols.v1", "repo": repo,
+            "plan_digest": state["approval"]["plan_digest"],
+            "contracts": [{"artifact": path, "symbols": sorted(names)} for path, names in sorted(files.items())]}
 
 
 def write_stage_reader_audit(artifacts: Path, state: dict, repo: str, stage: dict, source: dict) -> None:

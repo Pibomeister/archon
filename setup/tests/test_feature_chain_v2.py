@@ -560,6 +560,33 @@ class FeatureChainV2(unittest.TestCase):
         with self.assertRaisesRegex(fc.FeatureChainError, "not verified"):
             fc.reopen(self.host, self.args, chain_id, "api", "x")
 
+    def test_stage_dispatch_writes_the_approved_contract_symbols(self):
+        state = self.locally_verified_chain(finalize=False)
+        api = self.root / "contract-api"
+        fc.write_phase_artifacts(api, state, "implement", "api", {"id": "7" * 32})
+        doc = json.loads((api / "contract-symbols.json").read_text(encoding="utf-8"))
+        self.assertEqual((doc["repo"], doc["plan_digest"]), ("api", state["approval"]["plan_digest"]))
+        self.assertEqual(doc["contracts"], [{"artifact": "openapi.json", "symbols": []}])
+
+    def test_contract_symbols_come_from_the_producer_contracts_plan_lines_and_owned_pins(self):
+        plan = self.plan()
+        plan["contracts"][0]["artifact"] = "src/dto.ts"
+        plan["contracts"][0]["description"] = "BriefingResponseDto shape (meetings, optional travelCandidates) the tool mirrors"
+        plan["pinned_decisions"] = [
+            {"symbol": "resolveBriefingWindow", "file": "src/api.ts", "rule": "r"},
+            {"symbol": "getBriefing", "file": "src/tool.ts", "rule": "r"},
+        ]
+        plan_md = ("- `src/dto.ts` — contract: `{ window, travelCandidates?: TravelCandidatesDto }` see `apps/x/y.ts:3`\n"
+                   "- unrelated line naming `OtherDto`\n")
+        state = {"approved_plan": plan, "approval": {"plan_digest": "d"}}
+        self.assertEqual(fc.contract_symbols(state, "api", plan_md)["contracts"], [
+            {"artifact": "src/api.ts", "symbols": ["resolveBriefingWindow"]},
+            {"artifact": "src/dto.ts", "symbols": ["BriefingResponseDto", "TravelCandidatesDto", "travelCandidates", "window"]},
+        ])
+        # Negative control: the consumer produces no contract and gets only its own pin.
+        self.assertEqual(fc.contract_symbols(state, "goodword-mcp", plan_md)["contracts"],
+                         [{"artifact": "src/tool.ts", "symbols": ["getBriefing"]}])
+
     def test_reopen_takes_verify_only_from_the_cli_flag_on_args(self):
         state = self.locally_verified_chain(finalize=False)
         api_head = state["candidate_handoffs"]["api"]["candidate_head"]
