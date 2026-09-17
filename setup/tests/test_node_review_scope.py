@@ -161,7 +161,11 @@ class ReviewInputGateIsWired(unittest.TestCase):
             with self.subTest(lane=lane):
                 body = gate_body(lane)
                 self.assertNotIn("GATE_4_scope_matches_mode", body)
-                self.assertIn("GATE_5_input_matches", body)
+                # GATE_5 is printed by round-state.py gate, which the node calls;
+                # the literal lives in the helper, not the yaml body.
+                self.assertTrue(
+                    "GATE_5_input_matches" in body or "round-state.py gate" in body,
+                    "review-gate neither prints GATE_5 nor delegates to round-state.py gate")
 
 
 if __name__ == "__main__":
