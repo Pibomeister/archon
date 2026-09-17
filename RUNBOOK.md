@@ -1112,13 +1112,26 @@ archon workflow approve <run>                                   # at every gate
 python3 .archon/setup/archon-run.py feature-advance --chain <id>  # after each run completes
 ```
 
-For `api,goodword-mcp` chains the joint integration scenario command should be
-`bash .archon/setup/joint-api-mcp-e2e.sh '<jest pattern>' <api-port>`: the
-runner's disposable worktrees carry no `node_modules`, `.env`, running api, or
-token, and its test counter only reads `ARCHON_INTEGRATION_TESTS=<n>` lines; the
-harness installs, boots the api candidate against the local dev stack, mints a
-JWT through the whitelisted local OTP flow, runs the goodword-mcp jest pattern,
-and emits that line. Contract `artifact` values must be repository-relative file
+Before any integration command runs, `run-joint-integration.py` prepares every
+disposable candidate worktree from its repository profile (`runtime_deps`,
+`runtime_env_files` in `setup/repo-profile.sh`; api: `node_modules`, `.env`,
+`.env.e2e`) through `setup/candidate_env.py`: each entry already present is left
+alone, otherwise it is symlinked from the stage worktree or, failing that, the
+root clone (dependency directories only when `package.json` and the lockfiles are
+byte-identical), otherwise the profile's install command runs in the candidate.
+Anything unresolvable stops the run with `CANDIDATE_ENV=FAIL repo=<repo>
+<entry>: not found in [<searched>]` (or the install's rc and output tail) before
+any command runs; the result JSON records what was linked or installed under
+`candidate_environments`. Fix the named file on the machine (for example
+`api/.env.e2e`) and resume. Plans therefore call a repository's existing test
+command directly; a jest command gets its `ARCHON_INTEGRATION_TESTS=<n>` line
+from `python3 .archon/setup/jest-count.py <jest argv...>`, and plans must not add
+their own bootstrap scripts (the critic files those as scope). For
+`api,goodword-mcp` end-to-end tests that need a booted api, the command is
+`bash .archon/setup/joint-api-mcp-e2e.sh '<jest pattern>' <api-port>`: it boots
+the api candidate against the local dev stack, mints a JWT through the
+whitelisted local OTP flow, runs the goodword-mcp jest pattern, and emits the
+count line. Contract `artifact` values must be repository-relative file
 paths (`validate-joint-plan.py` rejects prose), and `expected_tests` entries
 must correspond to real jest tests (the runner requires reported >= declared).
 Chain params carry `api_port` whenever any selected repository's profile declares

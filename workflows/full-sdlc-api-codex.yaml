@@ -454,6 +454,23 @@ nodes:
       The number it prints in ARCHON_INTEGRATION_TESTS is the count of test
       CASES the command ran, and it must be at least the scenario's
       expected_tests length — see the COUNTING RULE above.
+    - The runner also PREPARES each candidate before any command runs: it
+      resolves the repository profile's runtime_deps and runtime_env_files
+      (.archon/setup/repo-profile.sh; api: node_modules, .env, .env.e2e) from
+      the stage worktree or the root clone, installs when the candidate's
+      manifests differ, and stops with CANDIDATE_ENV=FAIL when it cannot.
+      So an integration command calls the repository's EXISTING test command
+      and test paths directly. For a jest suite wrap it in the harness count
+      adapter, which prints ARCHON_INTEGRATION_TESTS from jest's own report:
+        "argv":["python3",
+         "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/jest-count.py",
+         "<the repo's jest command argv>", "<spec path>"]
+      (for api the jest command argv is bun run test:integration --).
+      For api + goodword-mcp end-to-end tests against a booted api, use
+      .archon/setup/joint-api-mcp-e2e.sh. Do NOT plan scripts, files, or steps
+      whose purpose is harness bootstrap: installing or symlinking
+      dependencies, copying env files, locating source worktrees, or printing
+      the count line. They duplicate the harness and are scope creep.
     - Trace each changed interface end to end: producer status/payload, client
       normalization, generated types, consumer behavior, and observable tests.
       Cite the existing transformation code. If errors are collapsed by a client,
@@ -717,7 +734,13 @@ nodes:
         planning worktrees are not evidence of an integration provenance bug.
         When uncertain, read run-joint-integration.py's create_worktrees and
         structured_command_details instead of inferring runtime cwd from the
-        planning session. Trace producer responses through client
+        planning session. The runner prepares every candidate's runtime
+        dependencies and env files itself (prepare_environments,
+        candidate_env.py): a candidate lacking node_modules or .env files is
+        NOT a plan defect. A plan that adds its own bootstrap script
+        (installing or linking dependencies, copying env files, locating
+        source worktrees, printing ARCHON_INTEGRATION_TESTS for a jest run
+        that setup/jest-count.py covers) is a kind "scope" finding. Trace producer responses through client
         normalization into consumer decisions, including collapsed errors;
         a consumer cannot distinguish information discarded by its client.
 
