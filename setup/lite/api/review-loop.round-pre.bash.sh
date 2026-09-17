@@ -22,12 +22,12 @@ test -f "$ARTIFACTS_DIR/round-cap.txt" || echo 1 > "$ARTIFACTS_DIR/round-cap.txt
 # code on this lane rather than a behaviour difference.
 C="$ARTIFACTS_DIR/round.txt"
 N=$(cat "$C" 2>/dev/null || echo 0)
-case "$N" in '') N=0 ;; *[!0-9]*) echo "ROUND_PRE=FAIL round.txt is not an integer: [$N]" | tee -a "$ARTIFACTS_DIR/node-round-pre.out"; exit 1 ;; esac
+case "$N" in '') N=0 ;; *[!0-9]*) echo "ROUND_PRE=FAIL round.txt is not an integer: [$N]" >&2; exit 1 ;; esac
 # Same durable cap as the parent, and it has to be duplicated rather than
 # inherited because this overlay replaces the parent body wholesale. The
 # DEFAULT differs (1, not 4) and that is the only reason this lane has an
 # overlay at all; the seed above only bites when preflight wrote no cap file.
 CAP=$(cat "$ARTIFACTS_DIR/round-cap.txt" 2>/dev/null || echo 1)
 case "$CAP" in ''|*[!0-9]*) CAP=1 ;; esac
-if [ "$N" -ge "$CAP" ] && [ ! -f "$ARTIFACTS_DIR/accept-residuals.txt" ]; then echo "ROUND_CAP_REACHED round=$N cap=$CAP (pre-round: a resume does not buy another review; write accept-residuals.txt or raise round-cap.txt)" | tee -a "$ARTIFACTS_DIR/node-round-pre.out"; exit 1; fi
+if [ "$N" -ge "$CAP" ] && [ ! -f "$ARTIFACTS_DIR/accept-residuals.txt" ]; then echo "ROUND_CAP_REACHED round=$N cap=$CAP (pre-round: a resume does not buy another review; write accept-residuals.txt or raise round-cap.txt)" >&2; exit 1; fi
 python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py pre "$ARTIFACTS_DIR"

@@ -111,6 +111,43 @@ class PromptEmbedding(unittest.TestCase):
                          "review-scope.txt"):
             self.assertIn(required, codex)
 
+    def test_every_round_state_call_puts_the_subcommand_first(self):
+        """round-state.py is argparse subparsers: the subcommand comes first.
+
+        `round-state.py "$ARTIFACTS_DIR" mark review-start` parses as subcommand
+        `$ARTIFACTS_DIR`, which does not exist, so it exits 2 having done
+        nothing. It reads perfectly plausibly and it has been written the wrong
+        way round in four separate prompt files by three different people, so it
+        gets a grep rather than a convention. Checked in the prompt sources AND
+        in the lane, because the lane is what runs.
+        """
+        bad = []
+        sources = list(PROMPTS.glob("*.md"))
+        for lane in ("full-sdlc-api",) + DERIVED:
+            for node in ("review", "fixer"):
+                body = prompt(lane, node, default="")
+                for line in body.splitlines():
+                    if "round-state.py" in line and not re.search(
+                            r"round-state\.py (pre|pre-lite|gate|fix-plan|commit-fixer"
+                            r"|converge|exit-check|mark|reject-review|id)\b", line):
+                        bad.append(f"{lane}:{node}: {line.strip()[:90]}")
+        for f in sources:
+            for line in f.read_text(encoding="utf-8").splitlines():
+                if "round-state.py" in line and not re.search(
+                        r"round-state\.py (pre|pre-lite|gate|fix-plan|commit-fixer"
+                        r"|converge|exit-check|mark|reject-review|id)\b", line):
+                    bad.append(f"{f.name}: {line.strip()[:90]}")
+        self.assertEqual(bad, [], "round-state.py called with the artifacts dir first")
+
+    def test_negative_control_the_wrong_order_is_caught(self):
+        # The grep above passes trivially if its pattern is wrong. This is the
+        # exact shape that shipped, and it must not match a known subcommand.
+        import re as _re
+        wrong = 'python3 {{SETUP}}/round-state.py "$ARTIFACTS_DIR" mark review-start'
+        self.assertIsNone(_re.search(
+            r"round-state\.py (pre|pre-lite|gate|fix-plan|commit-fixer"
+            r"|converge|exit-check|mark|reject-review|id)\b", wrong))
+
     def test_the_mode_independent_preamble_survives_any_mode(self):
         # It belongs to item 1's execution contract, not to a topology, so it is
         # prepended by the embed rather than living in the mode files -- where a

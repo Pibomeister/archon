@@ -105,8 +105,12 @@ class RoundPreCap(unittest.TestCase):
     def test_at_default_cap_stops_before_spending(self):
         for wf, default in LANES.items():
             r = self.run_pre(wf, default)
-            self.assertEqual(r.returncode, 1, wf + r.stdout)
-            self.assertIn(f"ROUND_CAP_REACHED round={default} cap={default}", r.stdout)
+            self.assertEqual(r.returncode, 1, wf + r.stdout + r.stderr)
+            # v2 lanes send the stop to stderr (stdout is the JSON decision on every
+            # path); the v1 lanes still tee it to stdout. Either stream reaches the
+            # operator and node-<id>.out; stdout PURITY is asserted separately, in
+            # test_node_review_loop_shape.
+            self.assertIn(f"ROUND_CAP_REACHED round={default} cap={default}", r.stdout + r.stderr)
             self.assertEqual((self.ad / "round.txt").read_text().strip(), str(default), "round.txt must not be incremented")
             self.assertNotIn("ROUND_RECLAIM", r.stderr, wf + ": proven rounds must never be reclaimed")
 
@@ -125,7 +129,7 @@ class RoundPreCap(unittest.TestCase):
                 # second -- stricter, and for a reason that no longer applies.
                 r = self.run_pre(wf, default, proven=default - 1)
                 self.assertEqual(r.returncode, 1, wf + r.stdout + r.stderr)
-                self.assertIn(f"ROUND_CAP_REACHED round={default} cap={default}", r.stdout, wf)
+                self.assertIn(f"ROUND_CAP_REACHED round={default} cap={default}", r.stdout + r.stderr, wf)
                 continue
             r = self.run_pre(wf, default, proven=default - 1)
             self.assertEqual(r.returncode, 0, wf + r.stdout + r.stderr)
@@ -133,12 +137,12 @@ class RoundPreCap(unittest.TestCase):
             self.assertIn(f"ROUND={default}", r.stdout, wf)
             r = self.run_pre(wf, default, proven=default - 1, reset=False)
             self.assertEqual(r.returncode, 1, wf + r.stdout + r.stderr)
-            self.assertIn(f"ROUND_CAP_REACHED round={default} cap={default}", r.stdout, wf)
+            self.assertIn(f"ROUND_CAP_REACHED round={default} cap={default}", r.stdout + r.stderr, wf)
 
     def test_explicit_cap_file_wins(self):
         for wf in LANES:
             r = self.run_pre(wf, 1, cap=1)
-            self.assertEqual(r.returncode, 1, wf + r.stdout)
+            self.assertEqual(r.returncode, 1, wf + r.stdout + r.stderr)
             r = self.run_pre(wf, 1, cap=3)
             self.assertEqual(r.returncode, 0, wf + r.stdout + r.stderr)
 

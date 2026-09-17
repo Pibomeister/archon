@@ -2652,7 +2652,7 @@ nodes:
             C="$ARTIFACTS_DIR/round.txt"
             N=$(cat "$C" 2>/dev/null || echo 0)
             # Hand-editable counter: reject junk before it is compared or used as a path.
-            case "$N" in '') N=0 ;; *[!0-9]*) echo "ROUND_PRE=FAIL round.txt is not an integer: [$N]" | tee -a "$ARTIFACTS_DIR/node-round-pre.out"; exit 1 ;; esac
+            case "$N" in '') N=0 ;; *[!0-9]*) echo "ROUND_PRE=FAIL round.txt is not an integer: [$N]" >&2; exit 1 ;; esac
             # THE DURABLE CAP, and it stays in the node rather than moving into the
             # helper with the rest of the decision. A resumed loop_group re-enters
             # with a fresh iteration counter, so `max_iterations` bounds one
@@ -2663,7 +2663,7 @@ nodes:
             # human act: agents never write that file.
             CAP=$(cat "$ARTIFACTS_DIR/round-cap.txt" 2>/dev/null || echo 4)
             case "$CAP" in ''|*[!0-9]*) CAP=4 ;; esac
-            if [ "$N" -ge "$CAP" ] && [ ! -f "$ARTIFACTS_DIR/accept-residuals.txt" ]; then echo "ROUND_CAP_REACHED round=$N cap=$CAP (pre-round: a resume does not buy another review; write accept-residuals.txt or raise round-cap.txt)" | tee -a "$ARTIFACTS_DIR/node-round-pre.out"; exit 1; fi
+            if [ "$N" -ge "$CAP" ] && [ ! -f "$ARTIFACTS_DIR/accept-residuals.txt" ]; then echo "ROUND_CAP_REACHED round=$N cap=$CAP (pre-round: a resume does not buy another review; write accept-residuals.txt or raise round-cap.txt)" >&2; exit 1; fi
             # Everything else -- the counter itself, the pending-commit
             # reconciliation, review identity, the reuse decision, review-mode and
             # base validation -- is the helper's. It advances round.txt only on a
@@ -2718,11 +2718,11 @@ nodes:
 
             YOUR FIRST ACTION, before reading anything else, is exactly:
 
-                python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py "$ARTIFACTS_DIR" mark review-start
+                python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py mark "$ARTIFACTS_DIR" review-start
 
             YOUR LAST ACTION, after the envelope file is written, is exactly:
 
-                python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py "$ARTIFACTS_DIR" mark review-done "$ARTIFACTS_DIR/round-$N/review-envelope.txt"
+                python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py mark "$ARTIFACTS_DIR" review-done "$ARTIFACTS_DIR/round-$N/review-envelope.txt"
 
             You are read-only in the candidate worktree (contract section 1). `review-gate`
             compares the tree before and after this session; an edit fails the round. The
@@ -3154,6 +3154,14 @@ nodes:
       CROSS=$(python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --gate "$RD/fixer-result.json") \
         || { printf '%s\n' "$CROSS" | sed '$d'; echo "EXIT_GATE=FAIL CROSS_REPO_FINDING round=$N $(printf '%s\n' "$CROSS" | tail -n 1)"; exit 1; }
       [ -z "$CROSS" ] || printf '%s\n' "$CROSS"
+      # AUTHORIZATION, and it comes before everything the operator can waive.
+      # review-summary.json is written BEFORE review-gate's final checks and
+      # stays readable with a Ready verdict, so reading the verdict alone lets a
+      # resume that walked past converge's stop reach ship on a round no gate
+      # ever passed. review.ok for the current identity and fixer.ok at HEAD are
+      # the only things that say otherwise, and accept-residuals waives the
+      # VERDICT, never this.
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py exit-check "$ARTIFACTS_DIR" || exit 1
       # A human accepting residuals waives the verdict and fixer checks — never
       # the clean-tree, scope, or unit-test checks (accepted findings, not a broken tree).
       if [ -f "$ARTIFACTS_DIR/accept-residuals.txt" ]; then
