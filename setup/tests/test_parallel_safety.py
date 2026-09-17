@@ -309,7 +309,12 @@ class EveryTypedGateLeavesItsReasonOnDisk(unittest.TestCase):
             body = node.get("bash")
             if not body or not self.TYPED.search(body):
                 continue
-            if "exec > >(tee" not in body:
+            # Either direction satisfies the rule: what matters is that the
+            # node's typed lines land in node-<id>.out, not which stream they
+            # travelled on. review-loop's round-pre and fix-plan CANNOT tee
+            # stdout -- a sibling's `when:` parses it as a bare JSON object --
+            # so they put every human line on stderr and tee that instead.
+            if "exec > >(tee" not in body and "exec 2> >(tee" not in body:
                 bad.append(nid)
         return bad
 
