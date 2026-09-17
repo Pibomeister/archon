@@ -2310,9 +2310,21 @@ nodes:
         ## Step 2 — persona selection is the skill's
 
         Let `ce-code-review` select its always-on and conditional personas by its own
-        rules for this diff, and run its validator pass. Do not cap the set, and do not
-        add a custom lens beyond what the skill dispatches: a measured cap (three
-        personas) saved no wall time and lost a P1 the full set had found.
+        rules for this diff, and run its validator pass. Do not cap the set below what
+        the skill's own sizing rule gives: a measured fixed cap (three personas) saved
+        no wall time and lost a P1 the full set had found.
+
+        Measure the diff first: in the worktree, run
+        `git diff --stat <base>..HEAD` with the base from `review-base.txt`.
+        Size the review on PRODUCTION churn: count changed lines EXCLUDING
+        test/spec files, generated files, and lockfiles — the same basis
+        ce-code-review's own catalog sizes a review on. Test volume is proof
+        of the change, not production risk surface, so counting it inflates
+        the persona fan-out exactly where the tests are most thorough.
+        Under roughly 150 production lines, cap the conditional personas at
+        3 beyond the always-on set, and record the decision (production
+        lines, total lines, cap applied or not, personas chosen) in the
+        envelope's Coverage section so the choice is observable.
 
         ## Step 3 — invoke the skill
 
@@ -2340,8 +2352,10 @@ nodes:
         arguments either way.
 
         Do not return until every persona the skill dispatched has reported, and until
-        the validator pass has run. A relay that stops mid-fan-out is a billed round
-        that proves nothing.
+        the validator pass has run. A relayed envelope that stops mid-fan-out, or that
+        carries an empty verdict, is not a completed review: the round is billed and
+        every downstream gate rejects it. If a persona cannot finish, say which one and
+        why in the envelope and still emit a verdict.
 
         ## Step 4 — write the envelope
 
