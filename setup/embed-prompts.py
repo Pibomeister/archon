@@ -31,13 +31,12 @@ ARCHON = HERE.parent
 SETUP_LITERAL = "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup"
 
 # ---- the one line that flips trio <-> capped -----------------------------
-REVIEW_MODE = "trio"
+REVIEW_MODE = "ce"
 # -------------------------------------------------------------------------
 
 LANE = "full-sdlc-api"
 PROMPTS = {
     "review": f"review-{REVIEW_MODE}.md",
-    "docreview": "docreview-bounded.md",
 }
 # review-verify.md is NOT embedded. `verify` is a per-round SCOPE the reviewer
 # selects by reading round-N/review-scope.txt, not a node, so its body is read

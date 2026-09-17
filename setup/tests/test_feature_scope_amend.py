@@ -485,5 +485,166 @@ class ClaudeChainScopeAmend(unittest.TestCase):
         self.assert_refused("--chain", CHAIN, message="stale")
 
 
+class FeaturePinAmend(FeatureScopeAmend):
+    """feature-pin-amend: the recovery scope-amend cannot express.
+
+    feature-scope-amend is allowlist-only, so a PIN_BREACH on a pin the spec got
+    wrong had no route but re-planning the stage. This is the same operation
+    shape -- same refusal rule, same approval path, same audit row -- over the
+    pinned decision's allowed_change instead of the allowlist.
+
+    It inherits scope-amend's suite deliberately: the guards are the contract,
+    and a copy of them would drift from the original the first time either moved.
+    """
+
+    PIN = "shareGroup"
+
+    def plan(self):
+        body = super().plan()
+        body["pinned_decisions"] = [{
+            "symbol": self.PIN,
+            "file": "src/api.ts",
+            "rule": "No other change to `POST /group/share`.",
+            "spec_line": 12,
+            "allowed_change": "none",
+        }]
+        return body
+
+    def setUp(self):
+        super().setUp()
+        self.args.symbol = self.PIN
+        self.args.allowed_change = "the managed-group sentence only"
+        self.args.action = "feature-pin-amend"
+
+    def amend(self):
+        return fc.pin_amend_command(self.host, self.args, self.row)
+
+    def pin_entry(self, state):
+        return fc.plan_pin_entries(state["approved_plan"], "api")[0]
+
+    def test_the_pin_is_rewritten_and_the_approval_is_resigned(self):
+        before = self.state()
+        old_approval = dict(before["approval"])
+        self.assertEqual("none", self.pin_entry(before)["allowed_change"])
+
+        result = self.amend()
+        state = self.state()
+
+        self.assertEqual((CHAIN, "api", self.PIN), (result["chain"], result["repo"], result["symbol"]))
+        self.assertEqual(self.args.allowed_change, self.pin_entry(state)["allowed_change"])
+        self.assertEqual([old_approval], state["approval_history"])
+        self.assertNotEqual(old_approval["approval_digest"], state["approval"]["approval_digest"])
+        fc.verify_approval(state)
+
+    def test_the_plan_digest_moves_so_the_completed_review_is_invalidated(self):
+        """The review identity includes the plan digest; that is the whole point."""
+        before = self.state()["approval"]["plan_digest"]
+        self.amend()
+        self.assertNotEqual(before, self.state()["approval"]["plan_digest"])
+
+    def test_the_stage_artifacts_are_refreshed_with_the_new_plan(self):
+        self.amend()
+        state = self.state()
+        staged = json.loads((self.artifacts / fc.JOINT_PLAN_ARTIFACT).read_text(encoding="utf-8"))
+        self.assertEqual(self.args.allowed_change,
+                         fc.plan_pin_entries(staged, "api")[0]["allowed_change"])
+        revisions = json.loads((self.artifacts / "candidate-revisions.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["approval"]["plan_digest"], revisions["plan_digest"])
+        self.assertEqual(state["approval"]["plan_digest"], revisions["approved_plan_digest"])
+
+    def test_the_approval_packet_records_the_amendment(self):
+        self.amend()
+        amend_root = Path(self.state()["approval"]["source_artifacts"]["root"])
+        notice = json.loads((amend_root / "pin-amendment.json").read_text(encoding="utf-8"))
+        self.assertEqual((self.PIN, "api"), (notice["symbol"], notice["repo"]))
+        self.assertEqual(self.args.allowed_change, notice["allowed_change"])
+        self.assertTrue((amend_root / "original-joint-plan.json").is_file())
+        self.assertIn("Guarded pin amendment", (amend_root / "plan.md").read_text(encoding="utf-8"))
+
+    def test_the_amendment_is_idempotent(self):
+        first = self.amend()
+        second = self.amend()
+        state = self.state()
+        self.assertTrue(second["already_applied"])
+        self.assertEqual(first["amendment_id"], second["amendment_id"])
+        self.assertEqual(1, len(state["pin_amendments"]))
+
+    def test_a_matching_incomplete_journal_is_retried(self):
+        state = self.state()
+        amendment_id = fc.digest(fc.pin_amendment_payload(
+            CHAIN, RUN, "api", self.PIN, self.args.allowed_change, self.args.reason))
+        state["pin_amendment"] = {
+            **fc.pin_amendment_payload(CHAIN, RUN, "api", self.PIN,
+                                       self.args.allowed_change, self.args.reason),
+            "amendment_id": amendment_id, "status": "in_progress",
+            "started_at": "2026-09-13T00:00:00Z"}
+        fc.write_state(self.control, state)
+
+        result = self.amend()
+
+        self.assertEqual(amendment_id, result["amendment_id"])
+        self.assertIsNone(self.state().get("pin_amendment"))
+
+    def test_a_verified_candidate_handoff_refuses_the_amendment(self):
+        state = self.state()
+        state["candidate_handoffs"] = {"api": {"candidate_head": "a" * 40}}
+        fc.write_state(self.control, state)
+        with self.assertRaisesRegex(fc.FeatureChainError, "feature-pin-amend cannot modify"):
+            self.amend()
+
+    def test_a_locally_verified_chain_refuses_the_amendment(self):
+        state = self.state()
+        state["status"] = "locally_verified"
+        fc.write_state(self.control, state)
+        with self.assertRaisesRegex(fc.FeatureChainError, "after integration"):
+            self.amend()
+
+    def test_a_symbol_the_plan_does_not_pin_is_refused(self):
+        self.args.symbol = "noSuchSymbol"
+        with self.assertRaisesRegex(fc.FeatureChainError, "no pinned decision for symbol"):
+            self.amend()
+
+    def test_an_amendment_that_changes_nothing_is_refused(self):
+        self.args.allowed_change = "none"
+        with self.assertRaisesRegex(fc.FeatureChainError, "already allows"):
+            self.amend()
+
+    def test_an_empty_allowed_change_is_refused(self):
+        """`none` is the pin; an empty string records nothing at all."""
+        self.args.allowed_change = "   "
+        with self.assertRaisesRegex(fc.FeatureChainError, "requires --allowed-change"):
+            self.amend()
+
+    def test_a_reason_is_required(self):
+        self.args.reason = ""
+        with self.assertRaisesRegex(fc.FeatureChainError, "requires a reason"):
+            self.amend()
+
+    def test_an_incomplete_pin_amendment_blocks_the_next_dispatch(self):
+        state = self.state()
+        state["pin_amendment"] = {"status": "in_progress"}
+        with self.assertRaisesRegex(fc.FeatureChainError, "pin amendment is incomplete"):
+            fc.require_no_incomplete_pin_amendment(state)
+
+    def test_the_cli_parses_the_amendment_flags(self):
+        parsed = ar.parser().parse_args([
+            "feature-pin-amend", RUN, "--token", "t", "--symbol", self.PIN,
+            "--allowed-change", "the managed-group sentence only", "--reason", "spec was wrong"])
+        self.assertEqual("feature-pin-amend", parsed.action)
+        self.assertEqual(self.PIN, parsed.symbol)
+        self.assertEqual("the managed-group sentence only", parsed.allowed_change)
+
+    # The inherited scope-amend cases exercise fc.scope_amend_command, which this
+    # subclass's plan() does not change; running them twice buys nothing.
+    def test_guarded_scope_amend_adds_only_current_repo_allowlist_and_resigns(self):
+        self.skipTest("covered by FeatureScopeAmend")
+
+    def test_duplicate_retry_is_idempotent(self):
+        self.skipTest("covered by FeatureScopeAmend")
+
+    def test_retries_matching_incomplete_journal(self):
+        self.skipTest("covered by FeatureScopeAmend")
+
+
 if __name__ == "__main__":
     unittest.main()

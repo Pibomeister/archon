@@ -178,7 +178,10 @@ MANIFEST=(
   workflows/risk-delta-v1.md
   setup/review-yield.py
   # Two-hour convergence: review-mode.py is listed because round-pre calls it;
-  # the packaging test pins every referenced script to this list.
+  # the packaging test pins every referenced script to this list. ledger.py is
+  # called by review-gate, commit-fixer and converge, and review-contract.md is
+  # read by every review session -- its sha256 is the identity's contract digest,
+  # so an install that ships the prompts without it cannot compute a review id.
   setup/review-mode.py
   # Durable round checkpoints. round-state.py owns every state transition of the
   # review loop -- five of the loop's seven nodes are now a single call to it,
@@ -197,6 +200,7 @@ MANIFEST=(
   setup/review-contract.md
   # The live-acceptance checker, moved into the repo from the Goodword root.
   setup/chain-acceptance.py
+  # Review prompt bodies (item 2/3/7), embedded by the lane nodes at derive time.
   # Prompt bodies, and the step that splices them into the lane. The review
   # MODE is named in embed-prompts.py and nowhere else; `--check` is what stops
   # an edited prompt from looking landed while the lane runs the old text.
@@ -204,7 +208,7 @@ MANIFEST=(
   setup/prompts/review-trio.md
   setup/prompts/review-capped.md
   setup/prompts/review-verify.md
-  setup/prompts/docreview-bounded.md
+  setup/prompts/review-ce.md
   setup/mcp-smoke.sh
   setup/codex-usage.py
   setup/codex-watchdog.sh

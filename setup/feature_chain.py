@@ -1826,6 +1826,7 @@ def dispatch_lane(host: Any, args: Any, lane: str, message: Path, env: dict[str,
                 dispatch_state = read_state(Path(args.control_dir), env["ARCHON_FEATURE_CHAIN_ID"])
                 require_no_incomplete_amendment(dispatch_state)
                 require_no_incomplete_scope_amendment(dispatch_state)
+                require_no_incomplete_pin_amendment(dispatch_state)
                 db = Path(args.db) if getattr(args, "db", None) is not None else None
                 require_review_policy_integrity(dispatch_state, db=db)
                 shepherd_checkpoint(args, env["ARCHON_FEATURE_CHAIN_ID"])
@@ -2540,6 +2541,277 @@ def build_scope_amendment(control_dir: Path, state: dict, repo: str,
     return final_scope_amendment_state(state, repo, new_plan, validation, new_approval, source_artifacts)
 
 
+# --- guarded pin amendment -------------------------------------------------
+#
+# feature-scope-amend is allowlist-only: it cannot say "this pinned symbol may
+# change after all". Without a way to say it, a PIN_BREACH on a pin the spec got
+# wrong has no recovery but re-planning the whole stage. This is that operation,
+# under scope-amend's refusal rule, through scope-amend's approval path.
+#
+# The plan digest is part of the review identity, so an amendment invalidates the
+# stopped round's completed review and the next resume re-runs it. That is the
+# point: the review that passed judged the code against the old pin.
+
+
+def require_no_incomplete_pin_amendment(state: dict) -> None:
+    amendment = state.get("pin_amendment")
+    if isinstance(amendment, dict) and amendment.get("status") == "in_progress":
+        raise FeatureChainError("pin amendment is incomplete; retry feature-pin-amend before dispatch")
+
+
+def require_pin_amendment_open(state: dict) -> None:
+    """Scope-amend's refusal rule verbatim, reworded for whoever ran this command."""
+    try:
+        require_scope_amendment_open(state)
+    except FeatureChainError as exc:
+        raise FeatureChainError(str(exc).replace("feature-scope-amend", "feature-pin-amend")) from exc
+
+
+def validate_pin_symbol(symbol: object) -> str:
+    if not isinstance(symbol, str) or not symbol.strip():
+        raise FeatureChainError("feature-pin-amend requires --symbol")
+    if symbol != symbol.strip() or "\x00" in symbol or "\n" in symbol:
+        raise FeatureChainError("pin symbol must be a single-line name")
+    return symbol
+
+
+def validate_allowed_change(text: object) -> str:
+    """`none` is the pin; anything else is the exception the spec now states.
+
+    Empty is refused rather than read as `none`: the whole operation is a human
+    writing down what may change, and an empty string records nothing.
+    """
+    if not isinstance(text, str) or not text.strip():
+        raise FeatureChainError("feature-pin-amend requires --allowed-change")
+    return text.strip()
+
+
+def plan_pin_entries(plan: dict, repo: str) -> list[dict]:
+    pools = [plan.get("pinned_decisions")]
+    stages = plan.get("stages")
+    if isinstance(stages, dict):
+        pools.append((stages.get(repo) or {}).get("pinned_decisions"))
+    elif isinstance(stages, list):
+        pools.extend(stage.get("pinned_decisions") for stage in stages
+                     if isinstance(stage, dict) and stage.get("repo") == repo)
+    return [entry for pool in pools if isinstance(pool, list)
+            for entry in pool if isinstance(entry, dict)]
+
+
+def plan_with_amended_pin(plan: dict, repo: str, symbol: str, allowed_change: str) -> dict:
+    amended = json.loads(json.dumps(plan))
+    matches = [entry for entry in plan_pin_entries(amended, repo)
+               if entry.get("symbol") == symbol]
+    if not matches:
+        raise FeatureChainError(f"approved plan has no pinned decision for symbol {symbol}")
+    if len(matches) > 1:
+        raise FeatureChainError(f"approved plan pins {symbol} more than once; amend the plan by hand")
+    if matches[0].get("allowed_change") == allowed_change:
+        raise FeatureChainError(f"pinned decision for {symbol} already allows that change")
+    matches[0]["allowed_change"] = allowed_change
+    return amended
+
+
+def pin_amendment_payload(chain_id: str, run_id: str, repo: str, symbol: str,
+                          allowed_change: str, reason: str) -> dict:
+    return {
+        "kind": "feature-pin-amend",
+        "logical_chain_id": chain_id,
+        "run_id": run_id,
+        "repo": repo,
+        "symbol": symbol,
+        "allowed_change": allowed_change,
+        "reason": reason,
+    }
+
+
+def validate_current_stage_pin_artifacts(state: dict, row: dict, repo: str,
+                                         symbol: str, allowed_change: str) -> None:
+    artifacts_path = current_stage_artifacts(state, row)
+    revisions = read_json_artifact(artifacts_path / "candidate-revisions.json",
+                                   "candidate-revisions.json")
+    allowed = {state["approval"]["plan_digest"]}
+    if isinstance(state.get("pin_amendment"), dict):
+        # A retry after a crash mid-amendment: the stage may already carry the
+        # amended digest, and that is the one state we are allowed to resume into.
+        allowed.add(digest(plan_with_amended_pin(state["approved_plan"], repo, symbol,
+                                                 allowed_change)))
+    plan_digest = revisions.get("plan_digest")
+    if plan_digest != revisions.get("approved_plan_digest") or plan_digest not in allowed:
+        raise FeatureChainError("current stage candidate revisions do not match the approved plan digest")
+
+
+def write_pin_amendment_artifacts(root: Path, state: dict, old_plan: dict, new_plan: dict,
+                                  repo: str, symbol: str, allowed_change: str, reason: str,
+                                  amendment_id: str) -> dict:
+    amend_root = prepare_scope_amendment_dir(root, amendment_id)
+    source = state.get("approval", {}).get("source_artifacts", {})
+    files = source.get("files", {}) if isinstance(source, dict) else {}
+    copied: dict[str, str] = {}
+    for name in (JOINT_PLAN_ARTIFACT, *PLANNING_SUPPORT_ARTIFACTS):
+        if name not in files:
+            continue
+        src = root / name
+        if src.is_file():
+            ensure_owned_not_symlink(src, "approved planning source artifact")
+            dst = amend_root / ("original-" + name)
+            dst.write_bytes(src.read_bytes())
+            copied[dst.name] = file_digest(dst)
+    write_json_atomic(amend_root / "original-approval.json", state["approval"])
+    write_json_atomic(amend_root / "original-approved-plan.json", old_plan)
+    write_json_atomic(amend_root / JOINT_PLAN_ARTIFACT, new_plan)
+    recorded_at = state.get("pin_amendment", {}).get("started_at") or now()
+    notice = {
+        "schema_version": 1,
+        "kind": "feature-pin-amendment-notice",
+        "logical_chain_id": state["logical_chain_id"],
+        "amendment_id": amendment_id,
+        "repo": repo,
+        "symbol": symbol,
+        "allowed_change": allowed_change,
+        "reason": reason,
+        "previous_plan_digest": state["approval"]["plan_digest"],
+        "new_plan_digest": digest(new_plan),
+        "recorded_at": recorded_at,
+    }
+    write_json_atomic(amend_root / "pin-amendment.json", notice)
+    notice_md = (
+        "# Guarded pin amendment approval packet\n\n"
+        + f"- Chain: `{state['logical_chain_id']}`\n"
+        + f"- Amendment: `{amendment_id}`\n"
+        + f"- Repository: `{repo}`\n"
+        + f"- Pinned symbol: `{symbol}`\n"
+        + f"- Allowed change: {allowed_change}\n"
+        + f"- Previous approval digest: `{state['approval']['approval_digest']}`\n"
+        + f"- New plan digest: `{digest(new_plan)}`\n"
+    )
+    (amend_root / "approval-packet-notice.md").write_text(notice_md, encoding="utf-8")
+    addendum = (
+        approval_plan_markdown(state).rstrip()
+        + "\n\n## Guarded pin amendment\n\n"
+        + f"- Repository: `{repo}`\n"
+        + f"- Pinned symbol: `{symbol}`\n"
+        + f"- Allowed change: {allowed_change}\n"
+        + f"- Reason: {reason}\n"
+        + f"- Amendment id: `{amendment_id}`\n"
+    )
+    (amend_root / "plan.md").write_text(addendum + "\n", encoding="utf-8")
+    return {"root": str(amend_root), "files": {
+        JOINT_PLAN_ARTIFACT: file_digest(amend_root / JOINT_PLAN_ARTIFACT),
+        "plan.md": file_digest(amend_root / "plan.md"),
+        "pin-amendment.json": file_digest(amend_root / "pin-amendment.json"),
+        "approval-packet-notice.md": file_digest(amend_root / "approval-packet-notice.md"),
+        **copied,
+    }}
+
+
+def final_pin_amendment_state(state: dict, repo: str, validation: dict,
+                              new_approval: dict, source_artifacts: dict) -> dict:
+    old_approval = state["approval"]
+    amendment = dict(state["pin_amendment"])
+    amendment.update({
+        "status": "applied",
+        "applied_at": now(),
+        "approval_digest": new_approval["approval_digest"],
+        "previous_approval_digest": old_approval.get("approval_digest"),
+        "source_artifacts": source_artifacts,
+    })
+    final = dict(state)
+    final.setdefault("approval_history", []).append(old_approval)
+    final.setdefault("pin_amendments", []).append(amendment)
+    final["approval"] = new_approval
+    final["approved_plan"] = validation["plan"]
+    final["dependency_order"] = validation["dependency_order"]
+    final["stages"] = dict(state["stages"])
+    final["stages"][repo] = dict(final["stages"][repo])
+    final["stages"][repo]["plan"] = validation["stages"][repo]
+    final["pin_amendment"] = None
+    final["updated_at"] = now()
+    return final
+
+
+def build_pin_amendment(control_dir: Path, state: dict, repo: str, symbol: str,
+                        allowed_change: str, reason: str, amendment_id: str) -> dict:
+    old_approval = state.get("approval")
+    old_plan = state.get("approved_plan")
+    if not isinstance(old_approval, dict) or not isinstance(old_plan, dict):
+        raise FeatureChainError("feature-pin-amend requires an approved joint plan")
+    verify_approval(state)
+    source_root = planning_source_root(state)
+    new_plan = plan_with_amended_pin(old_plan, repo, symbol, allowed_change)
+    validation = validate_plan(new_plan, state["repositories"],
+                               state.get("executable_plan_contract") == 1)
+    source_artifacts = write_pin_amendment_artifacts(
+        source_root, state, old_plan, new_plan, repo, symbol, allowed_change, reason, amendment_id)
+    new_approval = approval_snapshot(state, new_plan, validation, source_artifacts)
+    return final_pin_amendment_state(state, repo, validation, new_approval, source_artifacts)
+
+
+def pin_amend_command(host: Any, args: Any, row: dict) -> dict:
+    symbol = validate_pin_symbol(getattr(args, "symbol", ""))
+    allowed_change = validate_allowed_change(getattr(args, "allowed_change", ""))
+    reason = str(getattr(args, "reason", "")).strip()
+    if not reason:
+        raise FeatureChainError("pin amendment requires a reason")
+    control = getattr(host, "read_control_state")(row, Path(args.control_dir))
+    feature = control_feature({"control": control})
+    if feature.get("scope") != "repositories":
+        raise FeatureChainError("feature-pin-amend requires a repository-list feature run")
+    chain_id = feature.get("logical_chain_id")
+    if not isinstance(chain_id, str):
+        raise FeatureChainError("run-control record is missing feature chain id")
+    applied: dict | None = None
+    with chain_lock(Path(args.control_dir), chain_id):
+        row = host.run_row_by_id(Path(args.db), row["id"])
+        if not isinstance(row, dict) or row.get("status") not in {"failed", "paused", "completed", "cancelled"}:
+            raise FeatureChainError("feature-pin-amend requires a stopped run")
+        control = host.require_control_token(row, Path(args.control_dir), getattr(args, "token", None))
+        if control.get("feature_chain") != feature:
+            raise FeatureChainError("feature control binding changed while acquiring the chain lock")
+        require_no_live_control_processes(control)
+        state = read_state(Path(args.control_dir), chain_id)
+        require_no_incomplete_amendment(state)
+        require_no_incomplete_scope_amendment(state)
+        pending = state.get("pending_control")
+        if pending is not None and (not isinstance(pending, dict) or process_claim_alive(pending)):
+            raise FeatureChainError("repository-list feature control already in progress")
+        if state.get("dispatch_reservation") is not None:
+            raise FeatureChainError("repository-list feature dispatch already in progress")
+        require_pin_amendment_open(state)
+        repo = current_implementation_repo(state, row)
+        payload = pin_amendment_payload(chain_id, row["id"], repo, symbol, allowed_change, reason)
+        amendment_id = digest(payload)
+        existing = state.get("pin_amendment")
+        if isinstance(existing, dict) and existing.get("status") == "in_progress" \
+                and existing.get("amendment_id") != amendment_id:
+            raise FeatureChainError("a different pin amendment is incomplete")
+        for prior in state.get("pin_amendments", []):
+            if prior.get("amendment_id") == amendment_id:
+                if prior.get("symbol") != symbol or prior.get("repo") != repo:
+                    raise FeatureChainError("pin amendment id was already used for a different change")
+                refresh_current_stage_artifacts(state, row, repo)
+                return {"chain": chain_id, "repo": repo, "symbol": symbol,
+                        "allowed_change": allowed_change, "amendment_id": amendment_id,
+                        "already_applied": True}
+        verify_approval(state)
+        validate_current_stage_pin_artifacts(state, row, repo, symbol, allowed_change)
+        preflight_scope_amendment_destination(planning_source_root(state), amendment_id)
+        if not (isinstance(existing, dict) and existing.get("status") == "in_progress"):
+            state["pin_amendment"] = {**payload, "amendment_id": amendment_id,
+                                      "status": "in_progress", "started_at": now()}
+            state["updated_at"] = now()
+            state = write_state(Path(args.control_dir), state)
+        final_state = build_pin_amendment(Path(args.control_dir), state, repo, symbol,
+                                          allowed_change, reason, amendment_id)
+        refresh_current_stage_artifacts(final_state, row, repo)
+        state = write_state(Path(args.control_dir), final_state)
+        applied = {"chain": chain_id, "repo": repo, "symbol": symbol,
+                   "allowed_change": allowed_change, "amendment_id": amendment_id,
+                   "already_applied": False}
+    assert applied is not None
+    return applied
+
+
 def final_review_policy_state(state: dict, amendment: dict, qualification: dict | None = None,
                               applied_at: str | None = None) -> dict:
     applied_at = applied_at or now()
@@ -2676,6 +2948,7 @@ def review_policy_update_command(host: Any, args: Any, row: dict) -> dict:
             raise FeatureChainError("feature-review-policy-update requires a Codex repository-list feature chain")
         require_no_incomplete_amendment(state)
         require_no_incomplete_scope_amendment(state)
+        require_no_incomplete_pin_amendment(state)
         pending = state.get("pending_control")
         if pending is not None and (not isinstance(pending, dict) or process_claim_alive(pending)):
             raise FeatureChainError("repository-list feature control already in progress")
@@ -3667,6 +3940,97 @@ def run_segments(db: Path, run_ids: list[str]) -> dict[str, list[tuple[float, fl
     return segments
 
 
+CHAIN_ACTIVE_BUDGET_SECONDS = 7200
+ROUND_TELEMETRY_KEYS = ("rounds", "review_invocations", "review_reused", "review_duplicates",
+                        "fixer_invocations", "fixer_duplicates")
+
+
+def stage_artifacts_dirs(state: dict) -> dict[str, Path]:
+    """Artifacts directory per repository, from the chain's own run bindings."""
+    dirs: dict[str, Path] = {}
+    for item in state.get("phase_runs") or []:
+        if not isinstance(item, dict) or item.get("phase") not in {"implement", "verify"}:
+            continue
+        repo, artifacts = item.get("repo"), item.get("artifacts_dir")
+        if isinstance(repo, str) and isinstance(artifacts, str) and artifacts:
+            dirs[repo] = Path(artifacts)
+    return dirs
+
+
+def read_round_activity(round_dir: Path) -> list[dict]:
+    try:
+        text = (round_dir / "activity.jsonl").read_text(encoding="utf-8")
+    except OSError:
+        return []
+    entries = []
+    for line in text.splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
+
+
+def round_telemetry(artifacts: Path) -> dict:
+    """Review and fixer counts for one stage, read from its round directories.
+
+    A duplicate is a `run` whose id (review) or tree (fixer) a `done` earlier in
+    the SAME round already recorded. It is derived here rather than asserted by
+    round-state.py, which is the component whose refusal to duplicate is the
+    thing under measurement: a check whose pass condition is "the code that made
+    the decision agrees with the decision" cannot see that decision being wrong.
+    """
+    counts = {key: 0 for key in ROUND_TELEMETRY_KEYS}
+    if not artifacts.is_dir():
+        return counts
+
+    def index(path: Path) -> int:
+        tail = path.name.split("-", 1)[1]
+        return int(tail) if tail.isdigit() else 0
+
+    round_dirs = sorted((p for p in artifacts.glob("round-*") if p.is_dir()), key=index)
+    counts["rounds"] = len(round_dirs)
+    for round_dir in round_dirs:
+        done: dict[str, set[str]] = {"review": set(), "fixer": set()}
+        for entry in read_round_activity(round_dir):
+            kind, decision = entry.get("kind"), entry.get("decision")
+            if kind not in ("review", "fixer"):
+                continue
+            token = str(entry.get("id" if kind == "review" else "tree") or "")
+            if decision == "done":
+                done[kind].add(token)
+            elif decision == "run":
+                counts[f"{kind}_invocations"] += 1
+                if token and token in done[kind]:
+                    counts[f"{kind}_duplicates"] += 1
+            elif kind == "review" and decision == "reuse":
+                counts["review_reused"] += 1
+    return counts
+
+
+def chain_activity(state: dict) -> dict:
+    return {repo: round_telemetry(path) for repo, path in stage_artifacts_dirs(state).items()}
+
+
+def active_seconds(timing: dict) -> int | None:
+    """The chain's ACTIVE sum: what the 2-hour claim is about.
+
+    Wall includes every human gate, so budgeting on it measures how long someone
+    took to read a plan-gate rather than how much work the lane did.
+    """
+    parts = [timing.get("planning_s"), timing.get("integration_s"),
+             *(timing.get("stages") or {}).values()]
+    known = [value for value in parts if isinstance(value, int)]
+    return sum(known) if known else None
+
+
+def active_budget_seconds() -> int:
+    raw = os.environ.get("ARCHON_CHAIN_BUDGET_S", "")
+    return int(raw) if raw.strip().isdigit() and int(raw) > 0 else CHAIN_ACTIVE_BUDGET_SECONDS
+
+
 def chain_timing(state: dict, db: Path) -> dict:
     """Wall and per-phase seconds for the chain. A run row we cannot read stays null."""
     records = [item for item in state.get("phase_runs") or [] if isinstance(item, dict)]
@@ -3699,6 +4063,7 @@ def chain_timing(state: dict, db: Path) -> dict:
         "planning_s": seconds("planning"),
         "stages": {repo: seconds(repo) for repo in state.get("repositories") or []},
         "integration_s": seconds("integration"),
+        "activity": chain_activity(state),
         "updated_at": now(),
     }
 
@@ -3721,6 +4086,20 @@ def record_chain_timing(args: Any, state: dict) -> dict | None:
     )
     if isinstance(timing["wall_s"], int) and timing["wall_s"] > CHAIN_WALL_BUDGET_SECONDS:
         print(f"CHAIN_BUDGET=EXCEEDED wall={timing['wall_s']} cap={CHAIN_WALL_BUDGET_SECONDS}")
+    activity = timing.get("activity") or {}
+    totals = {key: sum(int(counts.get(key, 0)) for counts in activity.values())
+              for key in ROUND_TELEMETRY_KEYS}
+    print(
+        f"CHAIN_TIMING reviews={totals['review_invocations']}/{totals['review_reused']} "
+        f"rounds={totals['rounds']} review_duplicates={totals['review_duplicates']} "
+        f"fixers={totals['fixer_invocations']} fixer_duplicates={totals['fixer_duplicates']}"
+    )
+    active, cap = active_seconds(timing), active_budget_seconds()
+    if isinstance(active, int):
+        print(f"CHAIN_ACTIVE active={active} cap={cap} wall={timing_field(timing['wall_s'])}")
+        if active > cap:
+            print(f"CHAIN_BUDGET=EXCEEDED active={active} cap={cap} "
+                  f"wall={timing_field(timing['wall_s'])}")
     return timing
 
 
@@ -3951,6 +4330,7 @@ def before_control(host: Any, args: Any, row: dict, control: dict | None) -> dic
         stopping_action = action in {"reject", "abandon"}
         if not stopping_action:
             require_no_incomplete_scope_amendment(state)
+            require_no_incomplete_pin_amendment(state)
             require_review_policy_integrity(state, row, Path(args.db))
         phase = str(feature.get("phase") or "implement")
         if phase in {"planning", "integration"}:

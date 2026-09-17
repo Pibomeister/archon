@@ -107,5 +107,145 @@ class CrossRepoPartition(unittest.TestCase):
         self.assertIn("FIXER_BLOCKED: cross_repo entry missing producer_repo", r.stderr)
 
 
+class PinConflictPartition(unittest.TestCase):
+    """A P0/P1 whose only repair changes a symbol the spec pinned shut.
+
+    It passes this gate and blocks in converge (row 1), because the resolution is
+    a human act -- revert the hunk, `feature-pin-amend`, or re-plan -- and not
+    another round of the same fixer arguing with the same pin.
+    """
+
+    def run_check(self, obj):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(obj, f)
+            path = f.name
+        try:
+            return subprocess.run(["python3", str(CHECK_FIXER_RESULT), path],
+                                  capture_output=True, encoding="utf-8")
+        finally:
+            Path(path).unlink()
+
+    def base(self, **extra):
+        return {"applied": [], "failed": [], "advisory": [], **extra}
+
+    def test_a_valid_pin_conflict_passes_and_is_counted(self):
+        r = self.run_check(self.base(pin_conflict=[
+            {"finding": "revocation must clear the link", "action": "needs shareGroup",
+             "symbol": "GroupService.shareGroup", "severity": "P1"}]))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("PIN_CONFLICT=1", r.stdout)
+
+    def test_an_absent_partition_counts_zero(self):
+        r = self.run_check(self.base())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("PIN_CONFLICT=0", r.stdout)
+
+    def test_an_entry_without_a_symbol_blocks(self):
+        r = self.run_check(self.base(pin_conflict=[{"finding": "f", "action": "a"}]))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("FIXER_BLOCKED: pin_conflict entry missing symbol", r.stderr)
+
+    def test_a_non_list_partition_blocks(self):
+        r = self.run_check(self.base(pin_conflict={"symbol": "x"}))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("FIXER_BLOCKED: pin_conflict must be a list", r.stderr)
+
+
+class FindingIdRequirement(unittest.TestCase):
+    """The ledger keys on the reviewer's finding_id.
+
+    An entry without one mints a SECOND ledger entry instead of moving the
+    reviewer's to `applied`, and a finding that never reaches `applied` can
+    never reach `closed` -- so positive closure deadlocks on a finding that was
+    in fact repaired. B's replay produced 36 entries from a much smaller real
+    population, with three repaired P1s unclosed at the cap.
+
+    It is a FLAG, not the default, because this script is shared by five lanes
+    and only the v2 claude lane's fixer prompt emits the field. Defaulting it on
+    fails every round in bugfix, lite and web on a contract their prompts were
+    never given.
+    """
+
+    def run_check(self, obj, *flags):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(obj, f)
+            path = f.name
+        try:
+            return subprocess.run(["python3", str(CHECK_FIXER_RESULT), path, *flags],
+                                  capture_output=True, encoding="utf-8")
+        finally:
+            Path(path).unlink()
+
+    def applied(self, entry):
+        return {"applied": [entry], "failed": [], "advisory": []}
+
+    def test_an_entry_with_a_finding_id_passes(self):
+        r = self.run_check(self.applied({"finding_id": "abc123def456", "finding": "f",
+                                         "action": "a", "severity": "P1"}),
+                           "--require-finding-id")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_an_entry_without_one_blocks_under_the_flag(self):
+        r = self.run_check(self.applied({"finding": "f", "action": "a", "severity": "P1"}),
+                           "--require-finding-id")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("FIXER_BLOCKED: applied entry missing finding_id", r.stderr)
+
+    def test_an_empty_finding_id_is_not_a_finding_id(self):
+        r = self.run_check(self.applied({"finding_id": "   ", "finding": "f",
+                                         "action": "a"}), "--require-finding-id")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("missing finding_id", r.stderr)
+
+    def test_every_partition_is_checked_not_just_applied(self):
+        for partition in ("advisory", "deferred", "incomplete", "pin_conflict"):
+            with self.subTest(partition=partition):
+                body = {"applied": [], "failed": [], "advisory": [],
+                        partition: [{"finding": "f", "action": "a", "symbol": "s"}]}
+                r = self.run_check(body, "--require-finding-id")
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn(f"{partition} entry missing finding_id", r.stderr)
+
+    def test_without_the_flag_the_older_lanes_still_pass(self):
+        r = self.run_check(self.applied({"finding": "f", "action": "a", "severity": "P1"}))
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_an_unreadable_result_is_typed_not_a_traceback(self):
+        r = subprocess.run(["python3", str(CHECK_FIXER_RESULT), "/nonexistent/result.json"],
+                           capture_output=True, encoding="utf-8")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("FIXER_BLOCKED: result unreadable", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
+
+class DesignExpandedFlag(unittest.TestCase):
+    """The flag that forces the next round full. A wrong type downgrades it."""
+
+    def run_check(self, applied):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump({"applied": applied, "failed": [], "advisory": []}, f)
+            path = f.name
+        try:
+            return subprocess.run(["python3", str(CHECK_FIXER_RESULT), path],
+                                  capture_output=True, encoding="utf-8")
+        finally:
+            Path(path).unlink()
+
+    def test_a_boolean_flag_passes(self):
+        r = self.run_check([{"finding": "f", "action": "a", "severity": "P1",
+                             "design_expanded": True}])
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_an_absent_flag_passes(self):
+        r = self.run_check([{"finding": "f", "action": "a", "severity": "P1"}])
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_the_string_false_is_not_a_boolean(self):
+        r = self.run_check([{"finding": "f", "action": "a", "severity": "P1",
+                             "design_expanded": "false"}])
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("design_expanded must be a boolean", r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

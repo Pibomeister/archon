@@ -2922,6 +2922,26 @@ def feature_scope_amend_command(args: argparse.Namespace) -> None:
     )
 
 
+def feature_pin_amend_command(args: argparse.Namespace) -> None:
+    """Recovery for a PIN_BREACH on a pin the spec got wrong.
+
+    feature-scope-amend is allowlist-only and cannot say "this symbol may change
+    after all"; without this, the only route past a wrong pin is re-planning the
+    stage. The plan digest is part of the review identity, so the stopped round's
+    completed review is invalidated and re-runs on resume -- intended, because it
+    judged the code against the old pin.
+    """
+    validate_control_location(args.control_dir)
+    row = resolve_run(args.db, args.run_id)
+    result = repository_feature_call("pin_amend_command", args, row)
+    status = "UNCHANGED" if result.get("already_applied") else "APPLIED"
+    print(
+        f"ARCHON_FEATURE_PIN_AMEND={status} "
+        f"chain={result['chain']} run={row['id'][:8]} repo={result['repo']} "
+        f"symbol={result['symbol']} amendment={result['amendment_id']}"
+    )
+
+
 def feature_review_policy_update_command(args: argparse.Namespace) -> None:
     validate_control_location(args.control_dir)
     row = resolve_run(args.db, args.run_id)
@@ -3477,6 +3497,12 @@ def parser() -> argparse.ArgumentParser:
     scope_amend.add_argument("--chain", help="claude chains (no control token): the chain id")
     scope_amend.add_argument("--add-file", required=True)
     scope_amend.add_argument("--reason", required=True)
+    pin_amend = sub.add_parser("feature-pin-amend", help="guarded pinned-symbol amendment for a stopped repository-list feature chain")
+    pin_amend.add_argument("run_id")
+    pin_amend.add_argument("--token", required=True)
+    pin_amend.add_argument("--symbol", required=True)
+    pin_amend.add_argument("--allowed-change", required=True)
+    pin_amend.add_argument("--reason", required=True)
     review_policy_update = sub.add_parser("feature-review-policy-update", help="guarded review policy amendment for a stopped repository-list feature chain")
     review_policy_update.add_argument("run_id")
     review_policy_update.add_argument("--token", required=True)
@@ -3586,6 +3612,9 @@ def main() -> None:
         return
     if args.action == "feature-scope-amend":
         feature_scope_amend_command(args)
+        return
+    if args.action == "feature-pin-amend":
+        feature_pin_amend_command(args)
         return
     if args.action == "feature-review-policy-update":
         feature_review_policy_update_command(args)
