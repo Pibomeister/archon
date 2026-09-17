@@ -431,7 +431,7 @@ sqlite3 ~/.archon/archon.db "update remote_agent_codebases set kind='repo', defa
 | Smoke ports | per run | `setup/port-alloc.sh`, recorded in `params.json` |
 | api/web worktrees | per run | slug-derived, incl. `bugfix-smoke-<slug>` |
 | ce-code-review run dir | **shared** | `head_sha` prefix match only — see below |
-| e2e docker stack | **shared, serialized** | `setup/e2e-mutex.sh` — a typed stop, not a queue |
+| e2e docker stack | **shared, serialized** | `setup/e2e-mutex.sh` — typed stop at human-gated bugfix sites, bounded wait in automated phases |
 | goodword-kb | **shared, scoped gates** | gates match this run's own file |
 
 **Ports.** No lane hardcodes a bind port any more. Preflight passes the lane's
@@ -468,6 +468,38 @@ hours, and blocking would hang a run behind a person.
 
 `smoke-teardown` (`always_run`) releases it. A run that dies before teardown strands
 the lock; the failure message names the owner and prints the `rm -rf` that clears it.
+
+**Automated phases wait instead.** The api integration suite's jest `globalSetup`
+runs `docker-compose -f local-env-compose.e2e.yaml down -v` and then `up`, so any
+`bun run test:integration` destroys a stack another run is using (observed
+2026-09-17: chain 42b42a13's reopened implement session ran one bare, and chain
+7e81a70d's joint integration died a second later with `container postgres-db-e2e
+exited (0)` and `ARCHON_INTEGRATION_TESTS=0`). Where overlap is normal and no human
+holds the stack, the mutex is a bounded blocking wait:
+
+- `run-joint-integration.py` runs `e2e-mutex.sh wait` before the first approved
+  command and `release` in `finally`, for every integration matrix.
+- AI nodes in the feature lanes (full-sdlc-api, -lite, -codex twins) may run an
+  integration spec only as `e2e-mutex.sh run "$ARTIFACTS_DIR" -- bun run
+  test:integration -- <spec>`, which releases on every exit path.
+
+`wait`/`run` poll with jitter up to `ARCHON_E2E_WAIT_SECONDS` (default 1800;
+`ARCHON_E2E_POLL_SECONDS` default 5), printing `E2E_MUTEX=WAITING owner=<dir>
+waited=<N>s` at most once a minute, then `E2E_MUTEX=FAIL timeout ...`.
+`E2E_MUTEX=FAIL cannot create lock` means the lock path is not writable (e.g. a
+sandboxed Codex worker) and does not wait. `acquire` stays non-blocking.
+
+**Stale owners are reclaimed, live ones never.** Both `acquire` and `wait` reclaim a
+lock (`E2E_MUTEX=RECLAIMED stale owner=<dir> status=<s>`) only when the owner's run id
+(its artifacts dir basename) is `completed`, `failed` or `cancelled` in archon.db
+AND the holder pid recorded by `wait`/`run` is gone. An owner archon.db does not
+know (a hand-held lock), an unreadable db, or a live pid is left alone; clear those
+by hand with the printed `rm -rf` once you have checked the holder is gone.
+
+*Known ceiling:* the rule for AI nodes is a prompt contract, not an interception.
+A session that ignores it and runs `bun run test:integration` bare still tears
+the stack down; `test_e2e_mutex_wait.py` only guarantees that no feature-lane
+prompt tells it to.
 
 *Known ceiling:* an **integration-kind repro** reaches the same shared database
 through `.env.e2e` at red-gate, green-check, exit-gate and negcontrol, and does NOT

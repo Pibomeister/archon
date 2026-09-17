@@ -703,7 +703,7 @@ worktrees are still cut under `<repo>/.worktrees/` as before.
 | Path lock, artifacts dir | per run |
 | Smoke ports | per run (`setup/port-alloc.sh`, recorded in `params.json`) |
 | api/web worktrees, incl. `bugfix-smoke-<slug>` | per run |
-| **e2e docker stack (54322/8001)** | **shared, serialized by `setup/e2e-mutex.sh`** |
+| **e2e docker stack (54322/8001)** | **shared, serialized by `setup/e2e-mutex.sh`** (bugfix gates: typed stop; joint integration and wrapped AI integration runs: bounded wait) |
 | **ce-code-review `/tmp` root** | **shared**; only the `head_sha` prefix match separates lanes |
 | **goodword-kb** | shared; the gates are scoped to each run's own file |
 
@@ -931,7 +931,8 @@ tee, quota). Differences that decide supervision calls:
   fresh critic, deliberately, because a resumed round must not be judged by a
   critique written against the pre-edit plan.
 - **`E2E_MUTEX=FAIL`** means another run owns the shared e2e stack (§5a), not that
-  anything is broken. The message names the owner's artifacts dir. Let that run reach
+  anything is broken. `E2E_MUTEX=WAITING` lines in a feature run are normal queueing
+  behind another chain; only `E2E_MUTEX=FAIL timeout` (default 30 min) is a stop. The message names the owner's artifacts dir. Let that run reach
   its smoke gate and approve it, or release by hand once it is gone.
 - **Resume is not arbitrary rewind.** Archon resumes failed loop/node work while
   skipping completed nodes; it cannot safely jump behind a frozen RED or an
