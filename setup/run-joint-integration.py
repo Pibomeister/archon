@@ -474,6 +474,15 @@ def run_commands(artifacts: Path, plan: dict, worktrees: dict[str, Path], candid
     # with the feature budget. params.json is the durable copy.
     env.update(feature_env_all(artifacts))
     env["ARCHON_INTEGRATION_ROOT"] = str(artifacts / "joint-integration-worktrees")
+    # Concurrent chains each get their own smoke port in params.json; without
+    # exporting it every joint e2e booted on the script's fixed default and the
+    # second chain died with "port already in use".
+    try:
+        api_port = json.loads((artifacts / "params.json").read_text(encoding="utf-8")).get("api_port")
+    except (OSError, ValueError):
+        api_port = None
+    if isinstance(api_port, int):
+        env["ARCHON_API_PORT"] = str(api_port)
     for repo, worktree in worktrees.items():
         env[safe_env_name(repo, "WORKTREE")] = str(worktree)
         env[safe_env_name(repo, "COMMIT")] = candidates[repo]["commit"]
