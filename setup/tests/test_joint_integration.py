@@ -242,7 +242,19 @@ class JointIntegrationRunnerTest(unittest.TestCase):
 
     def test_joint_e2e_script_defaults_to_the_exported_port(self):
         script = (Path(__file__).resolve().parents[1] / "joint-api-mcp-e2e.sh").read_text(encoding="utf-8")
-        self.assertIn('PORT="${2:-${ARCHON_API_PORT:-4213}}"', script)
+        self.assertIn('PORT="${ARCHON_API_PORT:-4213}"', script)
+
+    def test_joint_e2e_script_splits_port_from_extra_jest_args(self):
+        script = Path(__file__).resolve().parents[1] / "joint-api-mcp-e2e.sh"
+        head = script.read_text(encoding="utf-8").split('URL="http://localhost:$PORT"')[0]
+        probe = head.split("set -euo pipefail", 1)[1] + '\necho "PORT=$PORT PATTERN=$PATTERN EXTRA=${JEST_EXTRA[*]-}"\n'
+        env = dict(os.environ, ARCHON_API_PORT="4999", ARCHON_REPO_API_WORKTREE="/a", ARCHON_REPO_GOODWORD_MCP_WORKTREE="/m")
+        def run(*args):
+            return subprocess.run(["bash", "-c", "set -euo pipefail" + probe, "x", *args], env=env,
+                                  capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual("PORT=4999 PATTERN=tests/a.ts EXTRA=-t debrief", run("tests/a.ts", "-t", "debrief"))
+        self.assertEqual("PORT=4321 PATTERN=tests/a.ts EXTRA=-t x", run("tests/a.ts", "4321", "-t", "x"))
+        self.assertEqual("PORT=4999 PATTERN=tests/a.ts EXTRA=", run("tests/a.ts"))
 
     def test_runs_structured_command_in_repo_candidate_worktree_with_expanded_refs(self):
         self.write_plan({
