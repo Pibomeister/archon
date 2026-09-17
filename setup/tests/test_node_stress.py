@@ -249,18 +249,35 @@ def review_gate_output(verdict, path):
 class ReviewGateStress(unittest.TestCase):
     """S1: 3 enum verdicts x 3 entry paths x 3 lanes, N runs each."""
 
+    # full-sdlc-api's review-gate hands off to round-state.py after GATE_3, and
+    # that identity gate needs a review-input.json whose id is minted by the
+    # helper from a real candidate. A synthetic fixture cannot produce one
+    # without transcribing the sha256 formula, which would then silently stop
+    # matching the day the formula changed. What this class exists to prove --
+    # that the envelope parse and the ce-code-review run-dir scan are
+    # deterministic across N concurrent runs and that the exit is typed -- is
+    # still proven on that lane, by asserting the GATE_ lines and letting
+    # run_node's own determinism and typed-exit contracts do the rest. GATE_5
+    # itself is exercised for real, seventeen times, by
+    # setup/tests/injection/review-loop-replay.sh.
+    V2 = ("full-sdlc-api",)
+
     def _one(self, workflow, verdict, path):
         r = run_node(
             workflow, "review-gate",
             review_gate_fixture(verdict, path),
             outputs={"review": review_gate_output(verdict, path)},
         )
-        self.assertEqual(r["rc"], 0, r["output"])
-        self.assertIn(f"REVIEW_GATE=PASS round=1", r["output"])
         src = "metadata" if path == "metadata" else "envelope"
         self.assertIn(
             f"GATE_3_verdict_in_enum=PASS verdict=[{verdict}] source={src}", r["output"]
         )
+        if workflow in self.V2:
+            self.assertIn("GATE_1_review_complete_present=PASS", r["output"])
+            self.assertIn("GATE_2_degraded_absent=PASS", r["output"])
+            return r
+        self.assertEqual(r["rc"], 0, r["output"])
+        self.assertIn(f"REVIEW_GATE=PASS round=1", r["output"])
         return r
 
 
@@ -1157,7 +1174,13 @@ def converge_fixture(lane, verdict, fixer=None, dirty=False, cap=None, accept=Fa
 
 
 class ConvergeStress(unittest.TestCase):
-    LANES = ("full-sdlc-api", "bugfix")
+    # bugfix only. full-sdlc-api's converge is one call into round-state.py, and
+    # every assertion below is a v1 contract that lane no longer has: the cap
+    # moved to round-pre, NO_PROGRESS and the bare Ready-converges rule were
+    # replaced by the closure table (RUNBOOK 3c), and convergence now additionally
+    # requires every P0/P1 that entered the ledger to be verified closed. Those
+    # rows are tested against the helper in test_round_state.py.
+    LANES = ("bugfix",)
 
     def test_converged(self):
         for lane in self.LANES:
@@ -1271,7 +1294,16 @@ class ExitGateCounter(unittest.TestCase):
 ROUND_PRE_GUARD = '2>/dev/null | LC_ALL=C sort > "$RD/prerun-dirs.txt"'
 ROUND_PRE_UNGUARDED = '2>/dev/null | sort > "$RD/prerun-dirs.txt"'
 WEB_WT_SUB = []
-ROUND_PRE_LANES = ("full-sdlc-api", "full-sdlc-web", "bugfix")
+# Lanes whose round-pre body still owns the counter and the ce-code-review
+# baseline listing. full-sdlc-api hands both to round-state.py: the counter now
+# advances only on a progressed decision, stdout is the bare JSON decision
+# rather than `ROUND=N head=<sha>`, and the `LC_ALL=C sort` the negative control
+# reverts lives in Python. What that lane still has to guarantee is asserted in
+# RoundPreV2 below -- the baseline file, because review-gate's set-difference is
+# worthless without it, and the JSON line, because an unparseable one silently
+# skips the reviewer.
+ROUND_PRE_LANES = ("full-sdlc-web", "bugfix")
+ROUND_PRE_V2_LANES = ("full-sdlc-api",)
 
 
 def seeded_listing(names):
@@ -1291,8 +1323,14 @@ def round_pre_fixture(seeds=C_ORDER, counter=None):
     def build(tmp):
         art = tmp / "artifacts"
         wt = tmp / "wt"
-        init_worktree(wt)
+        base = init_worktree(wt)
         jdump(art / "params.json", params(tmp, wt))
+        # round-state.py refuses to open a round without an allowlist (an absent
+        # one used to read as "allow nothing", which empties the candidate), and
+        # needs the base and the plan for the review identity's digests.
+        jdump(art / "files-allowlist.json", ["src/foo.ts"])
+        (art / "bootstrap-head.txt").write_text(base + "\n", encoding="utf-8")
+        (art / "plan.md").write_text("# plan\n", encoding="utf-8")
         if counter is not None:
             (art / "round.txt").write_text(f"{counter}\n", encoding="utf-8")
             # round-pre now enforces the durable cap BEFORE spending a round
@@ -1377,11 +1415,50 @@ class RoundPreStress(unittest.TestCase):
         If this ever starts producing C order the fixture stopped reproducing
         and the guard test above is proving nothing."""
         require_locale(self, UTF8_LOCALE)
-        r = self._run("full-sdlc-api", round_pre_fixture(),
+        # bugfix, not full-sdlc-api: the `LC_ALL=C sort` this reverts moved into
+        # round-state.py when that lane's round-pre became one call to the
+        # helper, so the substitution has nothing to target there. Any lane with
+        # the guard in its body proves the guard still bites.
+        r = self._run("bugfix", round_pre_fixture(),
                       env={"LC_ALL": UTF8_LOCALE},
                       subs=[(ROUND_PRE_GUARD, ROUND_PRE_UNGUARDED)])
         self.assertEqual(r["files"]["round-1/prerun-dirs.txt"],
                          seeded_listing(tuple(reversed(C_ORDER))))
+
+
+class RoundPreV2(unittest.TestCase):
+    """full-sdlc-api's round-pre: what it still owes review-gate, N runs each."""
+
+    def test_the_baseline_listing_is_written_and_c_ordered(self):
+        # review-gate takes the set difference of this against a post-review
+        # listing to find THIS round's ce-code-review run directory. A missing
+        # or differently-collated baseline makes a pre-existing directory look
+        # new, and the gate then reads a foreign run's verdict.
+        for lane in ROUND_PRE_V2_LANES:
+            with self.subTest(lane=lane):
+                r = run_node(lane, "round-pre", round_pre_fixture())
+                self.assertEqual(r["rc"], 0, r["output"])
+                self.assertEqual(r["files"]["round-1/prerun-dirs.txt"],
+                                 seeded_listing(C_ORDER))
+
+    def test_an_empty_ce_review_root_yields_an_empty_file_not_a_missing_one(self):
+        # Empty and absent mean different things to the gate: empty is "nothing
+        # existed before the review", absent is "no baseline was taken", and the
+        # gate skips its scan entirely on the second rather than treating every
+        # directory on the host as new.
+        for lane in ROUND_PRE_V2_LANES:
+            with self.subTest(lane=lane):
+                r = run_node(lane, "round-pre", round_pre_fixture(seeds=()))
+                self.assertEqual(r["rc"], 0, r["output"])
+                self.assertEqual(r["files"]["round-1/prerun-dirs.txt"], "")
+
+    def test_stdout_is_one_parseable_json_decision(self):
+        import json as _json
+        for lane in ROUND_PRE_V2_LANES:
+            with self.subTest(lane=lane):
+                r = run_node(lane, "round-pre", round_pre_fixture())
+                decision = _json.loads(r["output"].strip().splitlines()[0])
+                self.assertIn(decision["review"], ("run", "reuse"))
 
 
 # ==========================================================================
@@ -1507,12 +1584,16 @@ class ReviewGateSharedRoot(unittest.TestCase):
         r = run_node("full-sdlc-api", "review-gate", build,
                      outputs={"review": envelope_with("Ready to merge")},
                      env={"CE_REVIEW_ROOT": str(shared)})
-        self.assertEqual(r["rc"], 0, r["output"])
+        # What this proves is `rundir=[]`: N concurrent repetitions sharing one
+        # root all declined the foreign run, and did so identically. The node
+        # goes on to fail GATE_5, because a synthetic fixture has no
+        # review-input.json and this class is not where that is tested -- but
+        # the scan's verdict is already decided by then, and run_node has
+        # already enforced that the exit is typed and every run identical.
         self.assertEqual(r["identical"], r["n"])
         self.assertIn(
             "GATE_3_verdict_in_enum=PASS verdict=[Ready to merge] "
             "source=envelope rundir=[]", r["output"])
-        self.assertIn("REVIEW_GATE=PASS round=1", r["output"])
 
 
 # ==========================================================================
