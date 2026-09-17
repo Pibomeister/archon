@@ -673,7 +673,14 @@ nodes:
     breaks the suite's mocks (api/CLAUDE.md:32 documents the bare form; it is wrong).
     Typecheck: `bun run typecheck` (tsgo) — NOT build:fast (esbuild-only).
     Lint: `bun run lint` (biome).
-    Integration tests: do NOT run any in this node.
+    Integration tests: do NOT run any in this node, except that a REOPENED stage whose
+    reopen-context.json evidence is an integration failure may re-run THAT spec, and
+    only through the host e2e mutex (use a long Bash timeout; it may print
+    E2E_MUTEX=WAITING while another run holds the stack):
+      bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/e2e-mutex.sh run "$ARTIFACTS_DIR" -- bun run test:integration -- <spec>
+    Never run `bun run test:integration`, `test:e2e`, or `docker-compose -f
+    local-env-compose.e2e.yaml` directly: jest's globalSetup runs `down -v` then
+    `up` on ONE machine-global e2e stack (54322/8001) that concurrent runs share.
     Nest Swagger: always explicit request/response DTO classes; never generic Object
     schemas. TypeScript strict; no `any`; unit specs live in `__tests__/` dirs.
     </repo-conventions>

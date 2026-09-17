@@ -1569,7 +1569,14 @@ nodes:
     breaks the suite's mocks (api/CLAUDE.md:32 documents the bare form; it is wrong).
     Typecheck: `bun run typecheck` (tsgo) — NOT build:fast (esbuild-only).
     Lint: `bun run lint` (biome).
-    Integration tests: do NOT run any in this node.
+    Integration tests: do NOT run any in this node, except that a REOPENED stage whose
+    reopen-context.json evidence is an integration failure may re-run THAT spec, and
+    only through the host e2e mutex (use a long Bash timeout; it may print
+    E2E_MUTEX=WAITING while another run holds the stack):
+      bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/e2e-mutex.sh run "$ARTIFACTS_DIR" -- bun run test:integration -- <spec>
+    Never run `bun run test:integration`, `test:e2e`, or `docker-compose -f
+    local-env-compose.e2e.yaml` directly: jest's globalSetup runs `down -v` then
+    `up` on ONE machine-global e2e stack (54322/8001) that concurrent runs share.
     Nest Swagger: always explicit request/response DTO classes; never generic Object
     schemas. TypeScript strict; no `any`; unit specs live in `__tests__/` dirs.
     </repo-conventions>
@@ -1750,7 +1757,9 @@ nodes:
                             verify.json in the artifacts directory.
     NEVER run bare `bun test`: `test` is a bun builtin, so the bare form runs
     bun's own runner instead of jest and silently breaks the suite's mocks.
-    Do not run integration tests in this node.
+    Do not run integration tests in this node. If any other node ever must, it runs
+    them only as `bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/e2e-mutex.sh run "$ARTIFACTS_DIR" -- bun run test:integration -- <spec>`
+    (never bare: jest globalSetup tears down the machine-global e2e stack).
 
     Write deslop-result.json to the artifacts directory, with exactly this shape:
       {"changed_files": ["<repo-relative>", ...],
@@ -1855,7 +1864,8 @@ nodes:
         For a run whose params.json "repo" is not "api", use that repository's
         commands, listed under ## Verification in plan.md, and omit any command the
         repository does not have. NEVER run bare `bun test`. Do not run integration
-        tests. The next node re-runs every check authoritatively either way.
+        tests (bare `bun run test:integration` tears down the machine-global e2e
+        stack other runs are using). The next node re-runs every check authoritatively either way.
 
         Do NOT edit deslop-result.json. It is the writer's declaration and is
         frozen after the first recheck: the next node fails the run if it changed

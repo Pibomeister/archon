@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Bounded blocking e2e-mutex (wait/run) and its stale-owner recovery."""
 import os
+import re
 import sqlite3
 import subprocess
 import tempfile
@@ -10,6 +11,14 @@ from pathlib import Path
 
 
 SETUP = Path(__file__).resolve().parents[1]
+WORKFLOWS = SETUP.parent / "workflows"
+FEATURE_LANES = ("full-sdlc-api", "full-sdlc-api-lite", "full-sdlc-api-codex", "full-sdlc-api-lite-codex")
+# Every way a feature-lane prompt may name the api integration suite: through the
+# mutex wrapper, inside a prohibition, or as the planner's joint-integration argv
+# (run-joint-integration.py holds the mutex for those).
+ALLOWED_INTEGRATION_MENTION = re.compile(
+    r"e2e-mutex\.sh run|Never run `bun run test:integration`|bare `bun run test:integration`"
+    r"|jest command argv is bun run test:integration")
 SCRIPT = SETUP / "e2e-mutex.sh"
 LIVE_RUN = "11111111-1111-1111-1111-111111111111"
 DEAD_RUN = "22222222-2222-2222-2222-222222222222"
@@ -153,6 +162,26 @@ class E2eMutexWaitTest(unittest.TestCase):
         self.assertEqual(1, r.returncode, r.stdout)
         self.assertIn("E2E_MUTEX=FAIL cannot create lock", r.stdout)
         self.assertLess(time.monotonic() - start, 10, "waited on a lock it can never create")
+
+
+def bare_integration_mentions(text):
+    return [line.strip() for line in text.splitlines()
+            if "test:integration" in line and not ALLOWED_INTEGRATION_MENTION.search(line)]
+
+
+class FeatureLanePromptsRouteIntegrationThroughTheMutex(unittest.TestCase):
+    def test_no_feature_lane_names_a_bare_integration_run(self):
+        for lane in FEATURE_LANES:
+            with self.subTest(lane=lane):
+                text = (WORKFLOWS / f"{lane}.yaml").read_text(encoding="utf-8")
+                self.assertIn("e2e-mutex.sh run \"$ARTIFACTS_DIR\" -- bun run test:integration", text)
+                self.assertEqual([], bare_integration_mentions(text))
+
+    def test_negative_control_an_unwrapped_command_is_caught(self):
+        text = (WORKFLOWS / "full-sdlc-api.yaml").read_text(encoding="utf-8")
+        mutated = re.sub(r'bash \S+e2e-mutex\.sh run "\$ARTIFACTS_DIR" -- (?=bun run test:integration)', "", text, count=1)
+        self.assertNotEqual(text, mutated, "mutation anchor no longer matches")
+        self.assertNotEqual([], bare_integration_mentions(mutated))
 
 
 if __name__ == "__main__":
