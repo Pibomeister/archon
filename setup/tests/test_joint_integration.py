@@ -287,7 +287,7 @@ class JointIntegrationRunnerTest(unittest.TestCase):
         self.assertIn("CANDIDATE_ENV=PASS repo=api", result.stdout)
         report = json.loads((self.artifacts / "joint-integration-result.json").read_text(encoding="utf-8"))
         self.assertEqual(
-            {"node_modules": "linked:" + str(self.root / "api" / "node_modules")},
+            {"node_modules": "linked:" + str(self.root.resolve() / "api" / "node_modules")},
             report["candidate_environments"]["api"]["deps"],
         )
         self.assertEqual([], list(report["candidate_environments"]["goodword-mcp"]["env_files"]))

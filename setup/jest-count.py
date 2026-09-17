@@ -29,7 +29,10 @@ def main(argv: list[str]) -> int:
         try:
             with open(report, encoding="utf-8") as handle:
                 data = json.load(handle)
-            passed, failed = int(data.get("numPassedTests", 0)), int(data.get("numFailedTests", 0))
+            passed = int(data.get("numPassedTests", 0))
+            # A suite that fails to compile or load reports numFailedTests=0.
+            failed = (int(data.get("numFailedTests", 0)) + int(data.get("numRuntimeErrorTestSuites", 0))
+                      + (0 if data.get("success", True) else 1))
         except (OSError, ValueError):
             passed, failed = 0, 1
     finally:

@@ -281,6 +281,10 @@ class JointIntegrationFallbackTest(unittest.TestCase):
         (repo / "candidate.txt").write_text(name + "\n")
         subprocess.run(["git", "-C", str(repo), "add", "candidate.txt"], env=self.env, check=True)
         subprocess.run(["git", "-C", str(repo), "commit", "-qm", "candidate"], env=self.env, check=True)
+        # The root clone's untracked runtime state candidate_env.py resolves.
+        (repo / "node_modules").mkdir()
+        for env_file in (".env", ".env.e2e"):
+            (repo / env_file).write_text(name + "\n")
         return subprocess.check_output(
             ["git", "-C", str(repo), "rev-parse", "HEAD"], env=self.env, text=True).strip()
 

@@ -39,9 +39,12 @@ class CandidateEnvError(Exception):
 
 def load_profile(repo: str) -> dict:
     out = subprocess.run(["bash", str(HERE / "repo-profile.sh"), "--json"], capture_output=True, encoding="utf-8")
-    if out.returncode != 0:
-        raise CandidateEnvError("repo-profile.sh --json failed")
-    profile = json.loads(out.stdout)["profiles"].get(repo)
+    try:
+        if out.returncode != 0:
+            raise ValueError(out.stderr.strip())
+        profile = json.loads(out.stdout)["profiles"].get(repo)
+    except (ValueError, KeyError) as exc:
+        raise CandidateEnvError(f"repo-profile.sh --json unusable: {exc}") from exc
     if profile is None:
         raise CandidateEnvError(f"unknown repo {repo}")
     return profile
@@ -83,31 +86,44 @@ def install(target: Path, profile: dict, name: str) -> str:
     return "installed"
 
 
+def link(target: Path, name: str, owner: Path) -> str:
+    (target / name).symlink_to(owner / name)
+    if not (target / name).exists():
+        raise CandidateEnvError(f"{name}: link to {owner / name} does not resolve")
+    return f"linked:{owner / name}"
+
+
+def present(target: Path, name: str) -> bool:
+    entry = target / name
+    if entry.is_symlink() and not entry.exists():
+        raise CandidateEnvError(f"{name}: {entry} is a dangling symlink to {entry.readlink()}")
+    return entry.exists()
+
+
 def resolve_dep(name: str, target: Path, roots: list[Path], profile: dict) -> str:
-    if (target / name).exists():
+    if present(target, name):
         return "present"
     owners = [root for root in roots if (root / name).is_dir()]
     for owner in owners:
         if manifests_match(owner, target, profile):
-            (target / name).symlink_to(owner / name)
-            return f"linked:{owner / name}"
+            return link(target, name, owner)
     if not profile["install"]:
         raise CandidateEnvError(f"{name}: not found in {[str(r) for r in roots]} and the profile declares no install")
     return install(target, profile, name)
 
 
 def resolve_env_file(name: str, target: Path, roots: list[Path]) -> str:
-    if (target / name).exists():
+    if present(target, name):
         return "present"
     for root in roots:
         if (root / name).is_file():
-            (target / name).symlink_to(root / name)
-            return f"linked:{root / name}"
+            return link(target, name, root)
     raise CandidateEnvError(f"{name}: not found in {[str(r) for r in roots]}")
 
 
 def prepare(repo: str, target: Path, source: Path) -> dict:
     profile = load_profile(repo)
+    target, source = target.resolve(), source.resolve()
     if not target.is_dir():
         raise CandidateEnvError(f"target worktree missing: {target}")
     if not source.is_dir():

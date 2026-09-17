@@ -96,6 +96,19 @@ class CandidateEnv(Fixture):
         self.assertIn(str(self.source), message)
         self.assertIn(str(self.clone), message)
 
+    def test_a_dangling_link_in_the_target_is_a_typed_failure(self):
+        (self.target / ".env.e2e").symlink_to(self.root / "moved-away")
+        with self.assertRaisesRegex(ce.CandidateEnvError, r"repo=api \.env\.e2e: .* is a dangling symlink"):
+            ce.prepare("api", self.target, self.source)
+
+    def test_relative_paths_still_produce_resolving_links(self):
+        (self.source / ".env.e2e").write_text("E2E=stage\n")  # found first, so linked via the relative source
+        cwd = os.getcwd()
+        os.chdir(self.root)
+        self.addCleanup(os.chdir, cwd)
+        ce.prepare("api", self.target.relative_to(self.root), self.source.relative_to(self.root))
+        self.assertEqual("E2E=stage\n", (self.target / ".env.e2e").read_text())
+
     def test_changed_lockfile_installs_instead_of_linking_stale_dependencies(self):
         (self.target / "bun.lock").write_text("lock-v2\n")
         self.shim_bun('mkdir node_modules && echo "$@" > node_modules/installed-with\n')
@@ -187,6 +200,20 @@ class JestCount(unittest.TestCase):
         result = self.run_count(3, 1)
         self.assertEqual(1, result.returncode)
         self.assertIn("JEST_COUNT=FAIL passed=3 failed=1", result.stdout)
+
+    def test_a_suite_that_failed_to_load_cannot_pass(self):
+        with tempfile.TemporaryDirectory() as td:
+            fake = Path(td) / "fake-jest.py"
+            fake.write_text(
+                "import json, sys\n"
+                "out = sys.argv[sys.argv.index('--outputFile') + 1]\n"
+                "json.dump({'numPassedTests': 5, 'numFailedTests': 0, 'numRuntimeErrorTestSuites': 1,"
+                " 'success': False}, open(out, 'w'))\n"
+            )
+            result = subprocess.run([sys.executable, str(SETUP / "jest-count.py"), sys.executable, str(fake)],
+                                    capture_output=True, text=True)
+        self.assertEqual(1, result.returncode)
+        self.assertIn("JEST_COUNT=FAIL passed=5", result.stdout)
 
     def test_zero_passed_cannot_pass(self):
         self.assertEqual(1, self.run_count(0, 0).returncode)
