@@ -190,6 +190,14 @@ MANIFEST=(
   setup/review-contract.md
   # The live-acceptance checker, moved into the repo from the Goodword root.
   setup/chain-acceptance.py
+  # Prompt bodies, and the step that splices them into the lane. The review
+  # MODE is named in embed-prompts.py and nowhere else; `--check` is what stops
+  # an edited prompt from looking landed while the lane runs the old text.
+  setup/embed-prompts.py
+  setup/prompts/review-trio.md
+  setup/prompts/review-capped.md
+  setup/prompts/review-verify.md
+  setup/prompts/docreview-bounded.md
   setup/mcp-smoke.sh
   setup/codex-usage.py
   setup/codex-watchdog.sh
