@@ -2448,7 +2448,7 @@ nodes:
   - id: reader-audit
     depends_on: [deslop-verify]
     model: sonnet
-    maxBudgetUsd: 3
+    maxBudgetUsd: 8
     timeout: 1200000
     prompt: |
       You are the reader-audit node: when a diff changes what a DB column's
