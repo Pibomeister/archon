@@ -506,6 +506,28 @@ class FeatureChainV2(unittest.TestCase):
         self.assertEqual(params["feature_previous_head"], baseline)
         self.assertEqual(git(worktree, "rev-parse", "HEAD"), candidate)
 
+    def test_reopen_refuses_a_first_failure_stage_whose_run_is_not_stopped(self):
+        state, _worktree = self.failed_first_stage()
+        chain_id = state["logical_chain_id"]
+        # The stage status alone is not the evidence: the run row decides. A running
+        # row is caught before the status check, a paused one by it.
+        self.host.run_row_by_id = lambda db, run_id: {"status": "running"}
+        with self.assertRaisesRegex(fc.FeatureChainError, "still running"):
+            fc.reopen(self.host, self.args, chain_id, "api", "mid-flight")
+        self.host.run_row_by_id = lambda db, run_id: {"status": "paused"}
+        with self.assertRaisesRegex(fc.FeatureChainError, "failed, cancelled"):
+            fc.reopen(self.host, self.args, chain_id, "api", "waiting at a gate")
+
+    def test_reopen_refuses_a_first_failure_repo_whose_stage_is_running(self):
+        state, _worktree = self.failed_first_stage()
+        chain_id = state["logical_chain_id"]
+        with fc.chain_lock(self.control, chain_id):
+            latest = fc.read_state(self.control, chain_id)
+            latest["stages"]["api"]["status"] = "running"
+            fc.write_state(self.control, latest)
+        with self.assertRaisesRegex(fc.FeatureChainError, "not verified"):
+            fc.reopen(self.host, self.args, chain_id, "api", "stage is not stopped")
+
     def test_reopen_still_refuses_a_pending_stage_that_never_ran(self):
         launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
         chain_id = launched["state"]["logical_chain_id"]
