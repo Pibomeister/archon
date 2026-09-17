@@ -533,6 +533,12 @@ class FeatureChainV2(unittest.TestCase):
         state = self.locally_verified_chain(finalize=False)
         chain_id = state["logical_chain_id"]
         api_head = state["candidate_handoffs"]["api"]["candidate_head"]
+        integration_dir = Path(state["current_run"]["artifacts_dir"])
+        (integration_dir / "joint-integration-1.log").write_text("got 500\n", encoding="utf-8")
+        with fc.chain_lock(self.control, chain_id):
+            latest = fc.read_state(self.control, chain_id)
+            latest.setdefault("phase_runs", []).append(dict(latest["current_run"]))
+            fc.write_state(self.control, latest)
         with mock.patch("builtins.print"):
             fc.reopen(self.host, self.args, chain_id, "api", "first reason")
         stopped = fc.read_state(self.control, chain_id)["current_run"]
@@ -545,6 +551,8 @@ class FeatureChainV2(unittest.TestCase):
         self.assertEqual(latest["reopens"][1]["stopped_run_id"], stopped["run_id"])
         context = json.loads((Path(self.host.calls[-1][3]["output_root"]) / "reopen-context.json").read_text(encoding="utf-8"))
         self.assertEqual((context["reason"], context["previous_head"]), ("second reason", api_head))
+        # The stopped reopen run has no integration evidence; the first reopen's does.
+        self.assertEqual(context["evidence"], [str(integration_dir / "joint-integration-1.log")])
         self.assertNotEqual(latest["current_run"]["run_id"], stopped["run_id"])
 
     def test_an_implementing_stage_that_was_never_reopened_is_not_reopenable(self):

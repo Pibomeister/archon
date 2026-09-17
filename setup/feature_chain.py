@@ -4388,6 +4388,13 @@ def reopen_evidence(artifacts_dir: Any) -> list[str]:
     return [str(path) for path in found if path.is_file()]
 
 
+def phase_run_artifacts(state: dict, run_id: Any) -> str | None:
+    for entry in reversed(state.get("phase_runs") or []):
+        if isinstance(entry, dict) and entry.get("run_id") == run_id:
+            return entry.get("artifacts_dir")
+    return None
+
+
 def reopen_context(record: dict, previous_head: str | None) -> dict:
     """The reopen reason as mandatory implement-node input, stored with its sha256
     so the dispatched artifact is bound the same way operator guidance is."""
@@ -4451,12 +4458,17 @@ def reopen(host: Any, args: Any, chain_id: str, repo: str, reason: str, verify_o
         previous_heads = dict(prior["previous_heads"]) if again else {}
         previous_heads.update({r: state["candidate_handoffs"][r]["candidate_head"] for r in affected if r in state["candidate_handoffs"]})
         stopped_artifacts = current.get("artifacts_dir")
+        evidence = reopen_evidence(stopped_artifacts)
+        if again:
+            # A stopped reopen run left no integration evidence of its own; the
+            # failure the stage still has to fix is in the first reopen's stopped run.
+            evidence = reopen_evidence(phase_run_artifacts(state, prior.get("stopped_run_id"))) + evidence
         record = {
             "repo": repo, "reason": reason.strip(), "affected": affected,
             "previous_heads": previous_heads,
             "stopped_run_id": current.get("run_id"), "reopened_at": now(),
             "stopped_run_artifacts": stopped_artifacts,
-            "evidence": reopen_evidence(stopped_artifacts),
+            "evidence": list(dict.fromkeys(evidence)),
         }
         record["verify_only"] = verify_only
         for name in affected:
