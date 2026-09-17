@@ -715,8 +715,9 @@ nodes:
             normalization into consumer decisions, including collapsed errors;
             a consumer cannot distinguish information discarded by its client.
 
-            If operator-guidance.md exists in the artifacts directory, read it: a
-            human operator's approach direction for this replan. It ranks below
+            If feature-chain-request.json in the artifacts directory names
+            operator_guidance, read operator-guidance.md there: a human operator's
+            approach direction for this replan. Ignore that file otherwise. It ranks below
             the spec for scope and above planner judgment for approach, so an
             approach choice the guidance dictates is not a finding unless it
             contradicts the spec (then raise it, quoting both).
@@ -844,8 +845,8 @@ nodes:
             artifact paths, optional export.argv, and integration {repo, argv};
             prose commands do not add hooks. Trace error normalization in clients
             before claiming distinct consumer handling.
-            If operator-guidance.md exists in the artifacts directory, a revision
-            must keep honoring it (below the spec for scope, above your judgment
+            If feature-chain-request.json names operator_guidance, a revision
+            must keep honoring operator-guidance.md (below the spec for scope, above your judgment
             for approach); a finding that asks you to undo it without citing the
             spec is declined, citing a verbatim quote from operator-guidance.md.
 
@@ -913,6 +914,8 @@ nodes:
               *) echo "PLAN_CONVERGE=FAIL unknown verdict [$V] round=$N"; exit 1 ;;
             esac
             test -s "$RD/revision.json" || { echo "PLAN_CONVERGE=FAIL no revision.json round=$N"; exit 1; }
+            # Written only by the cap route below, for THIS round; never inherit one.
+            rm -f "$ARTIFACTS_DIR/plan-cap-unverified.json"
             # 1. REJECT is a typed human stop. A one-unit plan has no automatic
             # transformation into a differently shaped one, so nothing here can fix it.
             # plan-revise is told to be a no-op on REJECT, but a prompt is a request,
@@ -1060,6 +1063,8 @@ nodes:
                         conf = int(str(x.get("confidence")))
                     except (TypeError, ValueError, AttributeError):
                         return None
+                    if x.get("severity") not in ("P0", "P1", "P2"):
+                        return None  # fail closed: an unknown severity is never routed
                     if x.get("severity") in severities and conf >= 75:
                         picked.append(x)
                 return picked
@@ -1072,8 +1077,18 @@ nodes:
             raised = blocking(findings, ("P0", "P1"))
             declined = blocking(revision.get("declined"), ("P0", "P1"))
             applied = blocking(revision.get("applied"), ("P1",))
-            if None in (open_p0, raised, declined, applied) or open_p0 or declined or len(applied) < len(raised):
+            if None in (open_p0, raised, declined, applied) or open_p0 or declined:
                 print("no"); sys.exit(0)
+            # One applied row per raised finding, matched on the fields the reviser
+            # is told to copy unchanged; a count alone lets a duplicated row stand
+            # in for a finding nobody answered.
+            unmatched = list(applied)
+            for finding in raised:
+                key = (finding.get("kind"), finding.get("section"), finding.get("severity"))
+                hit = next((row for row in unmatched if (row.get("kind"), row.get("section"), row.get("severity")) == key), None)
+                if hit is None:
+                    print("no"); sys.exit(0)
+                unmatched.remove(hit)
             json.dump({"round": int(n), "cap": int(cap), "unverified_applied": applied}, open(out, "w", encoding="utf-8"), indent=2)
             print(len(applied))
             PY
@@ -1249,7 +1264,7 @@ nodes:
       Identity by label, never color alone. Real names and paths only.
       <!-- PLAN --> The full plan, restyled for reading: keep every path,
       command, number, and decision VERBATIM, but present the prose cleanly.
-      If operator-guidance.md exists in the artifacts directory, OPEN this
+      If feature-chain-request.json names operator_guidance, OPEN this
       section with an element carrying data-operator-guidance="<sha256>" (the
       lowercase SHA-256 of that file's bytes, as operator_guidance.sha256 in
       feature-chain-request.json records it)
@@ -1336,9 +1351,18 @@ nodes:
         grep -qF "archon workflow $v" "$H" || { echo "RENDER_GATE=FAIL DECIDE box missing the $v command"; exit 1; }
       done
       cmp -s "$ARTIFACTS_DIR/plan.md" "$ARTIFACTS_DIR/plan.post-docreview.md" || { echo "RENDER_GATE=FAIL renderer modified plan.md"; exit 1; }
-      if [ -f "$ARTIFACTS_DIR/operator-guidance.md" ]; then
-        GSHA=$(python3 -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" "$ARTIFACTS_DIR/operator-guidance.md")
-        grep -qF "data-operator-guidance=\"$GSHA\"" "$H" || { echo "RENDER_GATE=FAIL operator-guidance.md present but the PLAN section does not show it (sha256 $GSHA)"; exit 1; }
+      # Operator guidance is bound to the hash the controller recorded in the
+      # planning request, never to the file merely existing: a planning session
+      # can write, edit or delete a file in its own artifacts directory.
+      GREQ=$(python3 -c "import json,os,sys; p=sys.argv[1]; print(((json.load(open(p)).get('operator_guidance') or {}).get('sha256') or '') if os.path.exists(p) else '')" "$ARTIFACTS_DIR/feature-chain-request.json")
+      G="$ARTIFACTS_DIR/operator-guidance.md"
+      if [ -z "$GREQ" ]; then
+        test ! -e "$G" || { echo "RENDER_GATE=FAIL operator-guidance.md present but feature-chain-request.json records no operator_guidance"; exit 1; }
+      else
+        test -f "$G" || { echo "RENDER_GATE=FAIL operator guidance $GREQ recorded but operator-guidance.md is missing"; exit 1; }
+        GSHA=$(python3 -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" "$G")
+        test "$GSHA" = "$GREQ" || { echo "RENDER_GATE=FAIL operator-guidance.md sha256 $GSHA does not match the recorded $GREQ"; exit 1; }
+        grep -qF "data-operator-guidance=\"$GREQ\"" "$H" || { echo "RENDER_GATE=FAIL operator guidance $GREQ is not shown in the PLAN section"; exit 1; }
       fi
       if [ -f "$ARTIFACTS_DIR/plan-cap-unverified.json" ]; then
         grep -q 'data-cap-unverified' "$H" || { echo "RENDER_GATE=FAIL plan-cap-unverified.json present but the CRITIC section does not flag the un-recritiqued revision"; exit 1; }

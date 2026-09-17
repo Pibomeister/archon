@@ -104,6 +104,26 @@ class PlanAccept(unittest.TestCase):
         self.assertIn("PLAN_ROUND_CAP round=1 cap=1", r.stdout)
         self.assertFalse((self.ad / "plan-cap-unverified.json").exists())
 
+    def test_a_duplicated_applied_row_cannot_stand_in_for_an_unanswered_finding(self):
+        other = dict(self.P1, kind="gap", section="## Approach")
+        self.critique([self.P1, other])
+        self.revision(applied=[self.P1, self.P1])
+        r = self.go()
+        self.assertIn("PLAN_ROUND_CAP round=1 cap=1", r.stdout)
+        self.assertFalse((self.ad / "plan-cap-unverified.json").exists())
+
+    def test_an_unknown_severity_is_never_routed(self):
+        self.critique([dict(self.P1, severity="p0")])
+        self.revision(applied=[self.P1])
+        self.assertIn("PLAN_ROUND_CAP round=1 cap=1", self.go().stdout)
+
+    def test_a_stale_marker_from_an_earlier_route_is_removed(self):
+        (self.ad / "plan-cap-unverified.json").write_text('{"round": 0}')
+        self.critique([dict(self.P1, severity="P0")])
+        self.revision(applied=[dict(self.P1, severity="P0")])
+        self.go()
+        self.assertFalse((self.ad / "plan-cap-unverified.json").exists())
+
     def test_cap_never_routes_a_p0_even_when_applied(self):
         p0 = dict(self.P1, severity="P0", confidence=100)
         self.critique([p0])
@@ -123,7 +143,7 @@ class PlanAccept(unittest.TestCase):
 class RenderGateCapFlag(unittest.TestCase):
     """plan-render-gate: a cap-routed plan reaches the human only with the flag."""
 
-    def run_gate(self, marker_file, html_flag, guidance=None, guidance_attr=None):
+    def run_gate(self, marker_file, html_flag, guidance=None, guidance_attr=None, recorded=None):
         doc = yaml.safe_load((ARCHON / "workflows" / "full-sdlc-api.yaml").read_text(encoding="utf-8"))
         body = next(n for n in doc["nodes"] if n["id"] == "plan-render-gate")["bash"]
         body = body.replace('OPENER="$(command -v xdg-open 2>/dev/null || command -v open 2>/dev/null || true)"', 'OPENER=""')
@@ -137,6 +157,8 @@ class RenderGateCapFlag(unittest.TestCase):
         (ad / "plan-review.html").write_text(f"{sections}{flag}{ad.name} {commands}")
         if marker_file:
             (ad / "plan-cap-unverified.json").write_text('{"round": 3}')
+        if recorded is not None:
+            (ad / "feature-chain-request.json").write_text(json.dumps({"operator_guidance": {"sha256": recorded}}))
         if guidance is not None:
             (ad / "operator-guidance.md").write_text(guidance)
             if guidance_attr:
@@ -149,14 +171,30 @@ class RenderGateCapFlag(unittest.TestCase):
         self.assertEqual(1, r.returncode)
         self.assertIn("RENDER_GATE=FAIL plan-cap-unverified.json present", r.stdout)
 
-    def test_replan_guidance_must_be_shown_with_its_hash(self):
-        text = "The week window must look ahead, not back.\n"
-        sha = hashlib.sha256(text.encode()).hexdigest()
-        missing = self.run_gate(False, False, guidance=text)
-        self.assertEqual(1, missing.returncode)
-        self.assertIn(f"operator-guidance.md present but the PLAN section does not show it (sha256 {sha})", missing.stdout)
-        self.assertEqual(1, self.run_gate(False, False, guidance=text, guidance_attr="0" * 64).returncode)
-        self.assertEqual(0, self.run_gate(False, False, guidance=text, guidance_attr=sha).returncode)
+    GUIDANCE = "The week window must look ahead, not back.\n"
+    GSHA = hashlib.sha256(GUIDANCE.encode()).hexdigest()
+
+    def test_recorded_guidance_must_be_shown_with_its_recorded_hash(self):
+        ok = self.run_gate(False, False, guidance=self.GUIDANCE, guidance_attr=self.GSHA, recorded=self.GSHA)
+        self.assertEqual(0, ok.returncode, ok.stdout)
+        hidden = self.run_gate(False, False, guidance=self.GUIDANCE, recorded=self.GSHA)
+        self.assertIn(f"operator guidance {self.GSHA} is not shown in the PLAN section", hidden.stdout)
+        self.assertEqual(1, hidden.returncode)
+
+    def test_guidance_the_controller_did_not_record_is_refused(self):
+        forged = self.run_gate(False, False, guidance=self.GUIDANCE, guidance_attr=self.GSHA)
+        self.assertEqual(1, forged.returncode)
+        self.assertIn("feature-chain-request.json records no operator_guidance", forged.stdout)
+
+    def test_edited_or_deleted_recorded_guidance_is_refused(self):
+        edited = "Look back instead.\n"
+        changed = self.run_gate(False, False, guidance=edited,
+                                guidance_attr=hashlib.sha256(edited.encode()).hexdigest(), recorded=self.GSHA)
+        self.assertEqual(1, changed.returncode)
+        self.assertIn(f"does not match the recorded {self.GSHA}", changed.stdout)
+        deleted = self.run_gate(False, False, recorded=self.GSHA)
+        self.assertEqual(1, deleted.returncode)
+        self.assertIn("operator-guidance.md is missing", deleted.stdout)
 
     def test_flagged_or_uncapped_packets_pass(self):
         self.assertEqual(0, self.run_gate(marker_file=True, html_flag=True).returncode)

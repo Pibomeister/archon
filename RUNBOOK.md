@@ -1370,9 +1370,10 @@ planning generation, and written into the new planning run as
 The launch line prints `guidance=<sha256|none>`. Authority: below the spec for
 scope and requirements (it cannot add or drop a requirement, repository, or
 acceptance criterion), above prior planning evidence and planner judgment for
-approach. The planner, critic and reviser all read it; `plan-render-gate` fails
-unless the packet's PLAN section quotes it under
-`data-operator-guidance="<sha256>"`, and approval binds the file with the other
+approach. The planner, critic and reviser read it only when the request records
+it; `plan-render-gate` fails unless `operator-guidance.md` exists exactly when the
+request records `operator_guidance`, matches that sha256, and is quoted in the
+packet's PLAN section under `data-operator-guidance="<sha256>"`, and approval binds the file with the other
 planning artifacts. A later replan without the flag keeps the recorded guidance;
 pass a new file to replace it. No other replan-time channel exists: the plan
 gate's reject-with-reason needs a run paused at that gate, `feature-scope-amend`

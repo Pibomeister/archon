@@ -1457,7 +1457,7 @@ def write_operator_guidance(artifacts_dir: Path, state: dict) -> dict | None:
     if not guidance:
         return None
     path = artifacts_dir / OPERATOR_GUIDANCE_ARTIFACT
-    path.write_text(guidance["content_text"], encoding="utf-8")
+    path.write_bytes(guidance["content_text"].encode("utf-8"))
     if file_digest(path) != guidance["sha256"]:
         raise FeatureChainError("operator guidance artifact does not match its recorded sha256")
     return {
