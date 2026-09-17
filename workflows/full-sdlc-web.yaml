@@ -742,6 +742,7 @@ nodes:
 
         - id: review
           depends_on: [round-pre]
+          context: fresh
           model: sonnet
           maxBudgetUsd: 15
           timeout: 1800000

@@ -614,6 +614,7 @@ nodes:
 
         - id: impact-probe
           depends_on: [plan-round-pre]
+          context: fresh
           model: sonnet
           maxBudgetUsd: 2
           timeout: 600000
@@ -675,6 +676,7 @@ nodes:
 
         - id: plan-critic
           depends_on: [impact-probe]
+          context: fresh
           model: opus
           maxBudgetUsd: 8
           timeout: 900000
@@ -1942,6 +1944,7 @@ nodes:
 
         - id: deslop-review
           depends_on: [deslop-recheck]
+          context: fresh
           model: sonnet
           maxBudgetUsd: 2
           timeout: 600000
@@ -2399,6 +2402,7 @@ nodes:
 
         - id: review
           depends_on: [round-pre]
+          context: fresh
           model: sonnet
           maxBudgetUsd: 20
           timeout: 1800000

@@ -2063,6 +2063,7 @@ nodes:
     - id: impact-probe
       depends_on:
       - rca-round-pre
+      context: fresh
       timeout: 600000
       prompt: |
         You are the code-graph impact node for one round of the RCA planning
@@ -2125,6 +2126,7 @@ nodes:
     - id: rca-critic
       depends_on:
       - impact-probe
+      context: fresh
       model: gpt-5.6-sol
       timeout: 900000
       prompt: |
@@ -3772,6 +3774,7 @@ nodes:
     - id: deslop-review
       depends_on:
       - deslop-recheck
+      context: fresh
       timeout: 600000
       prompt: |
         You are the deslop REVIEWER node. You are a reviewer ONLY: the writer
@@ -4146,6 +4149,7 @@ nodes:
     - id: review
       depends_on:
       - round-pre
+      context: fresh
       timeout: 1800000
       prompt: |
         Use $ce-code-review explicitly for this node.

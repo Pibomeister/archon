@@ -1997,6 +1997,7 @@ nodes:
 
         - id: impact-probe
           depends_on: [rca-round-pre]
+          context: fresh
           model: sonnet
           maxBudgetUsd: 2
           timeout: 600000
@@ -2061,6 +2062,7 @@ nodes:
 
         - id: rca-critic
           depends_on: [impact-probe]
+          context: fresh
           model: opus
           maxBudgetUsd: 4
           timeout: 900000
@@ -3728,6 +3730,7 @@ nodes:
 
         - id: deslop-review
           depends_on: [deslop-recheck]
+          context: fresh
           model: sonnet
           maxBudgetUsd: 2
           timeout: 600000
@@ -4104,6 +4107,7 @@ nodes:
 
         - id: review
           depends_on: [round-pre]
+          context: fresh
           model: sonnet
           # Measured: a full always-on + conditional fan-out on a ~230-line diff
           # costs about $10 (run 38d72218 round 1 finished just under it; round 2
