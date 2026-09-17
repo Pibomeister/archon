@@ -4865,7 +4865,16 @@ def reopen(host: Any, args: Any, chain_id: str, repo: str, reason: str, verify_o
         again = (prior is not None and prior.get("repo") == repo
                  and current.get("phase") == "implement" and current.get("repo") == repo
                  and str(current.get("bound_at") or "") >= str(prior.get("reopened_at") or "~"))
-        if state["stages"][repo].get("status") != "verified" and not again:
+        # A stage whose FIRST implement run failed has no candidate handoff, so the
+        # two branches above do not cover it and nothing else re-dispatches it:
+        # `advance` only records the failed status for a terminal non-completed run.
+        # That stranded chain 1f7a896a on a harness defect (review-gate overwrote the
+        # round's marked envelope, 2026-09-17) with its candidate committed in the
+        # stage worktree. The stage's own failed run is the evidence, so the same
+        # not-mid-flight rules apply as for `again`.
+        first_failure = (prior is None and state["stages"][repo].get("status") == "failed"
+                         and current.get("phase") == "implement" and current.get("repo") == repo)
+        if state["stages"][repo].get("status") != "verified" and not again and not first_failure:
             raise FeatureChainError(f"{repo} stage is not verified; nothing to reopen")
         reservation = state.get("dispatch_reservation")
         if isinstance(reservation, dict) and reservation.get("status") != "failed" and process_claim_alive(reservation):
@@ -4874,7 +4883,7 @@ def reopen(host: Any, args: Any, chain_id: str, repo: str, reason: str, verify_o
         affected = [repo] + consumers_of(state, repo)
         assert_reopenable_run(host, args, state.get("current_run"), affected)
         lookup = getattr(host, "run_row_by_id", None)
-        if again and callable(lookup):
+        if (again or first_failure) and callable(lookup):
             row = lookup(args.db, current.get("run_id"))
             # A run recorded completed without feature-result.json skipped its gates and
             # verified nothing (run e21573ca); it is as stopped as a failed one.
@@ -4886,6 +4895,14 @@ def reopen(host: Any, args: Any, chain_id: str, repo: str, reason: str, verify_o
                                         f"or completed without feature-result.json, got {(row or {}).get('status')}")
         previous_heads = dict(prior["previous_heads"]) if again else {}
         previous_heads.update({r: state["candidate_handoffs"][r]["candidate_head"] for r in affected if r in state["candidate_handoffs"]})
+        if first_failure and repo not in previous_heads:
+            # A first failure verified no candidate, so its "previous head" is the
+            # stage's pinned baseline, NOT the worktree HEAD: bootstrap rewrites
+            # bootstrap-head.txt to this sha, and every gate, the review diff and the
+            # candidate squash then see previous..worktree HEAD. Using the worktree
+            # HEAD would make that range empty and stop the run on
+            # `verify-only reopen has no change since previous head`.
+            previous_heads[repo] = str(state["worktrees"][repo]["baseline"])
         stopped_artifacts = current.get("artifacts_dir")
         evidence = reopen_evidence(stopped_artifacts)
         if again:

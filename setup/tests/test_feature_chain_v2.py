@@ -467,6 +467,60 @@ class FeatureChainV2(unittest.TestCase):
         with self.assertRaisesRegex(fc.FeatureChainError, "requires a reason"):
             fc.reopen(self.host, self.args, launched["state"]["logical_chain_id"], "api", " ")
 
+    def failed_first_stage(self, repo="api"):
+        """An approved chain whose FIRST implement run for ``repo`` failed with its
+        work committed in the stage worktree (chain 1f7a896a, review-gate defect)."""
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        state = fc.approve_plan(self.control, launched["state"]["logical_chain_id"], self.plan())
+        worktree = next((self.root / repo / ".worktrees").iterdir())
+        (worktree / "src").mkdir(exist_ok=True)
+        (worktree / "src" / "candidate.ts").write_text("x\n", encoding="utf-8")
+        git(worktree, "add", "."); git(worktree, "commit", "-qm", f"feat({repo}): candidate")
+        row = self.row("7" * 32)
+        fc.bind_phase_run(self.control, state["logical_chain_id"], phase="implement", repo=repo, row=row)
+        state = fc.advance(self.host, self.args, dict(row), {
+            "state": "terminal", "status": "failed",
+            "feature_chain": {"logical_chain_id": state["logical_chain_id"], "repo": repo},
+        })["state"]
+        self.host.run_row_by_id = lambda db, run_id: {"status": "failed"}
+        return fc.read_state(self.control, state["logical_chain_id"]), worktree
+
+    def test_reopen_admits_a_first_failure_stage_verify_only_from_its_baseline(self):
+        state, worktree = self.failed_first_stage()
+        self.assertEqual(state["stages"]["api"]["status"], "failed")
+        self.assertNotIn("api", state["candidate_handoffs"])
+        baseline = state["worktrees"]["api"]["baseline"]
+        candidate = git(worktree, "rev-parse", "HEAD")
+        self.assertNotEqual(baseline, candidate)
+        with mock.patch("builtins.print"):
+            fc.reopen(self.host, self.args, state["logical_chain_id"], "api",
+                      "harness defect: review-gate overwrote the marked envelope", verify_only=True)
+        latest = fc.read_state(self.control, state["logical_chain_id"])
+        self.assertEqual(latest["stages"]["api"]["status"], "running")
+        # The baseline, not the worktree HEAD: previous..HEAD must still hold the
+        # candidate, or gate-tests stops on "no change since previous head".
+        self.assertEqual(latest["stages"]["api"]["verify_only_head"], baseline)
+        self.assertEqual(latest["reopens"][0]["previous_heads"]["api"], baseline)
+        params = json.loads((Path(self.host.calls[-1][3]["output_root"]) / "params.json").read_text(encoding="utf-8"))
+        self.assertEqual(params["feature_verify_only"], "yes")
+        self.assertEqual(params["feature_previous_head"], baseline)
+        self.assertEqual(git(worktree, "rev-parse", "HEAD"), candidate)
+
+    def test_reopen_still_refuses_a_pending_stage_that_never_ran(self):
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        chain_id = launched["state"]["logical_chain_id"]
+        fc.approve_plan(self.control, chain_id, self.plan())
+        self.assertEqual(fc.read_state(self.control, chain_id)["stages"]["api"]["status"], "pending")
+        with self.assertRaisesRegex(fc.FeatureChainError, "not verified"):
+            fc.reopen(self.host, self.args, chain_id, "api", "nothing ran yet")
+
+    def test_reopen_refuses_a_first_failure_stage_named_by_another_repos_run(self):
+        state, _worktree = self.failed_first_stage()
+        chain_id = state["logical_chain_id"]
+        # goodword-mcp never ran, and api's failed run is not its evidence.
+        with self.assertRaisesRegex(fc.FeatureChainError, "not verified"):
+            fc.reopen(self.host, self.args, chain_id, "goodword-mcp", "wrong repo")
+
     def test_reopen_verify_only_puts_the_previous_head_in_the_stage_params(self):
         state = self.locally_verified_chain(finalize=False)
         api_head = state["candidate_handoffs"]["api"]["candidate_head"]
