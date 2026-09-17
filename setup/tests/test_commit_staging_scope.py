@@ -149,6 +149,19 @@ class StageMode(unittest.TestCase):
         self.assertIn("COMMIT_SCOPE=FAIL unreadable files-allowlist.json", r.stdout)
         self.assertNotIn("Traceback", r.stdout + r.stderr)
 
+    def test_an_allowlisted_file_in_a_new_directory_is_not_a_stray(self):
+        # Without --untracked-files=all porcelain reports "newmod/", which is not
+        # in the allowlist: the round stopped on a file the plan approved.
+        (self.wt / "newmod" / "deep").mkdir(parents=True)
+        (self.wt / "newmod" / "deep" / "x.ts").write_text("export const x = 1;\n")
+        self.allow.write_text(json.dumps(["keep.ts", "gone.ts", "newmod/deep/x.ts"]))
+        r = self.stage()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.staged(), ["newmod/deep/x.ts"])
+        scan = subprocess.run(["python3", str(SCRIPT), str(self.allow), str(self.wt), "HEAD"],
+                              capture_output=True, encoding="utf-8")
+        self.assertEqual(scan.returncode, 0, scan.stdout)
+
     def test_untouched_allowlist_paths_stage_nothing(self):
         r = self.stage()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

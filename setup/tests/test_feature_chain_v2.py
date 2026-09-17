@@ -1299,6 +1299,39 @@ class FeatureChainV2(unittest.TestCase):
         self.assertEqual(self.host.calls[-1][2]["ARCHON_FEATURE_REPO"], "api")
         self.assertEqual(sealed["current_run"]["repo"], "api")
 
+    def test_claude_replan_without_token_restarts_planning_on_the_same_chain(self):
+        # Run f07acb10: a Claude planning node was recorded completed with no
+        # plan.md. Resume never re-runs a completed AI node and a Claude launch
+        # has no control token, so feature-replan was unreachable.
+        args = self.claude_args()
+        launched = fc.launch(self.host, args, ["api", "goodword-mcp"])
+        state, row = launched["state"], dict(launched["row"], status="failed")
+        restarted = fc.restart_planning_unguarded(self.host, args, row, state["logical_chain_id"])
+        self.assertEqual(restarted["state"]["logical_chain_id"], state["logical_chain_id"])
+        self.assertEqual(restarted["state"]["worktrees"], state["worktrees"])
+        self.assertEqual(restarted["state"]["planning_generation"], 1)
+        self.assertNotEqual(restarted["row"]["id"], row["id"])
+        self.assertEqual(self.host.calls[-1][0], "full-sdlc-api")
+        self.assertEqual(self.host.calls[-1][2]["ARCHON_FEATURE_PHASE"], "planning")
+        with self.assertRaisesRegex(fc.FeatureChainError, "stale"):
+            fc.restart_planning_unguarded(self.host, args, row, state["logical_chain_id"])
+
+    def test_claude_replan_refuses_codex_chains_and_approved_work(self):
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        row = dict(launched["row"], status="failed")
+        with self.assertRaisesRegex(fc.FeatureChainError, "require --token"):
+            fc.restart_planning_unguarded(self.host, self.args, row, launched["state"]["logical_chain_id"])
+        args = self.claude_args()
+        launched = fc.launch(self.host, args, ["api", "goodword-mcp"])
+        state, row = launched["state"], launched["row"]
+        artifacts = Path(row["output_root"])
+        (artifacts / fc.JOINT_PLAN_ARTIFACT).write_text(json.dumps(self.plan()), encoding="utf-8")
+        fc.advance_unguarded(self.host, args, row, {
+            "state": "terminal", "status": "completed", "artifacts": str(artifacts),
+            "feature_chain": {"logical_chain_id": state["logical_chain_id"], "phase": "planning"}})
+        with self.assertRaisesRegex(fc.FeatureChainError, "planning run|stale|approved"):
+            fc.restart_planning_unguarded(self.host, args, dict(row, status="completed"), state["logical_chain_id"])
+
     def test_advance_unguarded_rejects_non_terminal_planning_and_seals_nothing(self):
         args = self.claude_args()
         launched = fc.launch(self.host, args, ["api", "goodword-mcp"])

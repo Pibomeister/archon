@@ -76,6 +76,12 @@ def runnable_body(workflow, node_id, outputs=None, root=None):
     archon_root = str(Path(root) / ".archon") if root else str(ARCHON_ROOT)
     body = body.replace(HARDCODED_ROOTS[0], archon_root)
     body = body.replace(HARDCODED_ROOTS[1], goodword_root)
+    # Same leak through one level of indirection: bugfix bodies set
+    # ROOT="<goodword>" and call "$ROOT/.archon/setup/...". A checkout that is not
+    # literally <goodword>/.archon then ran the MAIN checkout's scripts (observed:
+    # drill_deslop exercising main's check-slop.py against this tree's YAML).
+    # Every ROOT= in the workflows is the goodword root, so the rewrite is exact.
+    body = body.replace("$ROOT/.archon", archon_root)
     for name, val in (outputs or {}).items():
         quoted = "'" + str(val).replace("'", "'\\''") + "'"
         body = re.sub(r"\$" + re.escape(name) + r"\.output\b", lambda _m: quoted, body)

@@ -3585,7 +3585,7 @@ nodes:
         # by the guard above, so its assertions are not this gate's business.
         SL=0
         python3 "$SETUP/check-slop.py" \
-          "$WT" "$RED" --max-complexity 10 --exclude pnpm-lock.yaml --exclude "$TESTF" > "$RD/slop.txt" 2>&1 || SL=$?
+          "$WT" "$RED" --max-complexity 10 --exclude pnpm-lock.yaml --exclude "$TESTF" --repo "$REPO" > "$RD/slop.txt" 2>&1 || SL=$?
         python3 - "$RD/recheck.json" "$RP" "$TC" "$LT" "$UT" "$SC" "$SL" <<'PY'
         import json, sys
         path, rp, tc, lt, ut, sc, sl = sys.argv[1:8]

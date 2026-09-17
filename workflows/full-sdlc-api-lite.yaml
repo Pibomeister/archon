@@ -177,7 +177,7 @@ nodes:
   - bootstrap
   - kb-recon-gate
   model: sonnet
-  maxBudgetUsd: 3
+  maxBudgetUsd: 10
   timeout: 1200000
   prompt: |
     You are the planning node in an unattended workflow. Ask no questions; make
@@ -360,7 +360,7 @@ nodes:
   depends_on:
   - lite-envelope
   model: sonnet
-  maxBudgetUsd: 3
+  maxBudgetUsd: 5
   timeout: 900000
   prompt: |
     You are the plan-presentation node on the LITE lane. The human plan review
@@ -634,8 +634,10 @@ nodes:
     artifacts with sha256 hashes. Consume those exact local inputs only; do not
     require or assume an upstream PR, merge, publication, deployment, or newer
     repository state.
-    SINGLE-REPO RUNS: when params.json's "repo" is not "api", the two sentences
-    above are scoped to api runs. files-allowlist.json is then the entire scope,
+    OTHER REPOSITORIES: when params.json's "repo" is not "api", the opening
+    "Implement the API portion" sentence and the "Scope:" line are scoped to api
+    runs (the JOINT-REPOSITORY RUNS paragraph applies to every repository).
+    files-allowlist.json is then the entire scope,
     its paths are relative to that repository's root, and there is no web-app
     prong to avoid. Use that repository's own commands, listed below.
     Do not edit the plan file. Do not create commits — a later node commits.
@@ -721,18 +723,26 @@ nodes:
       "${CMD_TEST[@]}" "$PAT" || { echo "GATE_TESTS=FAIL unit pattern=$PAT"; exit 1; }
     done < "$ARTIFACTS_DIR/gate-tests-patterns.txt"
     BASE=$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")
-    CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$|^ M pnpm-lock\.yaml$|^\?\? pnpm-lock\.yaml$' || true)
-    if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- . ':(exclude)pnpm-lock.yaml'; then
+    # No lockfile is noise here: every repo this lane serves (repo-profile.sh) installs
+    # frozen, so lockfile-only drift is content, and check-scope.py calls it a breach.
+    CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$' || true)
+    if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- .; then
       printf '{"outcome":"NO_CHANGE","repo":"%s","basis":"baseline-to-candidate content","baseline":"%s","head":"%s","pr_url":null}\n' "$REPO" "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
       echo "GATE_TESTS=PASS outcome=NO_CHANGE"
       exit 0
     fi
     printf '{"outcome":"CHANGED","repo":"%s","basis":"baseline-to-candidate content","baseline":"%s","head":"%s"}\n' "$REPO" "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
-    test -s "$ARTIFACTS_DIR/commit-msg.txt" || { echo "GATE_TESTS=FAIL no commit-msg.txt from implement"; exit 1; }
+    test -s "$ARTIFACTS_DIR/commit-msg.txt" || {
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/node-no-output.py "$ARTIFACTS_DIR" implement commit-msg.txt
+      echo "GATE_TESTS=FAIL no commit-msg.txt from implement"; exit 1; }
     # Scope guard: catch implement-node creep before the first review round.
     python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py \
       "$ARTIFACTS_DIR/files-allowlist.json" "$WT" "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" \
       || { echo "GATE_TESTS=FAIL scope breach"; exit 1; }
+    # A not_applicable browser policy was derived at plan time from the
+    # allowlist; what ships is the diff, so re-derive it from the diff.
+    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/browser-exemption.py diff \
+      "$ARTIFACTS_DIR" "$WT" "$BASE" || { echo "GATE_TESTS=FAIL browser exemption void"; exit 1; }
     echo "GATE_TESTS=PASS"
 - id: commit-impl
   depends_on:
@@ -746,8 +756,10 @@ nodes:
     MSG=$(head -1 "$ARTIFACTS_DIR/commit-msg.txt" 2>/dev/null || true)
     test -n "$MSG" || MSG="feat(api): $SLUG"
     BASE=$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")
-    CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$|^ M pnpm-lock\.yaml$|^\?\? pnpm-lock\.yaml$' || true)
-    if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- . ':(exclude)pnpm-lock.yaml'; then
+    # No lockfile is noise here: every repo this lane serves (repo-profile.sh) installs
+    # frozen, so lockfile-only drift is content, and check-scope.py calls it a breach.
+    CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$' || true)
+    if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- .; then
       printf '{"outcome":"NO_CHANGE","repo":"%s","basis":"baseline-to-candidate content","baseline":"%s","head":"%s","pr_url":null}\n' "$REPO" "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
       echo "COMMIT_IMPL=SKIP outcome=NO_CHANGE"
       exit 0
@@ -813,7 +825,7 @@ nodes:
       - round-pre
       when: $round-pre.review == 'run'
       model: sonnet
-      maxBudgetUsd: 15
+      maxBudgetUsd: 20
       timeout: 1800000
       skills:
       - ce-code-review
@@ -1105,7 +1117,7 @@ nodes:
       - fix-plan
       when: $fix-plan.fixer == 'run'
       model: sonnet
-      maxBudgetUsd: 5
+      maxBudgetUsd: 8
       timeout: 1200000
       prompt: |
         You are the fixer node in an unattended review-fix pipeline. Ask no questions.
@@ -1400,10 +1412,19 @@ nodes:
     python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py \
       "$ARTIFACTS_DIR/files-allowlist.json" "$WT" "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" \
       || { echo "EXIT_GATE=FAIL scope breach"; exit 1; }
+    # Browser exemption belt: the fixer and a widened allowlist can both move
+    # the diff onto a browser surface after gate-tests derived the exemption.
+    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/browser-exemption.py diff \
+      "$ARTIFACTS_DIR" "$WT" "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" \
+      || { echo "EXIT_GATE=FAIL browser exemption void"; exit 1; }
     # Reader-audit belt: declared columns must have a passing result on disk.
     NC=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))['columns']))" "$ARTIFACTS_DIR/reader-audit.json" 2>/dev/null || echo 0)
-    if [ "$NC" != 0 ]; then
+    DERIVE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('derive',''))" "$ARTIFACTS_DIR/reader-audit.json" 2>/dev/null || echo "")
+    if [ "$NC" != 0 ] || [ "$DERIVE" = stage-diff ]; then
       test -s "$ARTIFACTS_DIR/reader-audit-result.json" || { echo "EXIT_GATE=FAIL READER_AUDIT_FAIL missing reader-audit-result.json"; exit 1; }
+      if [ "$DERIVE" = stage-diff ]; then
+        python3 -c "import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get('derived') is True else 1)" "$ARTIFACTS_DIR/reader-audit-result.json" || { echo "EXIT_GATE=FAIL READER_AUDIT_FAIL stage-diff audit result is not marked derived"; exit 1; }
+      fi
       python3 -c "import json,sys; cols=json.load(open(sys.argv[1]))['columns']; aff=[r for c in cols for r in c.get('readers',[]) if r.get('class')=='affected']; sys.exit('affected readers: %s' % aff) if aff else None" "$ARTIFACTS_DIR/reader-audit-result.json" || { echo "EXIT_GATE=FAIL READER_AUDIT_FAIL affected reader"; exit 1; }
     fi
     # Materialize-then-`test -s`, same as gate-tests and deslop-recheck: a process

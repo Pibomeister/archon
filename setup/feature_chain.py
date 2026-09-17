@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 import control_contract
+import lockfile_scope
 import review_delta_workflow
 import review_qualification
 import yaml
@@ -1528,13 +1529,34 @@ def restart_planning(host: Any, args: Any, row: dict, control: dict) -> dict:
     feature = control.get("feature_chain", {})
     if feature.get("scope") != "repositories" or feature.get("phase") != "planning":
         raise FeatureChainError("feature-replan requires a repository-list planning run")
+    return _restart_planning(host, args, row, feature["logical_chain_id"], guarded=True)
+
+
+def restart_planning_unguarded(host: Any, args: Any, row: dict, chain_id: str) -> dict:
+    """Claude chain replan: no control token exists for a Claude launch.
+
+    A Claude planning node can be recorded COMPLETED with no plan written (run
+    f07acb10), and archon never re-runs a completed AI node on resume, so without
+    this the only recovery was a whole new chain. Authority matches
+    feature-advance: the operator names the chain, whose private state is sealed;
+    every other refusal (terminal run, stale action, approved or implemented work,
+    budget) is the guarded path's, verbatim.
+    """
+    return _restart_planning(host, args, row, chain_id, guarded=False)
+
+
+def _restart_planning(host: Any, args: Any, row: dict, chain_id: str, *, guarded: bool) -> dict:
     if row.get("status") not in {"failed", "completed"}:
         raise FeatureChainError("feature-replan requires a terminal planning run")
-    chain_id = feature["logical_chain_id"]
     with chain_lock(Path(args.control_dir), chain_id):
-        revalidate_control_token(host, args, row)
+        if guarded:
+            revalidate_control_token(host, args, row)
         state = read_state(Path(args.control_dir), chain_id)
+        if not guarded and state.get("provider") != "claude":
+            raise FeatureChainError("feature-replan --chain is for claude chains; codex chains require --token")
         current = state.get("current_run")
+        if not guarded and isinstance(current, dict) and current.get("phase") != "planning":
+            raise FeatureChainError("feature-replan requires a repository-list planning run")
         reservation = state.get("dispatch_reservation")
         retry = (not current and isinstance(reservation, dict)
                  and reservation.get("phase") == "planning"
@@ -1859,7 +1881,12 @@ def params_payload(state: dict, phase: str, repo: str | None, row: dict) -> dict
     }
     if "executable_plan_contract" in state:
         payload["executable_plan_contract"] = state["executable_plan_contract"]
-    if "api" in state["repositories"]:
+    # The smoke port follows the repository PROFILE, not the name "api": the
+    # lane preflight requires APIPORT for any repo declaring HAS_SMOKE, so a
+    # single-repo goodword-mcp (or web-app) chain keyed on "api" got no port
+    # and died at PREFLIGHT=FAIL params.json carries no smoke port.
+    profiles = repo_profiles()
+    if any(profiles.get(name, {}).get("smoke") for name in state["repositories"]):
         payload["api_port"] = allocate_port(4123, slug)
     if "web-app" in state["repositories"]:
         payload["web_port"] = allocate_port(3127, slug)
@@ -1880,6 +1907,17 @@ def params_payload(state: dict, phase: str, repo: str | None, row: dict) -> dict
             payload["feature_verify_only"] = "yes"
             payload["feature_previous_head"] = str(previous_head)
     return payload
+
+
+def repo_profiles() -> dict:
+    result = subprocess.run(
+        ["bash", str(Path(__file__).resolve().parent / "repo-profile.sh"), "--json"],
+        capture_output=True,
+        encoding="utf-8",
+    )
+    if result.returncode != 0:
+        raise FeatureChainError((result.stderr or result.stdout).strip() or "cannot read repository profiles")
+    return json.loads(result.stdout)["profiles"]
 
 
 def allocate_port(base: int, slug: str) -> int:
@@ -1921,6 +1959,7 @@ def write_phase_artifacts(artifacts: Path, state: dict, phase: str, repo: str | 
             for original, target in (("web-premises.json", "premises.json"), ("web-reader-audit.json", "reader-audit.json")):
                 if original in source["files"]:
                     (artifacts / target).write_bytes((source_root / original).read_bytes())
+    write_stage_reader_audit(artifacts, state, repo, stage, source)
     candidate_inputs = {}
     for dependency in stage["depends_on"]:
         candidate = state["candidate_handoffs"].get(dependency)
@@ -1947,6 +1986,34 @@ def write_phase_artifacts(artifacts: Path, state: dict, phase: str, repo: str | 
     plan_md = approval_plan_markdown(state)
     if plan_md:
         (artifacts / "plan.md").write_text(plan_md, encoding="utf-8")
+
+
+def write_stage_reader_audit(artifacts: Path, state: dict, repo: str, stage: dict, source: dict) -> None:
+    """Each stage audits its OWN repository's columns.
+
+    The planning run writes one reader-audit.json for the repository it is
+    anchored on (params_payload's planning repo), and every stage used to get a
+    copy: a goodword-mcp stage then grepped goodword-mcp for api columns and
+    passed having audited nothing. The approved joint plan's
+    stages.<repo>.reader_audit wins. A legacy plan without one keeps the copy
+    only where it is scoped to the stage (the anchor, or web-app's
+    web-reader-audit.json); any other stage derives its own declaration from
+    its diff (the reader-audit node's stage-diff branch)."""
+    audit = stage.get("reader_audit")
+    if isinstance(audit, dict):
+        write_json_atomic(artifacts / "reader-audit.json", audit)
+        return
+    repos = state["repositories"]
+    anchor = "api" if "api" in repos else repos[0]
+    files = source.get("files", {}) if isinstance(source, dict) else {}
+    if len(repos) == 1 or repo == anchor or (repo == "web-app" and "web-reader-audit.json" in files):
+        return
+    write_json_atomic(artifacts / "reader-audit.json", {
+        "columns": [],
+        "derive": "stage-diff",
+        "reason": f"approved joint plan declares no stages.{repo}.reader_audit; "
+                  f"the planning reader-audit.json is {anchor}-scoped",
+    })
 
 
 def approval_plan_markdown(state: dict) -> str:
@@ -3604,7 +3671,10 @@ def candidate_from_artifacts(repo: str, row: dict, artifacts: Path, state: dict)
     git_output(worktree, "merge-base", "--is-ancestor", baseline, head)
     allowed = set(state["stages"][repo]["plan"]["files_allowlist"])
     changed = set(diff_files_since(worktree, baseline, head))
-    outside = sorted(changed - allowed)
+    # Same lockfile rule as check-scope.py: the lockfile that commit nodes staged
+    # with an in-scope package.json is part of the candidate, not a breach.
+    lockfiles, _ = lockfile_scope.judge(lockfile_scope.profile(repo), allowed, changed, set())
+    outside = sorted(changed - allowed - lockfiles)
     if outside:
         raise FeatureChainError(f"{repo} candidate changed files outside approved allowlist: {','.join(outside)}")
     assert_clean_worktree(worktree, repo)
