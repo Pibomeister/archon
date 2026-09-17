@@ -113,6 +113,45 @@ def validate_stage(repo: str, body: object, selected: set[str]) -> None:
     require_string_list(body, "verification", f"stage for {repo}")
 
 
+def declared_columns(audit: object, label: str) -> set[tuple[str, str]]:
+    columns = audit.get("columns") if isinstance(audit, dict) else None
+    if not isinstance(columns, list) or not all(
+        isinstance(c, dict) and all(isinstance(c.get(k), str) and c[k].strip() for k in ("table", "column"))
+        for c in columns
+    ):
+        fail(f"{label} must be {{\"columns\": [{{\"table\", \"column\", \"reason\"}}]}}")
+    return {(c["table"], c["column"]) for c in columns}
+
+
+def validate_reader_audits(repos: list[str], stages: dict, params: dict, artifacts: Path) -> None:
+    """stages.<repo>.reader_audit is each stage's own reader-audit obligation.
+    The planning run's reader-audit.json is anchored on ONE repository, so a
+    stage that inherits it audits another repository's columns and proves
+    nothing. All or none: a plan without any (every plan approved before this
+    field existed) passes with a WARN, and feature_chain has each non-anchor
+    stage derive its own audit from its diff instead of inheriting the anchor's."""
+    present = [repo for repo in repos if "reader_audit" in stages[repo]]
+    if not present:
+        if len(repos) > 1:
+            print("JOINT_PLAN=WARN no stages.<repo>.reader_audit (legacy plan): "
+                  "non-anchor stages derive their reader audit from their own diff")
+        return
+    for repo in repos:
+        if repo not in present:
+            fail(f"stage for {repo} must declare reader_audit (every stage declares one when any does)")
+        declared_columns(stages[repo]["reader_audit"], f"stages.{repo}.reader_audit")
+    # The packet renders reader-audit.json (anchor) and web-reader-audit.json;
+    # the stages consume the joint plan. They must say the same thing.
+    mirrors = [(params.get("repo"), "reader-audit.json")]
+    if params.get("repo") != "web-app":
+        mirrors.append(("web-app", "web-reader-audit.json"))
+    for repo, name in mirrors:
+        if repo in stages and (artifacts / name).exists():
+            planned = declared_columns(load_json(artifacts / name, name), name)
+            if planned != declared_columns(stages[repo]["reader_audit"], f"stages.{repo}.reader_audit"):
+                fail(f"{name} columns differ from stages.{repo}.reader_audit")
+
+
 def validate_contracts(doc: dict) -> None:
     contracts = doc.get("contracts")
     if not isinstance(contracts, list):
@@ -262,6 +301,7 @@ def main() -> int:
         mirrored = verify.get("test_patterns") if isinstance(verify, dict) else None
         if mirrored != stages[anchor]["test_patterns"]:
             fail(f"verify.json test_patterns differ from stages.{anchor}.test_patterns")
+    validate_reader_audits(repos, stages, params, artifacts)
     expected_order = ordered_repos(repos, stages)
     if "dependency_order" in doc and doc.get("dependency_order") != expected_order:
         fail("joint-plan.json dependency_order must be stable topological order")

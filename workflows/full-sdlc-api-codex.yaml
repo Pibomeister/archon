@@ -376,13 +376,23 @@ nodes:
          {"depends_on":["<selected upstream repo>", "..."],
           "files_allowlist":["<repo-relative path>", "..."],
           "test_patterns":["<test path or pattern>", "..."],
-          "verification":["<exact local command>", "..."]}},
+          "verification":["<exact local command>", "..."],
+          "reader_audit":{"columns":[{"table":"<table>","column":"<column>",
+                                     "reason":"<one line>"}]}}},
        "integration":{"scenarios":[{"name":"<scenario>",
                                     "uses":["<repo>", "..."],
                                     "covers":["<criterion id>", "..."],
                                     "commands":[{"repo":"<selected repo>",
                                                  "argv":["<executable>", "<candidate-relative script>"]}],
                                     "expected_tests":["<observable assertion>"]}]}}
+    Every stage carries its OWN "reader_audit": the DB columns or enum values
+    whose interpretation or presentation that repository's part of the plan
+    changes, in the reader-audit.json schema below ({"columns": []} when none).
+    Each stage run audits only its own entry, so an obligation filed under the
+    wrong repository is never checked. The anchor repository's (params.json
+    "repo") entry must declare the same columns as reader-audit.json, and a
+    selected web-app's the same as web-reader-audit.json; the validator
+    enforces both mirrors.
     Every acceptance criterion the spec states gets one id in
     acceptance_criteria, and every id appears in some scenario's covers. One
     scenario covers several criteria only when its expected_tests name an
@@ -853,7 +863,9 @@ nodes:
         the revised unit touches and match the ## Verification commands exactly,
         reader-audit.json lists any API column whose interpretation or
         presentation the revision changes, web-reader-audit.json lists any
-        web reader-semantic obligation, and any premise answer you alter keeps at least one
+        web reader-semantic obligation, every joint-plan.json stages.<repo>.reader_audit
+        still lists that repository's own columns (mirroring reader-audit.json for the
+        anchor and web-reader-audit.json for web-app), and any premise answer you alter keeps at least one
         citation whose quote appears VERBATIM in the file it names (verify that
         by reading the file). Findings at confidence 50 are advisory; act on them
         only if doing so costs nothing.
@@ -2011,12 +2023,23 @@ nodes:
     only safe when every reader has been looked at. Ask no questions.
 
     Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
-    Read reader-audit.json there. If its "columns" array is empty, write
-    exactly {"columns": []} to reader-audit-result.json in that directory
-    and end with the single line: READER_AUDIT_DONE
+    Read reader-audit.json there. If its "columns" array is empty and it has
+    no "derive" key, write exactly {"columns": []} to reader-audit-result.json
+    in that directory and end with the single line: READER_AUDIT_DONE
 
     The repository checkout is the "worktree" field of params.json in that
     same directory (you are NOT cwd'd there).
+
+    STAGE-DERIVED AUDIT: when reader-audit.json carries "derive": "stage-diff",
+    the approved joint plan
+    declared no reader audit for this repository and the planning file
+    belongs to another one. Declare the columns yourself from THIS
+    repository's change: read `git -C <worktree> diff <bootstrap-head.txt sha>`
+    (bootstrap-head.txt is in the artifacts directory) and list every DB
+    column or enum value whose INTERPRETATION or PRESENTATION the diff changes
+    here, not merely writes. Audit each one as below, and write the result with
+    a top-level "derived": true — {"derived": true, "columns": []} when the
+    diff changes none. Every derived column carries its "readers" array.
 
     For each declared column: enumerate EVERY reader of it in the repository
     — grep the repository layer, query builders, and raw SQL for the column
@@ -2041,14 +2064,27 @@ nodes:
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-reader-audit-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-reader-audit-gate.out" >&2); fi
     D="$ARTIFACTS_DIR/reader-audit.json"
     R="$ARTIFACTS_DIR/reader-audit-result.json"
+    # "derive": "stage-diff" (feature_chain.write_stage_reader_audit): this
+    # repository-list stage has no approved audit of its own, so the node
+    # declared columns from its diff. Zero declared columns is then no proof
+    # of anything; the result file must exist and say it was derived.
+    DERIVE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('derive',''))" "$D")
     NC=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))['columns']))" "$D")
-    if [ "$NC" = 0 ]; then echo "READER_AUDIT_GATE=PASS (no columns declared)"; exit 0; fi
+    if [ "$NC" = 0 ] && [ "$DERIVE" != stage-diff ]; then echo "READER_AUDIT_GATE=PASS (no columns declared)"; exit 0; fi
     test -s "$R" || { echo "READER_AUDIT_FAIL no reader-audit-result.json"; exit 1; }
     python3 - "$D" "$R" <<'PY'
     import json, sys
-    decl = {(c["table"], c["column"]) for c in json.load(open(sys.argv[1]))["columns"]}
-    res = json.load(open(sys.argv[2]))["columns"]
+    decl_doc = json.load(open(sys.argv[1]))
+    result = json.load(open(sys.argv[2]))
+    res = result["columns"]
     got = {(c["table"], c["column"]) for c in res}
+    if decl_doc.get("derive") == "stage-diff":
+        if result.get("derived") is not True:
+            print("READER_AUDIT_FAIL stage-diff audit result is not marked derived")
+            sys.exit(1)
+        decl = got
+    else:
+        decl = {(c["table"], c["column"]) for c in decl_doc["columns"]}
     missing = decl - got
     assert not missing, f"declared columns not covered: {sorted(missing)}"
     affected = [(c["table"], c["column"], r.get("file", "?"))
@@ -2565,8 +2601,12 @@ nodes:
       || { echo "EXIT_GATE=FAIL browser exemption void"; exit 1; }
     # Reader-audit belt: declared columns must have a passing result on disk.
     NC=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))['columns']))" "$ARTIFACTS_DIR/reader-audit.json" 2>/dev/null || echo 0)
-    if [ "$NC" != 0 ]; then
+    DERIVE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('derive',''))" "$ARTIFACTS_DIR/reader-audit.json" 2>/dev/null || echo "")
+    if [ "$NC" != 0 ] || [ "$DERIVE" = stage-diff ]; then
       test -s "$ARTIFACTS_DIR/reader-audit-result.json" || { echo "EXIT_GATE=FAIL READER_AUDIT_FAIL missing reader-audit-result.json"; exit 1; }
+      if [ "$DERIVE" = stage-diff ]; then
+        python3 -c "import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get('derived') is True else 1)" "$ARTIFACTS_DIR/reader-audit-result.json" || { echo "EXIT_GATE=FAIL READER_AUDIT_FAIL stage-diff audit result is not marked derived"; exit 1; }
+      fi
       python3 -c "import json,sys; cols=json.load(open(sys.argv[1]))['columns']; aff=[r for c in cols for r in c.get('readers',[]) if r.get('class')=='affected']; sys.exit('affected readers: %s' % aff) if aff else None" "$ARTIFACTS_DIR/reader-audit-result.json" || { echo "EXIT_GATE=FAIL READER_AUDIT_FAIL affected reader"; exit 1; }
     fi
     # Materialize-then-`test -s`, same as gate-tests and deslop-recheck: a process

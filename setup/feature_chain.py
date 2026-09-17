@@ -1958,6 +1958,7 @@ def write_phase_artifacts(artifacts: Path, state: dict, phase: str, repo: str | 
             for original, target in (("web-premises.json", "premises.json"), ("web-reader-audit.json", "reader-audit.json")):
                 if original in source["files"]:
                     (artifacts / target).write_bytes((source_root / original).read_bytes())
+    write_stage_reader_audit(artifacts, state, repo, stage, source)
     candidate_inputs = {}
     for dependency in stage["depends_on"]:
         candidate = state["candidate_handoffs"].get(dependency)
@@ -1984,6 +1985,34 @@ def write_phase_artifacts(artifacts: Path, state: dict, phase: str, repo: str | 
     plan_md = approval_plan_markdown(state)
     if plan_md:
         (artifacts / "plan.md").write_text(plan_md, encoding="utf-8")
+
+
+def write_stage_reader_audit(artifacts: Path, state: dict, repo: str, stage: dict, source: dict) -> None:
+    """Each stage audits its OWN repository's columns.
+
+    The planning run writes one reader-audit.json for the repository it is
+    anchored on (params_payload's planning repo), and every stage used to get a
+    copy: a goodword-mcp stage then grepped goodword-mcp for api columns and
+    passed having audited nothing. The approved joint plan's
+    stages.<repo>.reader_audit wins. A legacy plan without one keeps the copy
+    only where it is scoped to the stage (the anchor, or web-app's
+    web-reader-audit.json); any other stage derives its own declaration from
+    its diff (the reader-audit node's stage-diff branch)."""
+    audit = stage.get("reader_audit")
+    if isinstance(audit, dict):
+        write_json_atomic(artifacts / "reader-audit.json", audit)
+        return
+    repos = state["repositories"]
+    anchor = "api" if "api" in repos else repos[0]
+    files = source.get("files", {}) if isinstance(source, dict) else {}
+    if len(repos) == 1 or repo == anchor or (repo == "web-app" and "web-reader-audit.json" in files):
+        return
+    write_json_atomic(artifacts / "reader-audit.json", {
+        "columns": [],
+        "derive": "stage-diff",
+        "reason": f"approved joint plan declares no stages.{repo}.reader_audit; "
+                  f"the planning reader-audit.json is {anchor}-scoped",
+    })
 
 
 def approval_plan_markdown(state: dict) -> str:

@@ -1205,8 +1205,12 @@ nodes:
       || { echo "EXIT_GATE=FAIL browser exemption void"; exit 1; }
     # Reader-audit belt: declared columns must have a passing result on disk.
     NC=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))['columns']))" "$ARTIFACTS_DIR/reader-audit.json" 2>/dev/null || echo 0)
-    if [ "$NC" != 0 ]; then
+    DERIVE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('derive',''))" "$ARTIFACTS_DIR/reader-audit.json" 2>/dev/null || echo "")
+    if [ "$NC" != 0 ] || [ "$DERIVE" = stage-diff ]; then
       test -s "$ARTIFACTS_DIR/reader-audit-result.json" || { echo "EXIT_GATE=FAIL READER_AUDIT_FAIL missing reader-audit-result.json"; exit 1; }
+      if [ "$DERIVE" = stage-diff ]; then
+        python3 -c "import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get('derived') is True else 1)" "$ARTIFACTS_DIR/reader-audit-result.json" || { echo "EXIT_GATE=FAIL READER_AUDIT_FAIL stage-diff audit result is not marked derived"; exit 1; }
+      fi
       python3 -c "import json,sys; cols=json.load(open(sys.argv[1]))['columns']; aff=[r for c in cols for r in c.get('readers',[]) if r.get('class')=='affected']; sys.exit('affected readers: %s' % aff) if aff else None" "$ARTIFACTS_DIR/reader-audit-result.json" || { echo "EXIT_GATE=FAIL READER_AUDIT_FAIL affected reader"; exit 1; }
     fi
     # Materialize-then-`test -s`, same as gate-tests and deslop-recheck: a process
