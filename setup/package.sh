@@ -171,8 +171,17 @@ MANIFEST=(
   workflows/risk-delta-v1.md
   setup/review-yield.py
   # Two-hour convergence: review-mode.py is listed because round-pre calls it;
-  # the packaging test pins every referenced script to this list.
+  # the packaging test pins every referenced script to this list. ledger.py is
+  # called by review-gate, commit-fixer and converge, and review-contract.md is
+  # read by every review session -- its sha256 is the identity's contract digest,
+  # so an install that ships the prompts without it cannot compute a review id.
   setup/review-mode.py
+  setup/ledger.py
+  setup/review-contract.md
+  setup/prompts/review-trio.md
+  setup/prompts/review-capped.md
+  setup/prompts/review-verify.md
+  setup/prompts/docreview-bounded.md
   setup/mcp-smoke.sh
   setup/codex-usage.py
   setup/codex-watchdog.sh
