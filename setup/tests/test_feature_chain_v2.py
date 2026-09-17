@@ -793,6 +793,24 @@ class FeatureChainV2(unittest.TestCase):
         self.assertEqual(latest["integration"]["publication"], "held")
         fc.verify_receipt(latest)
 
+    def test_publication_body_lists_only_acknowledged_cross_repo_findings(self):
+        state = self.locally_verified_chain()
+        artifacts = Path(state["candidate_handoffs"]["api"]["artifacts"])
+        (artifacts / "round-1").mkdir(exist_ok=True)
+        filed = {"finding": "mcp drops errorMessage", "action": "route", "producer_repo": "goodword-mcp", "severity": "P2"}
+        unfiled = {"finding": "mcp retries forever", "action": "route", "producer_repo": "goodword-mcp", "severity": "P1"}
+        (artifacts / "round-1" / "fixer-result.json").write_text(json.dumps(
+            {"applied": [], "failed": [], "advisory": [], "cross_repo": [filed, unfiled]}), encoding="utf-8")
+        body = fc.publication_body(state, "api", {})
+        self.assertNotIn("Cross-repo findings filed", body)
+        # sha256("goodword-mcp\nmcp drops errorMessage")[:16], computed outside the helper.
+        (artifacts / "cross-repo-filed.json").write_text(json.dumps(
+            [{"key": "65609a9208165071", "filed": "https://github.com/o/goodword-mcp/issues/12", "by": "edy"}]), encoding="utf-8")
+        body = fc.publication_body(state, "api", {})
+        self.assertIn("## Cross-repo findings filed\n\n- [P2] goodword-mcp: mcp drops errorMessage "
+                      "(filed: https://github.com/o/goodword-mcp/issues/12, by edy, key `65609a9208165071`)", body)
+        self.assertNotIn("mcp retries forever", body)
+
     def test_publish_no_change_repo_skips_push_and_pr(self):
         state = self.locally_verified_chain(api_changed=False)
         run = self.fake_gh()

@@ -12,6 +12,7 @@ import datetime
 import fcntl
 import hashlib
 import hmac
+import importlib.util
 import json
 import os
 import re
@@ -4208,6 +4209,14 @@ def _last_round_advisory(artifacts: Path) -> list[str]:
     return []
 
 
+def cross_repo_keys():
+    """setup/cross-repo-keys.py, which owns the cross-repo acknowledgement contract."""
+    spec = importlib.util.spec_from_file_location("cross_repo_keys", setup_dir() / "cross-repo-keys.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def publication_body(state: dict, repo: str, publications: dict) -> str:
     candidate = state["candidate_handoffs"][repo]
     artifacts = Path(candidate["artifacts"])
@@ -4257,6 +4266,9 @@ def publication_body(state: dict, repo: str, publications: dict) -> str:
     if advisory:
         residual_lines += ["Last-round fixer advisory:", ""] + [f"- {a}" for a in advisory] + [""]
     out += residual_lines or ["None recorded.", ""]
+    filed = cross_repo_keys().prbody(artifacts)
+    if filed:
+        out += [filed]
     changed = diff_files_since(Path(state["worktrees"][repo]["worktree"]), state["worktrees"][repo]["baseline"], candidate["candidate_head"])
     out += ["## Post-Deploy Monitoring & Validation", "",
             "- Watch error rates (4xx/5xx or tool failures) on the surfaces changed by this PR after release.",
