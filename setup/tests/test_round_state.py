@@ -56,8 +56,10 @@ class Lane:
     def write_json(self, name, value):
         (self.ad / name).write_text(json.dumps(value), encoding="utf-8")
 
-    def run(self, *args):
+    def run(self, *args, kill_after=None):
         env = dict(os.environ, ARCHON_LEDGER_PY=str(LEDGER_STUB))
+        if kill_after:
+            env["ROUND_STATE_KILL_AFTER"] = kill_after
         return subprocess.run([sys.executable, str(ROUND_STATE), *[str(a) for a in args]],
                               capture_output=True, encoding="utf-8", env=env)
 
@@ -133,14 +135,27 @@ class Lane:
         self.stage()
         return self.run("commit-fixer", self.ad)
 
-    def converge(self, closure=None):
-        if closure is not None:
-            self.write_json("stub-closure.json", closure)
+    def converge(self, ledger=None):
+        """`ledger` is this round's ledger.json, the same file the real ledger
+        writes. The decision table is driven through it rather than through a
+        stub-only side channel, so the closure predicate under test is the one
+        that ships."""
+        if ledger is not None:
+            (self.rd / "ledger.json").write_text(json.dumps(ledger), encoding="utf-8")
         return self.run("converge", self.ad)
 
     def ledger_calls(self):
         path = self.ad / "ledger-calls.txt"
         return path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
+
+
+def entry(eid, severity="P1", state="closed", round_no=1, **extra):
+    """One ledger row, in the shape setup/ledger.py writes."""
+    return {"id": eid, "severity": severity, "state": state, "round": round_no,
+            "title": eid, **extra}
+
+
+CLOSED = [entry("a"), entry("b")]
 
 
 class LaneCase(unittest.TestCase):
@@ -149,7 +164,7 @@ class LaneCase(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.lane = Lane(self.tmp.name)
 
-    def full_round(self, verdict="Ready to merge", result=None, edit=None, closure=None):
+    def full_round(self, verdict="Ready to merge", result=None, edit=None, ledger=None):
         """A whole round, start to decision, with no kills."""
         lane = self.lane
         pre = lane.pre()
@@ -159,7 +174,7 @@ class LaneCase(unittest.TestCase):
         if plan["fixer"] == "run":
             lane.fixer(result=result, edit=edit)
         commit = lane.commit_fixer()
-        converge = lane.converge(closure)
+        converge = lane.converge(ledger)
         return pre, plan, commit, converge
 
 
@@ -191,7 +206,7 @@ class Identity(LaneCase):
         lane.review("Ready with fixes")
         lane.gate()
         lane.fix_plan()
-        lane.fixer(result={"applied": [{"finding": "f", "action": "a", "severity": "P2"}],
+        lane.fixer(result={"applied": [{"finding_id": "f0000000feed", "finding": "f", "action": "a", "severity": "P2"}],
                            "failed": [], "advisory": [], "incomplete": []},
                    edit=SEED + "// repaired\n")
         self.assertEqual(lane.commit_fixer().returncode, 0)
@@ -208,7 +223,7 @@ class CommitRecovery(LaneCase):
         lane.review("Ready with fixes")
         lane.gate()
         lane.fix_plan()
-        lane.fixer(result={"applied": [{"finding": "f", "action": "a", "severity": "P2"}],
+        lane.fixer(result={"applied": [{"finding_id": "f0000000feed", "finding": "f", "action": "a", "severity": "P2"}],
                            "failed": [], "advisory": [], "incomplete": []},
                    edit=SEED + "// repaired\n")
         return lane
@@ -264,7 +279,7 @@ class Authorization(LaneCase):
         lane.review("Ready with fixes")
         lane.gate()
         lane.fix_plan()
-        lane.fixer(result={"applied": [{"finding": "f", "action": "a", "severity": "P2"}],
+        lane.fixer(result={"applied": [{"finding_id": "f0000000feed", "finding": "f", "action": "a", "severity": "P2"}],
                            "failed": [], "advisory": [], "incomplete": []},
                    edit=SEED + "// gen1\n")
         lane.commit_fixer()
@@ -412,7 +427,7 @@ class FixPlan(LaneCase):
 
 class Converge(LaneCase):
     def test_a_clean_ready_round_converges_and_promises(self):
-        _, _, _, converge = self.full_round(closure={"closure_ok": True, "closed": 2})
+        _, _, _, converge = self.full_round(ledger=CLOSED)
         self.assertEqual(converge.returncode, 0, converge.stdout + converge.stderr)
         self.assertIn("CLOSURE round=1 closed=2", converge.stdout)
         self.assertIn("CONVERGED round=1", converge.stdout)
@@ -424,12 +439,57 @@ class Converge(LaneCase):
         lane.pre()
         lane.review()
         lane.gate()
+        # A valid result, so the precondition passes and the ABSENT attestation
+        # is what converge names.
+        (lane.rd / "fixer-result.json").write_text(
+            json.dumps({"applied": [], "failed": [], "advisory": []}), encoding="utf-8")
         proc = lane.converge()
         self.assertEqual(proc.returncode, 1)
         self.assertIn("FIXER_ABSENT", proc.stdout)
 
+    def test_an_unreadable_fixer_result_is_blocked_before_the_attestation(self):
+        """0b runs ahead of V(fixer.ok), which itself needs a valid result: the
+        stop has to name the result, not accuse the tree of drifting."""
+        lane = self.lane
+        lane.pre()
+        lane.review()
+        lane.gate()
+        proc = lane.converge()
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("FIXER_BLOCKED round=1", proc.stdout)
+        self.assertNotIn("FIXER_TREE_DRIFT", proc.stdout)
+
+    def test_a_failed_partition_is_blocked_not_drift(self):
+        lane = self.lane
+        lane.pre()
+        lane.review("Ready with fixes")
+        lane.gate()
+        lane.fix_plan()
+        lane.fixer(result={"applied": [], "advisory": [], "incomplete": [],
+                           "failed": [{"finding_id": "x1", "finding": "f", "action": "a"}]})
+        proc = lane.converge()
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("FIXER_BLOCKED round=1", proc.stdout)
+
+    def test_an_entry_without_a_finding_id_is_blocked(self):
+        """The ledger keys on finding_id; without it a repair mints a second
+        entry and the reviewer's original can never reach closed."""
+        lane = self.lane
+        lane.pre()
+        lane.review("Ready with fixes")
+        lane.gate()
+        lane.fix_plan()
+        lane.fixer(result={"applied": [{"finding": "f", "action": "a", "severity": "P2"}],
+                           "failed": [], "advisory": [], "incomplete": []},
+                   edit=SEED + "// repaired\n")
+        lane.commit_fixer()
+        proc = lane.converge(CLOSED)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("FIXER_BLOCKED round=1", proc.stdout)
+        self.assertIn("applied entry missing finding_id", proc.stdout)
+
     def test_an_unclosed_blocker_progresses_to_a_verify_round(self):
-        _, _, _, converge = self.full_round(closure={"closure_ok": False, "open": 1})
+        _, _, _, converge = self.full_round(ledger=[entry("a", state="open")])
         self.assertEqual(converge.returncode, 0, converge.stdout)
         self.assertIn("unverified P0/P1", converge.stdout)
         decision = json.loads((self.lane.rd / "decision.json").read_text(encoding="utf-8"))
@@ -451,27 +511,27 @@ class Converge(LaneCase):
         lane.fixer(edit=SEED + "// landed without an applied entry\n")
         commit = lane.commit_fixer()
         self.assertIn("COMMITTED=YES", commit.stdout)
-        converge = lane.converge({"closure_ok": True})
+        converge = lane.converge(CLOSED)
         self.assertEqual(converge.returncode, 1, converge.stdout)
         self.assertIn("REVIEW_TREE_DRIFT round=1", converge.stdout)
 
     def test_not_ready_with_no_open_blocker_is_a_contract_violation(self):
         _, _, _, converge = self.full_round(verdict="Not ready",
-                                            closure={"blockers_open": 0})
+                                            ledger=[entry("a", severity="P3", state="deferred")])
         self.assertEqual(converge.returncode, 1)
         self.assertIn("NOT_READY_WITHOUT_BLOCKER round=1", converge.stdout)
 
     def test_a_pin_conflict_blocks_before_every_other_row(self):
         _, _, _, converge = self.full_round(
             result={"applied": [], "failed": [], "advisory": [],
-                    "incomplete": [{"finding": "f", "action": "a", "severity": "P2"}]},
-            closure={"pin_conflict": ["GroupService.shareGroup"]})
+                    "incomplete": [{"finding_id": "f0000000feed", "finding": "f", "action": "a", "severity": "P2"}]},
+            ledger=[entry("a", state="pin_conflict", symbol="GroupService.shareGroup")])
         self.assertEqual(converge.returncode, 1)
         self.assertIn("PIN_CONFLICT round=1 symbol=GroupService.shareGroup", converge.stdout)
 
     def test_a_filed_cross_repo_finding_blocks(self):
         _, _, _, converge = self.full_round(
-            closure={"filed": [{"finding": "f", "action": "a", "producer_repo": "web-app"}]})
+            ledger=[entry("a", state="filed", producer_repo="web-app")])
         self.assertEqual(converge.returncode, 1)
         self.assertIn("CROSS_REPO_FINDING round=1 count=1 repos=web-app", converge.stdout)
         self.assertTrue((self.lane.ad / "cross-repo-findings.json").is_file())
@@ -479,7 +539,7 @@ class Converge(LaneCase):
     def test_an_applied_p0_forces_a_full_next_round(self):
         _, _, _, converge = self.full_round(
             verdict="Ready with fixes",
-            result={"applied": [{"finding": "f", "action": "a", "severity": "P0"}],
+            result={"applied": [{"finding_id": "f0000000p000", "finding": "f", "action": "a", "severity": "P0"}],
                     "failed": [], "advisory": [], "incomplete": []},
             edit=SEED + "// p0 repair\n")
         self.assertEqual(converge.returncode, 0, converge.stdout)
@@ -489,8 +549,8 @@ class Converge(LaneCase):
     def test_a_design_expanding_repair_forces_a_full_next_round(self):
         _, _, _, converge = self.full_round(
             verdict="Ready with fixes",
-            result={"applied": [{"finding": "f", "action": "a", "severity": "P1",
-                                 "design_expanded": True}],
+            result={"applied": [{"finding_id": "f0000000p100", "finding": "f", "action": "a",
+                                 "severity": "P1", "design_expanded": True}],
                     "failed": [], "advisory": [], "incomplete": []},
             edit=SEED + "// widened\n")
         decision = json.loads((self.lane.rd / "decision.json").read_text(encoding="utf-8"))
@@ -498,7 +558,7 @@ class Converge(LaneCase):
 
     def test_a_p2_repair_asks_for_a_verify_round(self):
         self.full_round(verdict="Ready with fixes",
-                        result={"applied": [{"finding": "f", "action": "a", "severity": "P2"}],
+                        result={"applied": [{"finding_id": "f0000000feed", "finding": "f", "action": "a", "severity": "P2"}],
                                 "failed": [], "advisory": [], "incomplete": []},
                         edit=SEED + "// tidy\n")
         decision = json.loads((self.lane.rd / "decision.json").read_text(encoding="utf-8"))
@@ -513,7 +573,7 @@ class Converge(LaneCase):
         lane.fix_plan()
         lane.fixer()
         lane.commit_fixer()
-        converge = lane.converge({"new_blockers": 1, "closure_ok": True})
+        converge = lane.converge([entry("new", state="closed", round_no=1)])
         self.assertEqual(converge.returncode, 0, converge.stdout)
         decision = json.loads((lane.rd / "decision.json").read_text(encoding="utf-8"))
         self.assertEqual(decision["next_mode"], "full")
@@ -523,7 +583,7 @@ class Converge(LaneCase):
 class RoundAdvance(LaneCase):
     def test_a_progressed_decision_opens_the_next_round(self):
         self.full_round(verdict="Ready with fixes",
-                        result={"applied": [{"finding": "f", "action": "a", "severity": "P2"}],
+                        result={"applied": [{"finding_id": "f0000000feed", "finding": "f", "action": "a", "severity": "P2"}],
                                 "failed": [], "advisory": [], "incomplete": []},
                         edit=SEED + "// tidy\n")
         lane = self.lane
@@ -538,7 +598,7 @@ class RoundAdvance(LaneCase):
                          lane.head())
 
     def test_a_converged_decision_replays_the_promise_without_re_reviewing(self):
-        self.full_round(closure={"closure_ok": True})
+        self.full_round(ledger=CLOSED)
         lane = self.lane
         replay = lane.pre()
         self.assertEqual(replay["round"], 1)
@@ -550,7 +610,7 @@ class RoundAdvance(LaneCase):
         self.assertIn("<promise>REVIEW_CONVERGED</promise>", converge.stdout)
 
     def test_a_decision_that_is_not_bound_to_this_head_is_ignored(self):
-        self.full_round(closure={"closure_ok": True})
+        self.full_round(ledger=CLOSED)
         lane = self.lane
         (lane.wt / "src" / "a.ts").write_text(SEED + "// a hand edit\n", encoding="utf-8")
         lane.git("add", "-A")
@@ -580,7 +640,7 @@ class ReuseCases(LaneCase):
     def test_the_post_fix_head_is_also_a_reuse_head(self):
         lane = self.gated_round("Ready with fixes")
         lane.fix_plan()
-        lane.fixer(result={"applied": [{"finding": "f", "action": "a", "severity": "P2"}],
+        lane.fixer(result={"applied": [{"finding_id": "f0000000feed", "finding": "f", "action": "a", "severity": "P2"}],
                            "failed": [], "advisory": [], "incomplete": []},
                    edit=SEED + "// repaired\n")
         lane.commit_fixer()
@@ -672,7 +732,7 @@ class InjectionSequence(LaneCase):
     BOUNDARIES = ("envelope", "gate", "repair", "ledger", "post-fix",
                   "commit", "fixer.ok", "decision")
 
-    REPAIR = {"applied": [{"finding": "f", "action": "a", "severity": "P2"}],
+    REPAIR = {"applied": [{"finding_id": "f0000000feed", "finding": "f", "action": "a", "severity": "P2"}],
               "failed": [], "advisory": [], "incomplete": []}
 
     def drive(self, kill_after):
@@ -718,21 +778,21 @@ class InjectionSequence(LaneCase):
             self.assertEqual(lane.gate().returncode, 0)
         if kill_after not in ("envelope", "gate"):
             repair_if_asked(do_fix_plan())
+        tree = None
         if kill_after in ("ledger", "post-fix", "commit", "fixer.ok", "decision"):
-            # Replay commit-fixer's own steps, stopping at the named boundary.
             lane.stage()
-            tree = json.loads((lane.rd / "repair.json").read_text(encoding="utf-8"))["tree"]
             if kill_after in ("fixer.ok", "decision"):
                 self.assertEqual(lane.run("commit-fixer", lane.ad).returncode, 0)
-        if kill_after == "ledger":
-            self.ledger_merge(lane)
-        elif kill_after in ("post-fix", "commit"):
-            self.ledger_merge(lane)
-            (lane.rd / "post-fix.json").write_text(json.dumps({"tree": tree}), encoding="utf-8")
-            if kill_after == "commit":
-                lane.git("commit", "-qm", "fix(review): apply fixer feedback")
+            else:
+                # The real commit-fixer, killed at its own boundary. Hand-building
+                # the post-kill state would test a state the harness invented
+                # rather than the one this code leaves behind, which is the whole
+                # point of the plan's recovery traces.
+                proc = lane.run("commit-fixer", lane.ad, kill_after=self.KILLS[kill_after])
+                self.assertNotEqual(proc.returncode, 0, proc.stdout)
+                self.assertFalse((lane.rd / "fixer.ok").is_file())
         if kill_after == "decision":
-            lane.converge({"closure_ok": True})
+            lane.converge(CLOSED)
 
         # --- the resume: every node runs again from round-pre ---
         review_if_asked(do_pre())
@@ -740,17 +800,13 @@ class InjectionSequence(LaneCase):
         repair_if_asked(do_fix_plan())
         commit = lane.commit_fixer()
         self.assertEqual(commit.returncode, 0, commit.stdout + commit.stderr)
-        converge = lane.converge({"closure_ok": True})
+        converge = lane.converge(CLOSED)
         self.assertEqual(converge.returncode, 0, converge.stdout + converge.stderr)
         return duplicates
 
-    @staticmethod
-    def ledger_merge(lane):
-        """commit-fixer's step 1, run alone: the merge landed, the commit did not."""
-        subprocess.run([sys.executable, str(LEDGER_STUB), "merge-fixer", str(lane.ad),
-                        str(lane.n), "--result", str(lane.rd / "fixer-result.json"),
-                        "--attempt", "1", "--head", lane.head()],
-                       capture_output=True, encoding="utf-8", check=True)
+    # The plan's kill points 4, 5 and 6, named as round-state.py spells them.
+    KILLS = {"ledger": "ledger-merged", "post-fix": "post-fix-written",
+             "commit": "committed"}
 
     def test_every_kill_point_resumes_without_a_duplicate_activity(self):
         for boundary in self.BOUNDARIES:

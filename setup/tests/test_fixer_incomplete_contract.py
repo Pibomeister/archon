@@ -151,6 +151,73 @@ class PinConflictPartition(unittest.TestCase):
         self.assertIn("FIXER_BLOCKED: pin_conflict must be a list", r.stderr)
 
 
+class FindingIdRequirement(unittest.TestCase):
+    """The ledger keys on the reviewer's finding_id.
+
+    An entry without one mints a SECOND ledger entry instead of moving the
+    reviewer's to `applied`, and a finding that never reaches `applied` can
+    never reach `closed` -- so positive closure deadlocks on a finding that was
+    in fact repaired. B's replay produced 36 entries from a much smaller real
+    population, with three repaired P1s unclosed at the cap.
+
+    It is a FLAG, not the default, because this script is shared by five lanes
+    and only the v2 claude lane's fixer prompt emits the field. Defaulting it on
+    fails every round in bugfix, lite and web on a contract their prompts were
+    never given.
+    """
+
+    def run_check(self, obj, *flags):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(obj, f)
+            path = f.name
+        try:
+            return subprocess.run(["python3", str(CHECK_FIXER_RESULT), path, *flags],
+                                  capture_output=True, encoding="utf-8")
+        finally:
+            Path(path).unlink()
+
+    def applied(self, entry):
+        return {"applied": [entry], "failed": [], "advisory": []}
+
+    def test_an_entry_with_a_finding_id_passes(self):
+        r = self.run_check(self.applied({"finding_id": "abc123def456", "finding": "f",
+                                         "action": "a", "severity": "P1"}),
+                           "--require-finding-id")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_an_entry_without_one_blocks_under_the_flag(self):
+        r = self.run_check(self.applied({"finding": "f", "action": "a", "severity": "P1"}),
+                           "--require-finding-id")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("FIXER_BLOCKED: applied entry missing finding_id", r.stderr)
+
+    def test_an_empty_finding_id_is_not_a_finding_id(self):
+        r = self.run_check(self.applied({"finding_id": "   ", "finding": "f",
+                                         "action": "a"}), "--require-finding-id")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("missing finding_id", r.stderr)
+
+    def test_every_partition_is_checked_not_just_applied(self):
+        for partition in ("advisory", "deferred", "incomplete", "pin_conflict"):
+            with self.subTest(partition=partition):
+                body = {"applied": [], "failed": [], "advisory": [],
+                        partition: [{"finding": "f", "action": "a", "symbol": "s"}]}
+                r = self.run_check(body, "--require-finding-id")
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn(f"{partition} entry missing finding_id", r.stderr)
+
+    def test_without_the_flag_the_older_lanes_still_pass(self):
+        r = self.run_check(self.applied({"finding": "f", "action": "a", "severity": "P1"}))
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_an_unreadable_result_is_typed_not_a_traceback(self):
+        r = subprocess.run(["python3", str(CHECK_FIXER_RESULT), "/nonexistent/result.json"],
+                           capture_output=True, encoding="utf-8")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("FIXER_BLOCKED: result unreadable", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
+
 class DesignExpandedFlag(unittest.TestCase):
     """The flag that forces the next round full. A wrong type downgrades it."""
 

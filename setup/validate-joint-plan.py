@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import re
 import sys
+import typing
 
 
 KNOWN_REPOS = {"api", "goodword-mcp", "web-app"}
@@ -17,7 +18,10 @@ BACKTICKED = re.compile(r"`([^`]+)`")
 BULLET = re.compile(r"^\s*[-*]\s+")
 
 
-def fail(message: str) -> None:
+def fail(message: str) -> typing.NoReturn:
+    """NoReturn, not None: every isinstance guard in this file is followed by a
+    fail() on the else branch, and a checker that thinks fail() returns treats
+    the value below it as still possibly the wrong type."""
     print("JOINT_PLAN=FAIL " + message)
     raise SystemExit(1)
 

@@ -336,8 +336,8 @@ def fixer_decision(rnd):
     fok = read_json(rnd.rd / "fixer.ok")
     repair = read_json(rnd.rd / "repair.json")
     start = read_json(rnd.rd / "repair-start.json")
-    if validates(rnd, fok, review_id, gen, tree) and fok.get("head") == rnd.head() \
-            and rnd.head_tree() == tree:
+    if isinstance(fok, dict) and validates(rnd, fok, review_id, gen, tree) \
+            and fok.get("head") == rnd.head() and rnd.head_tree() == tree:
         return {"fixer": "reuse-committed"}
     if fok is None and validates(rnd, repair, review_id, gen, tree):
         return {"fixer": "reuse-uncommitted"}
@@ -356,28 +356,55 @@ def ledger_py():
     return Path(os.environ.get("ARCHON_LEDGER_PY") or (HERE / "ledger.py"))
 
 
-def ledger(rnd, *args, capture=False):
+def ledger(rnd, command, *args, repo=False, echo=False):
+    """setup/ledger.py, on its own positional CLI: <artifacts> <command> …
+
+    Exit 1 is a VERDICT -- closure found an unclosed blocker -- not a failure;
+    only exit 2 is LEDGER=FAIL. Nobody propagates the 1: a converge that died
+    non-zero having printed only CLOSURE lines reads as an untyped exit to the
+    node harness, and row 10 is a progression, not a stop.
+    """
     script = ledger_py()
     if not script.is_file():
         raise Stop(f"ROUND_STATE=FAIL ledger helper is missing: {script}")
-    proc = subprocess.run([sys.executable, str(script), *[str(a) for a in args]],
-                          capture_output=True, encoding="utf-8")
-    if proc.returncode != 0:
+    argv = [sys.executable, str(script), str(rnd.ad), command, *[str(a) for a in args]]
+    if repo:
+        argv += ["--repo", str(rnd.wt)]
+    proc = subprocess.run(argv, capture_output=True, encoding="utf-8")
+    if proc.returncode >= 2:
         raise Stop(f"LEDGER=FAIL round={rnd.n} {proc.stdout.strip()} {proc.stderr.strip()}".strip())
     if proc.stderr.strip():
         note(proc.stderr.rstrip())
-    return proc.stdout if capture else None
+    if echo and proc.stdout.strip():
+        print(proc.stdout.rstrip(), flush=True)
+    return proc.returncode
 
 
-def ledger_closure(rnd, head):
-    raw = ledger(rnd, "closure", rnd.ad, rnd.n, "--head", head, "--json", capture=True)
-    try:
-        data = json.loads(raw.strip().splitlines()[-1])
-    except (ValueError, IndexError) as exc:
-        raise Stop(f"LEDGER=FAIL round={rnd.n} closure is not JSON: {exc}") from exc
-    if not isinstance(data, dict):
-        raise Stop(f"LEDGER=FAIL round={rnd.n} closure is not an object")
-    return data
+def ledger_entries(rnd):
+    data = read_json(rnd.rd / "ledger.json", [])
+    return [e for e in data if isinstance(e, dict)] if isinstance(data, list) else []
+
+
+def ledger_closure(rnd):
+    """Closure's verdict, plus the entry facts the decision table needs.
+
+    ledger.py answers one question -- is every P0/P1 closed -- as an exit code
+    and a printed line. The table's other inputs (pin_conflict symbols, filed
+    entries, open blockers, blockers first seen this round) are read straight
+    off round-N/ledger.json, the same file ledger.py just wrote.
+    """
+    code = ledger(rnd, "closure", rnd.n, echo=True)
+    entries = ledger_entries(rnd)
+    blocking = [e for e in entries if e.get("severity") in ("P0", "P1")]
+    return {
+        "closure_ok": code == 0,
+        "pin_conflict": [str(e.get("symbol") or e.get("title") or e.get("id"))
+                         for e in entries if e.get("state") == "pin_conflict"],
+        "filed": [e for e in entries if e.get("state") == "filed"],
+        "blockers_open": sum(1 for e in blocking
+                             if e.get("state") in ("open", "applied", "regressed")),
+        "new_blockers": sum(1 for e in blocking if str(e.get("round")) == str(rnd.n)),
+    }
 
 
 # --- pre ------------------------------------------------------------------
@@ -390,9 +417,29 @@ def open_round(rnd, n, next_mode=None):
     rnd.rd.mkdir(parents=True, exist_ok=True)
     write_atomic(rnd.rd / "pre-head.txt", rnd.head() + "\n")
     rnd.set_attempt(1)
-    if previous >= 1 and (rnd.ad / f"round-{previous}" / "ledger.json").is_file():
-        ledger(rnd, "copy-forward", rnd.ad, previous, n)
+    if previous >= 1:
+        # Unconditional: ledger.py falls back to the nearest earlier round that
+        # has a ledger. A round that wrote no fixer-result.json writes no
+        # ledger either, and a straight copy from it would carry nothing --
+        # v1's round 6 did exactly that, and closure at round 7 would then pass
+        # on an empty set.
+        ledger(rnd, "copy-forward", previous, n, echo=True)
     note(f"ROUND_OPENED round={n} head={rnd.head()} next_mode={next_mode or 'full'}")
+
+
+def snapshot_review_dirs(rnd):
+    """review-gate's baseline for telling THIS round's ce-code-review run
+    directory from every other one on the host.
+
+    Taken before the reviewer starts. An empty baseline is still written as a
+    file, because a missing one and an empty one mean opposite things to the
+    gate's `comm`: empty means "nothing was here", missing means "no idea",
+    and reading the second as the first lets a foreign run's verdict through.
+    """
+    root = Path(os.environ.get("CE_REVIEW_ROOT")
+                or "/tmp/compound-engineering/ce-code-review")
+    dirs = sorted(f"{p}/" for p in root.glob("*") if p.is_dir()) if root.is_dir() else []
+    write_atomic(rnd.rd / "prerun-dirs.txt", "".join(d + "\n" for d in dirs))
 
 
 def decision_bound(rnd, decision):
@@ -422,8 +469,8 @@ def reconcile_pending_commit(rnd):
     repair = read_json(rnd.rd / "repair.json")
     if not isinstance(repair, dict):
         return
-    ledger(rnd, "merge-fixer", rnd.ad, rnd.n, "--result", rnd.rd / "fixer-result.json",
-           "--attempt", repair.get("attempt", rnd.attempt()), "--head", rnd.head())
+    ledger(rnd, "merge-fixer", rnd.n, rnd.rd / "fixer-result.json",
+           repair.get("attempt") or rnd.attempt(), repo=True)
     write_json_atomic(rnd.rd / "fixer.ok", {
         "attempt": repair.get("attempt"), "review_id": repair.get("review_id"),
         "review_gen": repair.get("review_gen"), "result_sha256": repair.get("result_sha256"),
@@ -584,6 +631,7 @@ def cmd_pre(rnd, _args):
     previous = read_json(rnd.rd / "review-input.json")
     tree = rnd.tree()
     guard_resnapshot(rnd, previous, tree)
+    snapshot_review_dirs(rnd)
     run_review_mode(rnd)
     base = validate_base(rnd)
     record = {
@@ -604,9 +652,16 @@ def cmd_pre(rnd, _args):
 # --- gate -----------------------------------------------------------------
 
 def fail_gate(rnd, line):
+    """Every gate failure ends on REVIEW_GATE=FAIL, whatever named it.
+
+    The node prints REVIEW_GATE=PASS itself on the success path, so this helper
+    never prints a PASS -- test_node_review_gate asserts exactly one.
+    """
     write_atomic(rnd.rd / "gate.txt", "FAIL\n")
     unlink(rnd.rd / "review.ok")
     print(line, flush=True)
+    if not line.startswith("REVIEW_GATE=FAIL"):
+        print(f"REVIEW_GATE=FAIL round={rnd.n}", flush=True)
     return 1
 
 
@@ -632,8 +687,9 @@ def cmd_gate(rnd, args):
         files = rnd.tree_diff_count(record.get("review_tree"), tree)
         return fail_gate(rnd, f"REVIEW_WROTE_TREE round={rnd.n} files={files}")
     print(f"GUARD_read_only=PASS owner={'fixer' if owned else 'none'}", flush=True)
-    ledger(rnd, "merge-envelope", rnd.ad, rnd.n, "--envelope", rnd.rd / "review-envelope.txt",
-           "--mode", rnd.scope(), "--head", record.get("review_head"))
+    # Last, so review-summary.json (which ledger.py rewrites) carries the real
+    # residual count rather than the placeholder the node's earlier write left.
+    ledger(rnd, "merge-envelope", rnd.n, rnd.rd / "review-envelope.txt", repo=True)
     write_json_atomic(rnd.rd / "review.ok", {"gen": gen, "id": expected, "guard": "PASS"})
     write_atomic(rnd.rd / "gate.txt", "PASS\n")
     print(f"REVIEW_OK round={rnd.n} gen={gen} id={expected}", flush=True)
@@ -644,12 +700,17 @@ def cmd_gate(rnd, args):
 
 def cmd_fix_plan(rnd, _args):
     decision = fixer_decision(rnd)
+    # FIX_PLAN is this node's discriminator, so it prints on EVERY branch. The
+    # unauthorized branch exits 0 -- unauthorized is a decision, not a node
+    # failure; commit-fixer and converge are what stop -- and without this line
+    # the only typed word a successful node printed was REVIEW_UNAUTHORIZED,
+    # which runner.py reads as a failure word on a zero exit: an untyped exit.
+    note(f"FIX_PLAN round={rnd.n} fixer={decision['fixer']} "
+         f"reason={decision.get('reason', '-')}")
     if decision["fixer"] == "unauthorized":
         note(f"REVIEW_UNAUTHORIZED round={rnd.n} (no gated envelope for this candidate)")
         log_activity(rnd, kind="fixer", decision="unauthorized", tree="")
     else:
-        note(f"FIX_PLAN round={rnd.n} fixer={decision['fixer']} "
-             f"reason={decision.get('reason', '-')}")
         log_activity(rnd, kind="fixer", decision=decision["fixer"],
                      reason=decision.get("reason", ""), tree=rnd.tree())
     print(json.dumps(decision), flush=True)
@@ -672,16 +733,34 @@ def run_pin_guard(rnd):
         raise Stop(f"PIN_GUARD=FAIL round={rnd.n} (edit left staged for repair)")
 
 
+def kill_after(boundary):
+    """Injection hook: exit immediately after `boundary`'s write, before the next.
+
+    commit-fixer is one call from the node's point of view, so three of the
+    plan's kill points -- between the ledger merge and the commit, after
+    post-fix.json before the commit, and after the commit before fixer.ok --
+    are unreachable from outside it. The harness would otherwise hand-build the
+    post-kill state, which tests a state someone invented rather than the one
+    this code actually leaves behind. Unset, this does nothing.
+    """
+    if os.environ.get("ROUND_STATE_KILL_AFTER") == boundary:
+        raise SystemExit(f"ROUND_STATE_KILLED after={boundary}")
+
+
 def cmd_commit_fixer(rnd, _args):
     decision = fixer_decision(rnd)
     if decision["fixer"] == "unauthorized":
         print(f"REVIEW_UNAUTHORIZED round={rnd.n}", flush=True)
         return 1
-    review_id, gen = authorization(rnd)
+    auth = authorization(rnd)
+    if auth is None:
+        print(f"REVIEW_UNAUTHORIZED round={rnd.n}", flush=True)
+        return 1
+    review_id, gen = auth
     head = rnd.head()
     if decision["fixer"] == "reuse-committed":
-        ledger(rnd, "merge-fixer", rnd.ad, rnd.n, "--result", rnd.rd / "fixer-result.json",
-               "--attempt", rnd.attempt(), "--head", head)
+        ledger(rnd, "merge-fixer", rnd.n, rnd.rd / "fixer-result.json",
+               rnd.attempt(), repo=True)
         print(f"COMMIT_FIXER=OK round={rnd.n} reused=committed sha={head}", flush=True)
         return 0
     tree = rnd.tree()
@@ -689,8 +768,9 @@ def cmd_commit_fixer(rnd, _args):
     if not validates(rnd, repair, review_id, gen, tree):
         print(f"FIXER_INCOMPLETE round={rnd.n} attempt={rnd.attempt()}", flush=True)
         return 1
-    ledger(rnd, "merge-fixer", rnd.ad, rnd.n, "--result", rnd.rd / "fixer-result.json",
-           "--attempt", repair.get("attempt", rnd.attempt()), "--head", head)
+    ledger(rnd, "merge-fixer", rnd.n, rnd.rd / "fixer-result.json",
+           repair.get("attempt") or rnd.attempt(), repo=True)
+    kill_after("ledger-merged")
     run_pin_guard(rnd)
     attestation = {
         "attempt": repair.get("attempt"), "review_id": review_id, "review_gen": gen,
@@ -706,7 +786,9 @@ def cmd_commit_fixer(rnd, _args):
         print(f"COMMIT_FIXER=OK round={rnd.n} committed=false sha={head}", flush=True)
         return 0
     write_json_atomic(rnd.rd / "post-fix.json", {"tree": tree})
+    kill_after("post-fix-written")
     rnd.git("commit", "-m", "fix(review): apply fixer feedback")
+    kill_after("committed")
     head = rnd.head()
     attestation.update({"head": head, "committed": True})
     write_json_atomic(rnd.rd / "fixer.ok", attestation)
@@ -773,15 +855,77 @@ def converge_rows(rnd, closure, result, verdict, envelope_head):
     return "blocked", None, "unknown-verdict", f"CONVERGE=FAIL unknown verdict [{result}]", 1
 
 
+def helper(rnd, name, *args, cwd=None):
+    """Run a setup/ helper and pass its output through. Returns its exit code."""
+    script = HERE / name
+    if not script.is_file():
+        return 0
+    proc = subprocess.run([sys.executable, str(script), *[str(a) for a in args]],
+                          capture_output=True, encoding="utf-8", cwd=cwd)
+    for stream in (proc.stdout, proc.stderr):
+        if stream.strip():
+            print(stream.rstrip(), flush=True)
+    return proc.returncode
+
+
+def converge_preconditions(rnd):
+    """The four v1 converge checks the decision table does not restate.
+
+    Each earns its place: check-scope is the primary round-scoped breach check
+    and the RUNBOOK recipe for SCOPE_BREACH depends on it firing here;
+    check-fixer-result covers the `failed` partition and an unreadable result,
+    neither of which row 2 sees; update-waivers writes waivers.json, which the
+    review and fixer prompts both read for "Previously waived" and which
+    nothing else writes; review-yield is the operator's per-round number.
+
+    check-fixer-result runs FIRST, ahead of the attestation check, because
+    `V(fixer.ok)` itself requires a valid fixer-result: a `failed` partition
+    would otherwise surface as FIXER_TREE_DRIFT, naming the wrong cause.
+    """
+    result = rnd.rd / "fixer-result.json"
+    if helper(rnd, "check-fixer-result.py", result, "--require-finding-id") != 0:
+        return f"FIXER_BLOCKED round={rnd.n}"
+    return None
+
+
+def converge_reports(rnd):
+    """Scope guard, waiver ledger and the yield line. Returns a stop, or None."""
+    base = read_text(rnd.ad / "bootstrap-head.txt").strip()
+    if base and helper(rnd, "check-scope.py", rnd.ad / "files-allowlist.json",
+                       rnd.wt, base, "--round", rnd.n) != 0:
+        return f"SCOPE_BREACH round={rnd.n}"
+    helper(rnd, "update-waivers.py", rnd.rd / "fixer-result.json",
+           rnd.ad / "waivers.md")
+    helper(rnd, "review-yield.py", rnd.ad, rnd.n)
+    return None
+
+
+def round_verdict(rnd):
+    """The verdict the NODE typed as GATE_3, not one re-derived here.
+
+    review-summary.json is the compatibility artifact and ledger.py rewrites it;
+    review-verdict.txt is what review-gate resolved from the ce run directory.
+    Prefer the node's, so converge gates on the value the operator was shown.
+    """
+    typed = read_text(rnd.rd / "review-verdict.txt").strip()
+    if typed in VERDICTS:
+        return typed
+    return (read_json(rnd.rd / "review-summary.json", {}) or {}).get("verdict")
+
+
 def cmd_converge(rnd, _args):
     auth = authorization(rnd)
     if auth is None:
         print(f"REVIEW_UNAUTHORIZED round={rnd.n}", flush=True)
         return 1
     review_id, gen = auth
+    blocked = converge_preconditions(rnd)
+    if blocked:
+        print(blocked, flush=True)
+        return 1
     tree = rnd.tree()
     fok = read_json(rnd.rd / "fixer.ok")
-    if fok is None:
+    if not isinstance(fok, dict):
         print(f"FIXER_ABSENT round={rnd.n}", flush=True)
         return 1
     if not validates(rnd, fok, review_id, gen, tree) or fok.get("head") != rnd.head() \
@@ -789,22 +933,24 @@ def cmd_converge(rnd, _args):
         print(f"FIXER_TREE_DRIFT round={rnd.n}", flush=True)
         return 1
     previous = read_json(rnd.rd / "decision.json")
-    if decision_bound(rnd, previous) and previous.get("result") == "converged" \
+    if decision_bound(rnd, previous) and isinstance(previous, dict) \
+            and previous.get("result") == "converged" \
             and previous.get("gen") == gen and previous.get("tree") == tree:
         print(f"CONVERGED round={rnd.n}", flush=True)
         print("<promise>REVIEW_CONVERGED</promise>", flush=True)
         return 0
-    closure = ledger_closure(rnd, rnd.head())
-    print(f"CLOSURE round={rnd.n} closed={closure.get('closed', 0)} "
-          f"open={closure.get('open', 0)} regressed={closure.get('regressed', 0)} "
-          f"new={closure.get('new', 0)}", flush=True)
-    verdict = (read_json(rnd.rd / "review-summary.json", {}) or {}).get("verdict")
+    blocked = converge_reports(rnd)
+    if blocked:
+        print(blocked, flush=True)
+        return 1
+    closure = ledger_closure(rnd)
+    verdict = round_verdict(rnd)
     envelope_head = last(HEAD_RE, read_text(rnd.rd / "review-envelope.txt"))
     result = verdict if verdict in VERDICTS else "UNKNOWN"
     outcome, next_mode, reason, line, code = converge_rows(
         rnd, closure, result, verdict if verdict in VERDICTS else None, envelope_head)
     if outcome == "converged":
-        ledger(rnd, "residuals", rnd.ad, rnd.n, "--out", rnd.ad / "residuals.json")
+        ledger(rnd, "residuals", rnd.n, rnd.ad / "residuals.json", echo=True)
     write_decision(rnd, outcome, next_mode, reason, review_id, gen, tree)
     print(line, flush=True)
     if outcome == "converged":
