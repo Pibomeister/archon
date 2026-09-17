@@ -3749,6 +3749,9 @@ def main() -> None:
     env = dict(os.environ)
     env.update({
         "ARCHON_DB": str(args.db),
+        # archon-lock-retry.sh must give up before wait_for_watchdog_arm's 15 s
+        # window, or the timeout path terminates the launcher mid-attempt.
+        "ARCHON_LOCK_RETRY_DEADLINE_S": "10",
         "ARCHON_CONTROL_DIR": str(args.control_dir),
         "DISABLE_OMC": "1",
         "CODEX_HOME": str(args.codex_home),

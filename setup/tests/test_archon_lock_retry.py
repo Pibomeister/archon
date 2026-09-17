@@ -47,6 +47,10 @@ CREATE TABLE remote_agent_workflow_runs (
 # FAKE_ERROR: the non-lock error message to fail with instead.
 # FAKE_APPROVE_RECORDED=1: `approve` records the decision, then its resume
 #   hits the lock (the reject/approve incident shape).
+# FAKE_APPROVE_FAILED_LATER=1: `approve` ran the workflow, which failed later
+#   with a lock error inside a node (run ends `failed`, same message prefix).
+# FAKE_NEWER_RESUMABLE=<id>: the locked call also inserts a newer failed run in
+#   the named run's lane, so a retry would resume that one instead.
 # Every call bumps OTHER's last_activity_at, as a concurrent run would.
 SHIM = r"""#!/usr/bin/env python3
 import json, os, sqlite3, sys
@@ -60,8 +64,9 @@ db.execute("UPDATE remote_agent_workflow_runs SET last_activity_at = datetime('n
            (f"+{calls} seconds", os.environ["OTHER_RUN"]))
 db.commit()
 locked = os.environ.get("FAKE_LOCKED", "0")
-if verb == "approve" and os.environ.get("FAKE_APPROVE_RECORDED"):
-    db.execute("UPDATE remote_agent_workflow_runs SET metadata = '{\"approval\":\"approved\"}' WHERE id = ?", (run,))
+if verb == "approve" and (os.environ.get("FAKE_APPROVE_RECORDED") or os.environ.get("FAKE_APPROVE_FAILED_LATER")):
+    status = "failed" if os.environ.get("FAKE_APPROVE_FAILED_LATER") else "paused"
+    db.execute("UPDATE remote_agent_workflow_runs SET status = ?, metadata = '{\"approval\":\"approved\"}' WHERE id = ?", (status, run))
     db.commit()
     sys.stderr.write("Error: Approved but failed to resume workflow 'bugfix': Cannot resume workflow "
                      "'bugfix': failed to load prior run state — Failed to resume workflow run: "
@@ -71,6 +76,12 @@ if os.environ.get("FAKE_ERROR"):
     sys.stderr.write(os.environ["FAKE_ERROR"] + "\n")
     sys.exit(1)
 if locked == "forever" or calls <= int(locked):
+    if os.environ.get("FAKE_NEWER_RESUMABLE"):
+        db.execute("INSERT INTO remote_agent_workflow_runs (id, workflow_name, status, started_at, last_activity_at, "
+                   "working_path, user_message) SELECT ?, workflow_name, 'failed', '2026-09-16 11:00:00', "
+                   "'2026-09-16 11:00:00', working_path, 'other' FROM remote_agent_workflow_runs WHERE id = ?",
+                   (os.environ["FAKE_NEWER_RESUMABLE"], run))
+        db.commit()
     if os.environ.get("FAKE_TOUCH_NAMED"):
         db.execute("UPDATE remote_agent_workflow_runs SET metadata = ? WHERE id = ?", (f'{{"n":{calls}}}', run))
         db.commit()
@@ -173,12 +184,38 @@ class LockRetryTest(unittest.TestCase):
         self.assertEqual(self.verdict(res), "RESUME=OK run=4848e1e3 archon_rc=0", res.stdout + res.stderr)
         self.assertEqual(len(self.retry_lines(res)), 2)
 
-    def test_recorded_approval_whose_resume_locked_continues_with_resume(self):
-        res = subprocess.run(
+    def approve(self, **fake):
+        return subprocess.run(
             ["bash", str(RETRY), "APPROVE", RUN, "--", "archon", "workflow", "approve", RUN],
-            capture_output=True, encoding="utf-8", timeout=60,
-            env=self.env(FAKE_APPROVE_RECORDED="1"),
+            capture_output=True, encoding="utf-8", timeout=60, env=self.env(**fake),
         )
+
+    def test_approved_workflow_that_failed_later_is_not_resumed_again(self):
+        # Same "Approved but failed to resume" prefix, but the workflow ran and
+        # failed: the run is `failed`, not `paused`, so nothing continues.
+        res = self.approve(FAKE_APPROVE_FAILED_LATER="1")
+        self.assertEqual([c[1] for c in self.calls()], ["approve"], res.stdout + res.stderr)
+        self.assertNotIn("recorded=yes", res.stdout)
+        self.assertEqual(res.returncode, 1)
+
+    def test_lane_selection_change_stops_resume_retries(self):
+        newer = "5eeeeeee" + "0" * 24
+        res = self.resume(FAKE_LOCKED="forever", FAKE_NEWER_RESUMABLE=newer)
+        self.assertEqual(len(self.calls()), 1, res.stdout + res.stderr)
+        self.assertIn("RESUME_DB_LOCKED stop=lane-selection-changed run=4848e1e3", res.stdout)
+        self.assertTrue(self.verdict(res).startswith("RESUME=NOT_EXECUTED named=4848e1e3 archon_rc=1"))
+
+    def test_deadline_stops_retries(self):
+        res = self.resume(FAKE_LOCKED="forever", ARCHON_LOCK_RETRY_DEADLINE_S="0")
+        self.assertEqual(len(self.calls()), 1, res.stdout + res.stderr)
+        self.assertEqual(self.retry_lines(res), [])
+
+    def test_invalid_attempt_cap_falls_back_to_the_bounded_default(self):
+        res = self.resume(FAKE_LOCKED="forever", ARCHON_LOCK_RETRY_ATTEMPTS="abc")
+        self.assertEqual(len(self.calls()), 60, res.stdout[-500:])
+
+    def test_recorded_approval_whose_resume_locked_continues_with_resume(self):
+        res = self.approve(FAKE_APPROVE_RECORDED="1")
         verbs = [c[1] for c in self.calls()]
         self.assertEqual(verbs, ["approve", "resume"], res.stdout + res.stderr)
         self.assertIn("APPROVE_DB_LOCKED recorded=yes continue=resume.sh run=4848e1e3", res.stdout)
@@ -197,6 +234,11 @@ class ControlCommandsRouteThroughRetryTest(unittest.TestCase):
                          ["archon", "workflow", "reject", RUN, "why"])
         self.assertEqual(mod.command_for("reject", RUN, "why")[2], "REJECT")
         self.assertEqual(mod.command_for("resume", RUN), ["bash", str(SETUP / "resume.sh"), RUN])
+
+    def test_archon_run_bounds_retries_inside_the_watchdog_arm_window(self):
+        body = (SETUP / "archon-run.py").read_text(encoding="utf-8")
+        self.assertIn('"ARCHON_LOCK_RETRY_DEADLINE_S": "10"', body)
+        self.assertIn("timeout_s: int = 15) -> str:", body)
 
     def test_package_ships_the_retry_wrapper(self):
         # resume.sh, gate-approve.sh and archon-run.py all exec it by path.
