@@ -66,6 +66,7 @@ MANIFEST=(
   workflows/portable/single-repo-feature/scripts/repo_policy.py
   workflows/portable/single-repo-feature/scripts/review_envelope.py
   config.yaml
+  .env
   RUNBOOK.md
   workflows/babysit.yaml
   workflows/bugfix.yaml
@@ -90,6 +91,7 @@ MANIFEST=(
   setup/check-feature-handoff-integrity.py
   setup/check-lite-prbody.py
   setup/check-scope.py
+  setup/lockfile_scope.py
   setup/check-slop.py
   setup/detach.py
   setup/gist-README.md
@@ -104,6 +106,9 @@ MANIFEST=(
   setup/parse-critique.py
   setup/parse-review-envelope.py
   setup/plan-shape.sh
+  setup/browser-exemption.py
+  setup/check-unit-patterns.py
+  setup/node-no-output.py
   setup/validate-joint-plan.py
   setup/rca-shape.sh
   setup/probe-shape.py

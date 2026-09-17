@@ -113,7 +113,7 @@ def fail(reason: str) -> NoReturn:
     raise SystemExit(1)
 
 
-def resolve_run(db: Path, prefix: str) -> dict:
+def resolve_run(db: Path, prefix: str, lanes: set[str] = LANES) -> dict:
     if not ID_RE.fullmatch(prefix):
         fail(f"bad-id-format [{prefix}]")
     con = sqlite3.connect(db)
@@ -129,7 +129,7 @@ def resolve_run(db: Path, prefix: str) -> dict:
     if len(rows) != 1:
         fail(f"ambiguous prefix={prefix} matches={len(rows)}")
     row = dict(rows[0])
-    if row["workflow_name"] not in LANES:
+    if row["workflow_name"] not in lanes:
         fail(f"run {row['id'][:8]} is {row['workflow_name']}, not a guarded Codex lane")
     return row
 
@@ -2695,11 +2695,15 @@ def print_feature_chain_pause(args: argparse.Namespace, chain_id: str) -> None:
     gate = probe.get("gate") or probe.get("status")
     advance_command = f"python3 {Path(__file__).resolve()} feature-advance --chain {chain_id}"
     label = {"gate": "PAUSED", "handoff": "RUNNING"}.get(probe["state"], probe["state"].upper())
+    # approve only releases a paused gate; a failed/cancelled run is resumed after
+    # its cause is fixed (or its planning is replanned), never approved.
+    next_step = (f"archon workflow approve {row['id'][:8]}" if probe["state"] == "gate"
+                 else f"bash {SETUP / 'resume.sh'} {row['id'][:8]}")
     print(
         f"ARCHON_FEATURE_REPOSITORY_CHAIN={label} "
         f"chain={chain_id} phase={(current or {}).get('phase')} run={row['id'][:8]} "
         f"lane={row['workflow_name']} status={probe.get('status')} gate={gate} "
-        f"next=\"archon workflow approve {row['id'][:8]}\" then=\"{advance_command}\""
+        f"next=\"{next_step}\" then=\"{advance_command}\""
     )
 
 
@@ -3491,7 +3495,8 @@ def parser() -> argparse.ArgumentParser:
     publish.add_argument("--chain", required=True)
     replan = sub.add_parser("feature-replan")
     replan.add_argument("run_id")
-    replan.add_argument("--token", required=True)
+    replan.add_argument("--token", help="codex chains: CONTROL_TOKEN_FROM_LAST_LAUNCH")
+    replan.add_argument("--chain", help="claude chains (no control token): the chain id")
     replan.add_argument("--no-watch", action="store_true")
     replan.add_argument("--watch-timeout-seconds", type=int, default=86400)
     bugfix = sub.add_parser("bugfix")
@@ -3539,9 +3544,18 @@ def main() -> None:
     args = parser().parse_args()
     if args.action == "feature-replan":
         validate_control_location(args.control_dir)
-        row = resolve_run(args.db, args.run_id)
-        control = require_control_token(row, args.control_dir, args.token)
-        replanned = repository_feature_call("restart_planning", args, row, control)
+        # A claude chain's planning run is a claude feature lane, which the
+        # codex-only guard would reject before the chain's own provider check.
+        claude_lanes = LANES | set(FEATURE_LANES["claude"].values()) if args.chain else LANES
+        row = resolve_run(args.db, args.run_id, claude_lanes)
+        if args.chain:
+            replanned = repository_feature_call("restart_planning_unguarded", args, row, args.chain)
+            if isinstance(replanned, dict) and replanned.get("result") is None:
+                print_feature_chain_pause(args, args.chain)
+                return
+        else:
+            control = require_control_token(row, args.control_dir, args.token)
+            replanned = repository_feature_call("restart_planning", args, row, control)
         result = replanned.get("result")
         if isinstance(result, dict):
             print("ARCHON_FEATURE_SUPERVISION=" + result["state"].upper() + " " + redact_control_tokens(str(result)))

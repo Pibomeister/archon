@@ -336,6 +336,10 @@ nodes:
   prompt: |
     You are the planning node in an unattended workflow. Ask no questions; make
     conservative assumptions and record them in the plan.
+    Never start background agents or background shell commands: this node ends
+    when your turn ends, and anything still running then is discarded unwritten.
+    Run every sub-agent and command in the foreground and write the artifacts
+    yourself before finishing.
 
     First read params.json in the directory named by the ARTIFACTS_DIR
     environment variable (resolve via: echo "$ARTIFACTS_DIR"). Its "spec"
@@ -408,10 +412,14 @@ nodes:
     one pattern, each matching the Verification commands exactly.
     Every test_patterns entry (verify.json and each stages.<repo>.test_patterns
     in joint-plan.json) runs through that repository's UNIT test command and
-    its unit jest config; api's config ignores .int.spec.ts, .ai.spec.ts and
-    .ext.spec.ts, so an integration or e2e pattern there yields "0 matches"
-    and fails gate-tests. Integration coverage belongs in the integration
-    scenarios, never in test_patterns.
+    its unit config, which ignores some spec kinds (the `unit_test_excludes`
+    regexes in .archon/setup/repo-profile.sh): api ignores .int.spec.ts,
+    .ai.spec.ts and .ext.spec.ts; goodword-mcp ignores .e2e.test.ts and
+    .smoke.test.ts; web-app ignores tests/. Such a pattern yields "No tests
+    found" and fails gate-tests, so plan-shape rejects it before approval.
+    test_patterns = unit specs only. Integration/e2e specs go in the stage's
+    "verification" list or an integration scenario command, never in
+    test_patterns.
     JOINT-REPOSITORY RUNS must also write joint-plan.json in that directory:
       {"schema":"archon.joint-feature-plan.v1",
        "repositories":["<canonical repo>", "..."],
@@ -424,13 +432,23 @@ nodes:
          {"depends_on":["<selected upstream repo>", "..."],
           "files_allowlist":["<repo-relative path>", "..."],
           "test_patterns":["<test path or pattern>", "..."],
-          "verification":["<exact local command>", "..."]}},
+          "verification":["<exact local command>", "..."],
+          "reader_audit":{"columns":[{"table":"<table>","column":"<column>",
+                                     "reason":"<one line>"}]}}},
        "integration":{"scenarios":[{"name":"<scenario>",
                                     "uses":["<repo>", "..."],
                                     "covers":["<criterion id>", "..."],
                                     "commands":[{"repo":"<selected repo>",
                                                  "argv":["<executable>", "<candidate-relative script>"]}],
                                     "expected_tests":["<observable assertion>"]}]}}
+    Every stage carries its OWN "reader_audit": the DB columns or enum values
+    whose interpretation or presentation that repository's part of the plan
+    changes, in the reader-audit.json schema below ({"columns": []} when none).
+    Each stage run audits only its own entry, so an obligation filed under the
+    wrong repository is never checked. The anchor repository's (params.json
+    "repo") entry must declare the same columns as reader-audit.json, and a
+    selected web-app's the same as web-reader-audit.json; the validator
+    enforces both mirrors.
     Every acceptance criterion the spec states gets one id in
     acceptance_criteria, and every id appears in some scenario's covers. One
     scenario covers several criteria only when its expected_tests name an
@@ -577,14 +595,20 @@ nodes:
                        "value":"<expected value>","text":"<fill text when type=fill>"}]}]}
     Use stable criterion ids, same-origin paths only, and assertions that can be
     executed mechanically.
-    REPOSITORIES WITH NO BROWSER SURFACE: when params.json's "repo" is one whose
-    changes are not reachable through a browser at all (anything other than "api"
-    or "web-app"), a populated policy would be fiction. Write instead the typed
+    CHANGES WITH NO BROWSER SURFACE: when the change is not reachable through a
+    browser at all, a populated policy would be fiction. Write instead the typed
     disposition {"not_applicable":"<one-line reason>","required":[]} — the ONLY
     form in which "required" may be empty. It is hashed and frozen exactly like a
-    populated policy, so the disposition is fixed at approval and cannot be
-    loosened afterwards. Never use it to avoid writing a policy for a repository
-    that does have a browser surface.
+    populated policy. It is accepted only when the repository has no browser
+    surface (anything other than "api" or "web-app"), or when EVERY path in
+    files-allowlist.json, web-files-allowlist.json and joint-plan.json stage
+    allowlists matches that repository's `browser_exempt` globs in
+    .archon/setup/repo-profile.sh (for api: migrations, scripts/, tools/,
+    apps/utilities-cli/, apps/api-e2e/, the async analytic/enrichment/
+    notification lambdas, *.spec.ts, *.md). Any other path is a browser surface
+    and needs a populated policy. The exemption is re-checked against the actual
+    diff after implement and at exit, so it cannot survive a change that later
+    touches a surface path.
     browser-evidence.sha256 must contain the lowercase
     SHA-256 of the canonical JSON bytes (sort keys, separators ',', ':') of
     browser-evidence.json. This policy is web-scoped and frozen by the shared
@@ -605,6 +629,10 @@ nodes:
     # apart, and the drift would show up as a plan that passes here and fails
     # after the critic loop, or worse, the reverse.
     eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+    # A planner that ended its turn waiting on background work is recorded
+    # COMPLETED with nothing written; say so here, not as a bare "no plan.md".
+    test -s "$ARTIFACTS_DIR/plan.md" || python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/node-no-output.py \
+      "$ARTIFACTS_DIR" ralplan plan.md
     SHAPE=0
     OUT=$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/plan-shape.sh \
       "$ARTIFACTS_DIR" "$WT" "$SPEC" 2>&1) || SHAPE=$?
@@ -907,7 +935,9 @@ nodes:
         the revised unit touches and match the ## Verification commands exactly,
         reader-audit.json lists any API column whose interpretation or
         presentation the revision changes, web-reader-audit.json lists any
-        web reader-semantic obligation, and any premise answer you alter keeps at least one
+        web reader-semantic obligation, every joint-plan.json stages.<repo>.reader_audit
+        still lists that repository's own columns (mirroring reader-audit.json for the
+        anchor and web-reader-audit.json for web-app), and any premise answer you alter keeps at least one
         citation whose quote appears VERBATIM in the file it names (verify that
         by reading the file). Findings at confidence 50 are advisory; act on them
         only if doing so costs nothing.
@@ -1116,7 +1146,9 @@ nodes:
     Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
     Read ONLY premises-questions.json there, plus params.json for the
     "worktree" field — the repository checkout to read (you are NOT cwd'd
-    there). You are FORBIDDEN from opening premises.json or plan.md until
+    there). When params.json also has "worktrees_by_repo" (a joint run), a
+    question may concern any of those checkouts; read the one it names.
+    You are FORBIDDEN from opening premises.json or plan.md until
     step 2 below.
 
     If premises-questions.json is an empty array, write an empty array []
@@ -1520,8 +1552,10 @@ nodes:
     artifacts with sha256 hashes. Consume those exact local inputs only; do not
     require or assume an upstream PR, merge, publication, deployment, or newer
     repository state.
-    SINGLE-REPO RUNS: when params.json's "repo" is not "api", the two sentences
-    above are scoped to api runs. files-allowlist.json is then the entire scope,
+    OTHER REPOSITORIES: when params.json's "repo" is not "api", the opening
+    "Implement the API portion" sentence and the "Scope:" line are scoped to api
+    runs (the JOINT-REPOSITORY RUNS paragraph applies to every repository).
+    files-allowlist.json is then the entire scope,
     its paths are relative to that repository's root, and there is no web-app
     prong to avoid. Use that repository's own commands, listed below.
     Do not edit the plan file. Do not create commits — a later node commits.
@@ -1607,18 +1641,26 @@ nodes:
       "${CMD_TEST[@]}" "$PAT" || { echo "GATE_TESTS=FAIL unit pattern=$PAT"; exit 1; }
     done < "$ARTIFACTS_DIR/gate-tests-patterns.txt"
     BASE=$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")
-    CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$|^ M pnpm-lock\.yaml$|^\?\? pnpm-lock\.yaml$' || true)
-    if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- . ':(exclude)pnpm-lock.yaml'; then
+    # No lockfile is noise here: every repo this lane serves (repo-profile.sh) installs
+    # frozen, so lockfile-only drift is content, and check-scope.py calls it a breach.
+    CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$' || true)
+    if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- .; then
       printf '{"outcome":"NO_CHANGE","repo":"%s","basis":"baseline-to-candidate content","baseline":"%s","head":"%s","pr_url":null}\n' "$REPO" "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
       echo "GATE_TESTS=PASS outcome=NO_CHANGE"
       exit 0
     fi
     printf '{"outcome":"CHANGED","repo":"%s","basis":"baseline-to-candidate content","baseline":"%s","head":"%s"}\n' "$REPO" "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
-    test -s "$ARTIFACTS_DIR/commit-msg.txt" || { echo "GATE_TESTS=FAIL no commit-msg.txt from implement"; exit 1; }
+    test -s "$ARTIFACTS_DIR/commit-msg.txt" || {
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/node-no-output.py "$ARTIFACTS_DIR" implement commit-msg.txt
+      echo "GATE_TESTS=FAIL no commit-msg.txt from implement"; exit 1; }
     # Scope guard: catch implement-node creep before the first review round.
     python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py \
       "$ARTIFACTS_DIR/files-allowlist.json" "$WT" "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" \
       || { echo "GATE_TESTS=FAIL scope breach"; exit 1; }
+    # A not_applicable browser policy was derived at plan time from the
+    # allowlist; what ships is the diff, so re-derive it from the diff.
+    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/browser-exemption.py diff \
+      "$ARTIFACTS_DIR" "$WT" "$BASE" || { echo "GATE_TESTS=FAIL browser exemption void"; exit 1; }
     echo "GATE_TESTS=PASS"
 - id: deslop
   depends_on:
@@ -1783,7 +1825,7 @@ nodes:
         # committed until commit-impl, so a HEAD-anchored diff would be empty.
         SL=0
         python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-slop.py \
-          "$WT" "$BASE" --max-complexity 10 > "$RD/slop.txt" 2>&1 || SL=$?
+          "$WT" "$BASE" --max-complexity 10 --repo "$REPO" > "$RD/slop.txt" 2>&1 || SL=$?
         python3 - "$RD/recheck.json" "$TC" "$LT" "$UT" "$SC" "$SL" "$LINT_APPLICABLE" <<'PY'
         import json, sys
         path, tc, lt, ut, sc, sl, lint_applicable = sys.argv[1:8]
@@ -2136,12 +2178,23 @@ nodes:
     only safe when every reader has been looked at. Ask no questions.
 
     Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
-    Read reader-audit.json there. If its "columns" array is empty, write
-    exactly {"columns": []} to reader-audit-result.json in that directory
-    and end with the single line: READER_AUDIT_DONE
+    Read reader-audit.json there. If its "columns" array is empty and it has
+    no "derive" key, write exactly {"columns": []} to reader-audit-result.json
+    in that directory and end with the single line: READER_AUDIT_DONE
 
     The repository checkout is the "worktree" field of params.json in that
     same directory (you are NOT cwd'd there).
+
+    STAGE-DERIVED AUDIT: when reader-audit.json carries "derive": "stage-diff",
+    the approved joint plan
+    declared no reader audit for this repository and the planning file
+    belongs to another one. Declare the columns yourself from THIS
+    repository's change: read `git -C <worktree> diff <bootstrap-head.txt sha>`
+    (bootstrap-head.txt is in the artifacts directory) and list every DB
+    column or enum value whose INTERPRETATION or PRESENTATION the diff changes
+    here, not merely writes. Audit each one as below, and write the result with
+    a top-level "derived": true — {"derived": true, "columns": []} when the
+    diff changes none. Every derived column carries its "readers" array.
 
     For each declared column: enumerate EVERY reader of it in the repository
     — grep the repository layer, query builders, and raw SQL for the column
@@ -2166,14 +2219,27 @@ nodes:
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-reader-audit-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-reader-audit-gate.out" >&2); fi
     D="$ARTIFACTS_DIR/reader-audit.json"
     R="$ARTIFACTS_DIR/reader-audit-result.json"
+    # "derive": "stage-diff" (feature_chain.write_stage_reader_audit): this
+    # repository-list stage has no approved audit of its own, so the node
+    # declared columns from its diff. Zero declared columns is then no proof
+    # of anything; the result file must exist and say it was derived.
+    DERIVE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('derive',''))" "$D")
     NC=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))['columns']))" "$D")
-    if [ "$NC" = 0 ]; then echo "READER_AUDIT_GATE=PASS (no columns declared)"; exit 0; fi
+    if [ "$NC" = 0 ] && [ "$DERIVE" != stage-diff ]; then echo "READER_AUDIT_GATE=PASS (no columns declared)"; exit 0; fi
     test -s "$R" || { echo "READER_AUDIT_FAIL no reader-audit-result.json"; exit 1; }
     python3 - "$D" "$R" <<'PY'
     import json, sys
-    decl = {(c["table"], c["column"]) for c in json.load(open(sys.argv[1]))["columns"]}
-    res = json.load(open(sys.argv[2]))["columns"]
+    decl_doc = json.load(open(sys.argv[1]))
+    result = json.load(open(sys.argv[2]))
+    res = result["columns"]
     got = {(c["table"], c["column"]) for c in res}
+    if decl_doc.get("derive") == "stage-diff":
+        if result.get("derived") is not True:
+            print("READER_AUDIT_FAIL stage-diff audit result is not marked derived")
+            sys.exit(1)
+        decl = got
+    else:
+        decl = {(c["table"], c["column"]) for c in decl_doc["columns"]}
     missing = decl - got
     assert not missing, f"declared columns not covered: {sorted(missing)}"
     affected = [(c["table"], c["column"], r.get("file", "?"))
@@ -2197,8 +2263,10 @@ nodes:
     MSG=$(head -1 "$ARTIFACTS_DIR/commit-msg.txt" 2>/dev/null || true)
     test -n "$MSG" || MSG="feat(api): $SLUG"
     BASE=$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")
-    CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$|^ M pnpm-lock\.yaml$|^\?\? pnpm-lock\.yaml$' || true)
-    if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- . ':(exclude)pnpm-lock.yaml'; then
+    # No lockfile is noise here: every repo this lane serves (repo-profile.sh) installs
+    # frozen, so lockfile-only drift is content, and check-scope.py calls it a breach.
+    CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$' || true)
+    if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- .; then
       printf '{"outcome":"NO_CHANGE","repo":"%s","basis":"baseline-to-candidate content","baseline":"%s","head":"%s","pr_url":null}\n' "$REPO" "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
       echo "COMMIT_IMPL=SKIP outcome=NO_CHANGE"
       exit 0
@@ -2752,10 +2820,19 @@ nodes:
     python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py \
       "$ARTIFACTS_DIR/files-allowlist.json" "$WT" "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" \
       || { echo "EXIT_GATE=FAIL scope breach"; exit 1; }
+    # Browser exemption belt: the fixer and a widened allowlist can both move
+    # the diff onto a browser surface after gate-tests derived the exemption.
+    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/browser-exemption.py diff \
+      "$ARTIFACTS_DIR" "$WT" "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" \
+      || { echo "EXIT_GATE=FAIL browser exemption void"; exit 1; }
     # Reader-audit belt: declared columns must have a passing result on disk.
     NC=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))['columns']))" "$ARTIFACTS_DIR/reader-audit.json" 2>/dev/null || echo 0)
-    if [ "$NC" != 0 ]; then
+    DERIVE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('derive',''))" "$ARTIFACTS_DIR/reader-audit.json" 2>/dev/null || echo "")
+    if [ "$NC" != 0 ] || [ "$DERIVE" = stage-diff ]; then
       test -s "$ARTIFACTS_DIR/reader-audit-result.json" || { echo "EXIT_GATE=FAIL READER_AUDIT_FAIL missing reader-audit-result.json"; exit 1; }
+      if [ "$DERIVE" = stage-diff ]; then
+        python3 -c "import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get('derived') is True else 1)" "$ARTIFACTS_DIR/reader-audit-result.json" || { echo "EXIT_GATE=FAIL READER_AUDIT_FAIL stage-diff audit result is not marked derived"; exit 1; }
+      fi
       python3 -c "import json,sys; cols=json.load(open(sys.argv[1]))['columns']; aff=[r for c in cols for r in c.get('readers',[]) if r.get('class')=='affected']; sys.exit('affected readers: %s' % aff) if aff else None" "$ARTIFACTS_DIR/reader-audit-result.json" || { echo "EXIT_GATE=FAIL READER_AUDIT_FAIL affected reader"; exit 1; }
     fi
     # Materialize-then-`test -s`, same as gate-tests and deslop-recheck: a process

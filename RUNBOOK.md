@@ -131,7 +131,7 @@ Then `babysit` (drives PRs to merge-ready) and `cleanup` (teardown), same invoca
 
 A spec section titled exactly `## Premises to verify` (numbered questions) is a machine-read contract, not prose. For every question there, the planner must write a cited answer to `premises.json` — each answer needs at least one evidence item whose `file` exists in the worktree and whose `quote` appears verbatim in it. `plan-snapshot` greps for the quote and fails the run on an uncited answer; a separate `premise-verify` node then re-derives each answer BLIND (questions only, no planner reasoning) and `premise-gate` hard-stops on any `conflict` before the human plan gate. This exists because the first real-ticket run answered a spec question ("does row status gate survivors' sync?") with a plausible argument instead of a code check, and ten review rounds inherited the wrong premise. Use the section for anything the plan's correctness depends on; leave it out when the spec asserts nothing checkable.
 
-The planner also writes `files-allowlist.json` (every path the unit may touch — the scope gate's contract) and `reader-audit.json` (columns whose interpretation/presentation semantics the plan changes; `{"columns": []}` when none).
+The planner also writes `files-allowlist.json` (every path the unit may touch — the scope gate's contract) and `reader-audit.json` (columns whose interpretation/presentation semantics the plan changes; `{"columns": []}` when none). A repository-list plan also gives every stage its own `stages.<repo>.reader_audit` in `joint-plan.json`; the stage run audits only that entry (the anchor's must match `reader-audit.json`, web-app's `web-reader-audit.json`). A legacy joint plan without them writes `{"columns": [], "derive": "stage-diff"}` to non-anchor stages, whose reader-audit node then declares columns from its own diff and must write a result marked `"derived": true` (`READER_AUDIT_FAIL stage-diff audit result is not marked derived`).
 
 ## 2a. The plan gate (human review packet)
 
@@ -151,6 +151,16 @@ A useful hard failure names the invariant, observed contradiction, and safe
 unblock path. If it cannot, treat that as a workflow defect. This is not an
 override mechanism: the correction must preserve or replace the gate's actual
 safety purpose with tested evidence.
+
+**Browser policy `not_applicable` on api/web-app** is derived, never declared: `plan-shape.sh` accepts it only when every allowlisted path (files-allowlist, web-files-allowlist, joint-plan stages) matches that repo's `browser_exempt` globs in `setup/repo-profile.sh`, and `gate-tests`/`exit-gate` re-derive it from the actual diff (`BROWSER_EXEMPTION=FAIL … path=<p>`). The fix for that stop is a populated policy or reverting the surface edit, not a glob edit.
+
+**`verify.json` / joint-plan `test_patterns` are unit-runner-only.** `plan-shape.sh` runs `setup/check-unit-patterns.py`, which rejects (`UNIT_PATTERNS=FAIL repo=<r> pattern=<p>`) a pattern the repo's unit command ignores per its profile's `unit_test_excludes` (api `.int/.ai/.ext.spec.ts`, mcp `.e2e/.smoke.test.ts`, web `tests/`), so the "No tests found" failure lands before approval instead of at `gate-tests`.
+
+**`SLOP=FAIL yagni … reason=unreferenced`** counts a use anywhere in the defining file (other than the declaration line) and skips files matching the repo profile's `framework_loaded` globs (api: TypeORM migrations); both lanes pass `--repo "$REPO"`. The slop scan also lists untracked files inside new directories, which it previously never scanned.
+`check-scope.py` likewise lists untracked files individually: a plan that creates a file in a NEW directory used to read as `SCOPE_BREACH file=<dir>/` (and `--quarantine` moved the whole directory to strays).
+
+**Claude nodes run with background tasks disabled** (`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in `.archon/.env`, loaded by archon from the Goodword root, and in `resume.sh`). A node that still ends waiting on background work prints `NODE_BACKGROUNDED_NO_OUTPUT node=<id> evidence=<tools>` at the gate that finds its output missing. Resume cannot fix it (the AI node is recorded complete; also, each run snapshots its workflow YAML under `<artifacts>/workflow-source/`, and whether a resume uses that snapshot instead of today's lane is unverified, so prefer a fresh run after a lane fix): for a chain planning run use `archon-run.py feature-replan <run> --chain <chain-id>` (Claude, no token) or `--token` (Codex); otherwise relaunch. Operator edits to artifacts ARE read by the resumed bash gate (`test_node_plan_snapshot_recovery`), but a chain stage's `verify.json` test selection must still equal the approved joint plan at advance.
+
 
 Knowledge capture follows the same boundary: the required artifact is
 run-local `kb-capture.md`. Promotion to `goodword-kb` or another external sink
@@ -253,7 +263,7 @@ Hardening gates added after the ENG-3605 retrospective (2026-08-14) — each is 
 |---|---|---|
 | Run stops at premise-gate | `PREMISE_CONFLICT id=N` | The blind re-derivation contradicts the planner's answer to spec premise N (read `premises.json` vs `premise-verify.json` in artifacts). Same handling class as a plan-gate reject: fix the plan and/or spec so they match the code, then `archon workflow resume <run-id>`. Never "fix" the verifier. |
 | Run stops at reader-audit-gate (or exit-gate belt) | `READER_AUDIT_FAIL` | A reader of a column whose semantics this plan changes was classified `affected` — the plan missed a consumer. Read `reader-audit-result.json`, extend the plan/diff to cover the reader (or re-classify with justification), resume. |
-| Converge / gate-tests / exit-gate stops on a file | `SCOPE_BREACH round=N file=<path>` (round tag absent outside converge) | A change landed outside `files-allowlist.json`. Legitimate scope growth is a HUMAN act: edit `files-allowlist.json` in the run's artifacts to include the path (the edit is the approval), then resume. Otherwise revert the file in the worktree and resume. |
+| Converge / gate-tests / exit-gate stops on a file | `SCOPE_BREACH round=N file=<path>` (round tag absent outside converge) | A change landed outside `files-allowlist.json`. Legitimate scope growth is a HUMAN act: edit `files-allowlist.json` in the run's artifacts to include the path (the edit is the approval), then resume. Otherwise revert the file in the worktree and resume. Lockfiles are not listed by hand: `setup/lockfile_scope.py` puts the repo profile's lockfile (`bun.lock` api, `pnpm-lock.yaml` goodword-mcp/web-app) in scope, staged and committed, whenever an allowlisted `package.json` changed. A lockfile breach suffixed `(lockfile changed without an in-scope package.json change)` is lockfile-only drift: revert it, or a human allowlists it. web-app's unfrozen install drift stays tolerated while uncommitted. |
 | Review loop stops at the round cap | `ROUND_CAP_REACHED round=N` | The durable round counter hit the cap (default 4, override via `round-cap.txt`) without converging. Read the final round's envelope and fixer result, then either raise the cap or accept residuals (recipes below), then resume. |
 
 Accept-residuals recipe (ends the loop at the NEXT non-converged round at/past the cap, ships with residuals recorded):
@@ -602,7 +612,7 @@ the copy beside them.
 
 - **Vite binds IPv6 `::1` only.** Every web probe and UAT URL uses `localhost`, never `127.0.0.1`. A hand-check with `curl 127.0.0.1:3123` will "prove" the server is down when it isn't.
 - **mise shell shims do not apply in bare execs.** Anything detached/scripted must pin `mise x node@20 --` (web) / `mise x node@22 --` (api) explicitly, or it runs ambient Node 25 and Vite crashes.
-- **`pnpm install --frozen-lockfile` refuses on main's known lockfile drift.** The workflows install unfrozen and exclude `pnpm-lock.yaml` from every commit. If you hand-fix in a worktree, do the same.
+- **`pnpm install --frozen-lockfile` refuses on main's known lockfile drift.** The web-app lanes install unfrozen; that lockfile-only drift is never committed (repo-profile.sh `lockfile_install_drift`). A lockfile rewritten by a dependency change to an allowlisted `package.json` is committed with it. If you hand-fix in a worktree, do the same.
 - **A branch-DELETION push still fires husky pre-push** (full jest, multi-minute, historically flaky in hook git env). Delete pushes go `--no-verify`.
 - **api boot prints an inspector-port 9229 collision warning** when your own api dev server runs (`start:api` hardcodes `--debug`). It is noise, not a boot failure.
 - **`gh pr ready` re-triggers the AI-review bots**, so babysit always terminates with a freshly-pending CodeRabbit status. It resolves green minutes later. Merge-ready = CI green + ready flag; the post-flip bot re-run is expected residue.
@@ -638,7 +648,7 @@ Runs bill the **Claude subscription via OAuth login**, not an API key. `total_co
 - The real currency is your **5-hour window / weekly quota, shared with your own interactive Claude use**. The failure mode of a runaway run is *you locked out of your own Claude for hours*, not a bill.
 - Window exhaustion **hard-stops the run** (`claude.rate_limit_event`, org overage rejected). No cap value protects against it — plan runs against your window.
 - Calibration anchors: one full 10-persona review of a 7-line diff ≈ $7.65-equivalent / 10 min; the api lane's toy run ≈ $9.71-equivalent; the web lane ran 6 review rounds on the dry-run.
-- **Planning-critic loop budget** (`plan-loop` / `rca-plan-loop`, §3a/§12): each round spends `impact-probe` ($2, sonnet) + `plan-critic`/`rca-critic` ($4, opus) + `plan-revise`/`rca-revise` ($3, sonnet) = **$9 per round**. Typical run (1-2 rounds to ACCEPT): **+$9-18**. Worst case (3 rounds, the cap): **+3×$9 = +$27**. These figures are design-derived from `maxBudgetUsd` in the workflow YAML, not yet measured on a live run.
+- **Planning-critic loop budget** (`plan-loop` / `rca-plan-loop`, §3a/§12): each `full-sdlc-api` round is capped at `impact-probe` ($2, sonnet) + `plan-critic` ($8, opus) + `plan-revise` ($6, sonnet) = **$16 per round** (bugfix `rca-critic`/`rca-revise` stay $4/$3). Caps are ceilings, not spend. `full-sdlc-api` caps were raised 2026-09-16 to ~1.5x the measured per-node peaks in archon.db (plan-critic and fixer had died at $4/$5, ralplan at $3 on a two-repo plan); archon cannot scale a cap per run, so joint planning shares these static values. `test_review_sizing.ApiLaneCapsClearMeasuredCosts` pins the headroom.
 - **Deslop gate budget** (`deslop`/`deslop-verify`, §3b): the writer is $4 (sonnet), the reviewer is $2 (sonnet) — a clean pass is **+$6**. A `DESLOP=DIRTY` resume re-runs only the loop body (`deslop-recheck` + `deslop-review`), not the writer, adding another $2 for the reviewer: **+$8** on a one-round DIRTY resume. Same caveat — design-derived, not yet measured live.
 - **Billing guard: never set `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, or `ANTHROPIC_PROFILE`, and never configure `apiKeyHelper`.** Any of these silently outranks the subscription and flips billing to metered API (a Max subscriber in the wild hit $1,800 in two days this way). Preflight and the installer both assert this.
 - `total_cost_usd` **resets per resume process** — a resumed run's reported cost is the last process only. Sum per-process costs or use the event log if you need a real number.
@@ -1194,6 +1204,9 @@ JWT through the whitelisted local OTP flow, runs the goodword-mcp jest pattern,
 and emits that line. Contract `artifact` values must be repository-relative file
 paths (`validate-joint-plan.py` rejects prose), and `expected_tests` entries
 must correspond to real jest tests (the runner requires reported >= declared).
+Chain params carry `api_port` whenever any selected repository's profile declares
+`HAS_SMOKE` (not only when `api` is selected), so a single-repo `goodword-mcp` chain
+passes preflight.
 `feature-advance` waits for the current run, seals the approval from the
 completed planning run's `joint-plan.json`/`plan.md` digests, dispatches the next
 stage, and prints `ARCHON_FEATURE_REPOSITORY_CHAIN=PAUSED chain=… phase=… run=…
