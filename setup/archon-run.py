@@ -537,10 +537,13 @@ def command_for(action: str, target: str, reason: str | None = None) -> list[str
         return command
     if action == "resume":
         return ["bash", str(SETUP / "resume.sh"), target]
+    # SQLITE_BUSY under concurrent runs: retried while the run row is untouched;
+    # a recorded decision whose resume hit the lock continues via resume.sh.
+    retry = ["bash", str(SETUP / "archon-lock-retry.sh"), action.upper(), target, "--"]
     if action == "approve":
-        return [archon, "workflow", "approve", target]
+        return [*retry, archon, "workflow", "approve", target]
     if action == "reject":
-        return [archon, "workflow", "reject", target, reason or ""]
+        return [*retry, archon, "workflow", "reject", target, reason or ""]
     if action == "abandon":
         return [archon, "workflow", "abandon", target, "--json"]
     fail(f"unknown action {action}")

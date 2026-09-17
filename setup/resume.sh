@@ -264,7 +264,11 @@ elif [ -z "$RUN_AD" ]; then
 fi
 # Also set here, not only in .archon/.env: archon loads that file from the CWD,
 # and this wrapper can be called from anywhere (see .archon/.env for why).
-env "${CHAIN_ENV[@]}" DISABLE_OMC=1 CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 archon workflow resume "$RUN_ID" "$@" </dev/null
+# archon-lock-retry.sh repeats the resume only while archon fails with
+# "database is locked" and this run's row is untouched (SQLite read->write
+# upgrade under concurrent runs; see that file), printing RESUME_DB_LOCKED lines.
+bash "$(dirname "$0")/archon-lock-retry.sh" RESUME "$RUN_ID" -- \
+  env "${CHAIN_ENV[@]}" DISABLE_OMC=1 CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 archon workflow resume "$RUN_ID" "$@" </dev/null
 ARCHON_RC=$?
 set -e
 

@@ -131,6 +131,7 @@ MANIFEST=(
   setup/port-alloc.sh
   setup/e2e-mutex.sh
   setup/resume.sh
+  setup/archon-lock-retry.sh
   setup/chain-env.py
   setup/gate-approve.sh
   setup/run-artifacts.sh
