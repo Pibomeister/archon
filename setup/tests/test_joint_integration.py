@@ -227,6 +227,23 @@ class JointIntegrationRunnerTest(unittest.TestCase):
         self.assertEqual(report, evidence)
         self.assertFalse((self.artifacts / "joint-integration-worktrees").exists())
 
+    def test_commands_receive_the_chain_api_port_from_params(self):
+        params = self.artifacts / "params.json"
+        data = json.loads(params.read_text(encoding="utf-8")) if params.exists() else {}
+        data["api_port"] = 4999
+        params.write_text(json.dumps(data), encoding="utf-8")
+        self.write_plan(
+            "python3 -c \"import os; assert os.environ['ARCHON_API_PORT'] == '4999'; print('ARCHON_INTEGRATION_TESTS=1')\""
+        )
+        self.write_candidates()
+        result = self.run_runner()
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("JOINT_INTEGRATION=PASS", result.stdout)
+
+    def test_joint_e2e_script_defaults_to_the_exported_port(self):
+        script = (Path(__file__).resolve().parents[1] / "joint-api-mcp-e2e.sh").read_text(encoding="utf-8")
+        self.assertIn('PORT="${2:-${ARCHON_API_PORT:-4213}}"', script)
+
     def test_runs_structured_command_in_repo_candidate_worktree_with_expanded_refs(self):
         self.write_plan({
             "repo": "api",

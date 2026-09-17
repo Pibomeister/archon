@@ -19,7 +19,7 @@
 set -euo pipefail
 
 PATTERN="${1:?usage: joint-api-mcp-e2e.sh <jest-testPathPattern> [api-port]}"
-PORT="${2:-4213}"
+PORT="${2:-${ARCHON_API_PORT:-4213}}"
 API_WT="${ARCHON_REPO_API_WORKTREE:?ARCHON_REPO_API_WORKTREE is required}"
 MCP_WT="${ARCHON_REPO_GOODWORD_MCP_WORKTREE:?ARCHON_REPO_GOODWORD_MCP_WORKTREE is required}"
 ENV_SRC="${ARCHON_REPO_API_SOURCE_WORKTREE:-$API_WT}"
