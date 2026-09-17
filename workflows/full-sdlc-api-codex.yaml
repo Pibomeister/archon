@@ -1498,7 +1498,7 @@ nodes:
   depends_on:
   - feature-phase
   when: $feature-phase.integration == 'yes'
-  timeout: 1800000
+  timeout: 3600000
   bash: |
     set -euo pipefail
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-joint-integration.out") 2> >(tee -a "$ARTIFACTS_DIR/node-joint-integration.out" >&2); fi

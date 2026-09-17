@@ -184,5 +184,17 @@ class FeatureLanePromptsRouteIntegrationThroughTheMutex(unittest.TestCase):
         self.assertNotEqual([], bare_integration_mentions(mutated))
 
 
+class JointIntegrationNodeOutlivesTheMutexWait(unittest.TestCase):
+    def test_node_timeout_exceeds_the_default_wait(self):
+        import yaml
+        default_wait = int(re.search(r'ARCHON_E2E_WAIT_SECONDS:-(\d+)', SCRIPT.read_text()).group(1))
+        for lane in ("full-sdlc-api", "full-sdlc-api-codex"):
+            with self.subTest(lane=lane):
+                nodes = yaml.safe_load((WORKFLOWS / f"{lane}.yaml").read_text(encoding="utf-8"))["nodes"]
+                node = next(n for n in nodes if n["id"] == "joint-integration")
+                self.assertGreater(node["timeout"] / 1000, default_wait,
+                                   "the node would be killed before E2E_MUTEX=FAIL timeout prints")
+
+
 if __name__ == "__main__":
     unittest.main()

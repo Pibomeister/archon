@@ -1456,7 +1456,10 @@ nodes:
   - id: joint-integration
     depends_on: [feature-phase]
     when: "$feature-phase.integration == 'yes'"
-    timeout: 1800000
+    # 60 min: the runner may queue up to ARCHON_E2E_WAIT_SECONDS (30 min) for the
+    # shared e2e stack before its commands run; at 30 min the node would die
+    # before E2E_MUTEX=FAIL timeout could print.
+    timeout: 3600000
     bash: |
       set -euo pipefail
       if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-joint-integration.out") 2> >(tee -a "$ARTIFACTS_DIR/node-joint-integration.out" >&2); fi
