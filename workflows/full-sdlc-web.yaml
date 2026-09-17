@@ -596,6 +596,17 @@ nodes:
       TypeScript strict; no `any`. No co-author lines anywhere.
       </repo-conventions>
 
+      REOPENED STAGES: when reopen-context.json exists in ARTIFACTS_DIR, this run
+      was dispatched by feature-reopen and that file is MANDATORY work. The
+      worktree HEAD is the previous candidate ("previous_head"), which already
+      implements the approved plan. Read "reason" and every file under
+      "evidence" first, then change the candidate so the stated failure cannot
+      recur, with a test that fails without your change. gate-tests fails this
+      run with "IMPLEMENT=FAIL reopen produced no change" if the worktree is
+      unchanged. If the fix needs a file outside files-allowlist.json, do not
+      edit it: write its path (one per line) to reopen-blocked.txt in
+      ARTIFACTS_DIR and stop.
+
       Done when the feature behavior is implemented and those three commands exit
       0 in the working tree. Report exact commands and exit statuses. Unattended
       pipeline invocation; ask no questions.
@@ -614,11 +625,13 @@ nodes:
       BASE=$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")
       CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$|^ M pnpm-lock\.yaml$|^\?\? pnpm-lock\.yaml$' || true)
       if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- . ':(exclude)pnpm-lock.yaml'; then
+        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/reopen-gate.py "$ARTIFACTS_DIR" NO_CHANGE
         printf '{"outcome":"NO_CHANGE","repo":"web-app","basis":"baseline-to-candidate content","baseline":"%s","head":"%s","pr_url":null}\n' "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
         echo "GATE_TESTS=PASS outcome=NO_CHANGE"
         exit 0
       fi
       printf '{"outcome":"CHANGED","repo":"web-app","basis":"baseline-to-candidate content","baseline":"%s","head":"%s"}\n' "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/reopen-gate.py "$ARTIFACTS_DIR" CHANGED
       # Scope guard: implementation must declare its intended web diff; empty would reject all real changes.
       ALLOW_COUNT=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))))" "$ARTIFACTS_DIR/files-allowlist.json" 2>/dev/null || echo 0)
       if [ "$ALLOW_COUNT" = 0 ]; then echo "GATE_TESTS=FAIL approved web files-allowlist.json is required"; exit 1; fi
@@ -928,6 +941,11 @@ nodes:
             "producer_repo", "severity"}. Such a finding is neither advisory nor
             failed — it is not waivable and not fixable here, and it stops the
             run so the chain can route it to the repository that owns it.
+            If cross-repo-filed.json exists in the artifacts directory, a human has
+            filed some cross-repo findings; when you raise one of those same defects
+            again, copy its "finding" and "producer_repo" VERBATIM from
+            cross-repo-findings.json or the earlier round's fixer-result.json so its
+            acknowledgement still matches. Never create or edit cross-repo-filed.json.
             Writing the JSON result file is MANDATORY and comes BEFORE your final line —
             ending without it aborts the pipeline. Write it even when all arrays are
             empty. Then end with the single line: FIXER_DONE
@@ -966,13 +984,15 @@ nodes:
             python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py               "$ARTIFACTS_DIR/files-allowlist.json" "$(pwd)"               "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" --round "$N" --exclude pnpm-lock.yaml || exit 1
             if [ "$FIXOK" = NO ]; then echo "FIXER_BLOCKED round=$N $FIXMSG"; exit 1; fi
             # Cross-repo stop: a finding owned by another repository of this chain is
-            # not waivable here, so it must never reach update-waivers.py.
-            CROSSN=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1])).get('cross_repo') or []))" "$RD/fixer-result.json" 2>/dev/null || echo 0)
-            if [ "$CROSSN" != 0 ]; then
-              REPOS=$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]))['cross_repo'];json.dump(d,open(sys.argv[2],'w'),indent=1);print(','.join(sorted({str(e.get('producer_repo','?')) for e in d})))" "$RD/fixer-result.json" "$ARTIFACTS_DIR/cross-repo-findings.json")
-              echo "CROSS_REPO_FINDING round=$N count=$CROSSN repos=$REPOS"
+            # not waivable here, so it must never reach update-waivers.py unresolved. The
+            # only resolution is a human recording where it was filed in
+            # cross-repo-filed.json (cross-repo-keys.py prints the keys).
+            if ! CROSS=$(python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --gate "$RD/fixer-result.json"); then
+              printf '%s\n' "$CROSS" | sed '$d'
+              echo "CROSS_REPO_FINDING round=$N $(printf '%s\n' "$CROSS" | tail -n 1)"
               exit 1
             fi
+            [ -z "$CROSS" ] || printf '%s\n' "$CROSS"
             # Waiver ledger: record this round's advisory declines so later rounds
             # do not re-litigate them without new evidence.
             python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/update-waivers.py \
@@ -1171,6 +1191,10 @@ nodes:
       controller Playwright browser receipt (screenshot and trace digests in run artifacts).
       If no runtime impact beyond the web feature, the monitoring section must say exactly:
       "No additional operational monitoring required."
+      After those sections, run: python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --prbody
+      When it prints anything, append that output VERBATIM as the last section of
+      pr-body.md (the "## Cross-repo findings filed" section: defects in other
+      repositories a human filed instead of fixing here).
       No co-author or attribution lines. End with the single line: PRBODY_WRITTEN
 
   - id: ship

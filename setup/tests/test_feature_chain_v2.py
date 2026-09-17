@@ -489,6 +489,171 @@ class FeatureChainV2(unittest.TestCase):
         self.assertNotIn("feature_previous_head", params)
         self.assertFalse(fc.read_state(self.control, state["logical_chain_id"])["reopens"][0]["verify_only"])
 
+    def test_reopen_binds_the_reason_and_failure_evidence_into_the_stage_run(self):
+        state = self.locally_verified_chain(finalize=False)
+        api_head = state["candidate_handoffs"]["api"]["candidate_head"]
+        integration_dir = Path(state["current_run"]["artifacts_dir"])
+        (integration_dir / "joint-integration-result.json").write_text("{}\n", encoding="utf-8")
+        (integration_dir / "joint-integration-1.log").write_text("got 500\n", encoding="utf-8")
+        with mock.patch("builtins.print"):
+            fc.reopen(self.host, self.args, state["logical_chain_id"], "api", "window=bogus returns 500; validate it")
+        artifacts = Path(self.host.calls[-1][3]["output_root"])
+        params = json.loads((artifacts / "params.json").read_text(encoding="utf-8"))
+        context_path = artifacts / "reopen-context.json"
+        self.assertEqual(params["feature_reopen_context_sha256"], fc.file_digest(context_path))
+        context = json.loads(context_path.read_text(encoding="utf-8"))
+        self.assertEqual(context["reason"], "window=bogus returns 500; validate it")
+        self.assertEqual(context["previous_head"], api_head)
+        self.assertEqual(context["stopped_run_id"], state["current_run"]["run_id"])
+        self.assertEqual(context["evidence"], [str(integration_dir / "joint-integration-result.json"),
+                                               str(integration_dir / "joint-integration-1.log")])
+        latest = fc.read_state(self.control, state["logical_chain_id"])
+        self.assertEqual(latest["reopens"][0]["evidence"], context["evidence"])
+        self.assertNotIn("reopen_context", latest["stages"]["goodword-mcp"])
+
+    def test_verify_only_reopen_dispatches_no_reopen_context(self):
+        state = self.locally_verified_chain(finalize=False)
+        with mock.patch("builtins.print"):
+            fc.reopen(self.host, self.args, state["logical_chain_id"], "api", "verify the hand fix", verify_only=True)
+        artifacts = Path(self.host.calls[-1][3]["output_root"])
+        self.assertFalse((artifacts / "reopen-context.json").exists())
+        self.assertNotIn("feature_reopen_context_sha256", json.loads((artifacts / "params.json").read_text(encoding="utf-8")))
+        self.assertNotIn("reopen_context", fc.read_state(self.control, state["logical_chain_id"])["stages"]["api"])
+
+    def test_a_tampered_reopen_context_refuses_dispatch_artifacts(self):
+        state = self.locally_verified_chain(finalize=False)
+        with mock.patch("builtins.print"):
+            fc.reopen(self.host, self.args, state["logical_chain_id"], "api", "x")
+        latest = fc.read_state(self.control, state["logical_chain_id"])
+        latest["stages"]["api"]["reopen_context"]["content_text"] += " "
+        with self.assertRaisesRegex(fc.FeatureChainError, "reopen context artifact does not match"):
+            fc.write_phase_artifacts(self.root / "tamper", latest, "implement", "api", {"id": "7" * 32})
+
+    def test_a_reopened_stage_whose_implement_run_stopped_can_be_reopened_again(self):
+        state = self.locally_verified_chain(finalize=False)
+        chain_id = state["logical_chain_id"]
+        api_head = state["candidate_handoffs"]["api"]["candidate_head"]
+        integration_dir = Path(state["current_run"]["artifacts_dir"])
+        (integration_dir / "joint-integration-1.log").write_text("got 500\n", encoding="utf-8")
+        with fc.chain_lock(self.control, chain_id):
+            latest = fc.read_state(self.control, chain_id)
+            latest.setdefault("phase_runs", []).append(dict(latest["current_run"]))
+            fc.write_state(self.control, latest)
+        with mock.patch("builtins.print"):
+            fc.reopen(self.host, self.args, chain_id, "api", "first reason")
+        stopped = fc.read_state(self.control, chain_id)["current_run"]
+        self.assertEqual(stopped["phase"], "implement")
+        with mock.patch("builtins.print"):
+            fc.reopen(self.host, self.args, chain_id, "api", "second reason")
+        latest = fc.read_state(self.control, chain_id)
+        self.assertEqual(len(latest["reopens"]), 2)
+        self.assertEqual(latest["reopens"][1]["previous_heads"]["api"], api_head)
+        self.assertEqual(latest["reopens"][1]["stopped_run_id"], stopped["run_id"])
+        context = json.loads((Path(self.host.calls[-1][3]["output_root"]) / "reopen-context.json").read_text(encoding="utf-8"))
+        self.assertEqual((context["reason"], context["previous_head"]), ("second reason", api_head))
+        # The stopped reopen run has no integration evidence; the first reopen's does.
+        self.assertEqual(context["evidence"], [str(integration_dir / "joint-integration-1.log")])
+        self.assertNotEqual(latest["current_run"]["run_id"], stopped["run_id"])
+
+    def reopened_api_run(self):
+        state = self.locally_verified_chain(finalize=False)
+        chain_id = state["logical_chain_id"]
+        integration_dir = Path(state["current_run"]["artifacts_dir"])
+        (integration_dir / "joint-integration-1.log").write_text("got 500\n", encoding="utf-8")
+        with mock.patch("builtins.print"):
+            fc.reopen(self.host, self.args, chain_id, "api", "first reason")
+        return chain_id, state["candidate_handoffs"]["api"]["candidate_head"], integration_dir
+
+    def test_reopen_again_carries_the_original_failure_evidence_through_every_repeat(self):
+        chain_id, api_head, integration_dir = self.reopened_api_run()
+        for reason in ("second reason", "third reason"):
+            with mock.patch("builtins.print"):
+                fc.reopen(self.host, self.args, chain_id, "api", reason)
+        latest = fc.read_state(self.control, chain_id)
+        self.assertEqual(latest["reopens"][2]["evidence"], [str(integration_dir / "joint-integration-1.log")])
+        self.assertEqual(latest["reopens"][2]["previous_heads"]["api"], api_head)
+
+    def test_reopen_again_refuses_when_a_later_reopen_owns_the_stage_or_the_run_is_not_stopped(self):
+        chain_id, _head, _dir = self.reopened_api_run()
+        with fc.chain_lock(self.control, chain_id):
+            latest = fc.read_state(self.control, chain_id)
+            latest["reopens"].append({"repo": "upstream", "affected": ["upstream", "api"], "reopened_at": fc.now()})
+            fc.write_state(self.control, latest)
+        with self.assertRaisesRegex(fc.FeatureChainError, "not verified"):
+            fc.reopen(self.host, self.args, chain_id, "api", "x")
+        with fc.chain_lock(self.control, chain_id):
+            latest = fc.read_state(self.control, chain_id)
+            latest["reopens"].pop()
+            fc.write_state(self.control, latest)
+        self.host.run_row_by_id = lambda db, run_id: {"status": "paused"}
+        with self.assertRaisesRegex(fc.FeatureChainError, "failed or cancelled, got paused"):
+            fc.reopen(self.host, self.args, chain_id, "api", "x")
+        # Negative control: the same chain with a failed run is admitted.
+        self.host.run_row_by_id = lambda db, run_id: {"status": "failed"}
+        with mock.patch("builtins.print"):
+            fc.reopen(self.host, self.args, chain_id, "api", "x")
+
+    def test_a_reopened_stage_whose_candidate_tree_is_unchanged_does_not_verify(self):
+        chain_id, api_head, _dir = self.reopened_api_run()
+        latest = fc.read_state(self.control, chain_id)
+        artifacts = self.root / "no-change-artifacts"
+        artifacts.mkdir()
+        (artifacts / "feature-result.json").write_text(json.dumps({"outcome": "NO_CHANGE", "head": api_head}), encoding="utf-8")
+        row = {"id": latest["current_run"]["run_id"]}
+        with self.assertRaisesRegex(fc.FeatureChainError, "reopen produced no change"):
+            fc.candidate_from_artifacts("api", row, artifacts, latest)
+        # Negative control: without the reopen context the same candidate gets past
+        # the check (and stops later, on the params.json this fixture never wrote).
+        latest["stages"]["api"].pop("reopen_context")
+        with self.assertRaisesRegex(fc.FeatureChainError, "params.json"):
+            fc.candidate_from_artifacts("api", row, artifacts, latest)
+
+    def test_dispatch_binds_the_contract_symbols_digest_in_params(self):
+        chain_id, _head, _dir = self.reopened_api_run()
+        artifacts = Path(self.host.calls[-1][3]["output_root"])
+        params = json.loads((artifacts / "params.json").read_text(encoding="utf-8"))
+        self.assertEqual(params["feature_contract_symbols_sha256"], fc.file_digest(artifacts / "contract-symbols.json"))
+
+    def test_an_implementing_stage_that_was_never_reopened_is_not_reopenable(self):
+        # Negative control for the re-reopen admission: the prior reopen record is
+        # what makes a stopped implement run reopenable, not the run alone.
+        state = self.locally_verified_chain(finalize=False)
+        chain_id = state["logical_chain_id"]
+        with fc.chain_lock(self.control, chain_id):
+            latest = fc.read_state(self.control, chain_id)
+            latest["stages"]["api"]["status"] = "running"
+            latest["current_run"] = {"phase": "implement", "repo": "api", "run_id": "8" * 32}
+            fc.write_state(self.control, latest)
+        with self.assertRaisesRegex(fc.FeatureChainError, "not verified"):
+            fc.reopen(self.host, self.args, chain_id, "api", "x")
+
+    def test_stage_dispatch_writes_the_approved_contract_symbols(self):
+        state = self.locally_verified_chain(finalize=False)
+        api = self.root / "contract-api"
+        fc.write_phase_artifacts(api, state, "implement", "api", {"id": "7" * 32})
+        doc = json.loads((api / "contract-symbols.json").read_text(encoding="utf-8"))
+        self.assertEqual((doc["repo"], doc["plan_digest"]), ("api", state["approval"]["plan_digest"]))
+        self.assertEqual(doc["contracts"], [{"artifact": "openapi.json", "symbols": []}])
+
+    def test_contract_symbols_come_from_the_producer_contracts_plan_lines_and_owned_pins(self):
+        plan = self.plan()
+        plan["contracts"][0]["artifact"] = "src/dto.ts"
+        plan["contracts"][0]["description"] = "BriefingResponseDto shape (meetings, optional travelCandidates) the tool mirrors"
+        plan["pinned_decisions"] = [
+            {"symbol": "resolveBriefingWindow", "file": "src/api.ts", "rule": "r"},
+            {"symbol": "getBriefing", "file": "src/tool.ts", "rule": "r"},
+        ]
+        plan_md = ("- `src/dto.ts` — contract: `{ window, travelCandidates?: TravelCandidatesDto }` see `apps/x/y.ts:3`\n"
+                   "- unrelated line naming `OtherDto`\n")
+        state = {"approved_plan": plan, "approval": {"plan_digest": "d"}}
+        self.assertEqual(fc.contract_symbols(state, "api", plan_md)["contracts"], [
+            {"artifact": "src/api.ts", "symbols": ["resolveBriefingWindow"]},
+            {"artifact": "src/dto.ts", "symbols": ["BriefingResponseDto", "TravelCandidatesDto", "travelCandidates", "window"]},
+        ])
+        # Negative control: the consumer produces no contract and gets only its own pin.
+        self.assertEqual(fc.contract_symbols(state, "goodword-mcp", plan_md)["contracts"],
+                         [{"artifact": "src/tool.ts", "symbols": ["getBriefing"]}])
+
     def test_reopen_takes_verify_only_from_the_cli_flag_on_args(self):
         state = self.locally_verified_chain(finalize=False)
         api_head = state["candidate_handoffs"]["api"]["candidate_head"]
@@ -758,6 +923,24 @@ class FeatureChainV2(unittest.TestCase):
         self.assertEqual(latest["publication"], record)
         self.assertEqual(latest["integration"]["publication"], "held")
         fc.verify_receipt(latest)
+
+    def test_publication_body_lists_only_acknowledged_cross_repo_findings(self):
+        state = self.locally_verified_chain()
+        artifacts = Path(state["candidate_handoffs"]["api"]["artifacts"])
+        (artifacts / "round-1").mkdir(exist_ok=True)
+        filed = {"finding": "mcp drops errorMessage", "action": "route", "producer_repo": "goodword-mcp", "severity": "P2"}
+        unfiled = {"finding": "mcp retries forever", "action": "route", "producer_repo": "goodword-mcp", "severity": "P1"}
+        (artifacts / "round-1" / "fixer-result.json").write_text(json.dumps(
+            {"applied": [], "failed": [], "advisory": [], "cross_repo": [filed, unfiled]}), encoding="utf-8")
+        body = fc.publication_body(state, "api", {})
+        self.assertNotIn("Cross-repo findings filed", body)
+        # sha256("goodword-mcp\nmcp drops errorMessage")[:16], computed outside the helper.
+        (artifacts / "cross-repo-filed.json").write_text(json.dumps(
+            [{"key": "65609a9208165071", "filed": "https://github.com/o/goodword-mcp/issues/12", "by": "edy"}]), encoding="utf-8")
+        body = fc.publication_body(state, "api", {})
+        self.assertIn("## Cross-repo findings filed\n\n- [P2] goodword-mcp: mcp drops errorMessage "
+                      "(filed: https://github.com/o/goodword-mcp/issues/12, by edy, key `65609a9208165071`)", body)
+        self.assertNotIn("mcp retries forever", body)
 
     def test_publish_no_change_repo_skips_push_and_pr(self):
         state = self.locally_verified_chain(api_changed=False)

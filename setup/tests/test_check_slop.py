@@ -3,6 +3,7 @@
 four guards, the legacy-excess REPORT-not-FAIL distinction, a clean fixture,
 the working-tree-vs-base..HEAD anchoring negative control, and the C-quoted
 porcelain paths that used to drop a file with a space in its name."""
+import json
 import shutil
 import subprocess
 import sys
@@ -274,6 +275,33 @@ class CheckSlopTest(unittest.TestCase):
         r = run(repo, base, "--repo", "api")
         self.assertEqual(0, r.returncode, r.stdout)
         self.assertNotIn("yagni", r.stdout)
+
+    def test_yagni_reports_an_approved_contract_symbol_instead_of_failing(self):
+        # chain 42b42a13: the plan reserved TravelCandidatesDto on the response DTO.
+        repo, base = self._base_repo()
+        (repo / "dto").mkdir()
+        (repo / "dto" / "briefing-response.dto.ts").write_text(
+            "export class TravelCandidatesDto {}\nexport const unusedThing = 42;\n", encoding="utf-8")
+        contracts = self.tmp / "contract-symbols.json"
+        contracts.write_text(json.dumps({"contracts": [
+            {"artifact": "dto/briefing-response.dto.ts", "symbols": ["TravelCandidatesDto"]},
+            {"artifact": "dto/other.dto.ts", "symbols": ["unusedThing"]},
+        ]}), encoding="utf-8")
+        self.assertIn("SLOP=FAIL yagni file=dto/briefing-response.dto.ts line=1 export=TravelCandidatesDto",
+                      run(repo, base).stdout, "control: without the contract the export is flagged")
+        r = run(repo, base, "--contract-symbols", str(contracts))
+        self.assertIn("SLOP=REPORT yagni file=dto/briefing-response.dto.ts line=1 export=TravelCandidatesDto "
+                      "reason=approved-contract", r.stdout)
+        self.assertNotIn("SLOP=FAIL yagni file=dto/briefing-response.dto.ts line=1", r.stdout)
+        # A symbol declared for ANOTHER file does not cover this one.
+        self.assertIn("SLOP=FAIL yagni file=dto/briefing-response.dto.ts line=2 export=unusedThing", r.stdout)
+        self.assertEqual(1, r.returncode, r.stdout)
+
+    def test_an_unreadable_contract_file_keeps_the_strict_guard(self):
+        repo, base = self._base_repo()
+        (repo / "x.ts").write_text("export class Reserved {}\n", encoding="utf-8")
+        r = run(repo, base, "--contract-symbols", str(self.tmp / "missing.json"))
+        self.assertIn("SLOP=FAIL yagni file=x.ts line=1 export=Reserved", r.stdout)
 
     def test_untracked_files_in_a_new_directory_are_scanned(self):
         repo, base = self._base_repo()

@@ -31,7 +31,10 @@ class JointIntegrationRunnerTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="joint integration ")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.env = dict(os.environ, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null")
+        # The runner takes the host e2e mutex; never the machine's real lock.
+        self.lock = self.root / "e2e.lock"
+        self.env = dict(os.environ, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null",
+                        ARCHON_E2E_LOCK=str(self.lock), ARCHON_DB=str(self.root / "no-archon.db"))
         self.artifacts = self.root / "artifacts"
         self.artifacts.mkdir()
         self.api_commit = self.init_repo("api", "api-candidate\n")
@@ -242,7 +245,19 @@ class JointIntegrationRunnerTest(unittest.TestCase):
 
     def test_joint_e2e_script_defaults_to_the_exported_port(self):
         script = (Path(__file__).resolve().parents[1] / "joint-api-mcp-e2e.sh").read_text(encoding="utf-8")
-        self.assertIn('PORT="${2:-${ARCHON_API_PORT:-4213}}"', script)
+        self.assertIn('PORT="${ARCHON_API_PORT:-4213}"', script)
+
+    def test_joint_e2e_script_splits_port_from_extra_jest_args(self):
+        script = Path(__file__).resolve().parents[1] / "joint-api-mcp-e2e.sh"
+        head = script.read_text(encoding="utf-8").split('URL="http://localhost:$PORT"')[0]
+        probe = head.split("set -euo pipefail", 1)[1] + '\necho "PORT=$PORT PATTERN=$PATTERN EXTRA=${JEST_EXTRA[*]-}"\n'
+        env = dict(os.environ, ARCHON_API_PORT="4999", ARCHON_REPO_API_WORKTREE="/a", ARCHON_REPO_GOODWORD_MCP_WORKTREE="/m")
+        def run(*args):
+            return subprocess.run(["bash", "-c", "set -euo pipefail" + probe, "x", *args], env=env,
+                                  capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual("PORT=4999 PATTERN=tests/a.ts EXTRA=-t debrief", run("tests/a.ts", "-t", "debrief"))
+        self.assertEqual("PORT=4321 PATTERN=tests/a.ts EXTRA=-t x", run("tests/a.ts", "4321", "-t", "x"))
+        self.assertEqual("PORT=4999 PATTERN=tests/a.ts EXTRA=", run("tests/a.ts"))
 
     def test_runs_structured_command_in_repo_candidate_worktree_with_expanded_refs(self):
         self.write_plan({
@@ -514,6 +529,42 @@ class JointIntegrationRunnerTest(unittest.TestCase):
         result = self.run_runner()
         self.assertEqual(1, result.returncode)
         self.assertFalse((self.artifacts / "joint-integration-result.json").exists())
+
+
+    def test_commands_run_under_the_e2e_mutex_and_it_is_released(self):
+        self.write_plan(
+            "test \"$(cat \"$ARCHON_E2E_LOCK/owner\")\" = \"$ARCHON_EXPECT_OWNER\" || exit 9\n"
+            "echo ARCHON_INTEGRATION_TESTS=1")
+        self.write_candidates()
+        self.env["ARCHON_EXPECT_OWNER"] = str(self.artifacts.resolve())
+        result = self.run_runner()
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("E2E_MUTEX=ACQUIRED", result.stdout)
+        self.assertIn("E2E_MUTEX=RELEASED", result.stdout)
+        self.assertFalse(self.lock.exists())
+
+    def test_failed_command_still_releases_the_e2e_mutex(self):
+        self.write_plan("exit 7")
+        self.write_candidates()
+        result = self.run_runner()
+        self.assertEqual(1, result.returncode)
+        self.assertIn("E2E_MUTEX=RELEASED", result.stdout)
+        self.assertFalse(self.lock.exists())
+
+    def test_live_holder_blocks_commands_until_a_typed_timeout(self):
+        marker = self.root / "command-ran"
+        self.write_plan(f"touch {marker}; echo ARCHON_INTEGRATION_TESTS=1")
+        self.write_candidates()
+        self.lock.mkdir()
+        (self.lock / "owner").write_text("/elsewhere/runs/live-run\n")
+        self.env.update(ARCHON_E2E_WAIT_SECONDS="1", ARCHON_E2E_POLL_SECONDS="0.1")
+        result = self.run_runner()
+        self.assertEqual(1, result.returncode)
+        self.assertIn("E2E_MUTEX=WAITING owner=/elsewhere/runs/live-run", result.stdout)
+        self.assertIn("E2E_MUTEX=FAIL timeout", result.stdout)
+        self.assertFalse(marker.exists(), "an integration command ran without the e2e mutex")
+        self.assertEqual("/elsewhere/runs/live-run", (self.lock / "owner").read_text().strip())
+        self.assertFalse((self.artifacts / "joint-integration-worktrees").exists())
 
 
 if __name__ == "__main__":

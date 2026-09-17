@@ -537,10 +537,13 @@ def command_for(action: str, target: str, reason: str | None = None) -> list[str
         return command
     if action == "resume":
         return ["bash", str(SETUP / "resume.sh"), target]
+    # SQLITE_BUSY under concurrent runs: retried while the run row is untouched;
+    # a recorded decision whose resume hit the lock continues via resume.sh.
+    retry = ["bash", str(SETUP / "archon-lock-retry.sh"), action.upper(), target, "--"]
     if action == "approve":
-        return [archon, "workflow", "approve", target]
+        return [*retry, archon, "workflow", "approve", target]
     if action == "reject":
-        return [archon, "workflow", "reject", target, reason or ""]
+        return [*retry, archon, "workflow", "reject", target, reason or ""]
     if action == "abandon":
         return [archon, "workflow", "abandon", target, "--json"]
     fail(f"unknown action {action}")
@@ -2932,8 +2935,8 @@ def feature_pin_amend_command(args: argparse.Namespace) -> None:
     judged the code against the old pin.
     """
     validate_control_location(args.control_dir)
-    row = resolve_run(args.db, args.run_id)
-    result = repository_feature_call("pin_amend_command", args, row)
+    row = resolve_feature_control_run(args)
+    result = repository_feature_call("pin_amend_command", args, row, args.chain)
     status = "UNCHANGED" if result.get("already_applied") else "APPLIED"
     print(
         f"ARCHON_FEATURE_PIN_AMEND={status} "
@@ -3499,7 +3502,8 @@ def parser() -> argparse.ArgumentParser:
     scope_amend.add_argument("--reason", required=True)
     pin_amend = sub.add_parser("feature-pin-amend", help="guarded pinned-symbol amendment for a stopped repository-list feature chain")
     pin_amend.add_argument("run_id")
-    pin_amend.add_argument("--token", required=True)
+    pin_amend.add_argument("--token", help="codex chains: CONTROL_TOKEN_FROM_LAST_LAUNCH")
+    pin_amend.add_argument("--chain", help="claude chains (no control token): the chain id")
     pin_amend.add_argument("--symbol", required=True)
     pin_amend.add_argument("--allowed-change", required=True)
     pin_amend.add_argument("--reason", required=True)
@@ -3775,6 +3779,9 @@ def main() -> None:
     env = dict(os.environ)
     env.update({
         "ARCHON_DB": str(args.db),
+        # archon-lock-retry.sh must give up before wait_for_watchdog_arm's 15 s
+        # window, or the timeout path terminates the launcher mid-attempt.
+        "ARCHON_LOCK_RETRY_DEADLINE_S": "10",
         "ARCHON_CONTROL_DIR": str(args.control_dir),
         "DISABLE_OMC": "1",
         "CODEX_HOME": str(args.codex_home),

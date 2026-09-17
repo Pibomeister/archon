@@ -216,6 +216,8 @@ class FeatureScopeAmend(unittest.TestCase):
         self.assertIn("Guarded scope amendment", (amend_root / "plan.md").read_text(encoding="utf-8"))
         self.assertIn("Guarded scope amendment approval packet", (amend_root / "approval-packet-notice.md").read_text(encoding="utf-8"))
         self.assertEqual(["src/api.ts", self.args.add_file], json.loads((self.artifacts / "files-allowlist.json").read_text(encoding="utf-8")))
+        symbols = json.loads((self.artifacts / "contract-symbols.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["approval"]["plan_digest"], symbols["plan_digest"])
         revisions = json.loads((self.artifacts / "candidate-revisions.json").read_text(encoding="utf-8"))
         self.assertEqual(state["approval"]["plan_digest"], revisions["plan_digest"])
         self.assertEqual(state["approval"]["plan_digest"], revisions["approved_plan_digest"])
@@ -394,8 +396,16 @@ class FeatureScopeAmend(unittest.TestCase):
 class ClaudeChainScopeAmend(unittest.TestCase):
     """feature-scope-amend --chain through ar.main(): Claude launches have no control token."""
 
+    COMMAND = "feature-scope-amend"
+    APPLIED = "ARCHON_FEATURE_SCOPE_AMEND"
+    LEDGER = "scope_amendments"
+    FIXTURE = "FeatureScopeAmend"
+
+    def extra_args(self):
+        return ["--add-file", self.fx.args.add_file, "--reason", self.fx.args.reason]
+
     def setUp(self):
-        self.fx = FeatureScopeAmend("test_parser_registers_feature_scope_amend")
+        self.fx = globals()[self.FIXTURE]("test_parser_registers_feature_scope_amend")
         self.fx.provider = "claude"
         self.fx.setUp()
         self.addCleanup(self.fx.doCleanups)
@@ -413,7 +423,7 @@ class ClaudeChainScopeAmend(unittest.TestCase):
 
     def main(self, *auth: str) -> str:
         argv = ["archon-run.py", "--db", str(self.fx.db), "--control-dir", str(self.fx.control),
-                "feature-scope-amend", RUN, *auth, "--add-file", self.fx.args.add_file, "--reason", self.fx.args.reason]
+                self.COMMAND, RUN, *auth, *self.extra_args()]
         out = io.StringIO()
         with mock.patch("sys.argv", argv), mock.patch.object(ar, "validate_control_location"), \
              contextlib.redirect_stdout(out):
@@ -428,7 +438,7 @@ class ClaudeChainScopeAmend(unittest.TestCase):
                 self.main(*auth)
         self.assertIn(message, failed.call_args.args[0])
         after = self.fx.state()
-        self.assertNotIn("scope_amendments", after)
+        self.assertNotIn(self.LEDGER, after)
         self.assertEqual(before["approval"], after["approval"])
 
     def test_claude_chain_amend_adds_file_and_refreshes_bound_artifacts(self):
@@ -436,7 +446,7 @@ class ClaudeChainScopeAmend(unittest.TestCase):
         out = self.main("--chain", CHAIN)
         state = self.fx.state()
 
-        self.assertIn("ARCHON_FEATURE_SCOPE_AMEND=APPLIED", out)
+        self.assertIn(f"{self.APPLIED}=APPLIED", out)
         self.assertEqual(["src/api.ts", self.fx.args.add_file], state["stages"]["api"]["plan"]["files_allowlist"])
         self.assertEqual(["src/tool.ts"], state["stages"]["goodword-mcp"]["plan"]["files_allowlist"])
         self.assertEqual([before["approval"]], state["approval_history"])
@@ -447,7 +457,7 @@ class ClaudeChainScopeAmend(unittest.TestCase):
         self.assertEqual(state["approval"]["plan_digest"], revisions["approved_plan_digest"])
         self.assertNotEqual(before["approval"]["plan_digest"], revisions["approved_plan_digest"])
         self.assertIn(self.fx.args.add_file, json.loads((artifacts / fc.JOINT_PLAN_ARTIFACT).read_text())["stages"]["api"]["files_allowlist"])
-        self.assertIn("ARCHON_FEATURE_SCOPE_AMEND=UNCHANGED", self.main("--chain", CHAIN))
+        self.assertIn(f"{self.APPLIED}=UNCHANGED", self.main("--chain", CHAIN))
 
     def test_codex_chain_is_refused_without_its_token(self):
         self.set_provider("codex")
@@ -483,7 +493,6 @@ class ClaudeChainScopeAmend(unittest.TestCase):
         state["current_run"]["run_id"] = "e" * 32
         fc.write_state(self.fx.control, state)
         self.assert_refused("--chain", CHAIN, message="stale")
-
 
 class FeaturePinAmend(FeatureScopeAmend):
     """feature-pin-amend: the recovery scope-amend cannot express.
@@ -644,6 +653,54 @@ class FeaturePinAmend(FeatureScopeAmend):
 
     def test_retries_matching_incomplete_journal(self):
         self.skipTest("covered by FeatureScopeAmend")
+
+
+class ClaudeChainPinAmend(ClaudeChainScopeAmend):
+    """feature-pin-amend --chain: the same problem scope-amend had, same answer.
+
+    A claude launch writes no control token, so the guarded path was unreachable
+    for the very lane this plan targets -- a claude chain stopped on PIN_BREACH
+    could not authorize the relaxation at all. Both commands now share
+    guarded_feature_binding and authorize_stopped_run, so this subclass inherits
+    every refusal case rather than copying them: stopped run, live claims,
+    codex-requires-token, claude-lane-requires-chain, incomplete budget
+    amendment, stale current run.
+    """
+
+    COMMAND = "feature-pin-amend"
+    APPLIED = "ARCHON_FEATURE_PIN_AMEND"
+    LEDGER = "pin_amendments"
+    FIXTURE = "FeaturePinAmend"
+
+    def extra_args(self):
+        return ["--symbol", FeaturePinAmend.PIN,
+                "--allowed-change", "the managed-group sentence only",
+                "--reason", self.fx.args.reason]
+
+    def test_claude_chain_amend_adds_file_and_refreshes_bound_artifacts(self):
+        """The scope-amend body asserts allowlist growth; a pin amendment moves
+        allowed_change and leaves the allowlist alone."""
+        before = self.fx.state()
+        out = self.main("--chain", CHAIN)
+        state = self.fx.state()
+
+        self.assertIn("ARCHON_FEATURE_PIN_AMEND=APPLIED", out)
+        self.assertEqual("the managed-group sentence only",
+                         fc.plan_pin_entries(state["approved_plan"], "api")[0]["allowed_change"])
+        self.assertEqual(["src/api.ts"], state["stages"]["api"]["plan"]["files_allowlist"])
+        self.assertEqual([before["approval"]], state["approval_history"])
+        self.assertNotEqual(before["approval"]["plan_digest"], state["approval"]["plan_digest"])
+        fc.verify_approval(state)
+        revisions = json.loads((self.fx.artifacts / "candidate-revisions.json").read_text())
+        self.assertEqual(state["approval"]["plan_digest"], revisions["approved_plan_digest"])
+        self.assertIn("ARCHON_FEATURE_PIN_AMEND=UNCHANGED", self.main("--chain", CHAIN))
+
+    def test_a_verified_handoff_still_refuses_the_claude_path(self):
+        """The --chain route relaxes authorization, never the amendment window."""
+        state = self.fx.state()
+        state["candidate_handoffs"] = {"api": {"candidate_head": "a" * 40}}
+        fc.write_state(self.fx.control, state)
+        self.assert_refused("--chain", CHAIN, message="feature-pin-amend cannot modify")
 
 
 if __name__ == "__main__":

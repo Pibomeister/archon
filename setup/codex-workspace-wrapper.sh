@@ -354,12 +354,14 @@ rules = ",".join(json.dumps(str(path.resolve())) + '= "deny"' for path in denied
 if os.environ.get("ARCHON_FEATURE_SCOPE") == "repositories":
     artifacts = Path(sys.argv[1]).resolve()
     frozen = ["params.json", "worktrees.json", "bootstrap-head.txt", "feature-chain-request.json",
-              "prior-planning-evidence.json", "budget-forecast.json", "AGENTS.md"]
+              "prior-planning-evidence.json", "budget-forecast.json", "AGENTS.md",
+              "cross-repo-filed.json"]
     if os.environ.get("ARCHON_FEATURE_PHASE") != "planning":
         frozen += ["joint-plan.json", "plan.md", "files-allowlist.json", "verify.json",
                    "candidate-inputs.json", "candidate-revisions.json", "premises.json",
                    "reader-audit.json", "web-premises.json", "web-reader-audit.json",
-                   "browser-evidence.json", "browser-evidence.sha256", "smoke-probe.json"]
+                   "browser-evidence.json", "browser-evidence.sha256", "smoke-probe.json",
+                   "reopen-context.json", "contract-symbols.json"]
         if os.environ.get("ARCHON_FEATURE_SCOPE") == "repositories":
             frozen += ["review-authority.json", "review-state.json", "current-review.json", "review-checkpoints"]
     rules += "," + ",".join(json.dumps(str(artifacts / name)) + '= "read"' for name in frozen)

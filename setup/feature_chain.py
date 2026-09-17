@@ -12,6 +12,7 @@ import datetime
 import fcntl
 import hashlib
 import hmac
+import importlib.util
 import json
 import os
 import re
@@ -61,6 +62,14 @@ PRIOR_PLANNING_EVIDENCE_ARTIFACT = "prior-planning-evidence.json"
 OPERATOR_GUIDANCE_ARTIFACT = "operator-guidance.md"
 OPERATOR_GUIDANCE_MAX_BYTES = 32_000
 INTEGRATION_EVIDENCE_ARTIFACT = "integration-evidence.json"
+REOPEN_CONTEXT_ARTIFACT = "reopen-context.json"
+CONTRACT_SYMBOLS_ARTIFACT = "contract-symbols.json"
+# Failure evidence a reopened stage's implementer should read, when the stopped
+# run left it: an integration run's result/log, or a consumer's cross-repo finding.
+REOPEN_EVIDENCE_FILES = (
+    "joint-integration-result.json", INTEGRATION_EVIDENCE_ARTIFACT, "node-joint-integration.out",
+    "cross-repo-findings.json",
+)
 PLANNING_SUPPORT_ARTIFACTS = (
     "plan.md", "premises.json", "reader-audit.json", "web-premises.json",
     "web-reader-audit.json", "browser-evidence.json", "browser-evidence.sha256",
@@ -1953,6 +1962,12 @@ def params_payload(state: dict, phase: str, repo: str | None, row: dict) -> dict
         if previous_head:
             payload["feature_verify_only"] = "yes"
             payload["feature_previous_head"] = str(previous_head)
+        reopen_context = state["stages"][repo].get("reopen_context")
+        if isinstance(reopen_context, dict):
+            payload["feature_reopen_context_sha256"] = reopen_context["sha256"]
+        if isinstance(state.get("approved_plan"), dict):
+            payload["feature_contract_symbols_sha256"] = digest_json_file_payload(
+                contract_symbols(state, repo, approval_plan_markdown(state)))
     return payload
 
 
@@ -2033,6 +2048,57 @@ def write_phase_artifacts(artifacts: Path, state: dict, phase: str, repo: str | 
     plan_md = approval_plan_markdown(state)
     if plan_md:
         (artifacts / "plan.md").write_text(plan_md, encoding="utf-8")
+    write_json_atomic(artifacts / CONTRACT_SYMBOLS_ARTIFACT, contract_symbols(state, repo, plan_md))
+    reopen_context = state["stages"][repo].get("reopen_context")
+    if isinstance(reopen_context, dict):
+        path = artifacts / REOPEN_CONTEXT_ARTIFACT
+        path.write_text(reopen_context["content_text"], encoding="utf-8")
+        if file_digest(path) != reopen_context["sha256"]:
+            raise FeatureChainError("reopen context artifact does not match its recorded sha256")
+
+
+CONTRACT_SPAN_RE = re.compile(r"`([^`]+)`")
+CONTRACT_WORD_RE = re.compile(r"[A-Za-z_$][\w$]*")
+
+
+def _contract_identifier(word: str) -> bool:
+    # Prose around a contract is mostly English ("shape", "type", "optional");
+    # only code-shaped words name a symbol: camelCase, PascalCase or snake_case.
+    return "_" in word or any(a.islower() and b.isupper() for a, b in zip(word, word[1:]))
+
+
+def contract_symbols(state: dict, repo: str, plan_md: str) -> dict:
+    """Symbols the approved plan declares as this stage's contract, per file.
+
+    Derived only from approval-bound bytes, so a deslop reviewer reading "no
+    caller yet" on a reserved contract field is answered mechanically
+    (check-slop.py --contract-symbols, deslop-review-gate). Sources: each
+    contract this repo produces (its description, plus approved plan.md lines
+    naming the artifact path; backticked spans count whole unless they are
+    paths, prose counts only code-shaped words), and each pinned_decisions entry
+    whose file is in this stage's allowlist.
+    """
+    files: dict[str, set] = {}
+    plan = state["approved_plan"]
+    for contract in plan.get("contracts") or []:
+        artifact = contract.get("artifact") if isinstance(contract, dict) else None
+        if contract.get("producer") != repo or not isinstance(artifact, str) or not artifact:
+            continue
+        lines = [str(contract.get("description") or "")]
+        lines += [line for line in plan_md.splitlines() if artifact in line]
+        symbols = files.setdefault(artifact, set())
+        for line in lines:
+            for span in CONTRACT_SPAN_RE.findall(line):
+                if "/" not in span:
+                    symbols.update(CONTRACT_WORD_RE.findall(span))
+            symbols.update(w for w in CONTRACT_WORD_RE.findall(CONTRACT_SPAN_RE.sub(" ", line)) if _contract_identifier(w))
+    allowlist = set(plan["stages"][repo].get("files_allowlist") or [])
+    for pin in plan.get("pinned_decisions") or []:
+        if isinstance(pin, dict) and pin.get("file") in allowlist and isinstance(pin.get("symbol"), str):
+            files.setdefault(pin["file"], set()).update(CONTRACT_WORD_RE.findall(pin["symbol"]))
+    return {"schema": "archon.contract-symbols.v1", "repo": repo,
+            "plan_digest": state["approval"]["plan_digest"],
+            "contracts": [{"artifact": path, "symbols": sorted(names)} for path, names in sorted(files.items())]}
 
 
 def write_stage_reader_audit(artifacts: Path, state: dict, repo: str, stage: dict, source: dict) -> None:
@@ -2747,29 +2813,29 @@ def build_pin_amendment(control_dir: Path, state: dict, repo: str, symbol: str,
     return final_pin_amendment_state(state, repo, validation, new_approval, source_artifacts)
 
 
-def pin_amend_command(host: Any, args: Any, row: dict) -> dict:
+def pin_amend_command(host: Any, args: Any, row: dict, chain_id: str | None = None) -> dict:
+    """Relax one pinned decision's allowed_change.
+
+    ``chain_id`` selects the Claude path (``--chain``); omitted, the codex
+    run-control record and ``--token`` authorize it. A claude chain that stops
+    on PIN_BREACH has the same problem scope-amend had: a claude launch writes
+    no control token, so the guarded path was unreachable for the exact lane
+    this plan targets.
+    """
     symbol = validate_pin_symbol(getattr(args, "symbol", ""))
     allowed_change = validate_allowed_change(getattr(args, "allowed_change", ""))
     reason = str(getattr(args, "reason", "")).strip()
     if not reason:
         raise FeatureChainError("pin amendment requires a reason")
-    control = getattr(host, "read_control_state")(row, Path(args.control_dir))
-    feature = control_feature({"control": control})
-    if feature.get("scope") != "repositories":
-        raise FeatureChainError("feature-pin-amend requires a repository-list feature run")
-    chain_id = feature.get("logical_chain_id")
-    if not isinstance(chain_id, str):
-        raise FeatureChainError("run-control record is missing feature chain id")
+    feature = None
+    if chain_id is None:
+        feature, chain_id = guarded_feature_binding(host, args, row, "feature-pin-amend")
     applied: dict | None = None
     with chain_lock(Path(args.control_dir), chain_id):
-        row = host.run_row_by_id(Path(args.db), row["id"])
-        if not isinstance(row, dict) or row.get("status") not in {"failed", "paused", "completed", "cancelled"}:
-            raise FeatureChainError("feature-pin-amend requires a stopped run")
-        control = host.require_control_token(row, Path(args.control_dir), getattr(args, "token", None))
-        if control.get("feature_chain") != feature:
-            raise FeatureChainError("feature control binding changed while acquiring the chain lock")
-        require_no_live_control_processes(control)
+        row = authorize_stopped_run(host, args, row, "feature-pin-amend", feature)
         state = read_state(Path(args.control_dir), chain_id)
+        if feature is None:
+            require_claude_chain(state, "feature-pin-amend")
         require_no_incomplete_amendment(state)
         require_no_incomplete_scope_amendment(state)
         pending = state.get("pending_control")
@@ -3099,6 +3165,11 @@ def refresh_current_stage_artifacts(state: dict, row: dict, repo: str) -> None:
     plan_md = approval_plan_markdown(state)
     if plan_md:
         (artifacts_path / "plan.md").write_text(plan_md, encoding="utf-8")
+    write_json_atomic(artifacts_path / CONTRACT_SYMBOLS_ARTIFACT, contract_symbols(state, repo, plan_md))
+    if (artifacts_path / "params.json").is_file():
+        params = read_json_artifact(artifacts_path / "params.json", "params.json")
+        params["feature_contract_symbols_sha256"] = file_digest(artifacts_path / CONTRACT_SYMBOLS_ARTIFACT)
+        write_json_atomic(artifacts_path / "params.json", params)
 
 
 def guarded_feature_binding(host: Any, args: Any, row: dict, command: str) -> tuple[dict, str]:
@@ -3762,6 +3833,13 @@ def candidate_from_artifacts(repo: str, row: dict, artifacts: Path, state: dict)
     if outside:
         raise FeatureChainError(f"{repo} candidate changed files outside approved allowlist: {','.join(outside)}")
     assert_clean_worktree(worktree, repo)
+    reopen_ctx = state["stages"][repo].get("reopen_context")
+    if isinstance(reopen_ctx, dict):
+        # Every exit of the stage (gate-tests, commit-impl, a fixer that reverted the
+        # fix) ends here, and private state cannot be edited by the run.
+        previous = json.loads(reopen_ctx["content_text"]).get("previous_head")
+        if previous and git_output(worktree, "rev-parse", f"{previous}^{{tree}}") == git_output(worktree, "rev-parse", f"{head}^{{tree}}"):
+            raise FeatureChainError(f"{repo} reopen produced no change: candidate tree equals previous head {previous[:12]}")
     params = read_json_artifact(artifacts / "params.json", "params.json")
     if params.get("worktree") != str(worktree):
         raise FeatureChainError(f"{repo} params worktree does not match private state")
@@ -4196,6 +4274,7 @@ def advance(host: Any, args: Any, row: dict, result: dict) -> dict:
                     state = write_state(control_dir, state)
                 return {"state": state, "paused": result.get("state") != "terminal", "phase": phase, "repo": repo}
             candidate = verify_stage_result(state, repo, row, result)
+            state["stages"][repo].pop("reopen_context", None)
             state["candidate_handoffs"][repo] = candidate
             state["stages"][repo]["status"] = "verified"
             state["stages"][repo]["candidate"] = candidate
@@ -4373,6 +4452,11 @@ def write_local_integration_evidence(path: Path, state: dict, evidence: dict) ->
     return path
 
 
+def digest_json_file_payload(value: dict) -> str:
+    """sha256 of the bytes write_json_atomic writes for ``value``."""
+    return hashlib.sha256((json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")).hexdigest()
+
+
 def write_json_atomic(path: Path, value: dict) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(f".tmp.{os.getpid()}")
@@ -4505,6 +4589,14 @@ def _last_round_advisory(artifacts: Path) -> list[str]:
     return []
 
 
+def cross_repo_keys():
+    """setup/cross-repo-keys.py, which owns the cross-repo acknowledgement contract."""
+    spec = importlib.util.spec_from_file_location("cross_repo_keys", setup_dir() / "cross-repo-keys.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def publication_body(state: dict, repo: str, publications: dict) -> str:
     candidate = state["candidate_handoffs"][repo]
     artifacts = Path(candidate["artifacts"])
@@ -4554,6 +4646,9 @@ def publication_body(state: dict, repo: str, publications: dict) -> str:
     if advisory:
         residual_lines += ["Last-round fixer advisory:", ""] + [f"- {a}" for a in advisory] + [""]
     out += residual_lines or ["None recorded.", ""]
+    filed = cross_repo_keys().prbody(artifacts)
+    if filed:
+        out += [filed]
     changed = diff_files_since(Path(state["worktrees"][repo]["worktree"]), state["worktrees"][repo]["baseline"], candidate["candidate_head"])
     out += ["## Post-Deploy Monitoring & Validation", "",
             "- Watch error rates (4xx/5xx or tool failures) on the surfaces changed by this PR after release.",
@@ -4698,6 +4793,38 @@ def assert_reopenable_run(host: Any, args: Any, current: object, affected: list[
             raise FeatureChainError(f"run {run_id[:8]} is still running; wait or abandon it first")
 
 
+def reopen_evidence(artifacts_dir: Any) -> list[str]:
+    if not isinstance(artifacts_dir, str) or not artifacts_dir:
+        return []
+    root = Path(artifacts_dir)
+    found = [root / name for name in REOPEN_EVIDENCE_FILES] + sorted(root.glob("joint-integration-*.log"))
+    return [str(path) for path in found if path.is_file()]
+
+
+def phase_run_artifacts(state: dict, run_id: Any) -> str | None:
+    for entry in reversed(state.get("phase_runs") or []):
+        if isinstance(entry, dict) and entry.get("run_id") == run_id:
+            return entry.get("artifacts_dir")
+    return None
+
+
+def reopen_context(record: dict, previous_head: str | None) -> dict:
+    """The reopen reason as mandatory implement-node input, stored with its sha256
+    so the dispatched artifact is bound the same way operator guidance is."""
+    content = {
+        "schema": "archon.stage-reopen-context.v1",
+        "repo": record["repo"],
+        "reason": record["reason"],
+        "previous_head": previous_head,
+        "stopped_run_id": record["stopped_run_id"],
+        "stopped_run_artifacts": record["stopped_run_artifacts"],
+        "evidence": record["evidence"],
+        "reopened_at": record["reopened_at"],
+    }
+    text = json.dumps(content, indent=2, sort_keys=True) + "\n"
+    return {"content_text": text, "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
+
+
 def reopen(host: Any, args: Any, chain_id: str, repo: str, reason: str, verify_only: bool = False) -> dict:
     """Reset a verified stage (and its consumers) to pending and re-dispatch it.
 
@@ -4710,6 +4837,12 @@ def reopen(host: Any, args: Any, chain_id: str, repo: str, reason: str, verify_o
     that stage records its previous candidate head, so its params carry
     ``feature_verify_only``/``feature_previous_head``. Reset consumers are not
     marked; their verified input changed, so they are implemented again.
+
+    Otherwise the reopened stage carries ``reopen_context`` (reason, previous head,
+    stopped run and its failure evidence), dispatched as ``reopen-context.json``
+    under ``feature_reopen_context_sha256``; the implement node must address it and
+    gate-tests fails a run that changed nothing. A reopened stage whose implement
+    run stopped may itself be reopened again.
     """
     verify_only = bool(verify_only or getattr(args, "verify_only", False))
     control_dir = Path(args.control_dir)
@@ -4721,7 +4854,16 @@ def reopen(host: Any, args: Any, chain_id: str, repo: str, reason: str, verify_o
             raise FeatureChainError("cannot reopen a locally verified chain; its receipt would be invalidated")
         if repo not in state["repositories"]:
             raise FeatureChainError(f"reopen repository is outside selected scope: {repo}")
-        if state["stages"][repo].get("status") != "verified":
+        current = state.get("current_run") or {}
+        # A reopened stage whose own implement run then stopped (e.g. a deslop cap) is
+        # reopened again from the same previous candidate; any other unverified stage
+        # has nothing to reopen. "Own" means: the latest reopen touching this repo
+        # reopened THIS repo, and the stopped run was bound after it.
+        prior = next((r for r in reversed(state.get("reopens") or []) if repo in (r.get("affected") or [r.get("repo")])), None)
+        again = (prior is not None and prior.get("repo") == repo
+                 and current.get("phase") == "implement" and current.get("repo") == repo
+                 and str(current.get("bound_at") or "") >= str(prior.get("reopened_at") or "~"))
+        if state["stages"][repo].get("status") != "verified" and not again:
             raise FeatureChainError(f"{repo} stage is not verified; nothing to reopen")
         reservation = state.get("dispatch_reservation")
         if isinstance(reservation, dict) and reservation.get("status") != "failed" and process_claim_alive(reservation):
@@ -4729,10 +4871,29 @@ def reopen(host: Any, args: Any, chain_id: str, repo: str, reason: str, verify_o
         verify_approval(state)
         affected = [repo] + consumers_of(state, repo)
         assert_reopenable_run(host, args, state.get("current_run"), affected)
+        lookup = getattr(host, "run_row_by_id", None)
+        if again and callable(lookup):
+            row = lookup(args.db, current.get("run_id"))
+            if not isinstance(row, dict) or row.get("status") not in {"failed", "cancelled"}:
+                raise FeatureChainError(f"reopen again needs the stopped {repo} run to be failed or cancelled, "
+                                        f"got {(row or {}).get('status')}")
+        previous_heads = dict(prior["previous_heads"]) if again else {}
+        previous_heads.update({r: state["candidate_handoffs"][r]["candidate_head"] for r in affected if r in state["candidate_handoffs"]})
+        stopped_artifacts = current.get("artifacts_dir")
+        evidence = reopen_evidence(stopped_artifacts)
+        if again:
+            # A stopped reopen run left no integration evidence of its own; the failure
+            # the stage still has to fix is carried forward from the prior reopen (a
+            # record from before evidence was recorded re-derives it from its run).
+            carried = prior["evidence"] if isinstance(prior.get("evidence"), list) else \
+                reopen_evidence(phase_run_artifacts(state, prior.get("stopped_run_id")))
+            evidence = carried + evidence
         record = {
             "repo": repo, "reason": reason.strip(), "affected": affected,
-            "previous_heads": {r: state["candidate_handoffs"][r]["candidate_head"] for r in affected if r in state["candidate_handoffs"]},
-            "stopped_run_id": (state.get("current_run") or {}).get("run_id"), "reopened_at": now(),
+            "previous_heads": previous_heads,
+            "stopped_run_id": current.get("run_id"), "reopened_at": now(),
+            "stopped_run_artifacts": stopped_artifacts,
+            "evidence": list(dict.fromkeys(evidence)),
         }
         record["verify_only"] = verify_only
         for name in affected:
@@ -4746,6 +4907,12 @@ def reopen(host: Any, args: Any, chain_id: str, repo: str, reason: str, verify_o
                 state["stages"][name]["verify_only_head"] = previous_head
             else:
                 state["stages"][name].pop("verify_only_head", None)
+            # The reason is work for the reopened stage's implementer; a consumer's
+            # input changed, and a verify-only pass implements nothing.
+            if name == repo and not verify_only:
+                state["stages"][name]["reopen_context"] = reopen_context(record, previous_head)
+            else:
+                state["stages"][name].pop("reopen_context", None)
         state.setdefault("reopens", []).append(record)
         state["integration"] = None
         state["current_run"] = None
