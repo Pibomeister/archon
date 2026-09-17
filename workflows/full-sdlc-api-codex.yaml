@@ -1654,6 +1654,8 @@ nodes:
     test -s "$ARTIFACTS_DIR/commit-msg.txt" || {
       python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/node-no-output.py "$ARTIFACTS_DIR" implement commit-msg.txt
       echo "GATE_TESTS=FAIL no commit-msg.txt from implement"; exit 1; }
+    # Before scope: a declared reopen-blocked.txt is the actionable stop, not a breach.
+    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/reopen-gate.py "$ARTIFACTS_DIR" CHANGED
     # Scope guard: catch implement-node creep before the first review round.
     python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py \
       "$ARTIFACTS_DIR/files-allowlist.json" "$WT" "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" \
@@ -1662,7 +1664,6 @@ nodes:
     # allowlist; what ships is the diff, so re-derive it from the diff.
     python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/browser-exemption.py diff \
       "$ARTIFACTS_DIR" "$WT" "$BASE" || { echo "GATE_TESTS=FAIL browser exemption void"; exit 1; }
-    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/reopen-gate.py "$ARTIFACTS_DIR" CHANGED
     echo "GATE_TESTS=PASS"
 - id: deslop
   depends_on:
@@ -1982,7 +1983,13 @@ nodes:
         # Repository-chain stages carry contract-symbols.json (the approved plan's
         # declared contract symbols); an export named there is not yagni.
         CONTRACT_ARGS=()
-        if [ -s "$ARTIFACTS_DIR/contract-symbols.json" ]; then CONTRACT_ARGS=(--contract-symbols "$ARTIFACTS_DIR/contract-symbols.json"); fi
+        if [ -s "$ARTIFACTS_DIR/contract-symbols.json" ]; then
+          # Bound by the controller in params.json: an altered list is refused, never used.
+          python3 -c "import hashlib,json,sys; e=json.load(open(sys.argv[1])).get('feature_contract_symbols_sha256'); sys.exit(0 if not e or e == hashlib.sha256(open(sys.argv[2],'rb').read()).hexdigest() else 1)" \
+            "$ARTIFACTS_DIR/params.json" "$ARTIFACTS_DIR/contract-symbols.json" \
+            || { echo "DESLOP_GATE=FAIL contract-symbols.json altered round=$N"; exit 1; }
+          CONTRACT_ARGS=(--contract-symbols "$ARTIFACTS_DIR/contract-symbols.json")
+        fi
         python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-slop.py \
           "$WT" "$BASE" --max-complexity 10 --repo "$REPO" ${CONTRACT_ARGS[@]+"${CONTRACT_ARGS[@]}"} > "$RD/slop.txt" 2>&1 || SL=$?
         python3 - "$RD/recheck.json" "$TC" "$LT" "$UT" "$SC" "$SL" "$LINT_APPLICABLE" <<'PY'
@@ -2223,8 +2230,8 @@ nodes:
         # >= 75, and a declaration that disagrees with the findings is a failure,
         # not a tie-break.
         set +e
-        python3 - "$R" "$N" "$RD/slop.txt" "$RD/blocking-findings.json" "$ARTIFACTS_DIR/contract-symbols.json" <<'PY'
-        import json, re, sys
+        python3 - "$R" "$N" "$RD/slop.txt" "$RD/blocking-findings.json" "$ARTIFACTS_DIR/contract-symbols.json" "$ARTIFACTS_DIR/params.json" <<'PY'
+        import hashlib, json, re, sys
 
         GUARDS = ["complexity", "tautological_tests", "yagni", "open_closed", "comments"]
         STATUSES = ("assessed", "not_applicable")
@@ -2264,6 +2271,20 @@ nodes:
         # optional DTO field the fixer rightly refused to delete. A yagni finding
         # on such a symbol is kept and downgraded to 50.
         def _contracts():
+            # The controller binds the file's sha256 in params.json; a fixer or
+            # reviewer that widened the list must not buy a downgrade with it.
+            try:
+                expected = json.load(open(sys.argv[6], encoding="utf-8")).get("feature_contract_symbols_sha256")
+            except (IndexError, OSError, ValueError, AttributeError):
+                expected = None
+            if expected:
+                try:
+                    actual = hashlib.sha256(open(sys.argv[5], "rb").read()).hexdigest()
+                except OSError:
+                    actual = None
+                if actual != expected:
+                    print(f"DESLOP_REVIEW=FAIL contract-symbols.json altered round={rnd}")
+                    sys.exit(6)
             try:
                 doc = json.load(open(sys.argv[5], encoding="utf-8"))
             except (IndexError, OSError, ValueError):
@@ -2276,14 +2297,20 @@ nodes:
             return out
 
         CONTRACTS = _contracts()
-        EXPORT_DECL = re.compile(r"^\s*export\s+(?:default\s+)?(?:abstract\s+|declare\s+)*"
+        EXPORT_DECL = re.compile(r"^\s*export\s+(?:default\s+)?(?:abstract\s+|declare\s+|async\s+)*"
                                  r"(?:class|interface|type|const|let|function|enum)\s+([A-Za-z_$][\w$]*)")
         MEMBER_DECL = re.compile(r"^\s*(?:(?:public|private|protected|readonly|static|declare)\s+)*"
                                  r"([A-Za-z_$][\w$]*)\s*[?!]?\s*[:(=]")
 
+        def _declared(text, symbols):
+            m = EXPORT_DECL.match(text) or MEMBER_DECL.match(text)
+            return m.group(1) if m and m.group(1) in symbols else None
+
         def contract_symbol(file, line):
-            """The symbol a finding's line declares, else (a decorator, brace or
-            blank line) its enclosing exported declaration, when the plan lists it."""
+            """The listed symbol a finding's line declares. A closing-brace line
+            resolves to the declaration that brace closes; a decorator line to the
+            declaration it decorates. Any other line (a statement in a body, a
+            later export) resolves to nothing, so it still blocks."""
             symbols = CONTRACTS.get(file)
             try:
                 lines = open(file, encoding="utf-8", errors="replace").read().splitlines() if symbols else []
@@ -2291,17 +2318,22 @@ nodes:
                 return None
             if not 1 <= line <= len(lines):
                 return None
-            m = EXPORT_DECL.match(lines[line - 1]) or MEMBER_DECL.match(lines[line - 1])
-            if m:
-                return m.group(1) if m.group(1) in symbols else None
-            # ponytail: a non-declaring line falls back to the enclosing export, so
-            # a finding anchored on a decorator of an unlisted member of a listed DTO
-            # is downgraded too; resolve the member below if that shows up.
-            for text in reversed(lines[:line - 1]):
-                m = EXPORT_DECL.match(text)
-                if m:
-                    return m.group(1) if m.group(1) in symbols else None
-            return None
+            text = lines[line - 1].strip()
+            if text in ("}", "};"):
+                depth = 0
+                for i in range(line - 1, -1, -1):
+                    depth += lines[i].count("}") - lines[i].count("{")
+                    if depth <= 0:
+                        return _declared(lines[i], symbols)
+                return None
+            if text.startswith("@"):
+                depth = 0
+                for i in range(line - 1, len(lines)):
+                    if depth == 0 and i > line - 1 and not lines[i].strip().startswith("@"):
+                        return _declared(lines[i], symbols)
+                    depth += lines[i].count("(") - lines[i].count(")")
+                return None
+            return _declared(lines[line - 1], symbols)
 
 
         def malformed(msg):
@@ -2424,7 +2456,7 @@ nodes:
             echo "DESLOP_RETRY=PASS round=$N dirty_rounds=$D"
             exit 0
             ;;
-          3|4|5) exit 1 ;;
+          3|4|5|6) exit 1 ;;
           *) echo "DESLOP_REVIEW=FAIL validator error rc=$RC round=$N"; exit 1 ;;
         esac
 - id: reader-audit

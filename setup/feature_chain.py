@@ -1963,6 +1963,9 @@ def params_payload(state: dict, phase: str, repo: str | None, row: dict) -> dict
         reopen_context = state["stages"][repo].get("reopen_context")
         if isinstance(reopen_context, dict):
             payload["feature_reopen_context_sha256"] = reopen_context["sha256"]
+        if isinstance(state.get("approved_plan"), dict):
+            payload["feature_contract_symbols_sha256"] = digest_json_file_payload(
+                contract_symbols(state, repo, approval_plan_markdown(state)))
     return payload
 
 
@@ -2888,6 +2891,11 @@ def refresh_current_stage_artifacts(state: dict, row: dict, repo: str) -> None:
     plan_md = approval_plan_markdown(state)
     if plan_md:
         (artifacts_path / "plan.md").write_text(plan_md, encoding="utf-8")
+    write_json_atomic(artifacts_path / CONTRACT_SYMBOLS_ARTIFACT, contract_symbols(state, repo, plan_md))
+    if (artifacts_path / "params.json").is_file():
+        params = read_json_artifact(artifacts_path / "params.json", "params.json")
+        params["feature_contract_symbols_sha256"] = file_digest(artifacts_path / CONTRACT_SYMBOLS_ARTIFACT)
+        write_json_atomic(artifacts_path / "params.json", params)
 
 
 def guarded_feature_binding(host: Any, args: Any, row: dict, command: str) -> tuple[dict, str]:
@@ -3551,6 +3559,13 @@ def candidate_from_artifacts(repo: str, row: dict, artifacts: Path, state: dict)
     if outside:
         raise FeatureChainError(f"{repo} candidate changed files outside approved allowlist: {','.join(outside)}")
     assert_clean_worktree(worktree, repo)
+    reopen_ctx = state["stages"][repo].get("reopen_context")
+    if isinstance(reopen_ctx, dict):
+        # Every exit of the stage (gate-tests, commit-impl, a fixer that reverted the
+        # fix) ends here, and private state cannot be edited by the run.
+        previous = json.loads(reopen_ctx["content_text"]).get("previous_head")
+        if previous and git_output(worktree, "rev-parse", f"{previous}^{{tree}}") == git_output(worktree, "rev-parse", f"{head}^{{tree}}"):
+            raise FeatureChainError(f"{repo} reopen produced no change: candidate tree equals previous head {previous[:12]}")
     params = read_json_artifact(artifacts / "params.json", "params.json")
     if params.get("worktree") != str(worktree):
         raise FeatureChainError(f"{repo} params worktree does not match private state")
@@ -3879,6 +3894,7 @@ def advance(host: Any, args: Any, row: dict, result: dict) -> dict:
                     state = write_state(control_dir, state)
                 return {"state": state, "paused": result.get("state") != "terminal", "phase": phase, "repo": repo}
             candidate = verify_stage_result(state, repo, row, result)
+            state["stages"][repo].pop("reopen_context", None)
             state["candidate_handoffs"][repo] = candidate
             state["stages"][repo]["status"] = "verified"
             state["stages"][repo]["candidate"] = candidate
@@ -4053,6 +4069,11 @@ def write_local_integration_evidence(path: Path, state: dict, evidence: dict) ->
     receipt = integration_receipt(state, evidence)
     write_json_atomic(path, receipt)
     return path
+
+
+def digest_json_file_payload(value: dict) -> str:
+    """sha256 of the bytes write_json_atomic writes for ``value``."""
+    return hashlib.sha256((json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")).hexdigest()
 
 
 def write_json_atomic(path: Path, value: dict) -> Path:
@@ -4442,11 +4463,14 @@ def reopen(host: Any, args: Any, chain_id: str, repo: str, reason: str, verify_o
         if repo not in state["repositories"]:
             raise FeatureChainError(f"reopen repository is outside selected scope: {repo}")
         current = state.get("current_run") or {}
-        prior = next((r for r in reversed(state.get("reopens") or []) if r.get("repo") == repo), None)
         # A reopened stage whose own implement run then stopped (e.g. a deslop cap) is
         # reopened again from the same previous candidate; any other unverified stage
-        # has nothing to reopen.
-        again = prior is not None and current.get("phase") == "implement" and current.get("repo") == repo
+        # has nothing to reopen. "Own" means: the latest reopen touching this repo
+        # reopened THIS repo, and the stopped run was bound after it.
+        prior = next((r for r in reversed(state.get("reopens") or []) if repo in (r.get("affected") or [r.get("repo")])), None)
+        again = (prior is not None and prior.get("repo") == repo
+                 and current.get("phase") == "implement" and current.get("repo") == repo
+                 and str(current.get("bound_at") or "") >= str(prior.get("reopened_at") or "~"))
         if state["stages"][repo].get("status") != "verified" and not again:
             raise FeatureChainError(f"{repo} stage is not verified; nothing to reopen")
         reservation = state.get("dispatch_reservation")
@@ -4455,14 +4479,23 @@ def reopen(host: Any, args: Any, chain_id: str, repo: str, reason: str, verify_o
         verify_approval(state)
         affected = [repo] + consumers_of(state, repo)
         assert_reopenable_run(host, args, state.get("current_run"), affected)
+        lookup = getattr(host, "run_row_by_id", None)
+        if again and callable(lookup):
+            row = lookup(args.db, current.get("run_id"))
+            if not isinstance(row, dict) or row.get("status") not in {"failed", "cancelled"}:
+                raise FeatureChainError(f"reopen again needs the stopped {repo} run to be failed or cancelled, "
+                                        f"got {(row or {}).get('status')}")
         previous_heads = dict(prior["previous_heads"]) if again else {}
         previous_heads.update({r: state["candidate_handoffs"][r]["candidate_head"] for r in affected if r in state["candidate_handoffs"]})
         stopped_artifacts = current.get("artifacts_dir")
         evidence = reopen_evidence(stopped_artifacts)
         if again:
-            # A stopped reopen run left no integration evidence of its own; the
-            # failure the stage still has to fix is in the first reopen's stopped run.
-            evidence = reopen_evidence(phase_run_artifacts(state, prior.get("stopped_run_id"))) + evidence
+            # A stopped reopen run left no integration evidence of its own; the failure
+            # the stage still has to fix is carried forward from the prior reopen (a
+            # record from before evidence was recorded re-derives it from its run).
+            carried = prior["evidence"] if isinstance(prior.get("evidence"), list) else \
+                reopen_evidence(phase_run_artifacts(state, prior.get("stopped_run_id")))
+            evidence = carried + evidence
         record = {
             "repo": repo, "reason": reason.strip(), "affected": affected,
             "previous_heads": previous_heads,

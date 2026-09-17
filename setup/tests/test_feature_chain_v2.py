@@ -555,6 +555,65 @@ class FeatureChainV2(unittest.TestCase):
         self.assertEqual(context["evidence"], [str(integration_dir / "joint-integration-1.log")])
         self.assertNotEqual(latest["current_run"]["run_id"], stopped["run_id"])
 
+    def reopened_api_run(self):
+        state = self.locally_verified_chain(finalize=False)
+        chain_id = state["logical_chain_id"]
+        integration_dir = Path(state["current_run"]["artifacts_dir"])
+        (integration_dir / "joint-integration-1.log").write_text("got 500\n", encoding="utf-8")
+        with mock.patch("builtins.print"):
+            fc.reopen(self.host, self.args, chain_id, "api", "first reason")
+        return chain_id, state["candidate_handoffs"]["api"]["candidate_head"], integration_dir
+
+    def test_reopen_again_carries_the_original_failure_evidence_through_every_repeat(self):
+        chain_id, api_head, integration_dir = self.reopened_api_run()
+        for reason in ("second reason", "third reason"):
+            with mock.patch("builtins.print"):
+                fc.reopen(self.host, self.args, chain_id, "api", reason)
+        latest = fc.read_state(self.control, chain_id)
+        self.assertEqual(latest["reopens"][2]["evidence"], [str(integration_dir / "joint-integration-1.log")])
+        self.assertEqual(latest["reopens"][2]["previous_heads"]["api"], api_head)
+
+    def test_reopen_again_refuses_when_a_later_reopen_owns_the_stage_or_the_run_is_not_stopped(self):
+        chain_id, _head, _dir = self.reopened_api_run()
+        with fc.chain_lock(self.control, chain_id):
+            latest = fc.read_state(self.control, chain_id)
+            latest["reopens"].append({"repo": "upstream", "affected": ["upstream", "api"], "reopened_at": fc.now()})
+            fc.write_state(self.control, latest)
+        with self.assertRaisesRegex(fc.FeatureChainError, "not verified"):
+            fc.reopen(self.host, self.args, chain_id, "api", "x")
+        with fc.chain_lock(self.control, chain_id):
+            latest = fc.read_state(self.control, chain_id)
+            latest["reopens"].pop()
+            fc.write_state(self.control, latest)
+        self.host.run_row_by_id = lambda db, run_id: {"status": "paused"}
+        with self.assertRaisesRegex(fc.FeatureChainError, "failed or cancelled, got paused"):
+            fc.reopen(self.host, self.args, chain_id, "api", "x")
+        # Negative control: the same chain with a failed run is admitted.
+        self.host.run_row_by_id = lambda db, run_id: {"status": "failed"}
+        with mock.patch("builtins.print"):
+            fc.reopen(self.host, self.args, chain_id, "api", "x")
+
+    def test_a_reopened_stage_whose_candidate_tree_is_unchanged_does_not_verify(self):
+        chain_id, api_head, _dir = self.reopened_api_run()
+        latest = fc.read_state(self.control, chain_id)
+        artifacts = self.root / "no-change-artifacts"
+        artifacts.mkdir()
+        (artifacts / "feature-result.json").write_text(json.dumps({"outcome": "NO_CHANGE", "head": api_head}), encoding="utf-8")
+        row = {"id": latest["current_run"]["run_id"]}
+        with self.assertRaisesRegex(fc.FeatureChainError, "reopen produced no change"):
+            fc.candidate_from_artifacts("api", row, artifacts, latest)
+        # Negative control: without the reopen context the same candidate gets past
+        # the check (and stops later, on the params.json this fixture never wrote).
+        latest["stages"]["api"].pop("reopen_context")
+        with self.assertRaisesRegex(fc.FeatureChainError, "params.json"):
+            fc.candidate_from_artifacts("api", row, artifacts, latest)
+
+    def test_dispatch_binds_the_contract_symbols_digest_in_params(self):
+        chain_id, _head, _dir = self.reopened_api_run()
+        artifacts = Path(self.host.calls[-1][3]["output_root"])
+        params = json.loads((artifacts / "params.json").read_text(encoding="utf-8"))
+        self.assertEqual(params["feature_contract_symbols_sha256"], fc.file_digest(artifacts / "contract-symbols.json"))
+
     def test_an_implementing_stage_that_was_never_reopened_is_not_reopenable(self):
         # Negative control for the re-reopen admission: the prior reopen record is
         # what makes a stopped implement run reopenable, not the run alone.

@@ -758,6 +758,8 @@ nodes:
     test -s "$ARTIFACTS_DIR/commit-msg.txt" || {
       python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/node-no-output.py "$ARTIFACTS_DIR" implement commit-msg.txt
       echo "GATE_TESTS=FAIL no commit-msg.txt from implement"; exit 1; }
+    # Before scope: a declared reopen-blocked.txt is the actionable stop, not a breach.
+    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/reopen-gate.py "$ARTIFACTS_DIR" CHANGED
     # Scope guard: catch implement-node creep before the first review round.
     python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py \
       "$ARTIFACTS_DIR/files-allowlist.json" "$WT" "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" \
@@ -766,7 +768,6 @@ nodes:
     # allowlist; what ships is the diff, so re-derive it from the diff.
     python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/browser-exemption.py diff \
       "$ARTIFACTS_DIR" "$WT" "$BASE" || { echo "GATE_TESTS=FAIL browser exemption void"; exit 1; }
-    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/reopen-gate.py "$ARTIFACTS_DIR" CHANGED
     echo "GATE_TESTS=PASS"
 - id: commit-impl
   depends_on:

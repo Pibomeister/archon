@@ -37,8 +37,16 @@ export class BriefingResponseDto {
 export class NotInThePlanDto {
   value: string;
 }
+
+export async function resolveBriefingWindow(opts: Opts) {
+  const legacy = opts.legacy ?? false;
+  return compute(opts);
+}
+
+export async function unusedNewHelper() {}
 """
-CONTRACT = {"contracts": [{"artifact": DTO, "symbols": ["BriefingResponseDto", "TravelCandidatesDto", "travelCandidates"]}]}
+CONTRACT = {"contracts": [{"artifact": DTO, "symbols": [
+    "BriefingResponseDto", "TravelCandidatesDto", "travelCandidates", "resolveBriefingWindow"]}]}
 
 
 def sh(cmd, cwd):
@@ -52,7 +60,7 @@ def finding(line, file=DTO, guard="yagni", confidence=100):
 
 
 class DeslopContractDowngrade(unittest.TestCase):
-    def run_gate(self, findings, contract=CONTRACT, verdict="DIRTY"):
+    def run_gate(self, findings, contract=CONTRACT, verdict="DIRTY", bound=None):
         tmp = Path(tempfile.mkdtemp(prefix="dcc-"))
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         wt = tmp / "wt"
@@ -64,11 +72,13 @@ class DeslopContractDowngrade(unittest.TestCase):
         rd = ad / "deslop-round-1"
         rd.mkdir(parents=True)
         (ad / "deslop-round.txt").write_text("1\n")
-        (ad / "params.json").write_text(json.dumps(
-            {"spec": "/x.md", "slug": "x", "branch": "archon/x", "worktree": str(wt)}))
+        params = {"spec": "/x.md", "slug": "x", "branch": "archon/x", "worktree": str(wt)}
         (rd / "slop.txt").write_text("SLOP=OK files=1\n")
         if contract is not None:
             (ad / "contract-symbols.json").write_text(json.dumps(contract))
+            if bound is not None:
+                params["feature_contract_symbols_sha256"] = bound(ad / "contract-symbols.json")
+        (ad / "params.json").write_text(json.dumps(params))
         (ad / "deslop-review.json").write_text(json.dumps({
             "verdict": verdict,
             "coverage": {g: {"status": "assessed", "evidence": "read the diff"} for g in GUARDS},
@@ -113,6 +123,31 @@ class DeslopContractDowngrade(unittest.TestCase):
         p = self.run_gate([finding(13)])
         self.assertNotIn("DESLOP_CONTRACT_DOWNGRADE", p.stdout)
         self.assertIn("DESLOP=DIRTY round=1 blocking=1", p.stdout, p.stdout + p.stderr)
+
+    def test_a_decorator_line_resolves_to_the_member_it_decorates(self):
+        p = self.run_gate([finding(7)])
+        self.assertIn("DESLOP_CONTRACT_DOWNGRADE symbol=travelCandidates", p.stdout, p.stdout + p.stderr)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
+    def test_statements_and_later_exports_below_a_listed_export_still_block(self):
+        # Review finding: a nearest-export-above fallback downgraded every line
+        # below a listed function, including a new unrelated export.
+        p = self.run_gate([finding(18), finding(19), finding(22)])
+        self.assertNotIn("DESLOP_CONTRACT_DOWNGRADE", p.stdout)
+        self.assertIn("DESLOP=DIRTY round=1 blocking=3", p.stdout, p.stdout + p.stderr)
+
+    def test_an_async_listed_export_is_recognised(self):
+        p = self.run_gate([finding(17)])
+        self.assertIn("DESLOP_CONTRACT_DOWNGRADE symbol=resolveBriefingWindow", p.stdout, p.stdout + p.stderr)
+
+    def test_a_contract_file_altered_after_dispatch_fails_the_gate(self):
+        import hashlib
+        p = self.run_gate([finding(8)], bound=lambda path: hashlib.sha256(b"other bytes").hexdigest())
+        self.assertIn("DESLOP_REVIEW=FAIL contract-symbols.json altered round=1", p.stdout, p.stdout + p.stderr)
+        self.assertEqual(p.returncode, 1)
+        # Negative control: the bound digest of the real bytes downgrades as before.
+        p = self.run_gate([finding(8)], bound=lambda path: hashlib.sha256(path.read_bytes()).hexdigest())
+        self.assertIn("DESLOP_CONTRACT_DOWNGRADE symbol=travelCandidates", p.stdout, p.stdout + p.stderr)
 
     def test_the_downgrade_is_scoped_to_yagni_and_to_the_contract_file(self):
         p = self.run_gate([finding(8, guard="comments"), finding(8, file="dto/other.dto.ts")])

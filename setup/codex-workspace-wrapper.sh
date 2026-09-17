@@ -359,7 +359,8 @@ if os.environ.get("ARCHON_FEATURE_SCOPE") == "repositories":
         frozen += ["joint-plan.json", "plan.md", "files-allowlist.json", "verify.json",
                    "candidate-inputs.json", "candidate-revisions.json", "premises.json",
                    "reader-audit.json", "web-premises.json", "web-reader-audit.json",
-                   "browser-evidence.json", "browser-evidence.sha256", "smoke-probe.json"]
+                   "browser-evidence.json", "browser-evidence.sha256", "smoke-probe.json",
+                   "reopen-context.json", "contract-symbols.json"]
         if os.environ.get("ARCHON_FEATURE_SCOPE") == "repositories":
             frozen += ["review-authority.json", "review-state.json", "current-review.json", "review-checkpoints"]
     rules += "," + ",".join(json.dumps(str(artifacts / name)) + '= "read"' for name in frozen)

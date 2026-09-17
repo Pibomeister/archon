@@ -1040,6 +1040,22 @@ class DeslopStress(unittest.TestCase):
         self.assertEqual(r["rc"], 1, r["output"])
         self.assertIn("DESLOP_GATE=FAIL slop round=1", r["output"])
 
+    def test_deslop_recheck_api_refuses_a_contract_file_altered_after_dispatch(self):
+        def build(tmp, digest):
+            deslop_common(tmp, "api")
+            art = tmp / "artifacts"
+            jdump(art / "contract-symbols.json", {"contracts": []})
+            doc = json.loads((art / "params.json").read_text(encoding="utf-8"))
+            doc["feature_contract_symbols_sha256"] = digest(art / "contract-symbols.json")
+            jdump(art / "params.json", doc)
+        r = run_node("full-sdlc-api", "deslop-recheck", lambda tmp: build(tmp, lambda p: "0" * 64))
+        self.assertEqual(r["rc"], 1, r["output"])
+        self.assertIn("DESLOP_GATE=FAIL contract-symbols.json altered round=1", r["output"])
+        # Negative control: the digest of the real bytes passes.
+        r = run_node("full-sdlc-api", "deslop-recheck",
+                     lambda tmp: build(tmp, lambda p: hashlib.sha256(p.read_bytes()).hexdigest()))
+        self.assertEqual(r["rc"], 0, r["output"])
+
     def test_deslop_recheck_api_lint_failure_is_typed(self):
         r = run_node("full-sdlc-api", "deslop-recheck", deslop_recheck_fixture("api"),
                      env={"SHIM_RC_BUN_LINT": "1"})

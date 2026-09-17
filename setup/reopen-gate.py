@@ -28,6 +28,8 @@ def main() -> None:
         params = json.loads((artifacts / "params.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         fail(f"params.json unreadable: {exc}")
+    if not isinstance(params, dict):
+        fail("params.json is not an object")
     expected = params.get("feature_reopen_context_sha256")
     if not expected:
         print("REOPEN_GATE=SKIP no reopen context")
@@ -39,9 +41,13 @@ def main() -> None:
         actual = None
     if actual != expected:
         fail("reopen-context.json missing or altered")
-    blocked = artifacts / "reopen-blocked.txt"
-    if blocked.is_file() and blocked.read_text(encoding="utf-8", errors="replace").strip():
-        files = " ".join(blocked.read_text(encoding="utf-8", errors="replace").split())
+    try:
+        files = " ".join((artifacts / "reopen-blocked.txt").read_text(encoding="utf-8", errors="replace").split())
+    except FileNotFoundError:
+        files = ""
+    except OSError as exc:
+        fail(f"reopen-blocked.txt unreadable: {exc}")
+    if files:
         print(f"IMPLEMENT=FAIL reopen needs files outside the approved allowlist: {files}")
         print("  The allowlist is approval-bound; adding a file is a human act. Per file:")
         print(f"  python3 <.archon>/setup/archon-run.py feature-scope-amend {params.get('run_id')} "

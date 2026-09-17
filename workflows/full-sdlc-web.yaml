@@ -631,11 +631,11 @@ nodes:
         exit 0
       fi
       printf '{"outcome":"CHANGED","repo":"web-app","basis":"baseline-to-candidate content","baseline":"%s","head":"%s"}\n' "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/reopen-gate.py "$ARTIFACTS_DIR" CHANGED
       # Scope guard: implementation must declare its intended web diff; empty would reject all real changes.
       ALLOW_COUNT=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))))" "$ARTIFACTS_DIR/files-allowlist.json" 2>/dev/null || echo 0)
       if [ "$ALLOW_COUNT" = 0 ]; then echo "GATE_TESTS=FAIL approved web files-allowlist.json is required"; exit 1; fi
       python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py         "$ARTIFACTS_DIR/files-allowlist.json" "$(pwd)" "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")"         --exclude pnpm-lock.yaml || { echo "GATE_TESTS=FAIL scope breach"; exit 1; }
-      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/reopen-gate.py "$ARTIFACTS_DIR" CHANGED
       echo "GATE_TESTS=PASS"
 
   - id: reader-audit
