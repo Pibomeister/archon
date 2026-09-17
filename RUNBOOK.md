@@ -1252,8 +1252,22 @@ ceilings, reason, and shepherd option; do not edit private state. Token-only
 requests retain their original amendment IDs. An incomplete
 amendment blocks dispatch until recovery finishes. Amendment does not rotate
 the token; normal guarded resume still does. Verify every allowance record and
-unchanged historical consumption before resuming. Raising a review cap is a
-separate authorized operation: retain the round counter and all review evidence,
+unchanged historical consumption before resuming.
+
+A Claude repository-list chain has no control token (Claude launches never write
+one) but its shared active-time allowance is still enforced at dispatch and
+replan. Name the chain instead of the token:
+
+```bash
+python3 .archon/setup/archon-run.py feature-budget-update <run-id> --chain <chain-id> --total-tokens <unchanged-or-higher> --total-active-minutes 480 --reason "Authorized retry"
+```
+
+`--chain` is accepted only when the chain state's provider is `claude`; a Codex
+chain still requires `--token`. It amends the chain and its budget ledger with
+the same journal, increase-only, stopped-run, competing-control and
+dispatch-reservation refusals. There is no private run-control record to update,
+and `--enable-shepherd` is refused because the shepherd is Codex-only. Raising a
+review cap is a separate authorized operation: retain the round counter and all review evidence,
 and never accept findings merely to pass the cap.
 
 The experimental `risk-delta-v1` policy can be registered for a stopped Codex
@@ -1296,6 +1310,29 @@ and clears the journal. If interrupted, repeat the identical command with the
 same token, file, and reason. Pending scope amendments block resume/approve and
 dispatch but still allow emergency abandon/reject containment. The amendment
 preserves operator authority; normal guarded resume still rotates the token.
+
+On a Claude repository-list chain (no control token), name the chain instead:
+
+```bash
+python3 .archon/setup/archon-run.py feature-scope-amend <run-id> --chain <chain-id> --add-file <repo-relative-tracked-file> --reason "Authorized scope recovery"
+bash .archon/setup/resume.sh <run-id>
+```
+
+`--chain` is accepted only when the chain state's provider is `claude`; a Codex
+chain still requires `--token`. Authority is naming the chain, as with
+`feature-advance` and `feature-replan --chain`. Every other refusal is
+unchanged: the archon run must be stopped, and pending controls, dispatch
+reservations, incomplete budget amendments, a stale current run, approval drift,
+verified handoffs/integration/publication, and unsafe or untracked files all
+still refuse. A Claude launch records no launcher/watchdog process group, so
+liveness is the archon run status plus those chain claims. Claude resume is a
+plain `archon workflow resume` that does not read the chain journal: if an
+amendment is interrupted, repeat the identical command before `resume.sh`
+(the next chain dispatch refuses while the journal is incomplete).
+
+`feature-review-policy-update` and `feature-account-provider-usage` stay
+Codex-only: `risk-delta-v1` qualification and provider-usage receipts account
+Codex-controlled sessions, which a Claude chain does not have.
 
 Guarded Codex controls install a private `CLAUDE_BIN_PATH` denial executable.
 Stock approval rejection hooks do not support a scoped provider override;
