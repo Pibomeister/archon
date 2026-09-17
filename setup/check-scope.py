@@ -31,7 +31,13 @@ directory is the same unit and is adopted into the allowlist, recorded in
 allowlist-auto-expansion.json. Any other new file is moved -- never deleted --
 under <dir>/strays/, where a human can retrieve it. A MODIFIED tracked file
 outside the allowlist is neither: it is an edit to code someone else owns, and
-that still stops the round for a human."""
+that still stops the round for a human.
+
+Lockfiles follow their manifest (lockfile_scope.py): with the run's repo known
+from params.json beside the allowlist, the profile's lockfile is in scope and
+staged when an allowlisted package.json changed, tolerated unstaged only as a
+drift-declared install's uncommitted rewrite, and otherwise a breach. That rule
+overrides --exclude for the profile's own lockfile names."""
 import json
 import os
 import shutil
@@ -39,6 +45,7 @@ import subprocess
 import sys
 
 from feature_env import feature_env
+import lockfile_scope
 
 args = sys.argv[1:]
 allowlist_path, worktree, base = args[0], args[1], args[2]
@@ -77,24 +84,47 @@ def git(*cmd):
         ["git", "-C", worktree, *cmd], capture_output=True, encoding="utf-8", check=True
     ).stdout
 
-changed = set()
+committed = set()
 for line in git("diff", "--name-only", f"{base}..HEAD").splitlines():
     if line.strip():
-        changed.add(line.strip())
-for line in git("status", "--porcelain").splitlines():
+        committed.add(line.strip())
+uncommitted = set()
+# --untracked-files=all: by default a NEW directory is one `?? dir/` record, so an
+# allowlisted file in a new module read as a breach of "dir/" -- and under
+# --quarantine the whole directory was moved to strays.
+for line in git("status", "--porcelain", "--untracked-files=all").splitlines():
     if not line.strip():
         continue
     path = line[3:]
     if " -> " in path:  # rename: check the destination
         path = path.split(" -> ", 1)[1]
-    changed.add(path.strip())
+    uncommitted.add(path.strip())
+changed = committed | uncommitted
 
-breaches = sorted(p for p in changed if p not in allowed and p not in excludes)
+profile = None
+repo = lockfile_scope.repo_beside(allowlist_path)
+if repo:
+    try:
+        profile = lockfile_scope.profile(repo)
+    except Exception as exc:
+        tag = "COMMIT_SCOPE" if stage else "SCOPE_GUARD"
+        print(f"{tag}=FAIL cannot read repo profile for {repo}: {exc}")
+        sys.exit(1)
+lockfiles = set((profile or {}).get("lockfiles", []))
+excludes -= lockfiles
+lock_in_scope, lock_tolerated = lockfile_scope.judge(profile, allowed, committed, uncommitted)
+breaches = sorted(p for p in changed
+                  if p not in allowed and p not in excludes
+                  and p not in lock_in_scope and p not in lock_tolerated)
+
+
+def why(path):
+    return " (lockfile changed without an in-scope package.json change)" if path in lockfiles else ""
 
 
 def is_untracked(path):
     """`??` in porcelain: the file did not exist at HEAD, so nobody owns it."""
-    out = git("status", "--porcelain", "--", path)
+    out = git("status", "--porcelain", "--untracked-files=all", "--", path)
     return any(l.startswith("??") for l in out.splitlines() if l.strip())
 
 
@@ -130,15 +160,15 @@ def adoptable(path):
 if breaches and stage and quarantine:
     adopted, moved, blocked = [], [], []
     for b in breaches:
-        if not is_untracked(b):
-            blocked.append(b)          # an edit to a file someone else owns
+        if b in lockfiles or not is_untracked(b):
+            blocked.append(b)          # an edit to a file someone else owns, or lockfile-only drift
         elif adoptable(b):
             adopted.append(b)
         else:
             moved.append(b)
     if blocked:
         for b in blocked:
-            print(f"COMMIT_SCOPE=STRAY file={b} (modified, not new: outside the allowlist)")
+            print(f"COMMIT_SCOPE=STRAY file={b} (modified, not new: outside the allowlist){why(b)}")
         print("COMMIT_SCOPE=FAIL nothing staged (a human expands files-allowlist.json — "
               "the edit is the approval — or reverts the file, then resume)")
         sys.exit(1)
@@ -179,22 +209,25 @@ if breaches and stage and quarantine:
 if breaches:
     if stage:
         for p in breaches:
-            print(f"COMMIT_SCOPE=STRAY file={p}")
+            print(f"COMMIT_SCOPE=STRAY file={p}{why(p)}")
         print("COMMIT_SCOPE=FAIL nothing staged (delete the stray, or a human expands "
               "files-allowlist.json — the edit is the approval — then resume)")
     else:
         tag = f"SCOPE_BREACH round={round_no}" if round_no else "SCOPE_BREACH"
         for p in breaches:
-            print(f"{tag} file={p}")
+            print(f"{tag} file={p}{why(p)}")
     sys.exit(1)
 
 if stage:
     # Only allowlisted paths, one at a time: `git add -- <path>` stages a
     # deletion as readily as an edit, and a path the round never touched is a
-    # silent no-op. Excluded paths (.env, pnpm-lock.yaml) are tolerated dirty
-    # by the converge cleanliness check and must not be committed here.
-    for p in sorted(allowed):
+    # silent no-op. Excluded paths (.env) and a drift-declared install's
+    # lockfile rewrite are tolerated dirty and must not be committed here; a
+    # lockfile that follows an in-scope package.json is committed with it.
+    for p in sorted(allowed | lock_in_scope):
         subprocess.run(["git", "-C", worktree, "add", "--", p], capture_output=True)
+    for p in sorted(lock_in_scope - allowed):
+        print(f"COMMIT_SCOPE=LOCKFILE file={p} (staged with its in-scope package.json)")
     print(f"COMMIT_SCOPE=OK allowlisted={len(allowed)}")
     sys.exit(0)
 

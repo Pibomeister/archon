@@ -50,8 +50,8 @@ class PreflightRoundCaps(unittest.TestCase):
         p, art = run_block()
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertEqual((art / "round-cap.txt").read_text().strip(), "3")
-        self.assertEqual((art / "plan-round-cap.txt").read_text().strip(), "2")
-        self.assertIn("ROUND_CAPS=OK review=3 plan=2", p.stdout)
+        self.assertEqual((art / "plan-round-cap.txt").read_text().strip(), "3")
+        self.assertIn("ROUND_CAPS=OK review=3 plan=3", p.stdout)
 
     def test_the_legacy_scope_gets_no_cap_file(self):
         p, art = run_block(scope="legacy")
@@ -73,8 +73,8 @@ class PreflightRoundCaps(unittest.TestCase):
         p, art = run_block(preset={"round-cap.txt": "6\n"})
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertEqual((art / "round-cap.txt").read_text().strip(), "6")
-        self.assertEqual((art / "plan-round-cap.txt").read_text().strip(), "2")
-        self.assertIn("ROUND_CAPS=OK review=6 plan=2", p.stdout)
+        self.assertEqual((art / "plan-round-cap.txt").read_text().strip(), "3")
+        self.assertIn("ROUND_CAPS=OK review=6 plan=3", p.stdout)
 
 
 if __name__ == "__main__":

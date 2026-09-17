@@ -75,14 +75,17 @@ nodes:
       fi
       test -d /Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb/wiki || { echo "PREFLIGHT=FAIL knowledge base missing"; exit 1; }
       git -C /Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb status --porcelain | sort > "$ARTIFACTS_DIR/kb-pre-porcelain.txt"
-      # Repository-scope runs are budgeted to converge inside two hours, so they
-      # get tighter caps than the legacy defaults baked into the readers
-      # (round-pre/converge default 4, plan-round-pre/plan-converge default 3).
+      # Repository-scope runs are budgeted to converge inside two hours, so the
+      # review loop gets a tighter cap than the legacy default baked into its
+      # readers (round-pre/converge default 4). The plan cap stays at the legacy
+      # 3: at 2, chain 42b42a13 died with every blocking finding of its last
+      # round already applied, one of them harness-caused, and a joint plan
+      # needs a round to see the reviser's cross-repository edits.
       # Written only when absent: an operator who raised a cap and resumed keeps
       # the raise even if this node re-runs. Legacy runs get no file at all.
       if [ "${ARCHON_FEATURE_SCOPE-}" = repositories ]; then
         test -f "$ARTIFACTS_DIR/round-cap.txt" || echo 3 > "$ARTIFACTS_DIR/round-cap.txt"
-        test -f "$ARTIFACTS_DIR/plan-round-cap.txt" || echo 2 > "$ARTIFACTS_DIR/plan-round-cap.txt"
+        test -f "$ARTIFACTS_DIR/plan-round-cap.txt" || echo 3 > "$ARTIFACTS_DIR/plan-round-cap.txt"
         echo "ROUND_CAPS=OK review=$(cat "$ARTIFACTS_DIR/round-cap.txt") plan=$(cat "$ARTIFACTS_DIR/plan-round-cap.txt")"
       fi
       echo "PREFLIGHT=PASS"
@@ -212,6 +215,14 @@ nodes:
         cp "$REPO_DIR/$ENV_SRC" "$WT/$ENV_SRC"
       fi
       cd "$WT" && "${CMD_INSTALL[@]}" >/dev/null
+      # A chain stage's implement node runs the approved stage verification,
+      # integration commands included, in this worktree. Resolve the profile's
+      # runtime files the same way joint-integration candidates get them (api:
+      # .env.e2e, which ENV_SRC never seeded).
+      if [ "${ARCHON_FEATURE_SCOPE-}" = repositories ]; then
+        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/candidate_env.py "$REPO" "$WT" "$WT" \
+          || { echo "BOOTSTRAP=FAIL stage runtime environment unresolved (CANDIDATE_ENV line above)"; exit 1; }
+      fi
       git -C "$WT" rev-parse HEAD > "$ARTIFACTS_DIR/bootstrap-head.txt"
       # api_worktree is the key archon-run.py:2054 and resolve-web-params.sh:75
       # read; it keeps its name. "repo" is additive so the artifact stops
@@ -224,11 +235,15 @@ nodes:
     trigger_rule: none_failed_min_one_success
     when: "$feature-phase.plan == 'yes'"
     model: sonnet
-    maxBudgetUsd: 3
+    maxBudgetUsd: 10
     timeout: 1200000
     prompt: |
       You are the planning node in an unattended workflow. Ask no questions; make
       conservative assumptions and record them in the plan.
+      Never start background agents or background shell commands: this node ends
+      when your turn ends, and anything still running then is discarded unwritten.
+      Run every sub-agent and command in the foreground and write the artifacts
+      yourself before finishing.
 
       First read params.json in the directory named by the ARTIFACTS_DIR
       environment variable (resolve via: echo "$ARTIFACTS_DIR"). Its "spec"
@@ -301,10 +316,14 @@ nodes:
       one pattern, each matching the Verification commands exactly.
       Every test_patterns entry (verify.json and each stages.<repo>.test_patterns
       in joint-plan.json) runs through that repository's UNIT test command and
-      its unit jest config; api's config ignores .int.spec.ts, .ai.spec.ts and
-      .ext.spec.ts, so an integration or e2e pattern there yields "0 matches"
-      and fails gate-tests. Integration coverage belongs in the integration
-      scenarios, never in test_patterns.
+      its unit config, which ignores some spec kinds (the `unit_test_excludes`
+      regexes in .archon/setup/repo-profile.sh): api ignores .int.spec.ts,
+      .ai.spec.ts and .ext.spec.ts; goodword-mcp ignores .e2e.test.ts and
+      .smoke.test.ts; web-app ignores tests/. Such a pattern yields "No tests
+      found" and fails gate-tests, so plan-shape rejects it before approval.
+      test_patterns = unit specs only. Integration/e2e specs go in the stage's
+      "verification" list or an integration scenario command, never in
+      test_patterns.
       JOINT-REPOSITORY RUNS must also write joint-plan.json in that directory:
         {"schema":"archon.joint-feature-plan.v1",
          "repositories":["<canonical repo>", "..."],
@@ -317,13 +336,23 @@ nodes:
            {"depends_on":["<selected upstream repo>", "..."],
             "files_allowlist":["<repo-relative path>", "..."],
             "test_patterns":["<test path or pattern>", "..."],
-            "verification":["<exact local command>", "..."]}},
+            "verification":["<exact local command>", "..."],
+            "reader_audit":{"columns":[{"table":"<table>","column":"<column>",
+                                       "reason":"<one line>"}]}}},
          "integration":{"scenarios":[{"name":"<scenario>",
                                       "uses":["<repo>", "..."],
                                       "covers":["<criterion id>", "..."],
                                       "commands":[{"repo":"<selected repo>",
                                                    "argv":["<executable>", "<candidate-relative script>"]}],
                                       "expected_tests":["<observable assertion>"]}]}}
+      Every stage carries its OWN "reader_audit": the DB columns or enum values
+      whose interpretation or presentation that repository's part of the plan
+      changes, in the reader-audit.json schema below ({"columns": []} when none).
+      Each stage run audits only its own entry, so an obligation filed under the
+      wrong repository is never checked. The anchor repository's (params.json
+      "repo") entry must declare the same columns as reader-audit.json, and a
+      selected web-app's the same as web-reader-audit.json; the validator
+      enforces both mirrors.
       Every acceptance criterion the spec states gets one id in
       acceptance_criteria, and every id appears in some scenario's covers. One
       scenario covers several criteria only when its expected_tests name an
@@ -385,6 +414,23 @@ nodes:
         The number it prints in ARCHON_INTEGRATION_TESTS is the count of test
         CASES the command ran, and it must be at least the scenario's
         expected_tests length — see the COUNTING RULE above.
+      - The runner also PREPARES each candidate before any command runs: it
+        resolves the repository profile's runtime_deps and runtime_env_files
+        (.archon/setup/repo-profile.sh; api: node_modules, .env, .env.e2e) from
+        the stage worktree or the root clone, installs when the candidate's
+        manifests differ, and stops with CANDIDATE_ENV=FAIL when it cannot.
+        So an integration command calls the repository's EXISTING test command
+        and test paths directly. For a jest suite wrap it in the harness count
+        adapter, which prints ARCHON_INTEGRATION_TESTS from jest's own report:
+          "argv":["python3",
+           "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/jest-count.py",
+           "<the repo's jest command argv>", "<spec path>"]
+        (for api the jest command argv is bun run test:integration --).
+        For api + goodword-mcp end-to-end tests against a booted api, use
+        .archon/setup/joint-api-mcp-e2e.sh. Do NOT plan scripts, files, or steps
+        whose purpose is harness bootstrap: installing or symlinking
+        dependencies, copying env files, locating source worktrees, or printing
+        the count line. They duplicate the harness and are scope creep.
       - Trace each changed interface end to end: producer status/payload, client
         normalization, generated types, consumer behavior, and observable tests.
         Cite the existing transformation code. If errors are collapsed by a client,
@@ -394,6 +440,14 @@ nodes:
         refinement input. Preserve resolved requirements and recheck prior fixes;
         it is evidence, never approval. The independent critic still judges the
         current plan from source and the spec.
+      - If feature-chain-request.json names operator_guidance, read
+        operator-guidance.md in the same directory: a human operator's direction
+        for this replan. It ranks BELOW the spec for scope and requirements (it
+        cannot add or drop a requirement, repository, or acceptance criterion)
+        and ABOVE prior planning evidence and your own judgment for approach.
+        Where the spec is silent or ambiguous, follow it. Where it contradicts
+        the spec, follow the spec and record the conflict in the plan's
+        ## Approach. State under ## Approach how each guidance point is honored.
       Before finishing a joint plan, run python3
       /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/validate-joint-plan.py
       "$ARTIFACTS_DIR" and fix every diagnostic in planning artifacts. Do not
@@ -454,14 +508,20 @@ nodes:
                          "value":"<expected value>","text":"<fill text when type=fill>"}]}]}
       Use stable criterion ids, same-origin paths only, and assertions that can be
       executed mechanically.
-      REPOSITORIES WITH NO BROWSER SURFACE: when params.json's "repo" is one whose
-      changes are not reachable through a browser at all (anything other than "api"
-      or "web-app"), a populated policy would be fiction. Write instead the typed
+      CHANGES WITH NO BROWSER SURFACE: when the change is not reachable through a
+      browser at all, a populated policy would be fiction. Write instead the typed
       disposition {"not_applicable":"<one-line reason>","required":[]} — the ONLY
       form in which "required" may be empty. It is hashed and frozen exactly like a
-      populated policy, so the disposition is fixed at approval and cannot be
-      loosened afterwards. Never use it to avoid writing a policy for a repository
-      that does have a browser surface.
+      populated policy. It is accepted only when the repository has no browser
+      surface (anything other than "api" or "web-app"), or when EVERY path in
+      files-allowlist.json, web-files-allowlist.json and joint-plan.json stage
+      allowlists matches that repository's `browser_exempt` globs in
+      .archon/setup/repo-profile.sh (for api: migrations, scripts/, tools/,
+      apps/utilities-cli/, apps/api-e2e/, the async analytic/enrichment/
+      notification lambdas, *.spec.ts, *.md). Any other path is a browser surface
+      and needs a populated policy. The exemption is re-checked against the actual
+      diff after implement and at exit, so it cannot survive a change that later
+      touches a surface path.
       browser-evidence.sha256 must contain the lowercase
       SHA-256 of the canonical JSON bytes (sort keys, separators ',', ':') of
       browser-evidence.json. This policy is web-scoped and frozen by the shared
@@ -482,6 +542,10 @@ nodes:
       # apart, and the drift would show up as a plan that passes here and fails
       # after the critic loop, or worse, the reverse.
       eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+      # A planner that ended its turn waiting on background work is recorded
+      # COMPLETED with nothing written; say so here, not as a bare "no plan.md".
+      test -s "$ARTIFACTS_DIR/plan.md" || python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/node-no-output.py \
+        "$ARTIFACTS_DIR" ralplan plan.md
       SHAPE=0
       OUT=$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/plan-shape.sh \
         "$ARTIFACTS_DIR" "$WT" "$SPEC" 2>&1) || SHAPE=$?
@@ -550,6 +614,7 @@ nodes:
 
         - id: impact-probe
           depends_on: [plan-round-pre]
+          context: fresh
           model: sonnet
           maxBudgetUsd: 2
           timeout: 600000
@@ -611,8 +676,9 @@ nodes:
 
         - id: plan-critic
           depends_on: [impact-probe]
+          context: fresh
           model: opus
-          maxBudgetUsd: 4
+          maxBudgetUsd: 8
           timeout: 900000
           prompt: |
             You are the plan CRITIC. Your only value is that you did not write this
@@ -641,9 +707,22 @@ nodes:
             planning worktrees are not evidence of an integration provenance bug.
             When uncertain, read run-joint-integration.py's create_worktrees and
             structured_command_details instead of inferring runtime cwd from the
-            planning session. Trace producer responses through client
+            planning session. The runner prepares every candidate's runtime
+            dependencies and env files itself (prepare_environments,
+            candidate_env.py): a candidate lacking node_modules or .env files is
+            NOT a plan defect. A plan that adds its own bootstrap script
+            (installing or linking dependencies, copying env files, locating
+            source worktrees, printing ARCHON_INTEGRATION_TESTS for a jest run
+            that setup/jest-count.py covers) is a kind "scope" finding. Trace producer responses through client
             normalization into consumer decisions, including collapsed errors;
             a consumer cannot distinguish information discarded by its client.
+
+            If feature-chain-request.json in the artifacts directory names
+            operator_guidance, read operator-guidance.md there: a human operator's
+            approach direction for this replan. Ignore that file otherwise. It ranks below
+            the spec for scope and above planner judgment for approach, so an
+            approach choice the guidance dictates is not a finding unless it
+            contradicts the spec (then raise it, quoting both).
 
             DO NOT READ any earlier round's critique.json or revision.json. You are
             deliberately blind to prior rounds: a critic that reads its own earlier
@@ -732,7 +811,7 @@ nodes:
         - id: plan-revise
           depends_on: [plan-critic-gate]
           model: sonnet
-          maxBudgetUsd: 3
+          maxBudgetUsd: 6
           timeout: 900000
           prompt: |
             You are the plan REVISER. A critic in a separate session challenged the
@@ -768,6 +847,10 @@ nodes:
             artifact paths, optional export.argv, and integration {repo, argv};
             prose commands do not add hooks. Trace error normalization in clients
             before claiming distinct consumer handling.
+            If feature-chain-request.json names operator_guidance, a revision
+            must keep honoring operator-guidance.md (below the spec for scope, above your judgment
+            for approach); a finding that asks you to undo it without citing the
+            spec is declined, citing a verbatim quote from operator-guidance.md.
 
             Otherwise the verdict is REVISE. Read the spec, plan.md,
             files-allowlist.json, web-files-allowlist.json, verify.json,
@@ -789,7 +872,9 @@ nodes:
             the revised unit touches and match the ## Verification commands exactly,
             reader-audit.json lists any API column whose interpretation or
             presentation the revision changes, web-reader-audit.json lists any
-            web reader-semantic obligation, and any premise answer you alter keeps at least one
+            web reader-semantic obligation, every joint-plan.json stages.<repo>.reader_audit
+            still lists that repository's own columns (mirroring reader-audit.json for the
+            anchor and web-reader-audit.json for web-app), and any premise answer you alter keeps at least one
             citation whose quote appears VERBATIM in the file it names (verify that
             by reading the file). Findings at confidence 50 are advisory; act on them
             only if doing so costs nothing.
@@ -831,6 +916,8 @@ nodes:
               *) echo "PLAN_CONVERGE=FAIL unknown verdict [$V] round=$N"; exit 1 ;;
             esac
             test -s "$RD/revision.json" || { echo "PLAN_CONVERGE=FAIL no revision.json round=$N"; exit 1; }
+            # Written only by the cap route below, for THIS round; never inherit one.
+            rm -f "$ARTIFACTS_DIR/plan-cap-unverified.json"
             # 1. REJECT is a typed human stop. A one-unit plan has no automatic
             # transformation into a differently shaped one, so nothing here can fix it.
             # plan-revise is told to be a no-op on REJECT, but a prompt is a request,
@@ -961,6 +1048,62 @@ nodes:
                 echo "PLAN_ROUND_CAP round=$N cap=$CAP (plan-accept.txt present but critique has P0=$P0 open at >=75; a P0 is never waivable)"
                 exit 1
               fi
+              # Route to the human gate when the last round left no disagreement:
+              # no P0, no declined P0/P1, and every blocking finding applied. What
+              # is missing then is only a critic re-reading the final revision,
+              # and the plan gate is a human reading exactly that plan, so the
+              # packet must say so (plan-cap-unverified.json; plan-render-gate
+              # enforces it). A P0 or a declined blocking finding is a live
+              # disagreement and still stops here for plan-accept.txt, as before.
+              ROUTE=$(python3 - "$RD/critique.json" "$RD/revision.json" "$ARTIFACTS_DIR/plan-cap-unverified.json" "$N" "$CAP" <<'PY'
+            import json, sys
+            crit, rev, out, n, cap = sys.argv[1:6]
+            def blocking(rows, severities):
+                picked = []
+                for x in rows or []:
+                    try:
+                        conf = int(str(x.get("confidence")))
+                    except (TypeError, ValueError, AttributeError):
+                        return None
+                    if x.get("severity") not in ("P0", "P1", "P2"):
+                        return None  # fail closed: an unknown severity is never routed
+                    if x.get("severity") in severities and conf >= 75:
+                        picked.append(x)
+                return picked
+            try:
+                findings = json.load(open(crit, encoding="utf-8")).get("findings")
+                revision = json.load(open(rev, encoding="utf-8"))
+            except (OSError, ValueError, AttributeError):
+                print("no"); sys.exit(0)
+            open_p0 = blocking(findings, ("P0",))
+            raised = blocking(findings, ("P0", "P1"))
+            declined = blocking(revision.get("declined"), ("P0", "P1"))
+            applied = blocking(revision.get("applied"), ("P1",))
+            if None in (open_p0, raised, declined, applied) or open_p0 or declined:
+                print("no"); sys.exit(0)
+            # One applied row per raised finding, matched on the fields the reviser
+            # is told to copy unchanged; a count alone lets a duplicated row stand
+            # in for a finding nobody answered.
+            unmatched = list(applied)
+            for finding in raised:
+                key = (finding.get("kind"), finding.get("section"), finding.get("severity"))
+                hit = next((row for row in unmatched if (row.get("kind"), row.get("section"), row.get("severity")) == key), None)
+                if hit is None:
+                    print("no"); sys.exit(0)
+                unmatched.remove(hit)
+            json.dump({"round": int(n), "cap": int(cap), "unverified_applied": applied}, open(out, "w", encoding="utf-8"), indent=2)
+            print(len(applied))
+            PY
+              )
+              if [ "$ROUTE" != no ]; then
+                SHAPE=0
+                OUT=$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/plan-shape.sh \
+                  "$ARTIFACTS_DIR" "$WT" "$SPEC" 2>&1) || SHAPE=$?
+                if [ "$SHAPE" != 0 ]; then printf '%s\n' "$OUT"; rm -f "$ARTIFACTS_DIR/plan-cap-unverified.json"; echo "PLAN_CONVERGE=FAIL shape round=$N (cap route)"; exit 1; fi
+                echo "PLAN_CONVERGED round=$N (cap reached: $ROUTE applied blocking findings not re-critiqued; routed to the human gate, see plan-cap-unverified.json)"
+                echo "<promise>PLAN_CONVERGED</promise>"
+                exit 0
+              fi
               echo "PLAN_ROUND_CAP round=$N cap=$CAP"; exit 1
             fi
             echo "PLAN_ROUND_PROGRESSED round=$N"
@@ -1000,7 +1143,9 @@ nodes:
       Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
       Read ONLY premises-questions.json there, plus params.json for the
       "worktree" field — the repository checkout to read (you are NOT cwd'd
-      there). You are FORBIDDEN from opening premises.json or plan.md until
+      there). When params.json also has "worktrees_by_repo" (a joint run), a
+      question may concern any of those checkouts; read the one it names.
+      You are FORBIDDEN from opening premises.json or plan.md until
       step 2 below.
 
       If premises-questions.json is an empty array, write an empty array []
@@ -1053,7 +1198,7 @@ nodes:
   - id: docreview
     depends_on: [plan-post-snapshot]
     model: sonnet
-    maxBudgetUsd: 8
+    maxBudgetUsd: 12
     timeout: 1800000
     skills: [ce-doc-review]
     prompt: |
@@ -1083,7 +1228,7 @@ nodes:
   - id: plan-render
     depends_on: [docreview-gate, premise-gate]
     model: sonnet
-    maxBudgetUsd: 3
+    maxBudgetUsd: 5
     timeout: 900000
     prompt: |
       You are the plan-presentation node. The human plan review is the single
@@ -1121,6 +1266,12 @@ nodes:
       Identity by label, never color alone. Real names and paths only.
       <!-- PLAN --> The full plan, restyled for reading: keep every path,
       command, number, and decision VERBATIM, but present the prose cleanly.
+      If feature-chain-request.json names operator_guidance, OPEN this
+      section with an element carrying data-operator-guidance="<sha256>" (the
+      lowercase SHA-256 of that file's bytes, as operator_guidance.sha256 in
+      feature-chain-request.json records it)
+      that quotes the file verbatim under the heading "Operator guidance for
+      this replan", so the human approves the plan knowing what steered it.
       <!-- REVIEW --> What doc-review changed or flagged, in plain words: applied
       edits summarized from docreview.diff; unapplied findings from the envelope
       with their severity, one line each. If nothing, say so.
@@ -1147,6 +1298,12 @@ nodes:
       in one sentence and skip the table, because a reader must never mistake an
       unprobed plan for a plan with no callers. If plan-round.txt does not exist,
       one sentence saying the critic loop did not run.
+      If plan-cap-unverified.json exists, the loop hit its round cap and was
+      routed here with its last round's blocking findings applied but never
+      re-critiqued. OPEN the CRITIC section, before the table, with an element
+      carrying the attribute data-cap-unverified that says so in one sentence
+      and lists every entry of its "unverified_applied" (severity, kind, section,
+      what_changed verbatim): the human is the only reviewer of those edits.
       <!-- DECIDE --> The decision box: approving starts unattended
       implementation, and rejecting ends the run.
       Then, in the same box, the standard decision block that every gate
@@ -1196,6 +1353,22 @@ nodes:
         grep -qF "archon workflow $v" "$H" || { echo "RENDER_GATE=FAIL DECIDE box missing the $v command"; exit 1; }
       done
       cmp -s "$ARTIFACTS_DIR/plan.md" "$ARTIFACTS_DIR/plan.post-docreview.md" || { echo "RENDER_GATE=FAIL renderer modified plan.md"; exit 1; }
+      # Operator guidance is bound to the hash the controller recorded in the
+      # planning request, never to the file merely existing: a planning session
+      # can write, edit or delete a file in its own artifacts directory.
+      GREQ=$(python3 -c "import json,os,sys; p=sys.argv[1]; print(((json.load(open(p)).get('operator_guidance') or {}).get('sha256') or '') if os.path.exists(p) else '')" "$ARTIFACTS_DIR/feature-chain-request.json")
+      G="$ARTIFACTS_DIR/operator-guidance.md"
+      if [ -z "$GREQ" ]; then
+        test ! -e "$G" || { echo "RENDER_GATE=FAIL operator-guidance.md present but feature-chain-request.json records no operator_guidance"; exit 1; }
+      else
+        test -f "$G" || { echo "RENDER_GATE=FAIL operator guidance $GREQ recorded but operator-guidance.md is missing"; exit 1; }
+        GSHA=$(python3 -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" "$G")
+        test "$GSHA" = "$GREQ" || { echo "RENDER_GATE=FAIL operator-guidance.md sha256 $GSHA does not match the recorded $GREQ"; exit 1; }
+        grep -qF "data-operator-guidance=\"$GREQ\"" "$H" || { echo "RENDER_GATE=FAIL operator guidance $GREQ is not shown in the PLAN section"; exit 1; }
+      fi
+      if [ -f "$ARTIFACTS_DIR/plan-cap-unverified.json" ]; then
+        grep -q 'data-cap-unverified' "$H" || { echo "RENDER_GATE=FAIL plan-cap-unverified.json present but the CRITIC section does not flag the un-recritiqued revision"; exit 1; }
+      fi
       # show-me: put the packet in front of the human exactly when the gate pauses.
       # xdg-open first: on some Linux distros /usr/bin/open is util-linux's link to
       # openvt(1) — a different program, not a missing one. The file:// path is
@@ -1324,8 +1497,10 @@ nodes:
       artifacts with sha256 hashes. Consume those exact local inputs only; do not
       require or assume an upstream PR, merge, publication, deployment, or newer
       repository state.
-      SINGLE-REPO RUNS: when params.json's "repo" is not "api", the two sentences
-      above are scoped to api runs. files-allowlist.json is then the entire scope,
+      OTHER REPOSITORIES: when params.json's "repo" is not "api", the opening
+      "Implement the API portion" sentence and the "Scope:" line are scoped to api
+      runs (the JOINT-REPOSITORY RUNS paragraph applies to every repository).
+      files-allowlist.json is then the entire scope,
       its paths are relative to that repository's root, and there is no web-app
       prong to avoid. Use that repository's own commands, listed below.
       Do not edit the plan file. Do not create commits — a later node commits.
@@ -1411,18 +1586,26 @@ nodes:
         "${CMD_TEST[@]}" "$PAT" || { echo "GATE_TESTS=FAIL unit pattern=$PAT"; exit 1; }
       done < "$ARTIFACTS_DIR/gate-tests-patterns.txt"
       BASE=$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")
-      CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$|^ M pnpm-lock\.yaml$|^\?\? pnpm-lock\.yaml$' || true)
-      if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- . ':(exclude)pnpm-lock.yaml'; then
+      # No lockfile is noise here: every repo this lane serves (repo-profile.sh) installs
+      # frozen, so lockfile-only drift is content, and check-scope.py calls it a breach.
+      CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$' || true)
+      if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- .; then
         printf '{"outcome":"NO_CHANGE","repo":"%s","basis":"baseline-to-candidate content","baseline":"%s","head":"%s","pr_url":null}\n' "$REPO" "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
         echo "GATE_TESTS=PASS outcome=NO_CHANGE"
         exit 0
       fi
       printf '{"outcome":"CHANGED","repo":"%s","basis":"baseline-to-candidate content","baseline":"%s","head":"%s"}\n' "$REPO" "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
-      test -s "$ARTIFACTS_DIR/commit-msg.txt" || { echo "GATE_TESTS=FAIL no commit-msg.txt from implement"; exit 1; }
+      test -s "$ARTIFACTS_DIR/commit-msg.txt" || {
+        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/node-no-output.py "$ARTIFACTS_DIR" implement commit-msg.txt
+        echo "GATE_TESTS=FAIL no commit-msg.txt from implement"; exit 1; }
       # Scope guard: catch implement-node creep before the first review round.
       python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py \
         "$ARTIFACTS_DIR/files-allowlist.json" "$WT" "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" \
         || { echo "GATE_TESTS=FAIL scope breach"; exit 1; }
+      # A not_applicable browser policy was derived at plan time from the
+      # allowlist; what ships is the diff, so re-derive it from the diff.
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/browser-exemption.py diff \
+        "$ARTIFACTS_DIR" "$WT" "$BASE" || { echo "GATE_TESTS=FAIL browser exemption void"; exit 1; }
       echo "GATE_TESTS=PASS"
 
   - id: deslop
@@ -1533,7 +1716,115 @@ nodes:
       max_iterations: 2
       until: DESLOP_CLEAN
       nodes:
+        - id: deslop-fix-pre
+          timeout: 120000
+          bash: |
+            set -euo pipefail
+            if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-deslop-fix-pre.out") 2> >(tee -a "$ARTIFACTS_DIR/node-deslop-fix-pre.out" >&2); fi
+            # deslop-review-gate leaves deslop-fix-pending.txt (the DIRTY round) when
+            # it lets the loop continue; deslop-recheck consumes it once the fixer
+            # has recorded its result. stdout is ONLY the JSON the fixer's when: reads.
+            P="$ARTIFACTS_DIR/deslop-fix-pending.txt"
+            if [ ! -f "$P" ]; then printf '{"fix":"none"}\n'; exit 0; fi
+            R=$(cat "$P")
+            # Hand-editable marker: reject junk before it is used as a path.
+            case "$R" in ''|*[!0-9]*) echo "DESLOP_FIX=FAIL deslop-fix-pending.txt is not an integer: [$R]"; exit 1 ;; esac
+            test -s "$ARTIFACTS_DIR/deslop-round-$R/blocking-findings.json" \
+              || { echo "DESLOP_FIX=FAIL no blocking-findings.json for round=$R"; exit 1; }
+            # A result left by an earlier fixer attempt must not satisfy this one.
+            rm -f "$ARTIFACTS_DIR/deslop-fix-result.json"
+            printf '{"fix":"pending","round":"%s"}\n' "$R"
+
+        - id: deslop-fix
+          depends_on: [deslop-fix-pre]
+          when: "$deslop-fix-pre.output.fix == 'pending'"
+          model: sonnet
+          maxBudgetUsd: 4
+          timeout: 1200000
+          prompt: |
+            You are the deslop FIXER node in an unattended pipeline. The independent
+            deslop reviewer filed blocking findings against the deslop writer's
+            cleanup. You apply exactly those findings and nothing else, then the
+            recheck and a fresh reviewer run again. Ask no questions.
+
+            Resolve the artifacts directory by running: echo "$ARTIFACTS_DIR"
+
+            The working tree is the "worktree" field of params.json in that same
+            directory (you are NOT cwd'd there — cd into it for every git command).
+
+            READ:
+            - deslop-fix-pending.txt in the artifacts directory: the round number R
+              whose review blocked.
+            - deslop-round-R/blocking-findings.json there: {"round": R, "findings": [
+              {"guard", "file", "line", "confidence", "evidence"}]}. These findings are
+              the ONLY things you fix; the gate has already dropped non-blocking ones.
+            - deslop-result.json there: the writer's log of what it changed.
+
+            SCOPE — the same as the writer's: the intersection of
+              (a) files changed or untracked since the base sha in bootstrap-head.txt
+                  (git status --porcelain, and
+                   git diff --name-only "$(cat <that directory>/bootstrap-head.txt)"),
+              (b) the paths listed in files-allowlist.json in the artifacts directory.
+            The implementation is still UNCOMMITTED; the working tree is the subject.
+
+            Apply the matching guard's fix to each finding:
+              complexity — flatten the function (early returns, table dispatch).
+              tautological_tests — assert the observable value; if none exists,
+                delete the test.
+              yagni — delete the parameter, option, branch, export, type or config
+                that has no caller.
+              open_closed — use the extension point that already exists.
+              comments — delete the comment that restates the code, narrates the
+                change or preserves task history. Keep comments that explain *why*.
+
+            RULES — the writer's rules still bind you:
+            - Preserve behavior. Never simplify away a safety check. LOC removed is
+              not the metric.
+            - Do not change public API shapes (exported signatures, DTOs, route
+              contracts, response bodies); a finding that would require it goes under
+              "not_fixed".
+            - Do not touch any file outside the scope above, do not touch
+              commit-msg.txt, and do not create commits, branches or worktrees.
+            - Do not fix, rewrite or reformat anything the findings do not name. A
+              finding outside the scope above goes under "not_fixed".
+
+            VERIFICATION — after your edits, in the worktree, these must exit 0:
+              bun run typecheck     (tsgo — NOT build:fast)
+              bun run lint          (biome)
+              bun run test -- "<pattern>"  for each pattern in test_patterns in
+                                    verify.json in the artifacts directory.
+            For a run whose params.json "repo" is not "api", use that repository's
+            commands, listed under ## Verification in plan.md, and omit any command the
+            repository does not have. NEVER run bare `bun test`. Do not run integration
+            tests. The next node re-runs every check authoritatively either way.
+
+            Do NOT edit deslop-result.json. It is the writer's declaration and is
+            frozen after the first recheck: the next node fails the run if it changed
+            by a byte. Your edits are declared only in deslop-fix-result.json below,
+            which the recheck copies into the next round for the reviewer.
+
+            The gates own their state. Do not create, edit or delete deslop-review.json,
+            deslop-round.txt, deslop-dirty.txt, deslop-fix-pending.txt, deslop-tree.txt,
+            deslop-result.sha256 or anything under a deslop-round-* directory; a
+            rewound counter fails the run.
+
+            Write deslop-fix-result.json to the artifacts directory with exactly this shape:
+              {"round": <R as an int>,
+               "fixed": [{"guard": "<finding guard>", "file": "<repo-relative>", "line": <int>,
+                          "action": "deleted|rewrote"}],
+               "not_fixed": [{"guard": "<finding guard>", "file": "<repo-relative>", "line": <int>,
+                              "reason": "<one line>"}]}
+            Every blocking finding appears in exactly one of the two arrays, with its
+            guard, file and line copied unchanged; the next node fails the run otherwise. Writing this
+            file is MANDATORY and comes BEFORE your final line — ending without it stops
+            the pipeline. Then end with the single line: DESLOP_FIX_DONE
+
         - id: deslop-recheck
+          depends_on: [deslop-fix-pre, deslop-fix]
+          # deslop-fix is skipped (when:) on every iteration that has no pending
+          # DIRTY verdict; this rule still runs the recheck then, and skips it
+          # (failing the iteration) when the fixer itself failed.
+          trigger_rule: none_failed_min_one_success
           timeout: 1200000
           bash: |
             set -euo pipefail
@@ -1553,6 +1844,50 @@ nodes:
             case "$N" in '') N=0 ;; *[!0-9]*) echo "DESLOP_RECHECK=FAIL deslop-round.txt is not an integer: [$N]"; exit 1 ;; esac
             N=$((N+1)); echo "$N" > "$C"
             RD="$ARTIFACTS_DIR/deslop-round-$N"; mkdir -p "$RD"
+            # Every recheck writes recheck.json into the round it opens, so finding one
+            # means deslop-round.txt was rewound (the fixer runs between two rounds).
+            test ! -e "$RD/recheck.json" || { echo "DESLOP_RECHECK=FAIL deslop-round.txt rewound: round=$N was already checked"; exit 1; }
+            # Pending automatic fix (deslop-review-gate recorded DIRTY last round):
+            # the fixer must have recorded its result for THAT round before the
+            # marker is consumed. Left in place on failure, so a resume re-runs the
+            # fixer rather than rechecking a tree nobody fixed.
+            PENDING="$ARTIFACTS_DIR/deslop-fix-pending.txt"
+            if [ -f "$PENDING" ]; then
+              PR=$(cat "$PENDING")
+              case "$PR" in ''|*[!0-9]*) echo "DESLOP_FIX=FAIL deslop-fix-pending.txt is not an integer: [$PR]"; exit 1 ;; esac
+              FR="$ARTIFACTS_DIR/deslop-fix-result.json"
+              test -s "$FR" || { echo "DESLOP_GATE=FAIL no deslop-fix-result.json round=$N"; exit 1; }
+              # An integer round, and every blocking finding answered exactly once: a
+              # finding the fixer skipped must not reach the reviewer looking handled.
+              FRC=0
+              python3 - "$FR" "$PR" "$ARTIFACTS_DIR/deslop-round-$PR/blocking-findings.json" 2>/dev/null <<'PY' || FRC=$?
+            import json, sys
+            from collections import Counter
+            doc = json.load(open(sys.argv[1], encoding="utf-8"))
+            assert isinstance(doc, dict)
+            assert type(doc.get("round")) is int and doc["round"] == int(sys.argv[2])
+            assert isinstance(doc.get("fixed"), list) and isinstance(doc.get("not_fixed"), list)
+            entries = doc["fixed"] + doc["not_fixed"]
+            assert all(isinstance(e, dict) for e in entries)
+            def key(x):
+                return (x.get("guard"), x.get("file"), x.get("line"))
+            want = Counter(key(f) for f in json.load(open(sys.argv[3], encoding="utf-8"))["findings"])
+            sys.exit(0 if Counter(key(e) for e in entries) == want else 3)
+            PY
+              case "$FRC" in
+                0) ;;
+                3) echo "DESLOP_GATE=FAIL deslop-fix-result.json does not answer each blocking finding exactly once round=$N"; exit 1 ;;
+                *) echo "DESLOP_GATE=FAIL deslop-fix-result.json unparseable round=$N"; exit 1 ;;
+              esac
+              # The reviewed checkpoint recorded HEAD. A fixer commit would take its
+              # edits out of every working-tree diff below, so HEAD must not move.
+              SAVEDHEAD=$(sed -n 's/^head=//p' "$ARTIFACTS_DIR/deslop-tree.txt" 2>/dev/null || true)
+              test -n "$SAVEDHEAD" && test "$(git rev-parse HEAD)" = "$SAVEDHEAD" \
+                || { echo "DESLOP_GATE=FAIL fixer moved HEAD round=$N expected=[$SAVEDHEAD]"; exit 1; }
+              cp "$FR" "$RD/fix-result.json"
+              rm -f "$PENDING"
+              echo "DESLOP_FIX_CONSUMED round=$N fixed_round=$PR"
+            fi
             BASE=$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")
             # Every check runs even after one fails: recheck.json is the reviewer's
             # authoritative verification record and must carry all five exit codes.
@@ -1589,7 +1924,7 @@ nodes:
             # committed until commit-impl, so a HEAD-anchored diff would be empty.
             SL=0
             python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-slop.py \
-              "$WT" "$BASE" --max-complexity 10 > "$RD/slop.txt" 2>&1 || SL=$?
+              "$WT" "$BASE" --max-complexity 10 --repo "$REPO" > "$RD/slop.txt" 2>&1 || SL=$?
             python3 - "$RD/recheck.json" "$TC" "$LT" "$UT" "$SC" "$SL" "$LINT_APPLICABLE" <<'PY'
             import json, sys
             path, tc, lt, ut, sc, sl, lint_applicable = sys.argv[1:8]
@@ -1615,6 +1950,16 @@ nodes:
             test -s "$RJ" || { echo "DESLOP_GATE=FAIL no deslop-result.json round=$N"; exit 1; }
             python3 -c "import json,sys; d=json.load(open(sys.argv[1], encoding='utf-8')); assert isinstance(d, dict); assert isinstance(d.get('changed_files'), list); assert isinstance(d.get('passes'), list)" \
               "$RJ" || { echo "DESLOP_GATE=FAIL deslop-result.json unparseable round=$N"; exit 1; }
+            # deslop-result.json is the writer's declaration, the one the reviewer may
+            # excuse an edit against. It is frozen at the first recheck that gets here
+            # before any fixer ran; the fixer declares in deslop-fix-result.json.
+            FROZEN="$ARTIFACTS_DIR/deslop-result.sha256"
+            NOWSHA=$(python3 -c "import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())" "$RJ")
+            if [ ! -f "$FROZEN" ] && ! ls "$ARTIFACTS_DIR"/deslop-round-*/fix-result.json >/dev/null 2>&1; then
+              echo "$NOWSHA" > "$FROZEN"
+            elif [ "$(cat "$FROZEN" 2>/dev/null || true)" != "$NOWSHA" ]; then
+              echo "DESLOP_GATE=FAIL deslop-result.json changed after the writer round=$N"; exit 1
+            fi
             # Restorable checkpoint, not just a fingerprint. A throwaway index
             # turns the whole worktree — untracked implementation files included —
             # into a real tree object in this repo's object DB, so a reviewer that
@@ -1638,12 +1983,16 @@ nodes:
               echo "index=$CKINDEX"
               echo "checkpoint=$CKTREE"
             } > "$ARTIFACTS_DIR/deslop-tree.txt"
+            # The reviewer writes deslop-review.json fresh each round; the previous
+            # round's file must not stand in for a reviewer that wrote nothing.
+            rm -f "$ARTIFACTS_DIR/deslop-review.json"
             FILES=$(sed -n 's/^SLOP=OK files=\([0-9]*\)$/\1/p' "$RD/slop.txt" | tail -1)
             test -n "$FILES" || FILES=0
             echo "DESLOP_GATE=PASS files=$FILES round=$N checkpoint=$CKTREE"
 
         - id: deslop-review
           depends_on: [deslop-recheck]
+          context: fresh
           model: sonnet
           maxBudgetUsd: 2
           timeout: 600000
@@ -1676,6 +2025,10 @@ nodes:
             - deslop-result.json in the artifacts directory — the writer's own log of
               what it changed. Its "verification" block is HISTORICAL and may be stale
               (a human may have hand-fixed and resumed); recheck.json overrides it.
+            - deslop-round-N/fix-result.json, present only on a round after an automatic
+              fix: the fixer's "fixed"/"not_fixed" entries for the previous round's
+              blocking findings. deslop-result.json is frozen after the writer, so this
+              file is the only declaration of the fixer's edits.
             - the change itself, in the worktree:
                 git diff "$(cat <that directory>/bootstrap-head.txt)"
                 git status --porcelain
@@ -1708,7 +2061,9 @@ nodes:
             Confidence is a contract, not a mood. 100 = you read the code and the
             defect is present as described. 75 = present, with one assumption you
             could not check. 50 = suspicion worth recording that you could not
-            confirm. 75 and 100 BLOCK the pipeline for a human; 50 does not. There
+            confirm. 75 and 100 are blocking: the first blocking round gets one
+            automatic fixer pass, the second stops the pipeline for a human;
+            50 never blocks. There
             is no other allowed value.
 
             Write deslop-review.json to the artifacts directory with EXACTLY this
@@ -1805,12 +2160,13 @@ nodes:
             # >= 75, and a declaration that disagrees with the findings is a failure,
             # not a tie-break.
             set +e
-            python3 - "$R" "$N" "$RD/slop.txt" <<'PY'
+            python3 - "$R" "$N" "$RD/slop.txt" "$RD/blocking-findings.json" <<'PY'
             import json, sys
 
             GUARDS = ["complexity", "tautological_tests", "yagni", "open_closed", "comments"]
             STATUSES = ("assessed", "not_applicable")
             path, rnd = sys.argv[1], sys.argv[2]
+            blocking_path = sys.argv[4]
 
             # check-slop.py, not the reviewer, decides complexity. It already
             # separates a function this change made or worsened past the
@@ -1878,6 +2234,7 @@ nodes:
             if not isinstance(findings, list):
                 malformed("findings is not an array")
             blocking = 0
+            blocking_findings = []
             for i, f in enumerate(findings):
                 if not isinstance(f, dict):
                     malformed(f"index={i} finding is not an object")
@@ -1887,6 +2244,12 @@ nodes:
                     val = f.get(key)
                     if not isinstance(val, str) or not val.strip():
                         malformed(f"index={i} {key}={val!r}")
+                # This gate exits 0 on a DIRTY retry, and archon ends the loop on a
+                # completion signal anywhere in that stdout (<tag>SIGNAL</tag>, or a line
+                # holding only SIGNAL). The file path is printed below, so it must not be
+                # able to carry either shape.
+                if not f["file"].isprintable() or "<" in f["file"] or ">" in f["file"]:
+                    malformed(f"index={i} file holds a line break, control character or angle bracket")
                 line = f.get("line")
                 if isinstance(line, bool) or not isinstance(line, int):
                     malformed(f"index={i} line={line!r}")
@@ -1895,14 +2258,19 @@ nodes:
                     malformed(f"index={i} confidence={conf!r}")
                 if f["guard"] == "complexity" and conf >= 75 and f["file"] not in SLOP_BLOCKING:
                     fn = SLOP_REPORTED.get(f["file"], "?")
+                    fn = fn if fn.isprintable() and "<" not in fn and ">" not in fn else "?"
                     print(f"DESLOP_COMPLEXITY_DOWNGRADED fn={fn} file={f['file']}:{line} confidence={conf}->50")
                     conf = 50
                     downgraded += 1
                 if conf >= 75:
                     blocking += 1
+                    blocking_findings.append(dict(f, confidence=conf))
                     print(f"DESLOP_FINDING guard={f['guard']} file={f['file']}:{line} confidence={conf}")
             print(f"DESLOP_REVIEW_PARSE round={rnd} declared={verdict} findings={len(findings)} blocking={blocking} downgraded={downgraded}")
             if blocking > 0:
+                # The fixer's input: exactly what this gate counted as blocking.
+                with open(blocking_path, "w", encoding="utf-8") as fh:
+                    json.dump({"round": int(rnd), "findings": blocking_findings}, fh, indent=2)
                 print(f"DESLOP=DIRTY round={rnd} blocking={blocking}")
                 sys.exit(2)
             if verdict == "DIRTY" and downgraded == 0:
@@ -1926,10 +2294,22 @@ nodes:
                 # corrupt counter costs one extra round, never the cap itself.
                 D=$(cat "$ARTIFACTS_DIR/deslop-dirty.txt" 2>/dev/null || echo 0)
                 case "$D" in ''|*[!0-9]*) D=0 ;; esac
+                # The fixer runs between two verdicts and could rewind this file to buy a
+                # pass past the cap, so it may not fall below the per-round record.
+                REC=$(cat "$ARTIFACTS_DIR"/deslop-round-*/dirty-count.txt 2>/dev/null | sort -n | tail -1 || true)
+                case "$REC" in ''|*[!0-9]*) REC=0 ;; esac
+                if [ "$D" -lt "$REC" ]; then echo "DESLOP_REVIEW=FAIL deslop-dirty.txt rewound: file=$D recorded=$REC round=$N"; exit 1; fi
                 D=$((D+1))
                 echo "$D" > "$ARTIFACTS_DIR/deslop-dirty.txt"
-                if [ "$D" -ge 2 ]; then echo "DESLOP_ROUND_CAP round=$N dirty_rounds=$D"; fi
-                exit 1
+                echo "$D" > "$RD/dirty-count.txt"
+                if [ "$D" -ge 2 ]; then echo "DESLOP_ROUND_CAP round=$N dirty_rounds=$D"; exit 1; fi
+                # Below the cap DIRTY is a retry, not a failure: archon fails the whole
+                # loop_group on any failed body node, so exiting non-zero here would
+                # end the loop before its next iteration. Exit 0 with no promise, and
+                # leave the marker deslop-fix-pre reads to run the fixer next iteration.
+                echo "$N" > "$ARTIFACTS_DIR/deslop-fix-pending.txt"
+                echo "DESLOP_RETRY=PASS round=$N dirty_rounds=$D"
+                exit 0
                 ;;
               3|4|5) exit 1 ;;
               *) echo "DESLOP_REVIEW=FAIL validator error rc=$RC round=$N"; exit 1 ;;
@@ -1946,12 +2326,23 @@ nodes:
       only safe when every reader has been looked at. Ask no questions.
 
       Resolve the artifacts directory via: echo "$ARTIFACTS_DIR"
-      Read reader-audit.json there. If its "columns" array is empty, write
-      exactly {"columns": []} to reader-audit-result.json in that directory
-      and end with the single line: READER_AUDIT_DONE
+      Read reader-audit.json there. If its "columns" array is empty and it has
+      no "derive" key, write exactly {"columns": []} to reader-audit-result.json
+      in that directory and end with the single line: READER_AUDIT_DONE
 
       The repository checkout is the "worktree" field of params.json in that
       same directory (you are NOT cwd'd there).
+
+      STAGE-DERIVED AUDIT: when reader-audit.json carries "derive": "stage-diff",
+      the approved joint plan
+      declared no reader audit for this repository and the planning file
+      belongs to another one. Declare the columns yourself from THIS
+      repository's change: read `git -C <worktree> diff <bootstrap-head.txt sha>`
+      (bootstrap-head.txt is in the artifacts directory) and list every DB
+      column or enum value whose INTERPRETATION or PRESENTATION the diff changes
+      here, not merely writes. Audit each one as below, and write the result with
+      a top-level "derived": true — {"derived": true, "columns": []} when the
+      diff changes none. Every derived column carries its "readers" array.
 
       For each declared column: enumerate EVERY reader of it in the repository
       — grep the repository layer, query builders, and raw SQL for the column
@@ -1976,14 +2367,27 @@ nodes:
       if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-reader-audit-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-reader-audit-gate.out" >&2); fi
       D="$ARTIFACTS_DIR/reader-audit.json"
       R="$ARTIFACTS_DIR/reader-audit-result.json"
+      # "derive": "stage-diff" (feature_chain.write_stage_reader_audit): this
+      # repository-list stage has no approved audit of its own, so the node
+      # declared columns from its diff. Zero declared columns is then no proof
+      # of anything; the result file must exist and say it was derived.
+      DERIVE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('derive',''))" "$D")
       NC=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))['columns']))" "$D")
-      if [ "$NC" = 0 ]; then echo "READER_AUDIT_GATE=PASS (no columns declared)"; exit 0; fi
+      if [ "$NC" = 0 ] && [ "$DERIVE" != stage-diff ]; then echo "READER_AUDIT_GATE=PASS (no columns declared)"; exit 0; fi
       test -s "$R" || { echo "READER_AUDIT_FAIL no reader-audit-result.json"; exit 1; }
       python3 - "$D" "$R" <<'PY'
       import json, sys
-      decl = {(c["table"], c["column"]) for c in json.load(open(sys.argv[1]))["columns"]}
-      res = json.load(open(sys.argv[2]))["columns"]
+      decl_doc = json.load(open(sys.argv[1]))
+      result = json.load(open(sys.argv[2]))
+      res = result["columns"]
       got = {(c["table"], c["column"]) for c in res}
+      if decl_doc.get("derive") == "stage-diff":
+          if result.get("derived") is not True:
+              print("READER_AUDIT_FAIL stage-diff audit result is not marked derived")
+              sys.exit(1)
+          decl = got
+      else:
+          decl = {(c["table"], c["column"]) for c in decl_doc["columns"]}
       missing = decl - got
       assert not missing, f"declared columns not covered: {sorted(missing)}"
       affected = [(c["table"], c["column"], r.get("file", "?"))
@@ -2007,8 +2411,10 @@ nodes:
       MSG=$(head -1 "$ARTIFACTS_DIR/commit-msg.txt" 2>/dev/null || true)
       test -n "$MSG" || MSG="feat(api): $SLUG"
       BASE=$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")
-      CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$|^ M pnpm-lock\.yaml$|^\?\? pnpm-lock\.yaml$' || true)
-      if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- . ':(exclude)pnpm-lock.yaml'; then
+      # No lockfile is noise here: every repo this lane serves (repo-profile.sh) installs
+      # frozen, so lockfile-only drift is content, and check-scope.py calls it a breach.
+      CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$' || true)
+      if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- .; then
         printf '{"outcome":"NO_CHANGE","repo":"%s","basis":"baseline-to-candidate content","baseline":"%s","head":"%s","pr_url":null}\n' "$REPO" "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
         echo "COMMIT_IMPL=SKIP outcome=NO_CHANGE"
         exit 0
@@ -2061,8 +2467,9 @@ nodes:
 
         - id: review
           depends_on: [round-pre]
+          context: fresh
           model: sonnet
-          maxBudgetUsd: 15
+          maxBudgetUsd: 20
           timeout: 1800000
           skills: [ce-code-review]
           prompt: |
@@ -2236,7 +2643,7 @@ nodes:
         - id: fixer
           depends_on: [commit-fixes]
           model: sonnet
-          maxBudgetUsd: 5
+          maxBudgetUsd: 8
           timeout: 1200000
           prompt: |
             You are the fixer node in an unattended review-fix pipeline. Ask no questions.
@@ -2493,10 +2900,19 @@ nodes:
       python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py \
         "$ARTIFACTS_DIR/files-allowlist.json" "$WT" "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" \
         || { echo "EXIT_GATE=FAIL scope breach"; exit 1; }
+      # Browser exemption belt: the fixer and a widened allowlist can both move
+      # the diff onto a browser surface after gate-tests derived the exemption.
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/browser-exemption.py diff \
+        "$ARTIFACTS_DIR" "$WT" "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" \
+        || { echo "EXIT_GATE=FAIL browser exemption void"; exit 1; }
       # Reader-audit belt: declared columns must have a passing result on disk.
       NC=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))['columns']))" "$ARTIFACTS_DIR/reader-audit.json" 2>/dev/null || echo 0)
-      if [ "$NC" != 0 ]; then
+      DERIVE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('derive',''))" "$ARTIFACTS_DIR/reader-audit.json" 2>/dev/null || echo "")
+      if [ "$NC" != 0 ] || [ "$DERIVE" = stage-diff ]; then
         test -s "$ARTIFACTS_DIR/reader-audit-result.json" || { echo "EXIT_GATE=FAIL READER_AUDIT_FAIL missing reader-audit-result.json"; exit 1; }
+        if [ "$DERIVE" = stage-diff ]; then
+          python3 -c "import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get('derived') is True else 1)" "$ARTIFACTS_DIR/reader-audit-result.json" || { echo "EXIT_GATE=FAIL READER_AUDIT_FAIL stage-diff audit result is not marked derived"; exit 1; }
+        fi
         python3 -c "import json,sys; cols=json.load(open(sys.argv[1]))['columns']; aff=[r for c in cols for r in c.get('readers',[]) if r.get('class')=='affected']; sys.exit('affected readers: %s' % aff) if aff else None" "$ARTIFACTS_DIR/reader-audit-result.json" || { echo "EXIT_GATE=FAIL READER_AUDIT_FAIL affected reader"; exit 1; }
       fi
       # Materialize-then-`test -s`, same as gate-tests and deslop-recheck: a process

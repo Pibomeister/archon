@@ -780,6 +780,7 @@ nodes:
     - id: review
       depends_on:
       - round-pre
+      context: fresh
       timeout: 1800000
       prompt: |
         Use $ce-code-review explicitly for this node.
