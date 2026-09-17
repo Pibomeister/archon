@@ -385,6 +385,49 @@ def ledger_entries(rnd):
     return [e for e in data if isinstance(e, dict)] if isinstance(data, list) else []
 
 
+def cross_repo_gate(rnd):
+    """main's converge invocation of cross-repo-keys.py, in Python.
+
+    Returns (resolved, lines). exit 0 means every `cross_repo` entry carries a
+    human acknowledgement in cross-repo-filed.json, and the lines are one
+    CROSS_REPO_ACKED each; exit 1 means some are open, and the LAST line is the
+    `count=N repos=a,b` tail main's converge appends to CROSS_REPO_FINDING.
+
+    No CROSS_REPO_KEYS=NONE here: that line belongs to the script's operator
+    listing mode, not to --gate, which prints nothing when there are no
+    cross_repo entries. This mirrors main's converge hunk exactly.
+    """
+    script = HERE / "cross-repo-keys.py"
+    if not script.is_file():
+        return True, []
+    proc = subprocess.run(
+        [sys.executable, str(script), str(rnd.ad), "--gate", str(rnd.rd / "fixer-result.json")],
+        capture_output=True, encoding="utf-8")
+    if proc.stderr.strip():
+        note(proc.stderr.rstrip())
+    return proc.returncode == 0, proc.stdout.rstrip("\n").splitlines() if proc.stdout.strip() else []
+
+
+def mark_filed_acked(rnd):
+    """Record the acknowledgement in the ledger as `filed_acked`.
+
+    Only reached when the gate passed, and the gate passes only when EVERY
+    cross_repo entry is acknowledged -- so every `filed` entry is acknowledged
+    and no key matching is needed. The state is what makes the closure
+    allowance auditable: a P0/P1 filed against another repository is resolved
+    here, not closed here, and the ledger says which.
+    """
+    entries = ledger_entries(rnd)
+    changed = False
+    for entry in entries:
+        if entry.get("state") == "filed":
+            entry["state"] = "filed_acked"
+            changed = True
+    if changed:
+        write_json_atomic(rnd.rd / "ledger.json", entries)
+    return changed
+
+
 def ledger_closure(rnd):
     """Closure's verdict, plus the entry facts the decision table needs.
 
@@ -396,8 +439,13 @@ def ledger_closure(rnd):
     code = ledger(rnd, "closure", rnd.n, echo=True)
     entries = ledger_entries(rnd)
     blocking = [e for e in entries if e.get("severity") in ("P0", "P1")]
+    # ledger.py counts any P0/P1 that is not `closed` as unclosed, which is right
+    # for every state but one: a finding filed against another repository and
+    # acknowledged by a human is resolved, and it can never be closed HERE
+    # because the defect is not in this repository. Its exit stays the fast path.
     return {
-        "closure_ok": code == 0,
+        "closure_ok": code == 0 or not [e for e in blocking
+                                        if e.get("state") not in ("closed", "filed_acked")],
         "pin_conflict": [str(e.get("symbol") or e.get("title") or e.get("id"))
                          for e in entries if e.get("state") == "pin_conflict"],
         "filed": [e for e in entries if e.get("state") == "filed"],
@@ -812,7 +860,7 @@ def fixer_partitions(rnd):
     return data if isinstance(data, dict) else {}
 
 
-def converge_rows(rnd, closure, result, verdict, envelope_head):
+def converge_rows(rnd, closure, result, verdict, envelope_head, cross_repo):
     """Item 3's table, evaluated in order, first match wins."""
     partitions = fixer_partitions(rnd)
     applied = [e for e in (partitions.get("applied") or []) if isinstance(e, dict)]
@@ -820,13 +868,14 @@ def converge_rows(rnd, closure, result, verdict, envelope_head):
     if closure.get("pin_conflict"):
         symbol = closure["pin_conflict"][0]
         return "blocked", None, f"pin_conflict:{symbol}", f"PIN_CONFLICT round={rnd.n} symbol={symbol}", 1
-    if closure.get("filed"):
-        filed = closure["filed"]
-        repos = ",".join(sorted({str(e.get("producer_repo", "?")) for e in filed
-                                 if isinstance(e, dict)}))
-        write_json_atomic(rnd.ad / "cross-repo-findings.json", filed)
+    if cross_repo and not cross_repo[0]:
+        # cross-repo-keys.py already wrote cross-repo-findings.json and put its
+        # `count=N repos=a,b` tail on the last line; the rest are ACK problems.
+        tail = cross_repo[1][-1] if cross_repo[1] else ""
+        for line in cross_repo[1][:-1]:
+            print(line, flush=True)
         return "blocked", None, "cross_repo", \
-            f"CROSS_REPO_FINDING round={rnd.n} count={len(filed)} repos={repos}", 1
+            f"CROSS_REPO_FINDING round={rnd.n} {tail}".rstrip(), 1
     if partitions.get("incomplete"):
         return "progressed", "full", "incomplete", f"ROUND_PROGRESSED round={rnd.n} (incomplete)", 0
     if verdict == "Not ready" and not closure.get("blockers_open"):
@@ -943,12 +992,18 @@ def cmd_converge(rnd, _args):
     if blocked:
         print(blocked, flush=True)
         return 1
+    cross_repo = cross_repo_gate(rnd)
+    if cross_repo[0]:
+        for line in cross_repo[1]:
+            print(line, flush=True)
+        mark_filed_acked(rnd)
     closure = ledger_closure(rnd)
     verdict = round_verdict(rnd)
     envelope_head = last(HEAD_RE, read_text(rnd.rd / "review-envelope.txt"))
     result = verdict if verdict in VERDICTS else "UNKNOWN"
     outcome, next_mode, reason, line, code = converge_rows(
-        rnd, closure, result, verdict if verdict in VERDICTS else None, envelope_head)
+        rnd, closure, result, verdict if verdict in VERDICTS else None, envelope_head,
+        cross_repo)
     if outcome == "converged":
         ledger(rnd, "residuals", rnd.n, rnd.ad / "residuals.json", echo=True)
     write_decision(rnd, outcome, next_mode, reason, review_id, gen, tree)
