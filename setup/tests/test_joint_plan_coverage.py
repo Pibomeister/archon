@@ -134,3 +134,123 @@ class VerifyMirrorTest(unittest.TestCase):
         result = self._run(["groups.test.ts", "groups\\.int\\.spec"])
         self.assertEqual(1, result.returncode, result.stdout + result.stderr)
         self.assertIn("JOINT_PLAN=FAIL verify.json test_patterns differ from stages.goodword-mcp.test_patterns", result.stdout)
+
+
+SPEC_WITH_PINS = """# Share links
+
+## Interface (pinned)
+
+- No other change to `POST /group/share`: the managed-group sentence is the only
+  behaviour this ticket adds.
+- `GroupService.reshareGroup` keeps its current signature.
+
+## Pinned decisions
+
+### goodword-mcp
+
+- The `groups.list` tool response shape is frozen.
+
+## Notes
+
+- `somethingElse` is discussed here but this section is not pinned.
+"""
+
+PIN = {"symbol": "shareGroup", "file": "src/group.service.ts", "spec_line": 5,
+       "allowed_change": "none"}
+
+
+class PinCoverageTest(unittest.TestCase):
+    """Whole-bullet equality, not substring.
+
+    v1's planner kept the managed-group sentence and dropped the rest of the
+    spec's pin, so the reviewer argued with a rule the plan no longer stated for
+    four rounds. A substring check accepts that paraphrase; equality does not.
+    """
+
+    RULES = [
+        "No other change to `POST /group/share`: the managed-group sentence is the only "
+        "behaviour this ticket adds.",
+        "`GroupService.reshareGroup` keeps its current signature.",
+        "The `groups.list` tool response shape is frozen.",
+    ]
+
+    def _run(self, pins, spec_text=SPEC_WITH_PINS):
+        plan = base_plan(
+            [scenario("negative: unauthorized access rejected", covers=["AC1"])],
+            acceptance_criteria=[{"id": "AC1", "text": "unauthorized access is rejected"}],
+        )
+        if pins is not None:
+            plan["pinned_decisions"] = pins
+        with tempfile.TemporaryDirectory() as td:
+            ad = Path(td)
+            spec = ad / "spec.md"
+            spec.write_text(spec_text, encoding="utf-8")
+            (ad / "params.json").write_text(
+                json.dumps({"repositories": plan["repositories"], "spec": str(spec)}),
+                encoding="utf-8")
+            (ad / "joint-plan.json").write_text(json.dumps(plan), encoding="utf-8")
+            return subprocess.run(["python3", str(VALIDATOR), str(ad)],
+                                  capture_output=True, encoding="utf-8")
+
+    def full_pins(self):
+        return [{**PIN, "symbol": f"sym{i}", "rule": rule}
+                for i, rule in enumerate(self.RULES)]
+
+    def test_every_pinned_bullet_covered_passes(self):
+        result = self._run(self.full_pins())
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("JOINT_PLAN=PINS declared=3 covered=3", result.stdout)
+
+    def test_a_wrapped_bullet_is_one_rule(self):
+        """The first bullet wraps; its rule is the folded sentence, not the first line."""
+        result = self._run(self.full_pins())
+        self.assertEqual(0, result.returncode, result.stdout)
+
+    def test_a_paraphrased_rule_is_not_coverage(self):
+        pins = self.full_pins()
+        pins[0]["rule"] = "No other change to `POST /group/share`"
+        result = self._run(pins)
+        self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+        self.assertIn("JOINT_PLAN=FAIL pin coverage symbol=POST /group/share", result.stdout)
+
+    def test_a_missing_bullet_fails_by_its_symbol(self):
+        result = self._run(self.full_pins()[:2])
+        self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+        self.assertIn("JOINT_PLAN=FAIL pin coverage symbol=groups.list", result.stdout)
+
+    def test_a_repo_subsection_is_inside_its_pinned_section(self):
+        result = self._run([p for p in self.full_pins() if "groups.list" not in p["rule"]])
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("symbol=groups.list", result.stdout)
+
+    def test_an_unpinned_section_is_not_covered(self):
+        """`somethingElse` lives under ## Notes and must not demand an entry."""
+        result = self._run(self.full_pins())
+        self.assertNotIn("somethingElse", result.stdout)
+
+    def test_a_pin_with_no_file_guards_nothing(self):
+        pins = self.full_pins()
+        pins[1].pop("file")
+        result = self._run(pins)
+        self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+        self.assertIn("pinned decision is missing file", result.stdout)
+
+    def test_a_spec_with_no_pinned_section_skips_the_check(self):
+        result = self._run(None, spec_text="# Share links\n\n## Notes\n\n- `x` is fine.\n")
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertNotIn("JOINT_PLAN=PINS", result.stdout)
+
+    def test_a_spec_that_cannot_be_read_skips_the_check(self):
+        plan = base_plan(
+            [scenario("negative: unauthorized access rejected", covers=["AC1"])],
+            acceptance_criteria=[{"id": "AC1", "text": "unauthorized access is rejected"}],
+        )
+        with tempfile.TemporaryDirectory() as td:
+            ad = Path(td)
+            (ad / "params.json").write_text(
+                json.dumps({"repositories": plan["repositories"], "spec": str(ad / "gone.md")}),
+                encoding="utf-8")
+            (ad / "joint-plan.json").write_text(json.dumps(plan), encoding="utf-8")
+            result = subprocess.run(["python3", str(VALIDATOR), str(ad)],
+                                    capture_output=True, encoding="utf-8")
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
