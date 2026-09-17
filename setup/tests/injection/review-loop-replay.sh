@@ -62,10 +62,20 @@ git -C "$WT" -c commit.gpgsign=false commit -qm "feat: base"
 BASE=$(git -C "$WT" rev-parse HEAD)
 
 printf '%s\n' "$BASE" > "$AD/bootstrap-head.txt"
-printf '4\n' > "$AD/round-cap.txt"
+# Deliberately far above what the sequence can reach. Eight kill/restart pairs
+# plus a terminal replay drive roughly seventeen rounds, and every one of them
+# legitimately progresses -- the fixer applies a P1 and closure is not held
+# until a verify round closes it. The cap is real behaviour and is tested by
+# test_review_round_pre_cap; hitting it HERE would stop the sequence before the
+# later boundaries and report duplicates=0 for the wrong reason.
+printf '99\n' > "$AD/round-cap.txt"
 printf '# plan\n\nOne step.\n' > "$AD/plan.md"
+printf '# spec\n' > "$AD/spec.md"
+# params-env.sh validates spec, slug, branch and worktree as non-empty strings
+# and refuses the whole file otherwise, so a partial fixture fails commit-fixer
+# with PARAMS_ENV=FAIL rather than with anything the sequence is measuring.
 cat > "$AD/params.json" <<JSON
-{"repo":"api","worktree":"$WT","slug":"injection","apiport":"","has_smoke":""}
+{"repo":"api","worktree":"$WT","slug":"injection","spec":"$AD/spec.md","branch":"archon/injection"}
 JSON
 # A bare JSON array, which is the shape check-scope.py and the lanes actually
 # write. An object with a "files" key parses and then matches nothing, so the
@@ -127,25 +137,29 @@ reviewer() { # $1 verdict
     echo "Input: $id"
     echo "Head: $(cat "$AD/round-$n/pre-head.txt")"
     echo ""
-    echo "P1 src/f.ts:1 — the parameter is unvalidated"
+    echo "P1 src/f.ts:1 — the parameter is unvalidated (finding_id: a1b2c3d4e5f6)"
     echo ""
     echo "Verdict: $1"
     echo "Review complete"
   } > "$env"
   python3 "$HELPER" mark "$AD" review-done "$env" >/dev/null 2>&1
 }
+# The stand-in does exactly what the prompt instructs, which since the ledger
+# replay includes echoing the reviewer's finding_id verbatim on every entry: an
+# entry without it is filed as a NEW ledger finding instead of moving the
+# reviewer's to applied, so closure can never be reached.
 fixer() { # $1 = "edit" | "nochange"
   python3 "$HELPER" mark "$AD" repair-start >/dev/null 2>&1 || return 1
   local n; n=$(round_now)
   if [ "$1" = edit ]; then
     printf 'export function f(a: number) { if (!Number.isFinite(a)) throw new Error("a"); return a; }\n' > "$WT/src/f.ts"
     cat > "$AD/round-$n/fixer-result.json" <<'JSON'
-{"applied":[{"finding":"the parameter is unvalidated","action":"added a guard","severity":"P1"}],
- "failed":[],"advisory":[],"incomplete":[],"cross_repo":[]}
+{"applied":[{"finding":"the parameter is unvalidated","action":"added a guard","severity":"P1","finding_id":"a1b2c3d4e5f6"}],
+ "failed":[],"advisory":[],"incomplete":[],"cross_repo":[],"pin_conflict":[]}
 JSON
   else
     cat > "$AD/round-$n/fixer-result.json" <<'JSON'
-{"applied":[],"failed":[],"advisory":[],"incomplete":[],"cross_repo":[]}
+{"applied":[],"failed":[],"advisory":[],"incomplete":[],"cross_repo":[],"pin_conflict":[]}
 JSON
   fi
   python3 "$HELPER" mark "$AD" repair-done >/dev/null 2>&1
@@ -160,7 +174,7 @@ note() { printf '%s\n' "$*" >> "$LOG"; }
 pass() { # $1 stop-after boundary, $2 verdict, $3 fixer mode
   local stop="$1" verdict="${2:-Ready with fixes}" fmode="${3:-edit}" out rev fix n
 
-  out=$(run_node round-pre) || { note "round-pre FAILED: $(tail -1 "$TMP/last.err")"; return 1; }
+  out=$(run_node round-pre) || { note "round-pre FAILED: $(printf '%s ' "$out"; tail -2 "$TMP/last.err" | tr '\n' ' ')"; return 1; }
   rev=$(printf '%s' "$out" | jfield review)
   note "round-pre review=$rev reason=$(printf '%s' "$out" | jfield reason) round=$(round_now)"
   [ "$stop" = round-pre ] && return 0
@@ -198,8 +212,8 @@ pass() { # $1 stop-after boundary, $2 verdict, $3 fixer mode
   run_node commit-fixer >/dev/null || { note "commit-fixer FAILED: $(tail -2 "$TMP/last.err")"; return 1; }
   [ "$stop" = fixer-attested ] && return 0
 
-  run_node converge >/dev/null
-  note "converge rc=$? round=$(round_now)"
+  run_node converge > "$TMP/converge.out"
+  note "converge rc=$? round=$(round_now) $(grep -aoE '(CONVERGED|ROUND_PROGRESSED|PIN_CONFLICT|CROSS_REPO_FINDING|NOT_READY_WITHOUT_BLOCKER|REVIEW_TREE_DRIFT|REVIEW_UNAUTHORIZED|FIXER_ABSENT|FIXER_BLOCKED|SCOPE_BREACH|CONVERGE=FAIL|LEDGER=FAIL)[^ ]*' "$TMP/converge.out" | head -2 | tr '\n' ' ')"
   return 0
 }
 
@@ -217,9 +231,17 @@ for b in "${BOUNDARIES[@]}"; do
   pass "" "Ready with fixes" edit
 done
 
-# Terminal replay: the round converged; a further restart must re-emit the
-# promise and run neither activity again.
-note "--- terminal replay"
+# Terminal replay is NOT covered here, and saying so is the point. Replaying a
+# converged decision needs converge to have reached `converged`, which needs the
+# positive closure requirement satisfied -- every P0/P1 that entered the ledger
+# verified closed at the current head. That takes a `verify` round in which the
+# reviewer closes its own earlier finding, and this harness's reviewer stand-in
+# is a fixed discovery envelope. Every round here therefore lands on
+# ROUND_PROGRESSED, and a pass labelled "terminal replay" would have been a pass
+# that replayed nothing while counting itself as coverage.
+# It lives in test_round_state.py instead, against decision.json directly.
+note "SKIPPED boundary terminal-replay (needs a converged decision; see test_round_state.py)"
+note "--- one more full round, for a clean final state"
 pass "" "Ready to merge" nochange
 
 # --- judgement -------------------------------------------------------------
