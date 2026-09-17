@@ -489,6 +489,77 @@ class FeatureChainV2(unittest.TestCase):
         self.assertNotIn("feature_previous_head", params)
         self.assertFalse(fc.read_state(self.control, state["logical_chain_id"])["reopens"][0]["verify_only"])
 
+    def test_reopen_binds_the_reason_and_failure_evidence_into_the_stage_run(self):
+        state = self.locally_verified_chain(finalize=False)
+        api_head = state["candidate_handoffs"]["api"]["candidate_head"]
+        integration_dir = Path(state["current_run"]["artifacts_dir"])
+        (integration_dir / "joint-integration-result.json").write_text("{}\n", encoding="utf-8")
+        (integration_dir / "joint-integration-1.log").write_text("got 500\n", encoding="utf-8")
+        with mock.patch("builtins.print"):
+            fc.reopen(self.host, self.args, state["logical_chain_id"], "api", "window=bogus returns 500; validate it")
+        artifacts = Path(self.host.calls[-1][3]["output_root"])
+        params = json.loads((artifacts / "params.json").read_text(encoding="utf-8"))
+        context_path = artifacts / "reopen-context.json"
+        self.assertEqual(params["feature_reopen_context_sha256"], fc.file_digest(context_path))
+        context = json.loads(context_path.read_text(encoding="utf-8"))
+        self.assertEqual(context["reason"], "window=bogus returns 500; validate it")
+        self.assertEqual(context["previous_head"], api_head)
+        self.assertEqual(context["stopped_run_id"], state["current_run"]["run_id"])
+        self.assertEqual(context["evidence"], [str(integration_dir / "joint-integration-result.json"),
+                                               str(integration_dir / "joint-integration-1.log")])
+        latest = fc.read_state(self.control, state["logical_chain_id"])
+        self.assertEqual(latest["reopens"][0]["evidence"], context["evidence"])
+        self.assertNotIn("reopen_context", latest["stages"]["goodword-mcp"])
+
+    def test_verify_only_reopen_dispatches_no_reopen_context(self):
+        state = self.locally_verified_chain(finalize=False)
+        with mock.patch("builtins.print"):
+            fc.reopen(self.host, self.args, state["logical_chain_id"], "api", "verify the hand fix", verify_only=True)
+        artifacts = Path(self.host.calls[-1][3]["output_root"])
+        self.assertFalse((artifacts / "reopen-context.json").exists())
+        self.assertNotIn("feature_reopen_context_sha256", json.loads((artifacts / "params.json").read_text(encoding="utf-8")))
+        self.assertNotIn("reopen_context", fc.read_state(self.control, state["logical_chain_id"])["stages"]["api"])
+
+    def test_a_tampered_reopen_context_refuses_dispatch_artifacts(self):
+        state = self.locally_verified_chain(finalize=False)
+        with mock.patch("builtins.print"):
+            fc.reopen(self.host, self.args, state["logical_chain_id"], "api", "x")
+        latest = fc.read_state(self.control, state["logical_chain_id"])
+        latest["stages"]["api"]["reopen_context"]["content_text"] += " "
+        with self.assertRaisesRegex(fc.FeatureChainError, "reopen context artifact does not match"):
+            fc.write_phase_artifacts(self.root / "tamper", latest, "implement", "api", {"id": "7" * 32})
+
+    def test_a_reopened_stage_whose_implement_run_stopped_can_be_reopened_again(self):
+        state = self.locally_verified_chain(finalize=False)
+        chain_id = state["logical_chain_id"]
+        api_head = state["candidate_handoffs"]["api"]["candidate_head"]
+        with mock.patch("builtins.print"):
+            fc.reopen(self.host, self.args, chain_id, "api", "first reason")
+        stopped = fc.read_state(self.control, chain_id)["current_run"]
+        self.assertEqual(stopped["phase"], "implement")
+        with mock.patch("builtins.print"):
+            fc.reopen(self.host, self.args, chain_id, "api", "second reason")
+        latest = fc.read_state(self.control, chain_id)
+        self.assertEqual(len(latest["reopens"]), 2)
+        self.assertEqual(latest["reopens"][1]["previous_heads"]["api"], api_head)
+        self.assertEqual(latest["reopens"][1]["stopped_run_id"], stopped["run_id"])
+        context = json.loads((Path(self.host.calls[-1][3]["output_root"]) / "reopen-context.json").read_text(encoding="utf-8"))
+        self.assertEqual((context["reason"], context["previous_head"]), ("second reason", api_head))
+        self.assertNotEqual(latest["current_run"]["run_id"], stopped["run_id"])
+
+    def test_an_implementing_stage_that_was_never_reopened_is_not_reopenable(self):
+        # Negative control for the re-reopen admission: the prior reopen record is
+        # what makes a stopped implement run reopenable, not the run alone.
+        state = self.locally_verified_chain(finalize=False)
+        chain_id = state["logical_chain_id"]
+        with fc.chain_lock(self.control, chain_id):
+            latest = fc.read_state(self.control, chain_id)
+            latest["stages"]["api"]["status"] = "running"
+            latest["current_run"] = {"phase": "implement", "repo": "api", "run_id": "8" * 32}
+            fc.write_state(self.control, latest)
+        with self.assertRaisesRegex(fc.FeatureChainError, "not verified"):
+            fc.reopen(self.host, self.args, chain_id, "api", "x")
+
     def test_reopen_takes_verify_only_from_the_cli_flag_on_args(self):
         state = self.locally_verified_chain(finalize=False)
         api_head = state["candidate_handoffs"]["api"]["candidate_head"]

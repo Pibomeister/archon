@@ -16,6 +16,7 @@ External tools are stubbed through a PATH-prepended shim dir (see SHIMS):
 No covered node calls gh, aws, or archon.
 """
 import atexit
+import hashlib
 import json
 import os
 import shutil
@@ -765,6 +766,49 @@ class GateTestsStress(unittest.TestCase):
         self.assertEqual(r["rc"], 0, r["output"])
         self.assertIn("SCOPE_OK files=1", r["output"])
         self.assertIn("GATE_TESTS=PASS", r["output"])
+
+    # A feature-reopen'd stage (reopen-context.json bound by params.json) must
+    # change its previous candidate. Chain 42b42a13 run aab1f254 re-implemented a
+    # plan already in the worktree, changed nothing, and passed as NO_CHANGE.
+    @staticmethod
+    def with_reopen(fixture, dirty=True):
+        def build(tmp):
+            fixture(tmp)
+            art, wt = tmp / "artifacts", tmp / "wt"
+            if not dirty:
+                git(wt, "checkout", "--", ".")
+            body = b'{"reason": "GET /briefing?window=bogus returned 500"}\n'
+            (art / "reopen-context.json").write_bytes(body)
+            doc = json.loads((art / "params.json").read_text(encoding="utf-8"))
+            doc["feature_reopen_context_sha256"] = hashlib.sha256(body).hexdigest()
+            jdump(art / "params.json", doc)
+        return build
+
+    def test_reopen_with_no_change_fails_typed(self):
+        for lane, fixture in (("full-sdlc-api", gate_tests_api_fixture), ("full-sdlc-web", gate_tests_web_fixture)):
+            with self.subTest(lane=lane):
+                r = run_node(lane, "gate-tests", self.with_reopen(fixture, dirty=False))
+                self.assertEqual(r["rc"], 1, r["output"])
+                self.assertIn("IMPLEMENT=FAIL reopen produced no change", r["output"])
+                self.assertNotIn("GATE_TESTS=PASS", r["output"])
+
+    def test_reopen_with_a_change_passes(self):
+        for lane, fixture in (("full-sdlc-api", gate_tests_api_fixture), ("full-sdlc-web", gate_tests_web_fixture)):
+            with self.subTest(lane=lane):
+                r = run_node(lane, "gate-tests", self.with_reopen(fixture))
+                self.assertEqual(r["rc"], 0, r["output"])
+                self.assertIn("REOPEN_GATE=PASS", r["output"])
+                self.assertIn("GATE_TESTS=PASS", r["output"])
+
+    def test_no_change_without_reopen_context_still_passes(self):
+        # Negative control for the reopen failure: the same clean tree with no
+        # reopen context is an ordinary NO_CHANGE outcome.
+        def build(tmp):
+            gate_tests_api_fixture(tmp)
+            git(tmp / "wt", "checkout", "--", ".")
+        r = run_node("full-sdlc-api", "gate-tests", build)
+        self.assertEqual(r["rc"], 0, r["output"])
+        self.assertIn("GATE_TESTS=PASS outcome=NO_CHANGE", r["output"])
 
 
 # ==========================================================================

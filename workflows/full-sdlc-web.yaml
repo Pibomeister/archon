@@ -596,6 +596,17 @@ nodes:
       TypeScript strict; no `any`. No co-author lines anywhere.
       </repo-conventions>
 
+      REOPENED STAGES: when reopen-context.json exists in ARTIFACTS_DIR, this run
+      was dispatched by feature-reopen and that file is MANDATORY work. The
+      worktree HEAD is the previous candidate ("previous_head"), which already
+      implements the approved plan. Read "reason" and every file under
+      "evidence" first, then change the candidate so the stated failure cannot
+      recur, with a test that fails without your change. gate-tests fails this
+      run with "IMPLEMENT=FAIL reopen produced no change" if the worktree is
+      unchanged. If the fix needs a file outside files-allowlist.json, do not
+      edit it: write its path (one per line) to reopen-blocked.txt in
+      ARTIFACTS_DIR and stop.
+
       Done when the feature behavior is implemented and those three commands exit
       0 in the working tree. Report exact commands and exit statuses. Unattended
       pipeline invocation; ask no questions.
@@ -614,6 +625,7 @@ nodes:
       BASE=$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")
       CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$|^ M pnpm-lock\.yaml$|^\?\? pnpm-lock\.yaml$' || true)
       if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- . ':(exclude)pnpm-lock.yaml'; then
+        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/reopen-gate.py "$ARTIFACTS_DIR" NO_CHANGE
         printf '{"outcome":"NO_CHANGE","repo":"web-app","basis":"baseline-to-candidate content","baseline":"%s","head":"%s","pr_url":null}\n' "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
         echo "GATE_TESTS=PASS outcome=NO_CHANGE"
         exit 0
@@ -623,6 +635,7 @@ nodes:
       ALLOW_COUNT=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))))" "$ARTIFACTS_DIR/files-allowlist.json" 2>/dev/null || echo 0)
       if [ "$ALLOW_COUNT" = 0 ]; then echo "GATE_TESTS=FAIL approved web files-allowlist.json is required"; exit 1; fi
       python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py         "$ARTIFACTS_DIR/files-allowlist.json" "$(pwd)" "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")"         --exclude pnpm-lock.yaml || { echo "GATE_TESTS=FAIL scope breach"; exit 1; }
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/reopen-gate.py "$ARTIFACTS_DIR" CHANGED
       echo "GATE_TESTS=PASS"
 
   - id: reader-audit

@@ -1507,6 +1507,19 @@ nodes:
       Do not create branches or worktrees — you are already on the correct branch.
       If the unit's work already exists and satisfies Verification, say so and stop;
       do not reimplement.
+      REOPENED STAGES: when reopen-context.json exists in ARTIFACTS_DIR, this run
+      was dispatched by feature-reopen and that file is MANDATORY work, not
+      background. The worktree HEAD is the previous candidate ("previous_head"):
+      the approved plan is already implemented there, so the "already exists, say
+      so and stop" rule above does NOT apply to it. Read "reason" and every file
+      under "evidence" (the stopped run's failing output) first, then change the
+      candidate so the stated failure cannot recur, with a test that fails
+      without your change. gate-tests fails this run with
+      "IMPLEMENT=FAIL reopen produced no change" if the worktree is unchanged.
+      The fix stays inside files-allowlist.json. If it genuinely needs a file
+      outside that list, do not edit that file: write its repo-relative path (one
+      per line) to reopen-blocked.txt in ARTIFACTS_DIR and stop; a human decides
+      whether to amend scope.
 
       <repo-conventions repo="api">
       Package manager: bun@1.3.10. Node 22.16.0.
@@ -1589,7 +1602,9 @@ nodes:
       # No lockfile is noise here: every repo this lane serves (repo-profile.sh) installs
       # frozen, so lockfile-only drift is content, and check-scope.py calls it a breach.
       CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$' || true)
+      # A feature-reopen'd stage must change its previous candidate (reopen-gate.py).
       if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- .; then
+        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/reopen-gate.py "$ARTIFACTS_DIR" NO_CHANGE
         printf '{"outcome":"NO_CHANGE","repo":"%s","basis":"baseline-to-candidate content","baseline":"%s","head":"%s","pr_url":null}\n' "$REPO" "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
         echo "GATE_TESTS=PASS outcome=NO_CHANGE"
         exit 0
@@ -1606,6 +1621,7 @@ nodes:
       # allowlist; what ships is the diff, so re-derive it from the diff.
       python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/browser-exemption.py diff \
         "$ARTIFACTS_DIR" "$WT" "$BASE" || { echo "GATE_TESTS=FAIL browser exemption void"; exit 1; }
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/reopen-gate.py "$ARTIFACTS_DIR" CHANGED
       echo "GATE_TESTS=PASS"
 
   - id: deslop

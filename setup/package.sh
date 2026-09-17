@@ -100,6 +100,7 @@ MANIFEST=(
   setup/install.sh
   setup/negcontrol.sh
   setup/no-change-closure.py
+  setup/reopen-gate.py
   setup/package.sh
   setup/params-env.sh
   setup/repo-profile.sh
