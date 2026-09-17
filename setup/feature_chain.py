@@ -3561,12 +3561,14 @@ def candidate_from_artifacts(repo: str, row: dict, artifacts: Path, state: dict)
         raise FeatureChainError(f"{repo} candidate changed files outside approved allowlist: {','.join(outside)}")
     assert_clean_worktree(worktree, repo)
     reopen_ctx = state["stages"][repo].get("reopen_context")
+    # A verify-only reopen carries no context but has the same obligation.
+    previous = state["stages"][repo].get("verify_only_head")
     if isinstance(reopen_ctx, dict):
         # Every exit of the stage (gate-tests, commit-impl, a fixer that reverted the
         # fix) ends here, and private state cannot be edited by the run.
         previous = json.loads(reopen_ctx["content_text"]).get("previous_head")
-        if previous and git_output(worktree, "rev-parse", f"{previous}^{{tree}}") == git_output(worktree, "rev-parse", f"{head}^{{tree}}"):
-            raise FeatureChainError(f"{repo} reopen produced no change: candidate tree equals previous head {previous[:12]}")
+    if previous and git_output(worktree, "rev-parse", f"{previous}^{{tree}}") == git_output(worktree, "rev-parse", f"{head}^{{tree}}"):
+        raise FeatureChainError(f"{repo} reopen produced no change: candidate tree equals previous head {previous[:12]}")
     params = read_json_artifact(artifacts / "params.json", "params.json")
     if params.get("worktree") != str(worktree):
         raise FeatureChainError(f"{repo} params worktree does not match private state")
@@ -4494,9 +4496,14 @@ def reopen(host: Any, args: Any, chain_id: str, repo: str, reason: str, verify_o
         lookup = getattr(host, "run_row_by_id", None)
         if again and callable(lookup):
             row = lookup(args.db, current.get("run_id"))
-            if not isinstance(row, dict) or row.get("status") not in {"failed", "cancelled"}:
-                raise FeatureChainError(f"reopen again needs the stopped {repo} run to be failed or cancelled, "
-                                        f"got {(row or {}).get('status')}")
+            # A run recorded completed without feature-result.json skipped its gates and
+            # verified nothing (run e21573ca); it is as stopped as a failed one.
+            stopped_dir = current.get("artifacts_dir")
+            unverified = (isinstance(row, dict) and row.get("status") == "completed" and isinstance(stopped_dir, str)
+                          and bool(stopped_dir) and not (Path(stopped_dir) / "feature-result.json").is_file())
+            if not unverified and (not isinstance(row, dict) or row.get("status") not in {"failed", "cancelled"}):
+                raise FeatureChainError(f"reopen again needs the stopped {repo} run to be failed, cancelled, "
+                                        f"or completed without feature-result.json, got {(row or {}).get('status')}")
         previous_heads = dict(prior["previous_heads"]) if again else {}
         previous_heads.update({r: state["candidate_handoffs"][r]["candidate_head"] for r in affected if r in state["candidate_handoffs"]})
         stopped_artifacts = current.get("artifacts_dir")
