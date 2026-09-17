@@ -38,9 +38,9 @@ class LaneDoctrine(unittest.TestCase):
         self.assertIn(line, text, f"{lane}: locked line not present verbatim to drop")
         p.write_text(text.replace(line, ""), encoding="utf-8")
 
-    def a_locked_line(self, node="review"):
+    def a_locked_line(self, node="fixer"):
         locked = ld.shared(str(ARCHON / "workflows"))
-        self.assertIn(node, locked, "locked nodes must include the review prompt")
+        self.assertIn(node, locked, f"locked nodes must include the {node} prompt")
         return locked[node][0]
 
     def test_shipped_lanes_are_locked(self):
@@ -50,12 +50,12 @@ class LaneDoctrine(unittest.TestCase):
 
     def test_the_lock_is_not_vacuous(self):
         # A probe that locks nothing passes every mutation. The floor is well
-        # under today's count (22 nodes / 589 lines) so ordinary prompt edits
+        # under today's count (21 nodes / 591 lines) so ordinary prompt edits
         # do not trip it, but an empty or near-empty lock does.
         locked = ld.shared(str(ARCHON / "workflows"))
         self.assertGreaterEqual(len(locked), 10, "too few shared prompt nodes locked")
         self.assertGreaterEqual(sum(len(v) for v in locked.values()), 200)
-        for node in ("review", "fixer", "prbody"):
+        for node in ("fixer", "prbody"):
             self.assertIn(node, locked, f"{node} appears in 5 lanes and must be locked")
 
     def test_one_lane_dropping_a_shared_line_is_drift(self):
@@ -66,7 +66,7 @@ class LaneDoctrine(unittest.TestCase):
         self.assertFalse(ok, msg)
         self.assertIn("LANE_DOCTRINE=FAIL", msg)
         self.assertIn("bugfix-lite", msg)
-        self.assertIn("node review", msg)
+        self.assertIn("node fixer", msg)
 
     def test_every_lane_dropping_it_is_a_relock_not_drift(self):
         # The boundary: removing doctrine everywhere is a deliberate act that
@@ -77,6 +77,17 @@ class LaneDoctrine(unittest.TestCase):
             p.write_text(p.read_text(encoding="utf-8").replace(line, ""), encoding="utf-8")
         ok, msg = ld.check(str(self.wf))
         self.assertTrue(ok, msg)
+
+    def test_review_is_deliberately_absent_from_the_lock(self):
+        # It used to be locked across all five lanes. full-sdlc-api and its two
+        # derivatives now embed a measured mode prompt from setup/prompts
+        # (embed-prompts.py), so the three v2 lanes and the two v1 lanes share
+        # no substantive review line and `shared()` drops the node. That is the
+        # intended end state, not drift: what stops a mode swap from quietly
+        # deleting the reviewer's execution contract is test_prompt_embedding,
+        # which pins the mode-independent preamble, not this lock.
+        locked = ld.shared(str(ARCHON / "workflows"))
+        self.assertNotIn("review", locked)
 
     def test_update_rewrites_the_lock_deterministically(self):
         first = ld.shared(str(ARCHON / "workflows"))
