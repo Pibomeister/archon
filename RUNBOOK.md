@@ -207,7 +207,7 @@ The per-repo review loop (review → commit fixes → fixer → converge) ends i
 | Round progressed | verdict acceptable but HEAD moved this round | Fixes landed; the next round re-reviews them. | None — expected. Steady state is ~2 rounds per repo. |
 | No progress | `NO_PROGRESS` (converge exits 1) | Verdict `Not ready` AND HEAD unchanged — the fixer isn't moving the needle. | Engineer. Semantic problem, not budget-shaped. Do not resume blindly. |
 | Fixer blocked | `FIXER_BLOCKED` (converge exits 1; also fired when `fixer-result.json` is missing) | The fixer reported a P0–P2 it cannot fix, or produced no result file. | Engineer. Read `round-N/fixer-result.json` `failed` partition for the finding. First check whether each `failed` entry is a genuine could-not-fix or a mis-partitioned scope decline (see the observed table below) — a decline belongs in `advisory` and can be reclassified by hand to unblock. |
-| Cross-repo finding | `CROSS_REPO_FINDING round=N count=N repos=<comma list>` (converge exits 1) | The fixer's `cross_repo` partition is non-empty — a finding whose defect lives in a different repository of this chain, neither waivable nor fixable here. | Engineer. Read `cross-repo-findings.json`, fix or file the finding against the named repository, then resume. |
+| Cross-repo finding | `CROSS_REPO_FINDING round=N count=N repos=<comma list>` (converge exits 1; exit-gate prints it as `EXIT_GATE=FAIL CROSS_REPO_FINDING ...`) | The fixer's `cross_repo` partition holds a finding whose defect lives in a different repository of this chain and that no human has recorded as filed. It is neither waivable nor fixable here, and `accept-residuals.txt` does not clear it. | Human. Fix it in the named repository or file it there, record the filing with the cross-repo acknowledgement recipe below, then resume. `cross-repo-findings.json` lists the entries that were open at that stop, each with its `key`. |
 
 Bound-related failures that look similar but are different:
 
@@ -272,6 +272,20 @@ archon workflow resume <run-id>
 ```
 
 The PR body then opens Known Residuals with that line verbatim plus the final round's advisory and incomplete entries. Acceptance waives the verdict and fixer checks only — the tree must still be clean, in scope, and passing unit gates. **Writing `accept-residuals.txt` is a human act; agents never write that file.**
+
+Cross-repo acknowledgement recipe (clears `CROSS_REPO_FINDING` for findings filed against their own repository):
+
+```bash
+python3 "$ROOT/.archon/setup/cross-repo-keys.py" <artifacts>   # key, severity, repo, summary per finding + a JSON skeleton
+# file each OPEN finding against its repository (issue or PR), then write, by hand:
+cat > <artifacts>/cross-repo-filed.json <<'JSON'
+[{"key": "<key printed above>", "filed": "https://github.com/<org>/<repo>/issues/<n>", "by": "<name>"}]
+JSON
+python3 "$ROOT/.archon/setup/cross-repo-keys.py" <artifacts>   # every finding now reads "acknowledged"
+bash "$ROOT/.archon/setup/resume.sh" <run-id>
+```
+
+converge, exit-gate and the risk-delta review runtime treat an entry as resolved only when its `key` (a digest of `producer_repo` plus the whitespace-collapsed finding text) appears with a non-empty `by` and an `http(s)` `filed` URL. A wrong key, a missing or non-URL `filed`, an empty `by`, or an unreadable file resolves nothing, and the run stops again. Acknowledged findings print `CROSS_REPO_ACKED key=... filed=...` and are listed in the PR body under "Cross-repo findings filed". **Writing `cross-repo-filed.json` is a human act; agents never write that file** (Codex workers get it read-only). Two limits: the resume re-enters the review loop and spends a new round, and if that round's fixer words the finding differently it mints a new key and stops again (the fixer is told to copy acknowledged findings verbatim); re-run the helper and add the new key. A run started before this recipe existed executes its captured workflow source on resume, which has no acknowledgement check; the recipe cannot unblock it (see the note in §4).
 
 Raise-cap recipe: `echo 6 > <artifacts>/round-cap.txt` then resume. The cap counts `round.txt` (durable across resumes), not loop iterations.
 
@@ -350,6 +364,7 @@ archon workflow resume <run-id>
 - **Resume does NOT restore AI session context** — every post-gate node re-reads its inputs from disk artifacts. That's by design; nothing for you to do.
 - **A failed `loop_group` resumes with a FRESH iteration counter.** `max_iterations` bounds per-invocation work only. The durable round counter is `round.txt` in the run's artifacts — that's the number that means anything across resumes.
 - **`plan-loop`, `rca-plan-loop`, and `deslop-verify` are `loop_group`s too** (§3a/§3b, §12) and follow the same rule: a resume re-enters with a fresh iteration and re-runs every body AI node, even ones that "succeeded" in the failed iteration (a `DESLOP_REVIEW=FAIL` on the review-gate still re-runs `deslop-recheck` from scratch on resume, for example). Their durable counters are `plan-round.txt`, `rca-round.txt`, `deslop-round.txt`, and `deslop-dirty.txt` (the DIRTY-verdict counter, distinct from `deslop-round.txt`'s iteration count) in the run's artifacts; `deslop-fix-pending.txt` is the durable "fixer owed" marker. Every judging body node (`review`, `deslop-review`, `plan-critic`, `rca-critic`, `impact-probe`) is `context: fresh`: without it archon 0.10.1 resumes the previous body AI node's session, so a reviewer would continue the fixer's conversation. A body gate that means "not done yet" must exit 0 without the promise — any non-zero body exit fails the group at that iteration.
+- **A resume executes the run's CAPTURED workflow source, not the live YAML (archon 0.10.1).** At start the engine copies the workflows into `<artifacts>/workflow-source/` and records its digest in the run's `metadata.workflow_source`; resume restores that copy (`workflow.source_restored`) and refuses to run if its bytes changed ("The run cannot be resumed against different source"). So a fix to a node's inline bash does not reach a run that started before it. What IS live on resume: every `setup/` script a node calls by absolute path. A run blocked by a gate whose inline logic changed needs a fresh run (for a repository-list stage, `feature-reopen --repo <repo> --verify-only`), never an edit to the captured copy.
 - Node outputs may not survive a resume — every consumer has a disk-artifact fallback (envelope files). If you're debugging, trust the files in `$ARTIFACTS_DIR`, not remembered node output.
 
 **A failed bash GATE whose cause lives in an artifact an AI node wrote is not fixed by resuming.** Only the gate re-executes (§4: completed AI nodes outside a failed `loop_group` never re-run), so it re-reads the same bytes and returns the same verdict. Hand-edit the named artifact first, then `resume.sh`. Both of 2026-09-07's `rca-gate` failures were in this class, and §12's row for one of them used to say "Resume re-runs the RCA", which is false.

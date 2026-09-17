@@ -554,7 +554,7 @@ discriminator string is verbatim in `round-N/converge.txt` in the run's artifact
 | verdict acceptable, HEAD moved | Fixes landed; next round re-reviews them | None - expected |
 | `NO_PROGRESS` | `Not ready` AND HEAD unchanged - the fixer is not moving the needle | Escalate. Semantic, not budget-shaped |
 | `FIXER_BLOCKED` | Fixer reported a P0-P2 it cannot fix, or wrote no result file | Escalate. Read the `failed` partition first |
-| `CROSS_REPO_FINDING round=N count=N repos=<comma list>` | A fixer finding's defect lives in a different repository of this chain - not waivable, not fixable here | Escalate. Read `cross-repo-findings.json` |
+| `CROSS_REPO_FINDING round=N count=N repos=<comma list>` | A fixer finding's defect lives in a different repository of this chain - not waivable, not fixable here, and no human has recorded it as filed | Escalate. Read `cross-repo-findings.json`; a human files it and writes `cross-repo-filed.json` (RUNBOOK §3 recipe). Never write that file yourself |
 
 Three rules that decide most supervision calls:
 
