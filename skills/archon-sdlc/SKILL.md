@@ -643,7 +643,10 @@ resume (RUNBOOK §3).
 - `PLAN_REJECTED`, `PLAN_NO_PROGRESS`, `PLAN_SCOPE_DISPUTE`, `PLAN_CONVERGE=FAIL`
   (RUNBOOK §3a) - the plan-loop critic and reviser disagree, or the loop stalled.
   Read `plan-round-N/critique.json` and `revision.json`, explain the disagreement,
-  hand back. `PLAN_ROUND_CAP` alone is resumable after raising the cap or
+  hand back. A cap round whose blocking findings were all applied (none declined, no P0)
+  converges to the plan gate with `plan-cap-unverified.json`; call those
+  un-recritiqued edits out by name at the gate like declined findings.
+  `PLAN_ROUND_CAP` alone is resumable after raising the cap or
   accepting the loop's last state by hand.
 - `PLAN_ROUND_PRE=FAIL` (RUNBOOK §3a) / `RCA_ROUND_PRE=FAIL` (RUNBOOK §12) - the
   round counter (`plan-round.txt` / `rca-round.txt`) is not an integer, or a

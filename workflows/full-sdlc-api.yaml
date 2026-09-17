@@ -75,14 +75,17 @@ nodes:
       fi
       test -d /Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb/wiki || { echo "PREFLIGHT=FAIL knowledge base missing"; exit 1; }
       git -C /Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb status --porcelain | sort > "$ARTIFACTS_DIR/kb-pre-porcelain.txt"
-      # Repository-scope runs are budgeted to converge inside two hours, so they
-      # get tighter caps than the legacy defaults baked into the readers
-      # (round-pre/converge default 4, plan-round-pre/plan-converge default 3).
+      # Repository-scope runs are budgeted to converge inside two hours, so the
+      # review loop gets a tighter cap than the legacy default baked into its
+      # readers (round-pre/converge default 4). The plan cap stays at the legacy
+      # 3: at 2, chain 42b42a13 died with every blocking finding of its last
+      # round already applied, one of them harness-caused, and a joint plan
+      # needs a round to see the reviser's cross-repository edits.
       # Written only when absent: an operator who raised a cap and resumed keeps
       # the raise even if this node re-runs. Legacy runs get no file at all.
       if [ "${ARCHON_FEATURE_SCOPE-}" = repositories ]; then
         test -f "$ARTIFACTS_DIR/round-cap.txt" || echo 3 > "$ARTIFACTS_DIR/round-cap.txt"
-        test -f "$ARTIFACTS_DIR/plan-round-cap.txt" || echo 2 > "$ARTIFACTS_DIR/plan-round-cap.txt"
+        test -f "$ARTIFACTS_DIR/plan-round-cap.txt" || echo 3 > "$ARTIFACTS_DIR/plan-round-cap.txt"
         echo "ROUND_CAPS=OK review=$(cat "$ARTIFACTS_DIR/round-cap.txt") plan=$(cat "$ARTIFACTS_DIR/plan-round-cap.txt")"
       fi
       echo "PREFLIGHT=PASS"
@@ -1014,6 +1017,50 @@ nodes:
                 echo "PLAN_ROUND_CAP round=$N cap=$CAP (plan-accept.txt present but critique has P0=$P0 open at >=75; a P0 is never waivable)"
                 exit 1
               fi
+              # Route to the human gate when the last round left no disagreement:
+              # no P0, no declined P0/P1, and every blocking finding applied. What
+              # is missing then is only a critic re-reading the final revision,
+              # and the plan gate is a human reading exactly that plan, so the
+              # packet must say so (plan-cap-unverified.json; plan-render-gate
+              # enforces it). A P0 or a declined blocking finding is a live
+              # disagreement and still stops here for plan-accept.txt, as before.
+              ROUTE=$(python3 - "$RD/critique.json" "$RD/revision.json" "$ARTIFACTS_DIR/plan-cap-unverified.json" "$N" "$CAP" <<'PY'
+            import json, sys
+            crit, rev, out, n, cap = sys.argv[1:6]
+            def blocking(rows, severities):
+                picked = []
+                for x in rows or []:
+                    try:
+                        conf = int(str(x.get("confidence")))
+                    except (TypeError, ValueError, AttributeError):
+                        return None
+                    if x.get("severity") in severities and conf >= 75:
+                        picked.append(x)
+                return picked
+            try:
+                findings = json.load(open(crit, encoding="utf-8")).get("findings")
+                revision = json.load(open(rev, encoding="utf-8"))
+            except (OSError, ValueError, AttributeError):
+                print("no"); sys.exit(0)
+            open_p0 = blocking(findings, ("P0",))
+            raised = blocking(findings, ("P0", "P1"))
+            declined = blocking(revision.get("declined"), ("P0", "P1"))
+            applied = blocking(revision.get("applied"), ("P1",))
+            if None in (open_p0, raised, declined, applied) or open_p0 or declined or len(applied) < len(raised):
+                print("no"); sys.exit(0)
+            json.dump({"round": int(n), "cap": int(cap), "unverified_applied": applied}, open(out, "w", encoding="utf-8"), indent=2)
+            print(len(applied))
+            PY
+              )
+              if [ "$ROUTE" != no ]; then
+                SHAPE=0
+                OUT=$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/plan-shape.sh \
+                  "$ARTIFACTS_DIR" "$WT" "$SPEC" 2>&1) || SHAPE=$?
+                if [ "$SHAPE" != 0 ]; then printf '%s\n' "$OUT"; rm -f "$ARTIFACTS_DIR/plan-cap-unverified.json"; echo "PLAN_CONVERGE=FAIL shape round=$N (cap route)"; exit 1; fi
+                echo "PLAN_CONVERGED round=$N (cap reached: $ROUTE applied blocking findings not re-critiqued; routed to the human gate, see plan-cap-unverified.json)"
+                echo "<promise>PLAN_CONVERGED</promise>"
+                exit 0
+              fi
               echo "PLAN_ROUND_CAP round=$N cap=$CAP"; exit 1
             fi
             echo "PLAN_ROUND_PROGRESSED round=$N"
@@ -1202,6 +1249,12 @@ nodes:
       in one sentence and skip the table, because a reader must never mistake an
       unprobed plan for a plan with no callers. If plan-round.txt does not exist,
       one sentence saying the critic loop did not run.
+      If plan-cap-unverified.json exists, the loop hit its round cap and was
+      routed here with its last round's blocking findings applied but never
+      re-critiqued. OPEN the CRITIC section, before the table, with an element
+      carrying the attribute data-cap-unverified that says so in one sentence
+      and lists every entry of its "unverified_applied" (severity, kind, section,
+      what_changed verbatim): the human is the only reviewer of those edits.
       <!-- DECIDE --> The decision box: approving starts unattended
       implementation, and rejecting ends the run.
       Then, in the same box, the standard decision block that every gate
@@ -1251,6 +1304,9 @@ nodes:
         grep -qF "archon workflow $v" "$H" || { echo "RENDER_GATE=FAIL DECIDE box missing the $v command"; exit 1; }
       done
       cmp -s "$ARTIFACTS_DIR/plan.md" "$ARTIFACTS_DIR/plan.post-docreview.md" || { echo "RENDER_GATE=FAIL renderer modified plan.md"; exit 1; }
+      if [ -f "$ARTIFACTS_DIR/plan-cap-unverified.json" ]; then
+        grep -q 'data-cap-unverified' "$H" || { echo "RENDER_GATE=FAIL plan-cap-unverified.json present but the CRITIC section does not flag the un-recritiqued revision"; exit 1; }
+      fi
       # show-me: put the packet in front of the human exactly when the gate pauses.
       # xdg-open first: on some Linux distros /usr/bin/open is util-linux's link to
       # openvt(1) — a different program, not a missing one. The file:// path is
