@@ -249,7 +249,10 @@ For the guarded Codex path:
   the cause. It preserves the chain, selected worktrees, and shared budget;
   prior plan and critic/revision evidence are supplied as hashed, read-only
   `prior-planning-evidence.json` for refinement, without transferring approval.
-  It cannot replace approved or implemented work. A `RECOVERABLE` start supplies
+  It cannot replace approved or implemented work. To steer the successor planner on approach
+  (never scope) without editing the spec snapshot, add `--guidance-file <path>`;
+  it is hashed into chain state, shown in the plan packet, and ranked below the
+  spec (RUNBOOK "Feature launcher"). A `RECOVERABLE` start supplies
   usable control authority; retain its operator-held token. Never persist tokens
   in handoff documents or edit private state to bypass a failed check.
 - Finish only when the approved integration matrix passes against disposable

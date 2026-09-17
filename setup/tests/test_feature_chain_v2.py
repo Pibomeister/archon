@@ -3,6 +3,7 @@ import contextlib
 import datetime
 import importlib.util
 import io
+import hashlib
 import json
 import sqlite3
 import subprocess
@@ -1184,6 +1185,57 @@ class FeatureChainV2(unittest.TestCase):
         self.assertEqual(self.host.calls[-1][2]["ARCHON_FEATURE_PHASE"], "planning")
         with self.assertRaisesRegex(fc.FeatureChainError, "stale"):
             fc.restart_planning_unguarded(self.host, args, row, state["logical_chain_id"])
+
+    def test_replan_guidance_is_hashed_into_state_and_handed_to_the_planner(self):
+        args = self.claude_args()
+        launched = fc.launch(self.host, args, ["api", "goodword-mcp"])
+        state, row = launched["state"], dict(launched["row"], status="failed")
+        guidance = self.root / "guidance.md"
+        guidance.write_text("The week window must look ahead, not back.\n", encoding="utf-8")
+        expected_sha = hashlib.sha256(guidance.read_bytes()).hexdigest()
+        restarted = fc.restart_planning_unguarded(
+            self.host, Namespace(**dict(vars(args), guidance_file=str(guidance))), row, state["logical_chain_id"])
+        sealed = fc.read_state(self.control, state["logical_chain_id"])
+        self.assertEqual(expected_sha, sealed["operator_guidance"]["sha256"])
+        self.assertEqual(1, sealed["operator_guidance"]["planning_generation"])
+        artifacts = Path(restarted["row"]["output_root"])
+        self.assertEqual(guidance.read_bytes(), (artifacts / fc.OPERATOR_GUIDANCE_ARTIFACT).read_bytes())
+        request = json.loads((artifacts / fc.PLANNING_REQUEST_ARTIFACT).read_text(encoding="utf-8"))
+        self.assertEqual(expected_sha, request["operator_guidance"]["sha256"])
+        self.assertEqual(fc.OPERATOR_GUIDANCE_ARTIFACT, request["operator_guidance"]["artifact"])
+        # A later replan without the flag keeps steering by the same guidance.
+        guidance.write_text("edited after the fact\n", encoding="utf-8")
+        again = fc.restart_planning_unguarded(self.host, args, dict(restarted["row"], status="failed"),
+                                              state["logical_chain_id"])
+        carried = Path(again["row"]["output_root"]) / fc.OPERATOR_GUIDANCE_ARTIFACT
+        self.assertEqual("The week window must look ahead, not back.\n", carried.read_text(encoding="utf-8"))
+        self.assertIn(fc.OPERATOR_GUIDANCE_ARTIFACT, fc.PLANNING_SUPPORT_ARTIFACTS)
+
+    def test_replan_without_guidance_writes_none(self):
+        args = self.claude_args()
+        launched = fc.launch(self.host, args, ["api", "goodword-mcp"])
+        state, row = launched["state"], dict(launched["row"], status="failed")
+        restarted = fc.restart_planning_unguarded(self.host, args, row, state["logical_chain_id"])
+        artifacts = Path(restarted["row"]["output_root"])
+        self.assertFalse((artifacts / fc.OPERATOR_GUIDANCE_ARTIFACT).exists())
+        request = json.loads((artifacts / fc.PLANNING_REQUEST_ARTIFACT).read_text(encoding="utf-8"))
+        self.assertIsNone(request["operator_guidance"])
+
+    def test_unusable_guidance_file_refuses_before_touching_the_chain(self):
+        args = self.claude_args()
+        launched = fc.launch(self.host, args, ["api", "goodword-mcp"])
+        state, row = launched["state"], dict(launched["row"], status="failed")
+        empty = self.root / "empty.md"
+        empty.write_text("  \n", encoding="utf-8")
+        calls = len(self.host.calls)
+        for path, message in ((empty, "empty"), (self.root / "missing.md", "unreadable")):
+            with self.subTest(path=path.name), self.assertRaisesRegex(fc.FeatureChainError, message):
+                fc.restart_planning_unguarded(
+                    self.host, Namespace(**dict(vars(args), guidance_file=str(path))), row, state["logical_chain_id"])
+        after = fc.read_state(self.control, state["logical_chain_id"])
+        self.assertEqual(0, after.get("planning_generation", 0))
+        self.assertNotIn("operator_guidance", after)
+        self.assertEqual(calls, len(self.host.calls))
 
     def test_claude_replan_refuses_codex_chains_and_approved_work(self):
         launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])

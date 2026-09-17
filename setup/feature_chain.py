@@ -58,12 +58,15 @@ DEFAULT_INTEGRATION_LANE = {"claude": "full-sdlc-api", "codex": "full-sdlc-api-c
 JOINT_PLAN_ARTIFACT = "joint-plan.json"
 PLANNING_REQUEST_ARTIFACT = "feature-chain-request.json"
 PRIOR_PLANNING_EVIDENCE_ARTIFACT = "prior-planning-evidence.json"
+OPERATOR_GUIDANCE_ARTIFACT = "operator-guidance.md"
+OPERATOR_GUIDANCE_MAX_BYTES = 32_000
 INTEGRATION_EVIDENCE_ARTIFACT = "integration-evidence.json"
 PLANNING_SUPPORT_ARTIFACTS = (
     "plan.md", "premises.json", "reader-audit.json", "web-premises.json",
     "web-reader-audit.json", "browser-evidence.json", "browser-evidence.sha256",
     "smoke-probe.json", "kb-context.md", "docreview-envelope.txt", "docreview.diff",
     "plan-review.html", "plan-round.txt", "plan.post-critic.md", "plan.post-docreview.md",
+    OPERATOR_GUIDANCE_ARTIFACT,
 )
 PLANNING_ROUND_EVIDENCE = ("critique.json", "revision.json", "impact.json")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}", re.I)
@@ -1449,6 +1452,22 @@ def write_prior_planning_evidence(artifacts_dir: Path, state: dict) -> dict | No
     }
 
 
+def write_operator_guidance(artifacts_dir: Path, state: dict) -> dict | None:
+    guidance = state.get("operator_guidance")
+    if not guidance:
+        return None
+    path = artifacts_dir / OPERATOR_GUIDANCE_ARTIFACT
+    path.write_text(guidance["content_text"], encoding="utf-8")
+    if file_digest(path) != guidance["sha256"]:
+        raise FeatureChainError("operator guidance artifact does not match its recorded sha256")
+    return {
+        "artifact": OPERATOR_GUIDANCE_ARTIFACT,
+        "sha256": guidance["sha256"],
+        "planning_generation": guidance["planning_generation"],
+        "authority": "below the spec for scope and requirements; above prior planning evidence and planner judgment for approach",
+    }
+
+
 def prior_planning_attempt_summary(item: dict) -> dict:
     summary = {"run_id": item.get("run_id"), "spec_sha256": item.get("spec_sha256")}
     if item.get("evidence_sha256"):
@@ -1545,9 +1564,29 @@ def restart_planning_unguarded(host: Any, args: Any, row: dict, chain_id: str) -
     return _restart_planning(host, args, row, chain_id, guarded=False)
 
 
+def read_operator_guidance(path_value: Any) -> dict | None:
+    """Operator guidance for a replan: approach direction that must not edit the
+    immutable spec snapshot. Read and validated before any state changes."""
+    if not path_value:
+        return None
+    path = Path(str(path_value)).expanduser()
+    try:
+        data = path.read_bytes()
+        text = data.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise FeatureChainError(f"operator guidance file unreadable: {path}: {exc}") from exc
+    if not text.strip():
+        raise FeatureChainError(f"operator guidance file is empty: {path}")
+    if len(data) > OPERATOR_GUIDANCE_MAX_BYTES:
+        raise FeatureChainError(f"operator guidance file exceeds {OPERATOR_GUIDANCE_MAX_BYTES} bytes: {path}")
+    return {"sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data), "content_text": text,
+            "source_path": str(path.resolve())}
+
+
 def _restart_planning(host: Any, args: Any, row: dict, chain_id: str, *, guarded: bool) -> dict:
     if row.get("status") not in {"failed", "completed"}:
         raise FeatureChainError("feature-replan requires a terminal planning run")
+    guidance = read_operator_guidance(getattr(args, "guidance_file", None))
     with chain_lock(Path(args.control_dir), chain_id):
         if guarded:
             revalidate_control_token(host, args, row)
@@ -1575,6 +1614,10 @@ def _restart_planning(host: Any, args: Any, row: dict, chain_id: str, *, guarded
             )
             state["planning_generation"] = state.get("planning_generation", 0) + 1
             state["spec_sha256"] = file_digest(Path(state["spec"]))
+        if guidance:
+            # Replaces any earlier guidance; a replan without the flag keeps it.
+            state["operator_guidance"] = dict(guidance, planning_generation=state.get("planning_generation", 0),
+                                              recorded_at=now())
         state["current_run"] = None
         state["dispatch_reservation"] = {
             "phase": "planning", "repo": None, "source_run_id": row["id"],
@@ -1585,14 +1628,16 @@ def _restart_planning(host: Any, args: Any, row: dict, chain_id: str, *, guarded
     args.wall_minutes = state["budget"]["wall_minutes"]
     args.max_total_tokens = state["budget"]["max_total_tokens"]
     result = dispatch_planning(host, args, state)
+    carried = state.get("operator_guidance")
     print(
-        f"ARCHON_FEATURE_REPLAN=STARTED chain={chain_id} predecessor={row['id']} run={result['row']['id']}",
+        f"ARCHON_FEATURE_REPLAN=STARTED chain={chain_id} predecessor={row['id']} run={result['row']['id']} "
+        f"guidance={carried['sha256'] if carried else 'none'}",
         flush=True,
     )
     return result
 
 
-def planning_request_payload(state: dict, prior_evidence: dict | None = None) -> dict:
+def planning_request_payload(state: dict, prior_evidence: dict | None = None, guidance: dict | None = None) -> dict:
     return {
         "schema_version": 1,
         "kind": "repository-list-feature-planning-request",
@@ -1613,6 +1658,7 @@ def planning_request_payload(state: dict, prior_evidence: dict | None = None) ->
             "integration": "object with non-empty scenarios",
         },
         "prior_planning_evidence": prior_evidence,
+        "operator_guidance": guidance,
         "write_policy": "planning workers may write only planning artifacts; repository worktrees are read-only until approval",
         "created_at": now(),
     }
@@ -1621,9 +1667,10 @@ def planning_request_payload(state: dict, prior_evidence: dict | None = None) ->
 def write_planning_request(artifacts_dir: Path, state: dict) -> Path:
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     prior_evidence = write_prior_planning_evidence(artifacts_dir, state)
+    guidance = write_operator_guidance(artifacts_dir, state)
     path = artifacts_dir / PLANNING_REQUEST_ARTIFACT
     tmp = path.with_suffix(f".tmp.{os.getpid()}")
-    tmp.write_text(json.dumps(planning_request_payload(state, prior_evidence), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.write_text(json.dumps(planning_request_payload(state, prior_evidence, guidance), indent=2, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(path)
     return path
 

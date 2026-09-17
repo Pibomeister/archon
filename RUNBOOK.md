@@ -1349,6 +1349,31 @@ This starts guarded successor planning under the same scope, worktrees, baseline
 and cumulative budget. It refuses active planning, stale control actions, or
 replacement of approved/implemented work.
 
+To steer the successor planner without touching the immutable spec snapshot,
+add `--guidance-file <path>` (either provider; Claude chains use `--chain <id>`
+instead of `--token`):
+
+```bash
+python3 .archon/setup/archon-run.py feature-replan <run-id> --chain <chain-id> \
+  --guidance-file /absolute/path/to/guidance.md
+```
+
+The file (UTF-8, non-empty, at most 32 KB) is read before any state changes,
+recorded in the signed chain state as `operator_guidance` with its sha256 and
+planning generation, and written into the new planning run as
+`operator-guidance.md`, named with its sha256 in `feature-chain-request.json`.
+The launch line prints `guidance=<sha256|none>`. Authority: below the spec for
+scope and requirements (it cannot add or drop a requirement, repository, or
+acceptance criterion), above prior planning evidence and planner judgment for
+approach. The planner, critic and reviser all read it; `plan-render-gate` fails
+unless the packet's PLAN section quotes it under
+`data-operator-guidance="<sha256>"`, and approval binds the file with the other
+planning artifacts. A later replan without the flag keeps the recorded guidance;
+pass a new file to replace it. No other replan-time channel exists: the plan
+gate's reject-with-reason needs a run paused at that gate, `feature-scope-amend`
+only adds a file to an approved stage, and a run-local `AGENTS.md` reaches Codex
+nodes only and must already sit in the new run's artifacts directory.
+
 Claude chains record the same budget ledger but, like every Claude lane, run
 without the Codex watchdog and control tokens, and no session accounting: the
 ledger's `--require-sessions` check applies to codex chains only, so a claude

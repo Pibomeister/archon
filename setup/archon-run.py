@@ -3497,6 +3497,7 @@ def parser() -> argparse.ArgumentParser:
     replan.add_argument("run_id")
     replan.add_argument("--token", help="codex chains: CONTROL_TOKEN_FROM_LAST_LAUNCH")
     replan.add_argument("--chain", help="claude chains (no control token): the chain id")
+    replan.add_argument("--guidance-file", help="operator guidance for the planner (approach, not scope); hashed into chain state and shown in the plan-review packet")
     replan.add_argument("--no-watch", action="store_true")
     replan.add_argument("--watch-timeout-seconds", type=int, default=86400)
     bugfix = sub.add_parser("bugfix")

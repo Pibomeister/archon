@@ -3,6 +3,7 @@
 the mirror of rca-plan-accept.txt. Uses the plan-minimal fixture, which passes
 plan-shape.sh. Only the cap branch of plan-converge is under test: the run is
 staged so the verdict is REVISE with a moved plan."""
+import hashlib
 import json
 import os
 import shutil
@@ -122,7 +123,7 @@ class PlanAccept(unittest.TestCase):
 class RenderGateCapFlag(unittest.TestCase):
     """plan-render-gate: a cap-routed plan reaches the human only with the flag."""
 
-    def run_gate(self, marker_file, html_flag):
+    def run_gate(self, marker_file, html_flag, guidance=None, guidance_attr=None):
         doc = yaml.safe_load((ARCHON / "workflows" / "full-sdlc-api.yaml").read_text(encoding="utf-8"))
         body = next(n for n in doc["nodes"] if n["id"] == "plan-render-gate")["bash"]
         body = body.replace('OPENER="$(command -v xdg-open 2>/dev/null || command -v open 2>/dev/null || true)"', 'OPENER=""')
@@ -136,12 +137,26 @@ class RenderGateCapFlag(unittest.TestCase):
         (ad / "plan-review.html").write_text(f"{sections}{flag}{ad.name} {commands}")
         if marker_file:
             (ad / "plan-cap-unverified.json").write_text('{"round": 3}')
+        if guidance is not None:
+            (ad / "operator-guidance.md").write_text(guidance)
+            if guidance_attr:
+                with open(ad / "plan-review.html", "a") as html:
+                    html.write(f'<section data-operator-guidance="{guidance_attr}">{guidance}</section>')
         return subprocess.run(["bash", "-c", body], capture_output=True, encoding="utf-8", env={**os.environ, "ARTIFACTS_DIR": str(ad)})
 
     def test_cap_routed_plan_without_the_flag_fails(self):
         r = self.run_gate(marker_file=True, html_flag=False)
         self.assertEqual(1, r.returncode)
         self.assertIn("RENDER_GATE=FAIL plan-cap-unverified.json present", r.stdout)
+
+    def test_replan_guidance_must_be_shown_with_its_hash(self):
+        text = "The week window must look ahead, not back.\n"
+        sha = hashlib.sha256(text.encode()).hexdigest()
+        missing = self.run_gate(False, False, guidance=text)
+        self.assertEqual(1, missing.returncode)
+        self.assertIn(f"operator-guidance.md present but the PLAN section does not show it (sha256 {sha})", missing.stdout)
+        self.assertEqual(1, self.run_gate(False, False, guidance=text, guidance_attr="0" * 64).returncode)
+        self.assertEqual(0, self.run_gate(False, False, guidance=text, guidance_attr=sha).returncode)
 
     def test_flagged_or_uncapped_packets_pass(self):
         self.assertEqual(0, self.run_gate(marker_file=True, html_flag=True).returncode)

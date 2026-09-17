@@ -432,6 +432,14 @@ nodes:
         refinement input. Preserve resolved requirements and recheck prior fixes;
         it is evidence, never approval. The independent critic still judges the
         current plan from source and the spec.
+      - If feature-chain-request.json names operator_guidance, read
+        operator-guidance.md in the same directory: a human operator's direction
+        for this replan. It ranks BELOW the spec for scope and requirements (it
+        cannot add or drop a requirement, repository, or acceptance criterion)
+        and ABOVE prior planning evidence and your own judgment for approach.
+        Where the spec is silent or ambiguous, follow it. Where it contradicts
+        the spec, follow the spec and record the conflict in the plan's
+        ## Approach. State under ## Approach how each guidance point is honored.
       Before finishing a joint plan, run python3
       /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/validate-joint-plan.py
       "$ARTIFACTS_DIR" and fix every diagnostic in planning artifacts. Do not
@@ -699,6 +707,12 @@ nodes:
             normalization into consumer decisions, including collapsed errors;
             a consumer cannot distinguish information discarded by its client.
 
+            If operator-guidance.md exists in the artifacts directory, read it: a
+            human operator's approach direction for this replan. It ranks below
+            the spec for scope and above planner judgment for approach, so an
+            approach choice the guidance dictates is not a finding unless it
+            contradicts the spec (then raise it, quoting both).
+
             DO NOT READ any earlier round's critique.json or revision.json. You are
             deliberately blind to prior rounds: a critic that reads its own earlier
             findings starts defending them instead of re-deriving them from the plan
@@ -822,6 +836,10 @@ nodes:
             artifact paths, optional export.argv, and integration {repo, argv};
             prose commands do not add hooks. Trace error normalization in clients
             before claiming distinct consumer handling.
+            If operator-guidance.md exists in the artifacts directory, a revision
+            must keep honoring it (below the spec for scope, above your judgment
+            for approach); a finding that asks you to undo it without citing the
+            spec is declined, citing a verbatim quote from operator-guidance.md.
 
             Otherwise the verdict is REVISE. Read the spec, plan.md,
             files-allowlist.json, web-files-allowlist.json, verify.json,
@@ -1223,6 +1241,12 @@ nodes:
       Identity by label, never color alone. Real names and paths only.
       <!-- PLAN --> The full plan, restyled for reading: keep every path,
       command, number, and decision VERBATIM, but present the prose cleanly.
+      If operator-guidance.md exists in the artifacts directory, OPEN this
+      section with an element carrying data-operator-guidance="<sha256>" (the
+      lowercase SHA-256 of that file's bytes, as operator_guidance.sha256 in
+      feature-chain-request.json records it)
+      that quotes the file verbatim under the heading "Operator guidance for
+      this replan", so the human approves the plan knowing what steered it.
       <!-- REVIEW --> What doc-review changed or flagged, in plain words: applied
       edits summarized from docreview.diff; unapplied findings from the envelope
       with their severity, one line each. If nothing, say so.
@@ -1304,6 +1328,10 @@ nodes:
         grep -qF "archon workflow $v" "$H" || { echo "RENDER_GATE=FAIL DECIDE box missing the $v command"; exit 1; }
       done
       cmp -s "$ARTIFACTS_DIR/plan.md" "$ARTIFACTS_DIR/plan.post-docreview.md" || { echo "RENDER_GATE=FAIL renderer modified plan.md"; exit 1; }
+      if [ -f "$ARTIFACTS_DIR/operator-guidance.md" ]; then
+        GSHA=$(python3 -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" "$ARTIFACTS_DIR/operator-guidance.md")
+        grep -qF "data-operator-guidance=\"$GSHA\"" "$H" || { echo "RENDER_GATE=FAIL operator-guidance.md present but the PLAN section does not show it (sha256 $GSHA)"; exit 1; }
+      fi
       if [ -f "$ARTIFACTS_DIR/plan-cap-unverified.json" ]; then
         grep -q 'data-cap-unverified' "$H" || { echo "RENDER_GATE=FAIL plan-cap-unverified.json present but the CRITIC section does not flag the un-recritiqued revision"; exit 1; }
       fi
