@@ -43,6 +43,10 @@ repo = sys.argv[1]
 PROFILES = {
     "api": {
         "install":   ["bun", "install", "--frozen-lockfile"],
+        # lockfile_scope.py: the lockfile follows package.json into scope. A
+        # frozen install never rewrites it, so lockfile-only drift is a breach.
+        "lockfiles": ["bun.lock", "bun.lockb"],
+        "lockfile_install_drift": "",
         "typecheck": ["bun", "run", "typecheck"],
         "lint":      ["bun", "run", "lint"],
         # jest's positional arg is a testPathPattern; the `--` keeps it out of
@@ -76,6 +80,8 @@ PROFILES = {
     "goodword-mcp": {
         # Node 20 via mise: the system default is 25 and the repo's CI pins 20.
         "install":   ["mise", "x", "node@20", "--", "pnpm", "install", "--frozen-lockfile"],
+        "lockfiles": ["pnpm-lock.yaml"],
+        "lockfile_install_drift": "",
         # `build` is `tsc && copy-static-assets`, so --noEmit IS the typecheck.
         "typecheck": ["mise", "x", "node@20", "--", "pnpm", "exec", "tsc", "--noEmit"],
         # No lint script in package.json. Declared absent, not inferred.
@@ -108,6 +114,11 @@ PROFILES = {
     # lane itself uses resolve-web-params.sh and consumes none of these.
     "web-app": {
         "install":   ["mise", "x", "node@20", "--", "pnpm", "install", "--no-frozen-lockfile"],
+        # The unfrozen install rewrites pnpm-lock.yaml at bootstrap (main's lock
+        # drifts from package.json), so UNCOMMITTED lockfile-only drift is
+        # expected here and is tolerated, never staged.
+        "lockfiles": ["pnpm-lock.yaml"],
+        "lockfile_install_drift": "1",
         "typecheck": ["mise", "x", "node@20", "--", "pnpm", "typecheck"],
         "lint":      ["mise", "x", "node@20", "--", "pnpm", "lint"],
         "test":      ["mise", "x", "node@20", "--", "pnpm", "test", "--run"],

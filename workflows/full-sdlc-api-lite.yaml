@@ -723,8 +723,10 @@ nodes:
       "${CMD_TEST[@]}" "$PAT" || { echo "GATE_TESTS=FAIL unit pattern=$PAT"; exit 1; }
     done < "$ARTIFACTS_DIR/gate-tests-patterns.txt"
     BASE=$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")
-    CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$|^ M pnpm-lock\.yaml$|^\?\? pnpm-lock\.yaml$' || true)
-    if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- . ':(exclude)pnpm-lock.yaml'; then
+    # No lockfile is noise here: every repo this lane serves (repo-profile.sh) installs
+    # frozen, so lockfile-only drift is content, and check-scope.py calls it a breach.
+    CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$' || true)
+    if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- .; then
       printf '{"outcome":"NO_CHANGE","repo":"%s","basis":"baseline-to-candidate content","baseline":"%s","head":"%s","pr_url":null}\n' "$REPO" "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
       echo "GATE_TESTS=PASS outcome=NO_CHANGE"
       exit 0
@@ -754,8 +756,10 @@ nodes:
     MSG=$(head -1 "$ARTIFACTS_DIR/commit-msg.txt" 2>/dev/null || true)
     test -n "$MSG" || MSG="feat(api): $SLUG"
     BASE=$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")
-    CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$|^ M pnpm-lock\.yaml$|^\?\? pnpm-lock\.yaml$' || true)
-    if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- . ':(exclude)pnpm-lock.yaml'; then
+    # No lockfile is noise here: every repo this lane serves (repo-profile.sh) installs
+    # frozen, so lockfile-only drift is content, and check-scope.py calls it a breach.
+    CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$' || true)
+    if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- .; then
       printf '{"outcome":"NO_CHANGE","repo":"%s","basis":"baseline-to-candidate content","baseline":"%s","head":"%s","pr_url":null}\n' "$REPO" "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
       echo "COMMIT_IMPL=SKIP outcome=NO_CHANGE"
       exit 0

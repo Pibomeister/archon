@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 import control_contract
+import lockfile_scope
 import review_delta_workflow
 import review_qualification
 import yaml
@@ -3368,7 +3369,10 @@ def candidate_from_artifacts(repo: str, row: dict, artifacts: Path, state: dict)
     git_output(worktree, "merge-base", "--is-ancestor", baseline, head)
     allowed = set(state["stages"][repo]["plan"]["files_allowlist"])
     changed = set(diff_files_since(worktree, baseline, head))
-    outside = sorted(changed - allowed)
+    # Same lockfile rule as check-scope.py: the lockfile that commit nodes staged
+    # with an in-scope package.json is part of the candidate, not a breach.
+    lockfiles, _ = lockfile_scope.judge(lockfile_scope.profile(repo), allowed, changed, set())
+    outside = sorted(changed - allowed - lockfiles)
     if outside:
         raise FeatureChainError(f"{repo} candidate changed files outside approved allowlist: {','.join(outside)}")
     assert_clean_worktree(worktree, repo)

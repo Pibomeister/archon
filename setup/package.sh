@@ -91,6 +91,7 @@ MANIFEST=(
   setup/check-feature-handoff-integrity.py
   setup/check-lite-prbody.py
   setup/check-scope.py
+  setup/lockfile_scope.py
   setup/check-slop.py
   setup/detach.py
   setup/gist-README.md
