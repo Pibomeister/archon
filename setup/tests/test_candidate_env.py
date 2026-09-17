@@ -7,6 +7,7 @@ node_modules and the env files, the chain's source worktree lives under
 outside the clone where Node's ancestor lookup cannot reach the clone.
 """
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -17,6 +18,7 @@ from pathlib import Path
 SETUP = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SETUP))
 import candidate_env as ce  # noqa: E402
+from nodes.extract import runnable_body  # noqa: E402
 
 GIT_ENV = dict(os.environ, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null")
 
@@ -25,7 +27,7 @@ def git(*args):
     return subprocess.run(["git", *args], env=GIT_ENV, check=True, capture_output=True, text=True).stdout.strip()
 
 
-class CandidateEnv(unittest.TestCase):
+class Fixture(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -60,6 +62,8 @@ class CandidateEnv(unittest.TestCase):
         os.environ["PATH"] = f"{bin_dir}:{path}"
         self.addCleanup(os.environ.__setitem__, "PATH", path)
 
+
+class CandidateEnv(Fixture):
     def test_resolves_from_the_root_clone_when_the_chain_worktree_has_nothing(self):
         result = ce.prepare("api", self.target, self.source)
         self.assertEqual({"node_modules": f"linked:{self.clone / 'node_modules'}"}, result["deps"])
@@ -123,6 +127,42 @@ class CandidateEnv(unittest.TestCase):
                              capture_output=True, text=True)
         self.assertEqual(1, bad.returncode)
         self.assertIn("CANDIDATE_ENV=FAIL unknown repo nope", bad.stdout)
+
+
+class StageBootstrap(Fixture):
+    """full-sdlc-api bootstrap: a chain stage worktree gets the profile's runtime
+    files too. Runs the SHIPPED block (extracted, not transcribed)."""
+
+    def block(self):
+        body = runnable_body("full-sdlc-api", "bootstrap")
+        match = re.search(r'^( *)if \[ "\$\{ARCHON_FEATURE_SCOPE-\}" = repositories \]; then\n(?:.*\n)*?\1fi\n', body, re.M)
+        blocks = [m for m in [match] if m and "candidate_env.py" in m.group(0)]
+        self.assertEqual(1, len(blocks), "stage runtime-env block not found in bootstrap")
+        return "set -euo pipefail\n" + blocks[0].group(0)
+
+    def run_block(self, scope):
+        env = dict(os.environ, REPO="api", WT=str(self.source))
+        env.pop("ARCHON_FEATURE_SCOPE", None)
+        if scope:
+            env["ARCHON_FEATURE_SCOPE"] = scope
+        return subprocess.run(["bash", "-c", self.block()], capture_output=True, text=True, env=env)
+
+    def test_repository_stage_links_the_e2e_env_file(self):
+        result = self.run_block("repositories")
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertEqual("E2E=root\n", (self.source / ".env.e2e").read_text())
+
+    def test_unresolvable_stage_environment_fails_bootstrap(self):
+        (self.clone / ".env.e2e").unlink()
+        result = self.run_block("repositories")
+        self.assertEqual(1, result.returncode)
+        self.assertIn("CANDIDATE_ENV=FAIL repo=api .env.e2e", result.stdout)
+        self.assertIn("BOOTSTRAP=FAIL stage runtime environment unresolved", result.stdout)
+
+    def test_legacy_runs_are_untouched(self):
+        result = self.run_block(None)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertFalse((self.source / ".env.e2e").exists())
 
 
 class JestCount(unittest.TestCase):

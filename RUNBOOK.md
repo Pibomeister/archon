@@ -1124,7 +1124,12 @@ Anything unresolvable stops the run with `CANDIDATE_ENV=FAIL repo=<repo>
 <entry>: not found in [<searched>]` (or the install's rc and output tail) before
 any command runs; the result JSON records what was linked or installed under
 `candidate_environments`. Fix the named file on the machine (for example
-`api/.env.e2e`) and resume. Plans therefore call a repository's existing test
+`api/.env.e2e`) and resume. A repository-scope stage's `bootstrap` runs the same
+resolution in its stage worktree after the install, so the implement node can run
+the stage's integration verification there; an unresolvable entry stops it with
+`BOOTSTRAP=FAIL stage runtime environment unresolved`. Smoke, gate-tests,
+exit-gate and local-candidate run in that bootstrapped worktree and need nothing
+more. Plans therefore call a repository's existing test
 command directly; a jest command gets its `ARCHON_INTEGRATION_TESTS=<n>` line
 from `python3 .archon/setup/jest-count.py <jest argv...>`, and plans must not add
 their own bootstrap scripts (the critic files those as scope). For
