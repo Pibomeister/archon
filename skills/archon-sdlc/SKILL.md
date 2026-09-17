@@ -599,11 +599,13 @@ reviewer. Stops here:
 - `DESLOP_GATE=FAIL <guard>` (typecheck/lint/unit/scope/slop) - the writer's own
   cleanup broke something. Hand-fix the worktree, resume; resume re-enters the
   loop fresh and re-checkpoints.
-- `DESLOP=DIRTY round=N blocking=N` - the independent reviewer session filed a
-  finding at confidence >=75. There is no automatic writer retry: hand-fix the
-  flagged issue in the worktree yourself, then resume.
-- `DESLOP_ROUND_CAP round=N` - the DIRTY-verdict counter hit 2. Same
-  resume-after-hand-fix pattern, or accept and ship with the residual noted.
+- `DESLOP=DIRTY round=N blocking=N` + `DESLOP_RETRY=PASS` - not a stop. The
+  reviewer filed a finding at confidence >=75; the gate exits 0 and the next
+  loop iteration's `deslop-fix` applies only those findings, then recheck and a
+  fresh reviewer run. Nothing to do.
+- `DESLOP_ROUND_CAP round=N` - the second DIRTY verdict (the automatic fix did
+  not clear it). Hand-fix the findings in `deslop-round-N/blocking-findings.json`
+  in the worktree, then resume, or accept and ship with the residual noted.
 - `DESLOP_REVIEW=FAIL coverage incomplete round=N <reason>` /
   `DESLOP_REVIEW=FAIL malformed finding round=N <reason>` /
   `DESLOP_REVIEW=FAIL verdict inconsistent round=N declared DIRTY with 0
@@ -660,9 +662,9 @@ resume (RUNBOOK §3).
   junk **counter** does.
 - `DESLOP_REVIEW=FAIL reviewer modified tree` (RUNBOOK §3b) - **never plain-resume**;
   run the printed restore triple first (§4 above), then resume.
-- `DESLOP=DIRTY`, `beyond_five_guards` findings (bugfix lane, RUNBOOK §12) - hand-fix
-  the flagged issue in the worktree before resuming; there is no automatic writer
-  retry.
+- `DESLOP_ROUND_CAP` (including `beyond_five_guards` findings on the bugfix lane,
+  RUNBOOK §12) - the one automatic fixer pass did not clear the reviewer; hand-fix
+  the flagged issue in the worktree before resuming.
 
 More iterations on any of these only burn quota. When you escalate, say which
 discriminator fired, which artifact file holds the evidence, and what the RUNBOOK
@@ -858,7 +860,8 @@ tee, quota). Differences that decide supervision calls:
   report anything else under `reported_not_fixed`; the reviewer diffs the
   writer's actual edits against that declaration and files
   `beyond_five_guards` for anything undeclared. It blocks like any other
-  finding — hand-fix (usually: revert the out-of-scope edit), then resume.
+  finding — the automatic fixer reverts the out-of-scope edit once; at
+  `DESLOP_ROUND_CAP` hand-fix (usually: revert the edit), then resume.
   `DESLOP_GATE=FAIL repro harness error rc=97` is a harness bug, not a
   regression — fix the environment, not the diff.
 - **Escalate, do not resume**, on: `CHAIN_CONFLICT` (blind verifier contradicts
