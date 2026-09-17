@@ -257,6 +257,12 @@ while IFS= read -r line; do
   [ -n "$line" ] && CHAIN_ENV+=("$line")
 done < <(test -n "$RUN_AD" && python3 "$(dirname "$0")/chain-env.py" "$RUN_AD" \
            --control-dir "${ARCHON_CONTROL_DIR:-$HOME/.archon/control/codex-lite}" 2>/dev/null || true)
+# Repository feature chains keep ARCHON_FEATURE_* in params.json, not a chain
+# file. Nodes that test the env directly (joint-integration) otherwise die with
+# "missing repository feature scope" on every resume.
+while IFS= read -r line; do
+  [ -n "$line" ] && CHAIN_ENV+=("$line")
+done < <(test -n "$RUN_AD" && python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); from feature_env import feature_env_all; [print(f"{k}={v}") for k, v in feature_env_all(sys.argv[2]).items()]' "$(dirname "$0")" "$RUN_AD" 2>/dev/null || true)
 if [ "${#CHAIN_ENV[@]}" -gt 0 ]; then
   echo "RESUME_CHAIN_ENV=RESTORED vars=${#CHAIN_ENV[@]}"
 elif [ -z "$RUN_AD" ]; then
