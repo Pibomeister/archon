@@ -32,6 +32,18 @@ class ReopenGate(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stdout)
         self.assertIn("REOPEN_GATE=SKIP", p.stdout)
 
+    def test_verify_only_needs_a_change_since_the_previous_head(self):
+        ad = self.artifacts(context=None, bound=False)
+        params = json.loads((ad / "params.json").read_text(encoding="utf-8"))
+        params.update(feature_verify_only="yes", feature_previous_head="3945463acb8d936efb36cef997cd76a8adefde3a")
+        (ad / "params.json").write_text(json.dumps(params), encoding="utf-8")
+        p = self.gate(ad, "NO_CHANGE")
+        self.assertEqual(p.returncode, 1, p.stdout)
+        self.assertIn("IMPLEMENT=FAIL verify-only reopen has no change since previous head 3945463acb8d", p.stdout)
+        p = self.gate(ad, "CHANGED")
+        self.assertEqual(p.returncode, 0, p.stdout)
+        self.assertIn("REOPEN_GATE=PASS verify-only", p.stdout)
+
     def test_no_change_with_context_fails_and_a_change_passes(self):
         ad = self.artifacts()
         p = self.gate(ad, "NO_CHANGE")
