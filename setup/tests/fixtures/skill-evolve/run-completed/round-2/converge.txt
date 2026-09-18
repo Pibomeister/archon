@@ -1,0 +1,3 @@
+ROUND=2 verdict=[Ready with fixes] fixer_ok=YES clean=YES head_moved=NO incomplete=0
+REVIEW_YIELD round=2 applied=2 verdict=DIMINISHING
+CONVERGED round=2

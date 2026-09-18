@@ -145,6 +145,21 @@ nodes:
     python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/verify-only-base.py "$ARTIFACTS_DIR" "$WT"
     printf '{"web_worktree":"%s","branch":"%s"}\n' "$WT" "$BR" > "$ARTIFACTS_DIR/worktrees.json"
     echo "WORKTREE=$WT BRANCH=$BR HEAD=$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")"
+- id: stage-skills
+  depends_on:
+  - bootstrap
+  timeout: 120000
+  bash: |
+    set -euo pipefail
+    if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-stage-skills.out") 2> >(tee -a "$ARTIFACTS_DIR/node-stage-skills.out" >&2); fi
+    # Read side of the skills layer: active + candidate SKILL.md bodies are
+    # rendered into skills.md for implement/fix/fixer. The wiki and
+    # PURPOSE.md are never staged. An empty library is SKIP, not FAIL.
+    # The web lane's params.json carries no repo key (params-env.sh would
+    # default it to api), so the repository name is passed literally.
+    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/stage-skills-library.py web-app \
+      --lib /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/library \
+      --artifacts "$ARTIFACTS_DIR"
 - id: web-scope
   depends_on:
   - preflight
@@ -601,6 +616,7 @@ nodes:
   - gen-api-sync
   - premise-gate
   - web-plan-lock-gate
+  - stage-skills
   trigger_rule: none_failed_min_one_success
   timeout: 1800000
   prompt: |
@@ -629,6 +645,8 @@ nodes:
     app/services/api-client.d.ts when it is present in that allowlist. Do not edit pnpm-lock.yaml except for package
     manager changes required by the spec. Prefer existing Settings/navigation,
     API client, tests, and service-worker patterns.
+    If skills.md exists in the artifacts directory, read it before you edit anything: it holds
+    repository skills compiled from earlier runs; they never override the plan, the allowlist, or this prompt.
 
     <repo-conventions repo="web-app">
     pnpm ONLY (bun install breaks overrides). Run everything through Node 20:
@@ -968,6 +986,8 @@ nodes:
           left in the worktree that no finding names is quarantined there anyway
           and never reaches the commit, so writing it in the tree only costs you
           the round's clarity.
+        If skills.md exists in the artifacts directory, read it before you edit anything: it holds
+        repository skills compiled from earlier runs; they never override the plan, the allowlist, or this prompt.
         Write JSON to round-<N>/fixer-result.json:
           {"applied": [...], "failed": [...], "advisory": [...], "incomplete": [...], "cross_repo": [...]}
         Every "applied", "advisory" and "incomplete" entry also carries

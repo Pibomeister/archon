@@ -74,6 +74,25 @@ class SetupScriptsArePackagedTest(unittest.TestCase):
         self.assertIn("feature_estimate.py", manifest_entries())
         self.assertIn("feature_chain.py", manifest_entries())
 
+    def test_stage_skills_library_is_shipped(self):
+        self.assertIn("stage-skills-library.py", manifest_entries())
+
+    def test_skill_evolve_helpers_are_shipped(self):
+        # skill_library.py is imported, not called, so the reference regex
+        # cannot see it; pin it by name with the four CLIs that import it.
+        entries = manifest_entries()
+        for name in ("skill_library.py", "trace-digest.py", "skill-score.py",
+                     "wiki-apply.py", "skill-admit.py"):
+            self.assertIn(name, entries, name)
+
+    def test_skill_evolve_workflow_is_packaged(self):
+        package = MANIFEST.read_text(encoding="utf-8")
+        self.assertIn("  workflows/skill-evolve.yaml\n", package)
+        self.assertIn("  library/README.md\n", package)
+        # Per-repo library trees must never ship: install.sh copies the payload
+        # over the target and would clobber an evolved registry.
+        self.assertNotRegex(package, r"^\s*library/(api|goodword-mcp|web-app)/", "per-repo library packaged")
+
     def test_canonical_test_runner_is_shipped_and_used_by_package(self):
         package = MANIFEST.read_text(encoding="utf-8")
         self.assertIn("setup/run-tests.py", package)

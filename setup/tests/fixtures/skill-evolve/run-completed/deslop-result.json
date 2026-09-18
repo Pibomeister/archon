@@ -1,0 +1,10 @@
+{
+  "changed_files": [],
+  "passes": [],
+  "reported_not_fixed": [],
+  "verification": {
+    "lint": 0,
+    "tests": 0,
+    "typecheck": 0
+  }
+}
