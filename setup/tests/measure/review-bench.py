@@ -81,7 +81,13 @@ def stage_skills(worktree, skills):
         if dest.exists():
             shutil.rmtree(dest)
         shutil.copytree(src, dest)
-    gitdir = Path(git(worktree, "rev-parse", "--git-dir"))
+    # --git-common-dir, NOT --git-dir. In a linked worktree the latter is
+    # .git/worktrees/<name>, whose info/exclude git never reads: exclusions come
+    # from $GIT_COMMON_DIR/info/exclude. Writing the wrong one left `.claude/`
+    # untracked-visible, and the read-only check then reported the harness's own
+    # skill staging as a reviewer that edited the candidate -- a false
+    # contract violation against the mode under test.
+    gitdir = Path(git(worktree, "rev-parse", "--git-common-dir"))
     if not gitdir.is_absolute():
         gitdir = Path(worktree) / gitdir
     exclude = gitdir / "info" / "exclude"
