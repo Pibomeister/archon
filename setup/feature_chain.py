@@ -2378,8 +2378,14 @@ def current_implementation_repo(state: dict, row: dict) -> str:
     return repo
 
 
-def require_scope_amendment_open(state: dict) -> None:
-    if state.get("candidate_handoffs"):
+def require_scope_amendment_open(state: dict, repo: str | None = None) -> None:
+    """A stage that has already verified is closed to amendment. Keyed on the
+    stage being amended, not on the whole map: in a two-repository chain the
+    second stage is amended exactly when the first has verified (chain
+    1f7a896a), and the whole-map check left it no guarded lever at all."""
+    handoffs = state.get("candidate_handoffs") or {}
+    closed = handoffs.get(repo) if repo else handoffs
+    if closed:
         raise FeatureChainError("feature-scope-amend cannot modify a chain with verified candidate handoffs")
     if state.get("integration") or state.get("status") == "locally_verified":
         raise FeatureChainError("feature-scope-amend cannot modify a chain after integration")
@@ -2625,10 +2631,10 @@ def require_no_incomplete_pin_amendment(state: dict) -> None:
         raise FeatureChainError("pin amendment is incomplete; retry feature-pin-amend before dispatch")
 
 
-def require_pin_amendment_open(state: dict) -> None:
+def require_pin_amendment_open(state: dict, repo: str | None = None) -> None:
     """Scope-amend's refusal rule verbatim, reworded for whoever ran this command."""
     try:
-        require_scope_amendment_open(state)
+        require_scope_amendment_open(state, repo)
     except FeatureChainError as exc:
         raise FeatureChainError(str(exc).replace("feature-scope-amend", "feature-pin-amend")) from exc
 
@@ -2843,8 +2849,8 @@ def pin_amend_command(host: Any, args: Any, row: dict, chain_id: str | None = No
             raise FeatureChainError("repository-list feature control already in progress")
         if state.get("dispatch_reservation") is not None:
             raise FeatureChainError("repository-list feature dispatch already in progress")
-        require_pin_amendment_open(state)
         repo = current_implementation_repo(state, row)
+        require_pin_amendment_open(state, repo)
         payload = pin_amendment_payload(chain_id, row["id"], repo, symbol, allowed_change, reason)
         amendment_id = digest(payload)
         existing = state.get("pin_amendment")
@@ -3235,8 +3241,8 @@ def scope_amend_command(host: Any, args: Any, row: dict, chain_id: str | None = 
             raise FeatureChainError("repository-list feature control already in progress")
         if state.get("dispatch_reservation") is not None:
             raise FeatureChainError("repository-list feature dispatch already in progress")
-        require_scope_amendment_open(state)
         repo = current_implementation_repo(state, row)
+        require_scope_amendment_open(state, repo)
         add_file = validate_scope_add_file(state, repo, add_file_arg)
         payload = scope_amendment_payload(chain_id, row["id"], repo, add_file, reason)
         amendment_id = digest(payload)

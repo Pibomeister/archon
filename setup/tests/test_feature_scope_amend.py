@@ -289,6 +289,21 @@ class FeatureScopeAmend(unittest.TestCase):
         with self.assertRaisesRegex(fc.FeatureChainError, "approval"):
             fc.scope_amend_command(self.host, self.args, self.row)
 
+    def test_another_stages_verified_handoff_does_not_close_this_stage(self):
+        # Chain 1f7a896a: api verified, goodword-mcp took a one-file breach, and the
+        # whole-map handoff check refused the only writer that re-signs both copies.
+        state = self.state(); state["candidate_handoffs"] = {"goodword-mcp": {"candidate_head": "1" * 40}}
+        fc.write_state(self.control, state)
+        with mock.patch("builtins.print"):
+            fc.scope_amend_command(self.host, self.args, self.row)
+        latest = self.state()
+        self.assertIn(self.args.add_file, latest["approved_plan"]["stages"]["api"]["files_allowlist"])
+        # Negative control: this stage's own handoff still refuses.
+        state = self.state(); state["candidate_handoffs"] = {"api": {"candidate_head": "0" * 40}}
+        fc.write_state(self.control, state)
+        with self.assertRaisesRegex(fc.FeatureChainError, "handoffs"):
+            fc.scope_amend_command(self.host, self.args, self.row)
+
     def test_path_must_be_safe_tracked_current_repo_file_and_not_symlink(self):
         untracked = Path(self.state()["worktrees"]["api"]["worktree"]) / "untracked.txt"
         untracked.write_text("x\n", encoding="utf-8")
