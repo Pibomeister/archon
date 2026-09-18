@@ -104,14 +104,16 @@ class StageSkillsNode(unittest.TestCase):
         for lane in ALL:
             with self.subTest(lane=lane):
                 body = nodes(lane)["stage-skills"]["bash"]
+                # the repo is the helper's positional argument, not a flag
+                self.assertNotIn("--repo", body)
                 if lane.startswith("full-sdlc-web"):
-                    self.assertIn("--repo web-app", body)
+                    self.assertIn("stage-skills-library.py web-app", body)
                     self.assertNotIn('params-env.sh "', body)  # never invoked (a comment may name it)
                     self.assertNotIn("$REPO", body)
                 else:
                     self.assertIn("params-env.sh", body)
-                    self.assertIn('--repo "$REPO"', body)
-                    self.assertNotIn("--repo web-app", body)
+                    self.assertRegex(body, r'stage-skills-library\.py"? "\$REPO"')
+                    self.assertNotIn("web-app", body)
 
     def test_lite_manifests_declare_the_node(self):
         for name, consumer in (("api", "implement"), ("bugfix", "fix-loop")):

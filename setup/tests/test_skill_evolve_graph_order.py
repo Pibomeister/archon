@@ -131,6 +131,24 @@ class BashBodies(unittest.TestCase):
             self.assertIn(frag, body, frag)
         self.assertLess(body.index("ensure_skeleton"), body.index("git-check"))
         self.assertLess(body.index("git-check"), body.index("mkdir \"$LOCK\""))
+        # repo.txt names the lock the report node must release, so it exists
+        # before the lock does: a kill in between must not leak an orphan lock.
+        self.assertLess(body.index("$ARTIFACTS_DIR/repo.txt"), body.index("mkdir \"$LOCK\""))
+        self.assertLess(body.index("$ARTIFACTS_DIR/source-run.txt"), body.index("mkdir \"$LOCK\""))
+
+    def test_every_commit_names_the_run_that_holds_the_lock(self):
+        # commit is an operator lever: it refuses while a foreign evolve run
+        # holds the repo lock, so the lane's own commits must identify
+        # themselves as the holder or the run would refuse its own writes.
+        seen = 0
+        for nid, body in self.bash().items():
+            for line in body.splitlines():
+                if 'skill-admit.py" commit' not in line:
+                    continue
+                seen += 1
+                self.assertIn('--evolve-run "$RID_SELF"', line, f"{nid}: {line.strip()}")
+                self.assertIn("RID_SELF=", body, nid)
+        self.assertEqual(seen, 5, "every commit call site must be checked")
 
     def test_score_run_commits_after_ingest(self):
         body = self.bash()["score-run"]
@@ -145,10 +163,14 @@ class BashBodies(unittest.TestCase):
     def test_report_flags(self):
         body = self.bash()["report"]
         for frag in ("EVOLVE_LOCK=RELEASED", "EVOLVE_LOCK=NOT_OWNED", "SKILL_IMPACT_TAIL",
+                     "SKILL_EVOLVE=FAIL wiki-gate refused the patch; the proposal chain was skipped",
                      "SKILL_EVOLVE=FAIL route said propose=yes but proposal-gate left no result",
                      "SKILL_EVOLVE=FAIL run $RID_SRC was not ingested",
                      'echo "SKILL_EVOLVE=OK run=$RID_SRC repo=$REPO wiki=$WIKI proposal=$PROPOSAL outcome=$OUTCOME"'):
             self.assertIn(frag, body, frag)
+        # a wiki refusal is named before the generic "no proposal result" check,
+        # which would otherwise blame the proposer for a wiki failure
+        self.assertLess(body.index('"$WIKI" = FAIL'), body.index('"$PROPOSE" = yes'))
 
 
 class Prompts(unittest.TestCase):

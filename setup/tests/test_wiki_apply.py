@@ -135,6 +135,7 @@ class HappyPath(Base):
         self.assertTrue(changed and all(c.startswith("library/api/") for c in changed), changed)
         self.assertEqual(self.lib.porcelain("api"), "")
         out = json.loads((self.tmp / "out.json").read_text())
+        self.assertEqual(out["schema"], sl.SCHEMA_WIKI_GATE_RESULT)
         self.assertEqual((out["result"], out["created"], out["patched"], out["run_id"]), ("PASS", ["new-one"], ["old-one"], RUN))
         self.assertEqual(out["commit"], self.lib.head())
 
@@ -162,7 +163,17 @@ class HappyPath(Base):
         self.assertNotIn("LIBRARY_COMMIT", r.stdout)
         self.assertEqual(tree(self.lib.root), before)
         self.assertEqual(self.lib.head(), head)
-        self.assertTrue(json.loads((self.tmp / "o.json").read_text())["dry_run"])
+        o = json.loads((self.tmp / "o.json").read_text())
+        self.assertEqual(o["schema"], sl.SCHEMA_WIKI_GATE_RESULT)
+        self.assertTrue(o["dry_run"])
+
+    def test_refusal_summary_is_schema_tagged(self):
+        out = self.tmp / "refused.json"
+        r = self.apply([{"op": "delete", "slug": "x"}], extra=["--out", str(out)])
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        summary = json.loads(out.read_text())
+        self.assertEqual((summary["schema"], summary["result"]), (sl.SCHEMA_WIKI_GATE_RESULT, "FAIL"))
+        self.assertIn("unknown op 'delete'", summary["reason"])
 
     def test_git_less_library_applies_and_skips_commit(self):
         lib = TempLibrary(git_init=False)
@@ -180,6 +191,45 @@ class HappyPath(Base):
         r = self.apply([create("cites-old", s)])
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertEqual(sl.parse_pattern(self.page("cites-old"))[0]["runs"], [RUN])
+
+
+class WritePhaseFailure(Base):
+    """The build passed and git then refuses. The node owns that failure."""
+
+    def lock_git_index(self):
+        lock = Path(self.lib.top) / ".git" / "index.lock"
+        lock.write_text("held by another git\n")
+        self.addCleanup(lambda: lock.exists() and lock.unlink())
+        return lock
+
+    def test_a_refused_commit_is_the_gates_own_typed_line(self):
+        out = self.tmp / "wiki-gate-result.json"
+        head = self.lib.head()
+        self.lock_git_index()
+        r = self.apply([create("p")], extra=["--out", str(out)])
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertTrue(self.last(r).startswith("WIKI_GATE=FAIL write phase: "), r.stdout)
+        self.assertIn("git add failed", self.last(r))
+        self.assertNotIn("Traceback", r.stderr)
+        summary = json.loads(out.read_text())
+        self.assertEqual(summary["result"], "FAIL")
+        self.assertIn("git add failed", summary["reason"])
+        self.assertEqual(summary["created"], ["p"], "the operator still learns which pages were built")
+        self.assertEqual(self.lib.head(), head, "nothing may be committed")
+        # the page is on disk but uncommitted: the RUNBOOK section 17 recipe
+        self.assertNotEqual(self.lib.porcelain("api"), "")
+
+    def test_a_refused_quarantine_commit_is_typed_too(self):
+        self.lib.add_pattern("p", runs=(RUN,))
+        self.lib.commit("seed")
+        head = self.lib.head()
+        self.lock_git_index()
+        r = run(["quarantine", "api", "p", "--lib", str(self.lib.root), "--reason", "contradicted"])
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertTrue(self.last(r).startswith("WIKI_QUARANTINE=FAIL write phase: "), r.stdout)
+        self.assertIn("git add failed", self.last(r))
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertEqual(self.lib.head(), head)
 
 
 class Refusals(Base):
@@ -359,6 +409,27 @@ class Quarantine(Base):
         self.assertEqual(tree(self.lib.root), before)
         self.assertEqual(self.lib.head(), head)
         self.assertEqual(sl.read_impact(self.lib.root, "api"), [])
+
+    def test_a_held_evolve_lock_refuses_the_lever(self):
+        # quarantine rewrites a page and commits it; doing that mid-run would
+        # fold the operator's decision into the live run's commit.
+        self.lib.add_pattern("p", runs=(RUN,))
+        self.lib.commit("seed")
+        lock = Path(self.lib.root) / ".locks" / "api.evolve.lock"
+        lock.mkdir(parents=True)
+        (lock / "owner").write_text("ev-20260917-99999999\n", encoding="utf-8")
+        before, head = tree(self.lib.root), self.lib.head()
+        r = self.q("p")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(self.last(r), "WIKI_QUARANTINE=FAIL evolve lock held by ev-20260917-99999999")
+        r = self.q("p", extra=["--evolve-run", "ev-other"])
+        self.assertEqual(self.last(r), "WIKI_QUARANTINE=FAIL evolve lock held by ev-20260917-99999999")
+        self.assertEqual(tree(self.lib.root), before)
+        self.assertEqual(self.lib.head(), head)
+        # the holder itself may still act
+        r = self.q("p", extra=["--evolve-run", "ev-20260917-99999999"])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.last(r), "WIKI_QUARANTINE=OK slug=p status=contested")
 
 
 class LintAndIndex(Base):

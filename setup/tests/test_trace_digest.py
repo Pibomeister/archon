@@ -23,6 +23,10 @@ _spec = importlib.util.spec_from_file_location("trace_digest", SCRIPT)
 td = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(td)
 
+_ss_spec = importlib.util.spec_from_file_location("skill_score", SETUP / "skill-score.py")
+ss = importlib.util.module_from_spec(_ss_spec)
+_ss_spec.loader.exec_module(ss)
+
 
 def run(args, cwd=None):
     return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True,
@@ -214,6 +218,75 @@ class Typed(Base):
         write(self.ad, "waivers.json", {"schema": "archon.waiver-ledger.v1",
                                         "entries": [{"finding": "Rename it"}, {"finding": "Split it"}, {"no": "finding"}]})
         self.assertEqual(self.digest()["waivers"], {"count": 3, "findings": ["Rename it", "Split it"]})
+
+
+class ScoreComponents(Base):
+    """trace-digest.py counts the score's components for its typed line;
+    skill-score.py weighs them. Both read the same digest, so the keys they
+    share must not drift apart, and the keys they do not share must diverge
+    only in the way score_components' docstring documents."""
+
+    # trace-digest spells two keys out and collapses the four applied
+    # severities into one bucket, because it weighs nothing.
+    RENAMED = {"review_rounds_beyond_first": "review_rounds_extra",
+               "plan_rounds_beyond_first": "plan_rounds_extra"}
+    SEVERITY_KEYS = ("applied_p0", "applied_p1", "applied_p2", "applied_p3")
+
+    def busy_digest(self):
+        """A run that makes every component non-zero, so no comparison below
+        passes by comparing zero with zero."""
+        write(self.ad, "plan.md", "# plan\n")
+        write(self.ad, "plan-round.txt", "2\n")
+        write(self.ad, "plan-round-1/converge.txt", "PLAN_ROUND_PROGRESSED round=1\n")
+        write(self.ad, "round.txt", "2\n")
+        write(self.ad, "round-1/review-summary.json",
+              {"verdict": "Not ready", "residual_count": 2, "degraded": False})
+        write(self.ad, "round-1/fixer-result.json",
+              self.fixer(applied=(("Cache key omits tenant", "P0"), ("Missing test", "P1"),
+                                  ("Rename it", "P2"), ("Comment it", "P3")),
+                         incomplete=("Snapshot",)))
+        write(self.ad, "round-2/fixer-result.json", self.fixer(applied=(("Cache key omits tenant", "P0"),)))
+        write(self.ad, "waivers.json", {"entries": [{"finding": "Split it"}]})
+        write(self.ad, "deslop-round.txt", "1\n")
+        write(self.ad, "deslop-dirty.txt", "1\n")
+        write(self.ad, "node-a.out", "NO_PROGRESS round=2\n")
+        write(self.ad, "node-b.out", "CROSS_REPO_FINDING repo=web\n")
+        d = self.digest()
+        self.assertEqual(d["terminal"], "failed")
+        return d
+
+    def test_shared_keys_agree_and_divergence_is_the_documented_one(self):
+        d = self.busy_digest()
+        mine, theirs = td.score_components(d), ss.components(d)
+        for key, value in mine.items():
+            self.assertTrue(value, f"{key} is zero, the cross-check would be vacuous")
+        shared = sorted(set(mine) & set(theirs))
+        self.assertTrue(shared)
+        for key in shared:
+            self.assertEqual(mine[key], theirs[key], key)
+        for mine_key, their_key in self.RENAMED.items():
+            self.assertEqual(mine[mine_key], theirs[their_key], mine_key)
+        self.assertEqual(mine["applied_findings"], sum(theirs[k] for k in self.SEVERITY_KEYS))
+        # and nothing else is unaccounted for on either side
+        self.assertEqual(set(mine) - set(shared) - set(self.RENAMED) - {"applied_findings"}, set())
+        self.assertEqual(set(theirs) - set(shared) - set(self.RENAMED.values()) - set(self.SEVERITY_KEYS), set())
+        self.assertEqual(set(theirs), set(ss.WEIGHTS))
+
+    def test_both_readers_split_the_rca_plan_tokens_the_same_way(self):
+        # The loop bucket is a membership set on both sides, so a rejected plan
+        # is a failed terminal here and a failed terminal there.
+        d = self.busy_digest()
+        d["typed"]["fail_terminals"] = ["RCA_PLAN_ROUND_CAP", "RCA_PLAN_REJECTED"]
+        d["typed"]["fail_tokens"] = {"RCA_PLAN_ROUND_CAP": 1, "RCA_PLAN_REJECTED": 1}
+        for comp in (td.score_components(d), ss.components(d)):
+            self.assertEqual((comp["loop_failure_tokens"], comp["other_fail_terminals"]), (1, 1))
+
+    def test_typed_line_counts_the_same_components(self):
+        d = self.busy_digest()
+        self.assertEqual(sum(1 for v in td.score_components(d).values() if v), len(td.score_components(d)))
+        r = run([str(self.ad)])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("score_inputs=10", r.stdout.strip().splitlines()[-1])
 
 
 class RepoAndLane(Base):

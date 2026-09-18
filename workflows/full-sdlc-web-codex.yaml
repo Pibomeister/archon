@@ -155,9 +155,9 @@ nodes:
     # PURPOSE.md are never staged. An empty library is SKIP, not FAIL.
     # The web lane's params.json carries no repo key (params-env.sh would
     # default it to api), so the repository name is passed literally.
-    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/stage-skills-library.py \
-      --library /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/library \
-      --repo web-app --artifacts "$ARTIFACTS_DIR"
+    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/stage-skills-library.py web-app \
+      --lib /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/library \
+      --artifacts "$ARTIFACTS_DIR"
 - id: web-scope
   depends_on:
   - preflight

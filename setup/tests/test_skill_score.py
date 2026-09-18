@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from skill_fixtures import TempLibrary, skill_text
 import skill_library as sl
@@ -86,15 +87,19 @@ class Base(unittest.TestCase):
         return {"schema": sl.SCHEMA_STAGED, "repo": "api", "result": "OK",
                 "skills": [{"name": name, "status": status, "sha256": sha, "bytes": 1, "path": f"skills/{name}/SKILL.md"}]}
 
-    def seed_candidate(self, name="cand", baseline=({"run_id": "b1", "score": 20.0},), window=3):
+    def seed_candidate(self, name="cand", baseline=None, window=3):
+        # A frozen baseline is always exactly window_size runs long (admission
+        # refuses a short one), so the default fixture is too.
+        rows = list(baseline) if baseline is not None else [
+            {"run_id": f"b{i + 1}", "score": 20.0} for i in range(window)]
         self.lib.add_skill(name, status="candidate",
-                           scoring={"window_size": window, "baseline_runs": list(baseline), "candidate_runs": []})
+                           scoring={"window_size": window, "baseline_runs": rows, "candidate_runs": []})
         return name
 
 
 class Weights(unittest.TestCase):
     def test_score_version_and_weights_pinned(self):
-        self.assertEqual(ss.SCORE_VERSION, 1)
+        self.assertEqual(ss.SCORE_VERSION, 2)
         self.assertEqual(ss.WEIGHTS, {
             "review_rounds_extra": 10, "applied_p0": 8, "applied_p1": 4, "applied_p2": 2, "applied_p3": 1,
             "fixer_incomplete": 3, "reraised": 3, "waivers": 1, "deslop_dirty_rounds": 5,
@@ -152,10 +157,26 @@ class Weights(unittest.TestCase):
 
     def test_loop_failure_tokens(self):
         for t in ("NO_PROGRESS", "FIXER_BLOCKED", "ROUND_CAP_REACHED", "DESLOP_ROUND_CAP",
-                  "PLAN_NO_PROGRESS", "PLAN_ROUND_CAP", "SCOPE_BREACH", "RCA_PLAN_ROUND_CAP", "RCA_PLAN_X"):
+                  "PLAN_NO_PROGRESS", "PLAN_ROUND_CAP", "SCOPE_BREACH",
+                  "RCA_PLAN_ROUND_CAP", "RCA_PLAN_NO_PROGRESS"):
             self.assertTrue(ss.is_loop_failure_token(t), t)
-        for t in ("CROSS_REPO_FINDING", "SMOKE", "PLAN_REJECTED"):
+        # membership, never a prefix: a rejected or disputed plan is a verdict
+        # on one plan, not a loop that ran out of rounds
+        for t in ("CROSS_REPO_FINDING", "SMOKE", "PLAN_REJECTED",
+                  "RCA_PLAN_REJECTED", "RCA_PLAN_SCOPE_DISPUTE", "RCA_PLAN_X"):
             self.assertFalse(ss.is_loop_failure_token(t), t)
+
+    def test_a_rejected_rca_plan_costs_a_terminal_not_a_loop(self):
+        # The regression the explicit set closes: RCA_PLAN_REJECTED used to
+        # match the RCA_PLAN_ prefix and score 20 instead of 10.
+        base, _ = ss.score(digest())
+        d = digest(typed={"fail_terminals": ["RCA_PLAN_REJECTED"], "fail_tokens": {}, "warn_lines": 0, "nodes": {}})
+        self.assertEqual(ss.score(d)[0], base + ss.WEIGHTS["other_fail_terminals"])
+        d = digest(typed={"fail_terminals": ["RCA_PLAN_ROUND_CAP"],
+                          "fail_tokens": {"RCA_PLAN_ROUND_CAP": 1}, "warn_lines": 0, "nodes": {}})
+        comp = ss.score(d)[1]
+        self.assertEqual((comp["loop_failure_tokens"], comp["other_fail_terminals"]), (1, 0))
+        self.assertEqual(ss.score(d)[0], base + ss.WEIGHTS["loop_failure_tokens"])
 
     def test_missing_blocks_read_as_zero(self):
         d = digest()
@@ -196,6 +217,16 @@ class ScoreCli(Base):
         r = run(["score", str(p)])
         self.assertEqual(r.returncode, 1)
         self.assertIn("schema", r.stdout)
+        # a run_id with a separator would name a path, not a run
+        p.write_text(json.dumps({"schema": sl.SCHEMA_DIGEST, "run_id": "a/b", "terminal": "completed"}))
+        r = run(["score", str(p)])
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("run_id missing or invalid", r.stdout)
+        # an unrecognised terminal is refused rather than scored as incomplete
+        p.write_text(json.dumps({"schema": sl.SCHEMA_DIGEST, "run_id": "r-1", "terminal": "exploded"}))
+        r = run(["score", str(p)])
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("terminal 'exploded' not in", r.stdout)
         r = run(["score", str(self.tmp / "missing.json")])
         self.assertEqual(r.returncode, 1)
 
@@ -217,7 +248,7 @@ class Ingest(Base):
         self.assertEqual((row["run_id"], row["lane"], row["terminal"], row["outcome"]),
                          ("r-0001", "feature", "completed", "CHANGED"))
         self.assertEqual((row["eligible"], row["eligibility_reason"], row["score"], row["score_version"]),
-                         (True, "completed", 3.0, 1))
+                         (True, "completed", 3.0, ss.SCORE_VERSION))
         self.assertEqual(row["skills_staged"], [])
         self.assertIsNone(row["attributed_to"])
         self.assertEqual(row["library_head"], self.lib.head())
@@ -312,6 +343,43 @@ class Attribution(Base):
         r = run(["window", "api", "--lib", str(self.lib.root)])
         self.assertEqual((r.returncode, last(r)), (0, "SKILL_WINDOW=NONE"))
 
+    def test_window_without_a_skills_index_is_a_typed_fail(self):
+        empty = self.tmp / "no-library"
+        empty.mkdir()
+        r = run(["window", "api", "--lib", str(empty)])
+        self.assertEqual((r.returncode, last(r)), (1, "SKILL_SCORE=FAIL no skills index for api"))
+        self.assertNotIn("Traceback", r.stderr)
+
+
+class ScoreVersionStamp(Base):
+    """The index carries the version the NEXT candidate is frozen against."""
+
+    def test_a_free_index_takes_the_current_version(self):
+        self.assertEqual(self.lib.index()["score_version"], ss.SCORE_VERSION)
+        nxt = ss.SCORE_VERSION + 1
+        with mock.patch.object(ss, "SCORE_VERSION", nxt):
+            ss.ingest(str(self.lib.root), "api", str(self.write_digest(digest())), "ev-1")
+        self.assertEqual(self.lib.index()["score_version"], nxt)
+        self.assertEqual(self.ledger()[0]["score_version"], nxt)
+
+    def test_an_open_window_keeps_the_old_version_and_closes_inconclusive(self):
+        name = self.seed_candidate()
+        cur, nxt = ss.SCORE_VERSION, ss.SCORE_VERSION + 1
+        with mock.patch.object(ss, "SCORE_VERSION", nxt):
+            for i in (1, 2):
+                d = digest(run_id=f"c-{i}", staged=self.staged_for(name))
+                out = ss.ingest(str(self.lib.root), "api", str(self.write_digest(d)), f"ev-{i}")
+                self.assertTrue(out["window"]["state"].startswith("open("), out["window"])
+                self.assertEqual(self.lib.index()["score_version"], cur,
+                                 "a pending candidate pins the version it was frozen against")
+            d = digest(run_id="c-3", staged=self.staged_for(name))
+            out = ss.ingest(str(self.lib.root), "api", str(self.write_digest(d)), "ev-3")
+        self.assertEqual(out["window"]["state"], "closed:inconclusive")
+        self.assertEqual(out["window"]["reason"], "score_version_mismatch")
+        self.assertEqual(self.lib.index()["skills"][name]["status"], "rolled_back")
+        # the window that was open when the version moved is the only one it costs
+        self.assertEqual(self.lib.index()["score_version"], nxt)
+
 
 class Windows(Base):
     def fill(self, name, scores, prefix="c"):
@@ -324,7 +392,8 @@ class Windows(Base):
         return out
 
     def test_accept_path(self):
-        name = self.seed_candidate(baseline=({"run_id": "b1", "score": 20.0}, {"run_id": "b2", "score": 10.0}))
+        name = self.seed_candidate(baseline=({"run_id": "b1", "score": 20.0}, {"run_id": "b2", "score": 10.0},
+                                            {"run_id": "b3", "score": 15.0}))
         r = self.fill(name, (5, 10, 15))  # mean 10 < 15
         lines = r.stdout.strip().splitlines()
         self.assertEqual(lines[-2], f"SKILL_WINDOW=ACCEPT skill={name} baseline=15.00 candidate=10.00")
@@ -339,7 +408,7 @@ class Windows(Base):
         ev = self.impact()[-1]
         self.assertEqual((ev["event"], ev["skill"], ev["evolve_run_id"], ev["reason"]), ("accepted", name, "ev-3", "better"))
         self.assertEqual(ev["details"]["candidate_runs"], ["c-1", "c-2", "c-3"])
-        self.assertEqual(ev["details"]["baseline_runs"], ["b1", "b2"])
+        self.assertEqual(ev["details"]["baseline_runs"], ["b1", "b2", "b3"])
         self.assertEqual((ev["details"]["baseline_mean"], ev["details"]["candidate_mean"]), (15.0, 10.0))
         md = Path(self.lib.paths()["impact_md"]).read_text()
         self.assertIn(f"accepted {name}", md)
@@ -347,7 +416,8 @@ class Windows(Base):
         self.assertIn(f"skill {name} accepted", log)
 
     def test_rollback_removes_a_created_candidate(self):
-        name = self.seed_candidate(baseline=({"run_id": "b1", "score": 5.0},))
+        name = self.seed_candidate(baseline=({"run_id": "b1", "score": 5.0}, {"run_id": "b2", "score": 5.0},
+                                            {"run_id": "b3", "score": 5.0}))
         r = self.fill(name, (10, 10, 10))
         lines = r.stdout.strip().splitlines()
         self.assertEqual(lines[-2], f"SKILL_WINDOW=ROLLBACK skill={name} reason=worse baseline=5.00 candidate=10.00")
@@ -371,7 +441,10 @@ class Windows(Base):
         (snap / "PURPOSE.md").write_text("origin: old\n")
         self.lib.add_skill(name, status="candidate", text=new,
                            rollback={"existed": True, "sha256": sl.sha256_bytes(old.encode()), "snapshot": f".rollback/{name}"},
-                           scoring={"window_size": 2, "baseline_runs": [{"run_id": "b1", "score": 3.0}], "candidate_runs": []})
+                           scoring={"window_size": 2,
+                                    "baseline_runs": [{"run_id": "b1", "score": 3.0},
+                                                      {"run_id": "b2", "score": 3.0}],
+                                    "candidate_runs": []})
         r = self.fill(name, (3, 3))  # tie
         lines = r.stdout.strip().splitlines()
         self.assertEqual(lines[-2], f"SKILL_WINDOW=ROLLBACK skill={name} reason=tie baseline=3.00 candidate=3.00")
@@ -396,7 +469,7 @@ class Windows(Base):
 
     def test_score_version_mismatch_is_inconclusive(self):
         idx = self.lib.index()
-        idx["score_version"] = 2
+        idx["score_version"] = ss.SCORE_VERSION + 1
         self.lib.write_index(idx)
         name = self.seed_candidate(window=1)
         r = self.fill(name, (1,))
@@ -406,6 +479,18 @@ class Windows(Base):
         self.assertTrue(lines[-1].endswith("window=closed:inconclusive"))
         self.assertEqual(self.lib.index()["skills"][name]["status"], "rolled_back")
         self.assertEqual(self.impact()[-1]["reason"], "score_version_mismatch")
+
+    def test_short_baseline_is_inconclusive(self):
+        # A hand-edited window whose baseline is shorter than K cannot be
+        # compared: the two means are over different sample sizes.
+        name = self.seed_candidate(baseline=({"run_id": "b1", "score": 20.0},), window=2)
+        r = self.fill(name, (1, 1))
+        lines = r.stdout.strip().splitlines()
+        self.assertEqual(lines[-2],
+                         f"SKILL_WINDOW=ROLLBACK skill={name} reason=short_baseline baseline=20.00 candidate=1.00")
+        self.assertTrue(lines[-1].endswith("window=closed:inconclusive"))
+        self.assertEqual(self.lib.index()["skills"][name]["status"], "rolled_back")
+        self.assertEqual(self.impact()[-1]["reason"], "short_baseline")
 
     def test_no_baseline_is_inconclusive(self):
         name = self.seed_candidate(baseline=(), window=1)
@@ -431,17 +516,17 @@ class Baseline(Base):
                                      ("d", True, 4.0, "2026-09-01T00:00:04Z"),
                                      ("e", True, 5.0, "2026-09-01T00:00:05Z")):
             self.lib.add_raw_run(rid, eligible=elig, score=score, ingested_at=at)
-        self.assertEqual(ss.baseline_runs(self.lib.root, "api", 3),
+        self.assertEqual(sl.baseline_runs(self.lib.root, "api", 3),
                          [{"run_id": "c", "score": 3.0}, {"run_id": "d", "score": 4.0}, {"run_id": "e", "score": 5.0}])
-        self.assertEqual(ss.baseline_runs(self.lib.root, "api", 2, before_iso="2026-09-01T00:00:04Z"),
+        self.assertEqual(sl.baseline_runs(self.lib.root, "api", 2, before_iso="2026-09-01T00:00:04Z"),
                          [{"run_id": "a", "score": 1.0}, {"run_id": "c", "score": 3.0}])
-        self.assertEqual(ss.baseline_runs(self.lib.root, "api", 10), [
+        self.assertEqual(sl.baseline_runs(self.lib.root, "api", 10), [
             {"run_id": "a", "score": 1.0}, {"run_id": "c", "score": 3.0},
             {"run_id": "d", "score": 4.0}, {"run_id": "e", "score": 5.0}])
-        self.assertEqual(ss.baseline_runs(self.lib.root, "api", 0), [])
+        self.assertEqual(sl.baseline_runs(self.lib.root, "api", 0), [])
 
     def test_empty_ledger(self):
-        self.assertEqual(ss.baseline_runs(self.lib.root, "api", 3), [])
+        self.assertEqual(sl.baseline_runs(self.lib.root, "api", 3), [])
 
 
 class Shipped(unittest.TestCase):

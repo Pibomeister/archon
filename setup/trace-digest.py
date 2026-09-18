@@ -67,8 +67,6 @@ NODE_OUT_RE = re.compile(r"^node-(.+)\.out$")
 FILES_PRESENT_CAP = 400
 SKIP_DIRS = ("traces", "kb")
 KEY_LEN = 80
-LOOP_FAILURE_TOKENS = {"NO_PROGRESS", "FIXER_BLOCKED", "ROUND_CAP_REACHED", "DESLOP_ROUND_CAP",
-                       "PLAN_NO_PROGRESS", "PLAN_ROUND_CAP", "SCOPE_BREACH"}
 
 
 class Fail(Exception):
@@ -128,12 +126,8 @@ def _typed_key(last):
 
 # --- sections ---------------------------------------------------------------
 def _repo(ad, params):
-    repo = params.get("repo")
-    if isinstance(repo, str) and repo:
-        return repo
-    if any(n.startswith("node-web-") and n.endswith(".out") for n in os.listdir(ad)):
-        return "web-app"
-    return "api"
+    # One definition, shared with the skill-evolve preflight.
+    return sl.detect_repo(ad, params)
 
 
 def _lane(ad):
@@ -295,13 +289,18 @@ def _terminal(ad, feature_result, typed):
 
 
 def score_components(d):
-    """The score inputs of setup/skill-score.py SCORE_VERSION 1, unweighted.
-    Kept here only to count non-zero components for the typed line."""
+    """The score inputs of setup/skill-score.py SCORE_VERSION 2, unweighted.
+    Kept here only to count non-zero components for the typed line.
+
+    Deliberately not key-for-key identical to skill-score.py components(): the
+    per-severity applied_p0..p3 buckets collapse into one applied_findings
+    count (their sum) and the two "beyond_first" keys are spelled out, because
+    nothing here weighs a component -- it only counts how many are non-zero.
+    Every other key must agree with skill-score.py exactly."""
     pr = d["review"]["per_round"]
     tokens = d["typed"]["fail_tokens"]
-    loop = sum(c for t, c in tokens.items() if t in LOOP_FAILURE_TOKENS or t.startswith("RCA_PLAN_"))
-    other = [k for k in d["typed"]["fail_terminals"]
-             if not (k in LOOP_FAILURE_TOKENS or k.startswith("RCA_PLAN_"))]
+    loop = sum(c for t, c in tokens.items() if t in sl.LOOP_FAILURE_TOKENS)
+    other = [k for k in d["typed"]["fail_terminals"] if k not in sl.LOOP_FAILURE_TOKENS]
     return {
         "review_rounds_beyond_first": max(0, d["review"]["rounds"] - 1),
         "applied_findings": sum(sum(r["applied_by_severity"].values()) for r in pr),
@@ -370,9 +369,10 @@ def digest(artifacts_dir):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("artifacts_dir")
-    ap.add_argument("--out")
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], epilog=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("artifacts_dir", help="the run's artifacts directory, the tree to compile")
+    ap.add_argument("--out", help="write the digest here atomically; without it nothing is written")
     args = ap.parse_args(argv)
     try:
         doc = digest(args.artifacts_dir)

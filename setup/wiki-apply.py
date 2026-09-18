@@ -9,6 +9,8 @@ and stays as evidence.
   wiki-apply.py apply <repo> <wiki-patch.json> --lib <dir> --digest <trace-digest.json>
                       [--out <json>] [--dry-run]
   wiki-apply.py quarantine <repo> <slug> --lib <dir> --reason "<text>" [--evolve-run <id>]
+  (quarantine is an operator lever: it refuses while a skill-evolve run holds
+   library/.locks/<repo>.evolve.lock, unless --evolve-run names the holder)
   wiki-apply.py regen-index <repo> --lib <dir>
   wiki-apply.py lint <repo> --lib <dir>
 
@@ -270,13 +272,21 @@ def _commit(lib_root, repo, message):
     return sha
 
 
+def _reason(exc):
+    """One line, always. A typed line IS its last line, and an OSError or a git
+    error carries multi-line text, which would push the discriminator off the
+    end of stdout and leave the caller reading git's advice as the verdict."""
+    return " ".join(f"{type(exc).__name__}: {exc}".split())
+
+
 def _summary(out, payload):
     if out:
         sl.write_json_atomic(out, payload)
 
 
 def cmd_apply(args):
-    summary = {"result": "FAIL", "created": [], "patched": [], "reason": "", "run_id": None}
+    summary = {"schema": sl.SCHEMA_WIKI_GATE_RESULT, "result": "FAIL", "created": [], "patched": [],
+               "reason": "", "run_id": None}
     try:
         sl.check_repo_name(args.repo)
         p = sl.paths(args.lib, args.repo)
@@ -307,12 +317,24 @@ def cmd_apply(args):
         print(f"WIKI_GATE=PASS created={len(created)} patched={len(patched)} "
               "index_regenerated=no log_appended=no dry_run=yes")
         return 0
-    for slug, text in built.items():
-        sl.write_text_atomic(sl.pattern_path(args.lib, args.repo, slug), text)
-    sl.regenerate_index_md(args.lib, args.repo)
-    sl.append_log(args.lib, args.repo,
-                  f"wiki: {log} (run {run_id}; created={len(created)} patched={len(patched)})", at=now)
-    sha = _commit(args.lib, args.repo, f"wiki({args.repo}): {log}")
+    # Building succeeded, but writing can still fail: a read-only tree, a full
+    # disk, a git commit the environment refuses. That is this node's failure
+    # and it says so in its own typed line, rather than dying on a traceback
+    # the lane's report node cannot attribute. created/patched stay in the
+    # summary so the operator knows which pages may be half-written; the tree
+    # is left dirty and uncommitted for the RUNBOOK section 17 recovery.
+    try:
+        for slug, text in built.items():
+            sl.write_text_atomic(sl.pattern_path(args.lib, args.repo, slug), text)
+        sl.regenerate_index_md(args.lib, args.repo)
+        sl.append_log(args.lib, args.repo,
+                      f"wiki: {log} (run {run_id}; created={len(created)} patched={len(patched)})", at=now)
+        sha = _commit(args.lib, args.repo, f"wiki({args.repo}): {log}")
+    except GATE_ERRORS as exc:
+        summary.update(result="FAIL", reason=f"write phase: {_reason(exc)}")
+        _summary(args.out, summary)
+        print(f"WIKI_GATE=FAIL write phase: {_reason(exc)}")
+        return 1
     summary["commit"] = sha
     _summary(args.out, summary)
     print(f"WIKI_GATE=PASS created={len(created)} patched={len(patched)} "
@@ -323,6 +345,12 @@ def cmd_apply(args):
 def cmd_quarantine(args):
     try:
         sl.check_repo_name(args.repo)
+        # Quarantine rewrites a page and commits it. Landing that between a live
+        # run's wiki apply and its commit would fold an operator's decision into
+        # the run's history under the run's message, so the lever waits.
+        owner = sl.evolve_lock_owner(args.lib, args.repo)
+        if owner is not None and owner != args.evolve_run:
+            raise GateFail(f"evolve lock held by {owner}")
         reason = " ".join(str(args.reason or "").split())
         if not reason:
             raise GateFail("--reason is required")
@@ -350,13 +378,19 @@ def cmd_quarantine(args):
     except GATE_ERRORS as exc:
         print(f"WIKI_QUARANTINE=FAIL {type(exc).__name__}: {exc}")
         return 1
-    sl.write_text_atomic(sl.pattern_path(args.lib, args.repo, args.slug), text)
-    sl.regenerate_index_md(args.lib, args.repo)
-    sl.append_log(args.lib, args.repo,
-                  f"quarantine: {args.slug} {previous} -> contested ({reason})", at=now)
-    sl.record_impact(args.lib, args.repo, "pattern_quarantined", "-", "-", args.evolve_run or "-",
-                     reason=reason, details={"slug": args.slug, "previous_status": previous}, at=now)
-    _commit(args.lib, args.repo, f"wiki({args.repo}): quarantine {args.slug}")
+    # Same rule as apply: a failure in the write phase is this lever's own
+    # typed FAIL line, not a traceback.
+    try:
+        sl.write_text_atomic(sl.pattern_path(args.lib, args.repo, args.slug), text)
+        sl.regenerate_index_md(args.lib, args.repo)
+        sl.append_log(args.lib, args.repo,
+                      f"quarantine: {args.slug} {previous} -> contested ({reason})", at=now)
+        sl.record_impact(args.lib, args.repo, "pattern_quarantined", "-", "-", args.evolve_run or "-",
+                         reason=reason, details={"slug": args.slug, "previous_status": previous}, at=now)
+        _commit(args.lib, args.repo, f"wiki({args.repo}): quarantine {args.slug}")
+    except GATE_ERRORS as exc:
+        print(f"WIKI_QUARANTINE=FAIL write phase: {_reason(exc)}")
+        return 1
     print(f"WIKI_QUARANTINE=OK slug={args.slug} status=contested")
     return 0
 
@@ -391,35 +425,50 @@ def cmd_lint(args):
     return 0
 
 
-def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    sub = ap.add_subparsers(dest="cmd", required=True)
+MORE = "The patch schema, the gate rules and the typed lines: wiki-apply.py --help"
 
-    a = sub.add_parser("apply")
-    a.add_argument("repo")
-    a.add_argument("patch")
-    a.add_argument("--lib", required=True)
-    a.add_argument("--digest", required=True)
-    a.add_argument("--out")
-    a.add_argument("--dry-run", action="store_true")
+REPO_HELP = "repository name, a directory under the library root"
+LIB_HELP = "library root, the directory holding <repo>/"
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], epilog=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True, metavar="<command>")
+
+    def parser(name, what):
+        # The whole docstring -- patch schema, gate rules, typed lines -- is
+        # the top-level epilog; a subcommand points at it, never repeats it.
+        return sub.add_parser(name, help=what, description=what, epilog=MORE,
+                              formatter_class=argparse.RawDescriptionHelpFormatter)
+
+    a = parser("apply", "lint a wiki patch and write every page, or write none of them")
+    a.add_argument("repo", help=REPO_HELP)
+    a.add_argument("patch", help="the maintainer's wiki-patch.json, archon.wiki-patch.v1")
+    a.add_argument("--lib", required=True, help=LIB_HELP)
+    a.add_argument("--digest", required=True,
+                   help="the run's trace digest; its run id is what Evidence may cite")
+    a.add_argument("--out", help="write the apply result to this JSON file")
+    a.add_argument("--dry-run", action="store_true",
+                   help="lint and report only; touch no file and commit nothing")
     a.set_defaults(fn=cmd_apply)
 
-    q = sub.add_parser("quarantine")
-    q.add_argument("repo")
-    q.add_argument("slug")
-    q.add_argument("--lib", required=True)
-    q.add_argument("--reason", required=True)
-    q.add_argument("--evolve-run")
+    q = parser("quarantine", "operator lever: mark one page contested; it can no longer motivate")
+    q.add_argument("repo", help=REPO_HELP)
+    q.add_argument("slug", help="the page's slug under wiki/")
+    q.add_argument("--lib", required=True, help=LIB_HELP)
+    q.add_argument("--reason", required=True, help="why the page is contested; kept on the page")
+    q.add_argument("--evolve-run", help="the run id holding the evolve lock, when one is held")
     q.set_defaults(fn=cmd_quarantine)
 
-    r = sub.add_parser("regen-index")
-    r.add_argument("repo")
-    r.add_argument("--lib", required=True)
+    r = parser("regen-index", "rebuild wiki/index.json from the pages on disk")
+    r.add_argument("repo", help=REPO_HELP)
+    r.add_argument("--lib", required=True, help=LIB_HELP)
     r.set_defaults(fn=cmd_regen_index)
 
-    l = sub.add_parser("lint")
-    l.add_argument("repo")
-    l.add_argument("--lib", required=True)
+    l = parser("lint", "check every page on disk against the gate rules; writes nothing")
+    l.add_argument("repo", help=REPO_HELP)
+    l.add_argument("--lib", required=True, help=LIB_HELP)
     l.set_defaults(fn=cmd_lint)
 
     args = ap.parse_args(argv)

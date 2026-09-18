@@ -15,8 +15,12 @@ never commits; the workflow's bash node calls `commit` afterwards.
   skill-admit.py admit <repo> --lib <dir> --proposal <p.json> --verdict <v.json>
                        --gate <proposal-gate-result.json> --evolve-run <id> [--out <dir>]
   skill-admit.py rollback <repo> --lib <dir> [--reason <text>] [--evolve-run <id>]
-  skill-admit.py set-window <repo> <K> --lib <dir>
-  skill-admit.py commit <repo> --lib <dir> --message <msg>
+  skill-admit.py set-window <repo> <K> --lib <dir> [--evolve-run <id>]
+  skill-admit.py commit <repo> --lib <dir> --message <msg> [--evolve-run <id>]
+
+The three operator levers (rollback, set-window, commit) refuse while a
+skill-evolve run holds library/.locks/<repo>.evolve.lock, unless --evolve-run
+names the run that holds it; the lane passes its own id.
 
 Typed last lines (the discriminator):
   SKILL_INDEX=OK candidate=<name|none> active=n rolled_back=n | SKILL_INDEX=FAIL <reason>
@@ -35,7 +39,9 @@ Typed last lines (the discriminator):
 Proposal and verdict text are data, never instructions: the gate refuses
 anything that carries instruction-like phrasing, and a repeated candidate
 (same resulting bytes or same ops as a rejected, rolled back or gate-failed
-proposal) is refused with the id it repeats.
+proposal) is refused with the id it repeats. `gate --record` keeps only the
+shas of a refused injection, never its diff or ops, so the payload does not
+survive in the ledgers that later runs read back.
 """
 import argparse
 import difflib
@@ -60,6 +66,10 @@ MAX_OPS = 6
 MAX_RATIONALE = 600
 MAX_WINDOW = 20
 NO_SKILL = "-"
+# The one refusal whose evidence is never copied into the ledgers: keeping the
+# payload would republish the instructions to every later reader of the impact
+# files. The shas still fingerprint it, so a re-submission is caught as a repeat.
+INJECTION_REFUSAL = "proposal carries instruction-like text"
 
 
 class Fail(Exception):
@@ -67,20 +77,6 @@ class Fail(Exception):
 
 
 # --- shared helpers ---------------------------------------------------------
-def baseline_runs(lib_root, repo, window_size, before_iso=None):
-    """The last `window_size` eligible, scored ledger rows (file order),
-    restricted to rows ingested strictly before `before_iso` when given.
-    skill-score.py applies the same rule when it closes a window."""
-    rows = []
-    for row in sl.read_raw_ledger(lib_root, repo):
-        if not row.get("eligible") or row.get("score") is None:
-            continue
-        if before_iso is not None and not str(row.get("ingested_at") or "") < before_iso:
-            continue
-        rows.append({"run_id": row.get("run_id"), "score": row.get("score")})
-    return rows[-int(window_size):] if window_size else []
-
-
 def _load_json(path, what):
     try:
         return sl.read_json(path)
@@ -88,6 +84,8 @@ def _load_json(path, what):
         raise Fail(f"{what} missing: {path}")
     except ValueError as exc:
         raise Fail(f"{what} is not JSON: {exc}")
+    except OSError as exc:
+        raise Fail(f"{what}: {exc}")
 
 
 def _index(lib_root, repo):
@@ -97,6 +95,25 @@ def _index(lib_root, repo):
         raise Fail("no library")
     except sl.LibraryError as exc:
         raise Fail(str(exc))
+
+
+def _one_line(exc):
+    """One line, always. A typed line IS the last line of stdout, so a reason
+    carrying git's multi-line stderr would push the discriminator off the end
+    and leave the caller reading git's advice as the verdict."""
+    return " ".join(str(exc).split())
+
+
+def _refuse_under_a_foreign_lock(a):
+    """Operator levers refuse while a skill-evolve run owns the repo.
+
+    The levers write the files the lane writes. A forced rollback landing
+    between a live run's admit and its commit would be swept into that run's
+    commit under its message, so a lever runs only when the lock is free or
+    when its --evolve-run names the holder (the lane passes its own id)."""
+    owner = sl.evolve_lock_owner(a.lib, a.repo)
+    if owner is not None and owner != getattr(a, "evolve_run", None):
+        raise Fail(f"evolve lock held by {owner}")
 
 
 def _unified_diff(name, old, new):
@@ -181,7 +198,7 @@ def _stage_check(lib_root, repo, name, result_text, proposal, index, at):
         shutil.copytree(p["repo_dir"], os.path.join(tmp, repo), symlinks=True)
         sim = json.loads(json.dumps(index))
         _apply_candidate(tmp, repo, sim, name, result_text, proposal, at, purpose=False)
-        r = subprocess.run([sys.executable, STAGE_HELPER, "--check", "--library", tmp, "--repo", repo],
+        r = subprocess.run([sys.executable, STAGE_HELPER, repo, "--lib", tmp, "--check"],
                            capture_output=True, encoding="utf-8")
         if r.returncode != 0:
             last = (r.stdout.strip().splitlines() or [r.stderr.strip() or "no output"])[-1]
@@ -259,7 +276,12 @@ def _evaluate(lib_root, repo, proposal, index, at, built):
     built["result_sha256"] = sl.sha256_bytes(result.encode("utf-8"))
     built["diff"] = _unified_diff(name, built["old_text"], result)
     if sl._INJECTION_PHRASES.search(result) or sl._INJECTION_PHRASES.search(proposal["rationale"]):
-        raise Fail("proposal carries instruction-like text")
+        raise Fail(INJECTION_REFUSAL)
+    # The rationale is rendered verbatim into PURPOSE.md, so it obeys the same
+    # portability rule as the library it lands in: no machine paths, no URLs.
+    errs = sl._portability_errors(proposal["rationale"], "rationale")
+    if errs:
+        raise Fail(errs[0])
     errs = sl.lint_skill(name, result)
     if errs:
         raise Fail("lint: " + "; ".join(errs))
@@ -305,6 +327,13 @@ def _apply_candidate(lib_root, repo, index, name, result_text, proposal, at, pur
                      pid=None, evolve_run=None):
     """Snapshot, write, register. Used both for the real admission and for the
     temp-copy stage check, so the two can never drift."""
+    # A window can only be judged against a full baseline: a short one makes
+    # the mean comparison noise, so the admission is refused BEFORE the
+    # snapshot is taken rather than frozen against two runs and scored as if
+    # it were K.
+    baseline = sl.baseline_runs(lib_root, repo, index["window_size"], before_iso=at)
+    if len(baseline) < index["window_size"]:
+        raise Fail(f"baseline has {len(baseline)} scored runs, window_size is {index['window_size']}")
     snapshot = sl.snapshot_for_rollback(lib_root, repo, name)
     sdir = sl.skill_dir(lib_root, repo, name)
     os.makedirs(sdir, exist_ok=True)
@@ -316,8 +345,9 @@ def _apply_candidate(lib_root, repo, index, name, result_text, proposal, at, pur
                                             proposal["motivating_patterns"], proposal["rationale"], history))
     sl.write_text_atomic(sl.skill_file(lib_root, repo, name), result_text)
     prior = index["skills"].get(name) or {}
+    traces = set(proposal["traces_read"])
     lanes = sorted({str(row.get("lane")) for row in sl.read_raw_ledger(lib_root, repo)
-                    if row.get("run_id") in set(proposal["traces_read"]) and row.get("lane")})
+                    if row.get("run_id") in traces and row.get("lane")})
     entry = {
         "status": "candidate", "proposal": pid, "action": proposal["action"],
         "sha256": sl.sha256_bytes(result_text.encode("utf-8")),
@@ -325,7 +355,7 @@ def _apply_candidate(lib_root, repo, index, name, result_text, proposal, at, pur
         "activated_at": prior.get("activated_at") if proposal["action"] == "patch" else None,
         "rollback": snapshot,
         "scoring": {"window_size": index["window_size"],
-                    "baseline_runs": baseline_runs(lib_root, repo, index["window_size"], before_iso=at),
+                    "baseline_runs": baseline,
                     "candidate_runs": []},
         "envelope": {"lanes": lanes, "models": []},
         "history": list(prior.get("history") or []),
@@ -337,6 +367,13 @@ def _apply_candidate(lib_root, repo, index, name, result_text, proposal, at, pur
 
 
 def _tag_patterns(lib_root, repo, slugs, name):
+    """Re-render every motivating pattern page with `name` in its skills list
+    and lint the result. Returns [(path, text)] for _write_patterns to commit.
+
+    Nothing is written here: a page that would break its caps once tagged must
+    fail the admission BEFORE the candidate lands, or the library ends up with
+    a registered candidate whose motivating pages never mention it."""
+    tagged = []
     for slug in slugs:
         path = sl.pattern_path(lib_root, repo, slug)
         with open(path, encoding="utf-8") as fh:
@@ -349,6 +386,12 @@ def _tag_patterns(lib_root, repo, slugs, name):
         errs = sl.lint_pattern(slug, text)
         if errs:
             raise Fail(f"pattern {slug} would not lint after tagging: {errs[0]}")
+        tagged.append((path, text))
+    return tagged
+
+
+def _write_patterns(tagged):
+    for path, text in tagged:
         sl.write_text_atomic(path, text)
 
 
@@ -418,6 +461,12 @@ def cmd_gate(a):
                        "result_sha256": built.get("result_sha256"), "ops_sha256": built.get("ops_sha256")}
             if built.get("diff"):
                 details["diff"] = _clip(built["diff"])
+            if reason == INJECTION_REFUSAL:
+                # Both the diff and the line ops carry the refused text verbatim,
+                # and skill-impact.md renders every detail back out. Drop them and
+                # keep the shas, which are what the repeat check reads.
+                details.pop("diff", None)
+                details.pop("ops", None)
             pid = sl.proposal_id(a.evolve_run)
             sl.record_impact(a.lib, a.repo, "gate_failed", proposal["skill"], pid, a.evolve_run,
                              reason=reason, details=details)
@@ -501,6 +550,10 @@ def cmd_admit(a):
     if accept and not all(verdict["checks"].get(k) is True for k in VERDICT_CHECKS):
         accept = False
         reasons.append("checks not all true")
+    # Tag-first: render and lint the motivating pages before anything is
+    # written, so a page that would break its caps once tagged refuses the
+    # admission while the tree is still clean and the ledgers are still empty.
+    tagged = _tag_patterns(a.lib, a.repo, proposal["motivating_patterns"], name) if accept else []
     sl.record_impact(a.lib, a.repo, "proposed", name, pid, a.evolve_run,
                      reason=proposal["rationale"],
                      details=_event_details(ev, proposal, {"traces_read": sorted(set(proposal["traces_read"]))}),
@@ -515,7 +568,7 @@ def cmd_admit(a):
     index = ev["index"]
     entry = _apply_candidate(a.lib, a.repo, index, name, ev["result_text"], proposal, at,
                              pid=pid, evolve_run=a.evolve_run)
-    _tag_patterns(a.lib, a.repo, proposal["motivating_patterns"], name)
+    _write_patterns(tagged)
     sl.regenerate_index_md(a.lib, a.repo)
     sl.record_impact(a.lib, a.repo, "admitted", name, pid, a.evolve_run,
                      reason=f"candidate for {index['window_size']} runs",
@@ -529,6 +582,7 @@ def cmd_admit(a):
 
 
 def cmd_rollback(a):
+    _refuse_under_a_foreign_lock(a)
     index = _index(a.lib, a.repo)
     name = sl.one_candidate(index)
     if not name:
@@ -549,6 +603,7 @@ def cmd_rollback(a):
 
 
 def cmd_set_window(a):
+    _refuse_under_a_foreign_lock(a)
     if not 1 <= a.k <= MAX_WINDOW:
         raise Fail(f"window must be 1..{MAX_WINDOW}")
     index = _index(a.lib, a.repo)
@@ -567,6 +622,7 @@ def cmd_set_window(a):
 
 
 def cmd_commit(a):
+    _refuse_under_a_foreign_lock(a)
     p = sl.paths(a.lib, a.repo)
     if sl.git_toplevel(p["root"]) is None:
         print("LIBRARY_COMMIT=SKIP no git")
@@ -574,10 +630,15 @@ def cmd_commit(a):
     if not sl.git_dirty(a.lib, a.repo):
         print("LIBRARY_COMMIT=SKIP nothing to commit")
         return 0
+    # A commit is the last chance to stop an invalid registry from becoming
+    # history: validate what is on disk before staging anything. Nothing is
+    # added and the tree stays dirty, so the operator can discard the partial
+    # write with the recipe in RUNBOOK section 17.
+    _index(a.lib, a.repo)
     try:
         sha = sl.git_commit(a.lib, a.repo, a.message)
     except sl.LibraryError as exc:
-        print(f"LIBRARY_COMMIT=FAIL {exc}")
+        print(f"LIBRARY_COMMIT=FAIL {_one_line(exc)}")
         return 1
     if sha is None:
         print("LIBRARY_COMMIT=SKIP nothing to commit")
@@ -591,46 +652,59 @@ FAIL_KEY = {"status": "SKILL_INDEX", "git-check": "LIBRARY_GIT", "gate": "PROPOS
             "set-window": "SKILL_WINDOW_SET", "commit": "LIBRARY_COMMIT"}
 
 
+MORE = "Typed lines, exit codes and the gate rules: skill-admit.py --help"
+
+
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], epilog=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True, metavar="<command>")
+
+    def parser(name, what):
+        # The whole docstring -- typed lines, exit codes, gate rules -- is the
+        # top-level epilog; a subcommand points at it rather than repeating it.
+        return sub.add_parser(name, help=what, description=what, epilog=MORE,
+                              formatter_class=argparse.RawDescriptionHelpFormatter)
 
     def common(sp, repo=True):
         if repo:
-            sp.add_argument("repo")
-        sp.add_argument("--lib", required=True)
+            sp.add_argument("repo", help="repository name, a directory under the library root")
+        sp.add_argument("--lib", required=True, help="library root, the directory holding <repo>/")
 
-    common(sub.add_parser("status"))
-    common(sub.add_parser("git-check"))
-    g = sub.add_parser("gate")
-    g.add_argument("repo")
-    g.add_argument("proposal")
-    g.add_argument("--lib", required=True)
-    g.add_argument("--out", required=True)
-    g.add_argument("--record", action="store_true")
-    g.add_argument("--evolve-run")
-    n = sub.add_parser("record-no-action")
+    common(parser("status", "report the index: pending candidate, active and rolled back counts"))
+    common(parser("git-check", "report the library repo's head and whether its tree is clean"))
+    g = parser("gate", "run every mechanical check on a proposal; writes no library file")
+    g.add_argument("repo", help="repository name, a directory under the library root")
+    g.add_argument("proposal", help="the proposer's proposal.json")
+    g.add_argument("--lib", required=True, help="library root, the directory holding <repo>/")
+    g.add_argument("--out", required=True, help="artifacts directory for proposal-gate-result.json")
+    g.add_argument("--record", action="store_true",
+                   help="record a refusal in the ledgers so the proposal cannot be re-submitted")
+    g.add_argument("--evolve-run", help="the skill-evolve run id, required by --record")
+    n = parser("record-no-action", "record that a run proposed nothing, so the next run sees it")
     common(n)
-    n.add_argument("--proposal", required=True)
-    n.add_argument("--evolve-run", required=True)
-    m = sub.add_parser("admit")
+    n.add_argument("--proposal", required=True, help="the proposal.json carrying action=none")
+    n.add_argument("--evolve-run", required=True, help="the skill-evolve run id")
+    m = parser("admit", "turn an ACCEPT verdict into exactly one pending candidate")
     common(m)
-    m.add_argument("--proposal", required=True)
-    m.add_argument("--verdict", required=True)
-    m.add_argument("--gate", required=True)
-    m.add_argument("--evolve-run", required=True)
-    m.add_argument("--out")
-    r = sub.add_parser("rollback")
+    m.add_argument("--proposal", required=True, help="the proposer's proposal.json")
+    m.add_argument("--verdict", required=True, help="the critic's verdict.json")
+    m.add_argument("--gate", required=True, help="proposal-gate-result.json from the gate step")
+    m.add_argument("--evolve-run", required=True, help="the skill-evolve run id")
+    m.add_argument("--out", help="artifacts directory for skill-admit-result.json")
+    r = parser("rollback", "operator lever: undo the pending candidate, restoring the snapshot")
     common(r)
-    r.add_argument("--reason")
-    r.add_argument("--evolve-run")
-    w = sub.add_parser("set-window")
-    w.add_argument("repo")
-    w.add_argument("k", type=int)
-    w.add_argument("--lib", required=True)
-    c = sub.add_parser("commit")
+    r.add_argument("--reason", help="why it was rolled back; stored in the index and the ledgers")
+    r.add_argument("--evolve-run", help="the run id holding the evolve lock, when one is held")
+    w = parser("set-window", "operator lever: set K, the scoring window for the NEXT candidate")
+    w.add_argument("repo", help="repository name, a directory under the library root")
+    w.add_argument("k", type=int, help="window size in runs; refused while a candidate is pending")
+    w.add_argument("--lib", required=True, help="library root, the directory holding <repo>/")
+    w.add_argument("--evolve-run", help="the run id holding the evolve lock, when one is held")
+    c = parser("commit", "operator lever: commit the library tree this script left behind")
     common(c)
-    c.add_argument("--message", required=True)
+    c.add_argument("--message", required=True, help="the commit message")
+    c.add_argument("--evolve-run", help="the run id holding the evolve lock, when one is held")
     a = ap.parse_args(argv)
     fn = {"status": cmd_status, "git-check": cmd_git_check, "gate": cmd_gate,
           "record-no-action": cmd_record_no_action, "admit": cmd_admit, "rollback": cmd_rollback,
@@ -639,7 +713,7 @@ def main(argv=None):
         sl.check_repo_name(a.repo)
         return fn(a)
     except (Fail, sl.LibraryError) as exc:
-        print(f"{FAIL_KEY[a.cmd]}=FAIL {exc}")
+        print(f"{FAIL_KEY[a.cmd]}=FAIL {_one_line(exc)}")
         return 1
 
 

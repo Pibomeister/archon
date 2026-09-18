@@ -225,9 +225,9 @@ nodes:
     # rendered into skills.md for implement/fix/fixer. The wiki and
     # PURPOSE.md are never staged. An empty library is SKIP, not FAIL.
     eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
-    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/stage-skills-library.py \
-      --library /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/library \
-      --repo "$REPO" --artifacts "$ARTIFACTS_DIR"
+    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/stage-skills-library.py "$REPO" \
+      --lib /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/library \
+      --artifacts "$ARTIFACTS_DIR"
 - id: ralplan
   depends_on:
   - bootstrap

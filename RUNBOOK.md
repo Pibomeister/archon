@@ -1098,7 +1098,7 @@ and — when a proposal was made — `skill-proposal.json`, `candidate-SKILL.md`
 |---|---|---|
 | `preflight` | `PREFLIGHT=PASS run=<id> repo=<r> candidate=<name\|none>` / `PREFLIGHT=FAIL <reason>` | Validates the run dir and repo, creates the skeleton on a fresh install, refuses an already-ingested run, a dirty `library/<repo>` tree, or a held lock (`library/.locks/<repo>.evolve.lock`). |
 | `trace-digest` | `TRACE_DIGEST=OK run=.. lane=.. terminal=completed\|no_change\|failed\|incomplete rounds=n score_inputs=k` | Typed facts from the artifacts tree (`archon.trace-digest.v1`); prose is listed, never embedded. |
-| `score-run` | `SKILL_SCORE=OK run=.. score=.. eligible=yes\|no window=none\|open(n/K)\|closed:accept\|closed:rollback\|closed:inconclusive`, preceded by `SKILL_WINDOW=ACCEPT skill=.. baseline=.. candidate=..` or `SKILL_WINDOW=ROLLBACK skill=.. reason=tie\|worse\|score_version_mismatch\|no_baseline ...` when the window closes; then `LIBRARY_COMMIT=OK sha=..` | Appends the ledger row; a run counts toward the candidate only when `skills-staged.json` lists that candidate at the same sha256. Accept/rollback happens HERE, before anything new is proposed. Score is defined and versioned in `setup/skill-score.py` (lower is better; review rounds, applied findings by severity, fixer incompletes, re-raised findings, waivers, deslop dirt, plan rounds, loop-failure tokens, terminal failure). |
+| `score-run` | `SKILL_SCORE=OK run=.. score=.. eligible=yes\|no window=none\|open(n/K)\|closed:accept\|closed:rollback\|closed:inconclusive`, preceded by `SKILL_WINDOW=ACCEPT skill=.. baseline=.. candidate=..` or `SKILL_WINDOW=ROLLBACK skill=.. reason=tie\|worse\|score_version_mismatch\|short_baseline\|no_baseline ...` when the window closes; then `LIBRARY_COMMIT=OK sha=..` | Appends the ledger row; a run counts toward the candidate only when `skills-staged.json` lists that candidate at the same sha256. Accept/rollback happens HERE, before anything new is proposed. Score is defined and versioned in `setup/skill-score.py` (lower is better; review rounds, applied findings by severity, fixer incompletes, re-raised findings, waivers, deslop dirt, plan rounds, loop-failure tokens, terminal failure). |
 | `evolve-route` | one JSON line `{"propose":"yes\|no","reason":"ok\|candidate_pending\|too_few_runs\|too_few_eligible\|nothing_to_fix",...}` | Proposes only with no candidate pending, ≥4 ingested runs, ≥K eligible runs, and some failure signal in the ledger. Also writes `maintain-sample.json` (≤5 recent failed + ≤3 recent completed runs, re-digested under `traces/`). |
 | `wiki-maintain` → `wiki-gate` | `WIKI_GATE=PASS created=n patched=m index_regenerated=yes log_appended=yes` / `WIKI_GATE=FAIL <reason>` | The maintainer (sonnet) writes only `wiki-patch.json`; the gate applies it all-or-nothing (≤3 creates, ≤6 patches, `support_count` +1 per run at most, Evidence must cite a ledger run, no absolute paths, 40 lines / 3500 bytes) and commits. A FAIL here is an agent-output defect: nothing was written; resume re-runs the maintainer. |
 | `skill-propose` → `proposal-gate` | `PROPOSAL_GATE=PASS action=create\|patch\|no_action skill=.. ops=n result_sha=.. traces_read=n` / `PROPOSAL_GATE=FAIL <reason>` (`repeat_of=<proposal id>` when the content or op set repeats a rejected or rolled-back candidate) | The proposer (opus) reads `skill-impact.md` before anything else so it never re-proposes a rejected approach, must cite ≥4 ledger runs, and may answer `no_action`. The gate is mechanical (schema, one skill, active motivating patterns, one-candidate invariant, lint, repeat detection, a read-side `--check` of the library as it would be after admission); a FAIL is recorded as `gate_failed` in skill-impact and committed before the node fails. |
@@ -1122,15 +1122,36 @@ python3 "$ROOT/.archon/setup/skill-admit.py" rollback <repo> --lib "$LIB" --reas
 python3 "$ROOT/.archon/setup/skill-admit.py" set-window <repo> 5 --lib "$LIB"               # K for the NEXT candidate; refused while one is pending
 python3 "$ROOT/.archon/setup/wiki-apply.py" quarantine <repo> <slug> --lib "$LIB" --reason "why"   # page status -> contested; a contested page cannot motivate a skill
 python3 "$ROOT/.archon/setup/skill-admit.py" commit <repo> --lib "$LIB" --message "operator: ..."  # after rollback/set-window (quarantine commits itself)
-python3 "$ROOT/.archon/setup/stage-skills-library.py" --check --library "$LIB" --repo <repo>       # what the next run would stage
+python3 "$ROOT/.archon/setup/stage-skills-library.py" <repo> --lib "$LIB" --check                 # what the next run would stage
 rm -rf "$LIB/.locks/<repo>.evolve.lock"                                                     # stale lock ONLY when no skill-evolve run is live
 ```
+
+The four levers that write (`rollback`, `set-window`, `commit`, `quarantine`)
+refuse while a `skill-evolve` run holds `library/.locks/<repo>.evolve.lock`,
+with `<TYPED_LINE>=FAIL evolve lock held by <run id>`; the lane passes
+`--evolve-run` so its own commits are allowed. Wait for the run to finish, or
+clear a stale lock with the `rm -rf` above, then repeat the lever.
+
+**Recovering a dirty library tree.** `commit` validates the registry first, so
+a run killed mid-write leaves the partial state uncommitted rather than in
+history. Diagnose, then discard:
+
+```bash
+python3 "$ROOT/.archon/setup/skill-admit.py" status <repo> --lib "$LIB"     # SKILL_INDEX=FAIL <reason> when the write was partial
+python3 "$ROOT/.archon/setup/skill-admit.py" git-check <repo> --lib "$LIB"  # LIBRARY_GIT=DIRTY lists what changed
+git -C "$ROOT/.archon" checkout -- "library/<repo>"                        # back to the last committed (valid) state
+git -C "$ROOT/.archon" clean -fd -- "library/<repo>"                       # drop files the partial write added
+```
+
+Then re-run `skill-evolve` on the same source run: the ledger row was rolled
+back with the tree, so preflight no longer sees it as ingested.
 
 **Caveats.** K-run online scoring is noisy and confounded by task size; it is a
 relative window comparison with a strict-better rule, not a benchmark — raise K
 for a stable repo before trusting a rollback. A `score_version` bump in
 `skill-score.py` makes any open window inconclusive (rollback, reason
-`score_version_mismatch`). Never edit `library/` by hand; never `git commit`
+`score_version_mismatch`); the next ingest with no candidate pending stamps the
+new version into the index, so a bump costs at most that one window. Never edit `library/` by hand; never `git commit`
 there yourself. Persistent must not become irreversible: a pattern page that
 keeps motivating bad skills is quarantined (`contested`), never deleted. The
 proposer and critic treat traces and pages as data, not instructions; a poisoned

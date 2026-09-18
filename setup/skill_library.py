@@ -33,6 +33,7 @@ SCHEMA_DIGEST = "archon.trace-digest.v1"
 SCHEMA_WIKI_PATCH = "archon.wiki-patch.v1"
 SCHEMA_PROPOSAL = "archon.skill-proposal.v1"
 SCHEMA_VERDICT = "archon.skill-verdict.v1"
+SCHEMA_WIKI_GATE_RESULT = "archon.wiki-gate-result.v1"
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 REPO_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -43,7 +44,11 @@ PATTERN_KINDS = ("failure", "strategy", "root-cause")
 # never deleted. superseded: replaced by another page.
 PATTERN_STATUSES = ("active", "contested", "superseded")
 PATTERN_SECTIONS = ("Problem", "Root cause", "Evidence", "Action sequence", "Known fix")
-PATTERN_META_SETTABLE = ("support_count", "last_observed", "runs", "status", "title", "kind")
+# Meta keys a maintainer's set_meta op may touch. "runs" and "skills" are NOT
+# here: the gate maintains runs from the ledger and skills from admission, so a
+# maintainer can never rewrite either. wiki-apply.py names them explicitly
+# first for a clearer refusal.
+PATTERN_META_SETTABLE = ("support_count", "last_observed", "status", "title", "kind")
 IMPACT_EVENTS = ("proposed", "admitted", "rejected", "gate_failed", "accepted",
                  "rolled_back", "no_action", "forced_rollback", "window_reset",
                  "pattern_quarantined")
@@ -58,6 +63,11 @@ PATTERN_MAX_BYTES = 3500
 IMPACT_DIFF_MAX_BYTES = 3000
 DEFAULT_WINDOW = 3
 DEFAULT_MIN_IMPROVEMENT = 0.0
+# The score_version a fresh index starts at. skill-score.py owns the weight
+# table, so its SCORE_VERSION is the authority and this mirrors it; a fresh
+# index that claimed an older version would make its first window
+# inconclusive. test_skill_library.py pins the two equal.
+DEFAULT_SCORE_VERSION = 2
 
 # Path-portability markers. The literal is split so the shipped source cannot
 # trip the packaging secret gate, which greps the payload for the same marker.
@@ -72,6 +82,11 @@ _INJECTION_PHRASES = re.compile(
     r"ignore (all |any )?(previous|prior|above) instructions|you are now\b|system prompt"
     r"|disregard (the|your|all) (previous|prior|above)|<\s*/?\s*(system|assistant|user)\s*>",
     re.IGNORECASE)
+# stage-skills-library.py wraps each staged body in <staged-skills><skill ...>
+# containers. A body or description carrying either marker could close its own
+# container early and have the rest read as top-level prompt text, so both the
+# admit-time lint and the staging renderer refuse it.
+SKILL_CONTAINER_MARKER = re.compile(r"</?\s*(skill|staged-skills)\b", re.IGNORECASE)
 
 # --- typed-line vocabulary ------------------------------------------------
 # Duplicated from setup/tests/nodes/runner.py on purpose: production code must
@@ -91,6 +106,16 @@ FAIL_TOKENS = {
     "PLAN_NO_PROGRESS", "RCA_PLAN_NO_PROGRESS", "NO_PROGRESS",
     "PLAN_SCOPE_DISPUTE", "RCA_PLAN_SCOPE_DISPUTE",
     "FIXER_BLOCKED", "SCOPE_BREACH", "CROSS_REPO_FINDING",
+}
+# The fail tokens that mean a loop gave up rather than a step failing. Scored
+# as one bucket by setup/skill-score.py and counted by setup/trace-digest.py,
+# so the set has one definition here and both readers test membership, never a
+# prefix: RCA_PLAN_REJECTED and RCA_PLAN_SCOPE_DISPUTE are a reviewer's verdict
+# on one plan, not a loop running out, and they belong in other_fail_terminals.
+LOOP_FAILURE_TOKENS = {
+    "NO_PROGRESS", "FIXER_BLOCKED", "ROUND_CAP_REACHED", "DESLOP_ROUND_CAP",
+    "PLAN_NO_PROGRESS", "PLAN_ROUND_CAP", "SCOPE_BREACH",
+    "RCA_PLAN_NO_PROGRESS", "RCA_PLAN_ROUND_CAP",
 }
 PASS_LINE_RES = (re.compile(r"^ROUND=\d+ head=\S+$"),)
 _TYPED_RE = re.compile(r"^(?P<key>[A-Z][A-Za-z0-9_]{2,})(?:=(?P<val>\S*))?(?:\s|$)")
@@ -123,6 +148,17 @@ def read_json(path):
         return json.load(fh)
 
 
+def _restore_mode(tmp, path, default=0o644):
+    """NamedTemporaryFile creates at 0600, so replacing an existing file would
+    narrow its mode on every rewrite. Carry the destination's mode across, or
+    fall back to the usual 0644 for a file that does not exist yet."""
+    try:
+        mode = os.stat(path).st_mode & 0o777
+    except OSError:
+        mode = default
+    os.chmod(tmp, mode)
+
+
 def write_json_atomic(path, value):
     """tempfile + os.replace, the same shape as setup/no-change-closure.py."""
     path = str(path)
@@ -132,6 +168,7 @@ def write_json_atomic(path, value):
         json.dump(value, out, indent=2, sort_keys=True)
         out.write("\n")
         tmp = out.name
+    _restore_mode(tmp, path)
     os.replace(tmp, path)
 
 
@@ -142,6 +179,7 @@ def write_text_atomic(path, text):
                                      delete=False, encoding="utf-8") as out:
         out.write(text)
         tmp = out.name
+    _restore_mode(tmp, path)
     os.replace(tmp, path)
 
 
@@ -241,8 +279,40 @@ def paths(lib_root, repo):
         "skills_dir": skills,
         "skills_index": os.path.join(skills, "index.json"),
         "rollback_dir": os.path.join(skills, ".rollback"),
-        "lock_dir": os.path.join(repo_dir, ".evolve.lock"),
+        "gitattributes": os.path.join(repo_dir, ".gitattributes"),
     }
+
+
+def evolve_lock_dir(lib_root, repo):
+    """The one-evolve-per-repo lock. It lives beside the repo dirs, not inside
+    one, so holding it never dirties the tree the gates require clean."""
+    check_repo_name(repo)
+    return os.path.join(os.path.realpath(str(lib_root)), ".locks", f"{repo}.evolve.lock")
+
+
+def evolve_lock_owner(lib_root, repo):
+    """The evolve run id holding the lock, `"unknown"` when the lock is held but
+    its owner file is unreadable, None when the lock is free.
+
+    The operator levers read this: they write the same files a live run writes,
+    so a manual rollback or commit landing mid-run would be attributed to that
+    run and swept into its commit."""
+    lock = evolve_lock_dir(lib_root, repo)
+    if not os.path.isdir(lock):
+        return None
+    try:
+        with open(os.path.join(lock, "owner"), encoding="utf-8") as fh:
+            owner = fh.read().strip()
+    except OSError:
+        return "unknown"
+    return owner or "unknown"
+
+
+# Every registry entry pins a skill by the sha256 of the exact bytes of its
+# SKILL.md, so git must never rewrite a line ending in this tree: a checkout
+# under core.autocrlf=true would invalidate every sha at once and fail the
+# library closed on a machine that only cloned it.
+GITATTRIBUTES = "* -text\n"
 
 
 REPO_README = """# Skills library: {repo}
@@ -307,13 +377,33 @@ gates read that file, never this one.
 """
 
 
+def detect_repo(artifacts_dir, params):
+    """The repository a finished run belongs to, in three branches:
+    params["repo"] when it names one, else "web-app" when the run left web
+    node outputs (node-web-*.out) in its artifacts dir, else "api".
+
+    One definition: trace-digest.py and the skill-evolve preflight both call
+    this so the digest node's cross-check can never disagree with preflight.
+    """
+    repo = params.get("repo") if isinstance(params, dict) else None
+    if isinstance(repo, str) and repo:
+        return repo
+    try:
+        names = os.listdir(artifacts_dir)
+    except OSError:
+        names = []
+    if any(n.startswith("node-web-") and n.endswith(".out") for n in names):
+        return "web-app"
+    return "api"
+
+
 def new_index(repo):
     return {
         "schema": SCHEMA_INDEX,
         "repo": repo,
         "window_size": DEFAULT_WINDOW,
         "min_improvement": DEFAULT_MIN_IMPROVEMENT,
-        "score_version": 1,
+        "score_version": DEFAULT_SCORE_VERSION,
         "skills": {},
     }
 
@@ -332,6 +422,7 @@ def ensure_skeleton(lib_root, repo):
 
     for d in (p["repo_dir"], p["raw_dir"], p["wiki_dir"], p["patterns_dir"], p["skills_dir"]):
         os.makedirs(d, exist_ok=True)
+    touch(p["gitattributes"], GITATTRIBUTES)
     touch(p["readme"], REPO_README.format(repo=repo))
     touch(p["raw_ledger"], "")
     touch(p["wiki_index"], WIKI_INDEX_HEADER.format(repo=repo))
@@ -348,8 +439,8 @@ def ensure_skeleton(lib_root, repo):
 def skeleton_present(lib_root, repo):
     p = paths(lib_root, repo)
     return all(os.path.exists(p[k]) for k in
-               ("readme", "raw_ledger", "wiki_index", "wiki_log", "impact_md",
-                "impact_jsonl", "patterns_dir", "skills_index"))
+               ("gitattributes", "readme", "raw_ledger", "wiki_index", "wiki_log",
+                "impact_md", "impact_jsonl", "patterns_dir", "skills_index"))
 
 
 # --- frontmatter ------------------------------------------------------------
@@ -500,8 +591,11 @@ def lint_skill(name, text):
     desc = meta.get("description")
     if not isinstance(desc, str) or not desc.strip():
         errs.append("description missing")
-    elif len(desc) > SKILL_MAX_DESCRIPTION:
-        errs.append(f"description is {len(desc)} chars, cap {SKILL_MAX_DESCRIPTION}")
+    else:
+        if len(desc) > SKILL_MAX_DESCRIPTION:
+            errs.append(f"description is {len(desc)} chars, cap {SKILL_MAX_DESCRIPTION}")
+        if any(c in desc for c in "\n\r\t"):
+            errs.append("description must be a single line (no newline, carriage return or tab)")
     extra = sorted(set(meta) - {"name", "description"})
     if extra:
         errs.append(f"frontmatter keys not allowed: {extra}")
@@ -514,6 +608,13 @@ def lint_skill(name, text):
         errs.append(f"body is {len(body.encode('utf-8'))} bytes, cap {SKILL_MAX_BODY_BYTES}")
     if not any(re.match(r"^\d+\. ", l) for l in body_lines):
         errs.append("body has no numbered step line (^\\d+\\. )")
+    # A container marker would close the <skill>/<staged-skills> wrapper that
+    # stage-skills-library.py renders, so everything after it would read to the
+    # implementer as top-level prompt text rather than as one staged skill.
+    for where, chunk in (("description", desc if isinstance(desc, str) else ""), ("body", body)):
+        hit = SKILL_CONTAINER_MARKER.search(chunk)
+        if hit:
+            errs.append(f"{where} contains a staged-skills container marker: {hit.group(0)!r}")
     m = _FORBIDDEN_SKILL_WORDS.search(str(text))
     if m:
         errs.append(f"forbidden word for a skill: {m.group(0)!r}")
@@ -614,7 +715,9 @@ def lint_pattern(slug, text):
 
 def apply_section_ops(text, ops):
     """set_section | append_section | set_meta on a pattern page. set_meta is
-    restricted to PATTERN_META_SETTABLE. Returns the re-rendered page."""
+    restricted to PATTERN_META_SETTABLE, which excludes "runs" and "skills":
+    those are maintained from the ledger and from admission, never by a patch.
+    Returns the re-rendered page."""
     if not isinstance(ops, list) or not ops:
         raise LibraryError("ops must be a non-empty list")
     meta, sections = parse_pattern(text)
@@ -762,6 +865,14 @@ def validate_index(index, repo=None, repo_dir=None):
         if env is not None and not (isinstance(env, dict)
                                     and all(isinstance(env.get(k), list) for k in ("lanes", "models"))):
             errs.append(f"{name}: envelope must be an object with lanes[] and models[]")
+        # The snapshot path is the one thing that decides what rollback and
+        # accept delete, so it is pinned to the single legal value rather than
+        # trusted: a hand-edited '../..' would escape skills/.rollback/.
+        rb_any = entry.get("rollback")
+        if isinstance(rb_any, dict):
+            snap_rel = rb_any.get("snapshot")
+            if snap_rel != f".rollback/{name}":
+                errs.append(f"{name}: rollback snapshot {snap_rel!r} must be '.rollback/{name}'")
         if status == "candidate":
             candidates.append(name)
             rb = entry.get("rollback")
@@ -859,6 +970,18 @@ def snapshot_for_rollback(lib_root, repo, name):
     return {"existed": existed, "sha256": sha, "snapshot": f".rollback/{name}"}
 
 
+def _contained_snapshot(paths_, name, snapshot):
+    """Resolve an index entry's snapshot path and refuse anything that is not
+    inside skills/.rollback/. rollback_candidate and accept_candidate rmtree
+    this path, so a hand-edited '../../..' would delete outside the library."""
+    snap = os.path.join(paths_["skills_dir"], snapshot or f".rollback/{name}")
+    real = os.path.realpath(snap)
+    root = os.path.realpath(paths_["rollback_dir"])
+    if real != root and not real.startswith(root + os.sep):
+        raise LibraryError(f"{name}: rollback snapshot {snapshot!r} escapes skills/.rollback/")
+    return real
+
+
 def _history(entry, proposal, action, outcome, at, **extra):
     row = {"proposal": proposal, "action": action, "outcome": outcome, "at": at}
     row.update(extra)
@@ -876,7 +999,7 @@ def rollback_candidate(lib_root, repo, index, name, reason, at=None):
     if entry.get("status") != "candidate":
         raise LibraryError(f"{name} is not a candidate")
     rb = entry.get("rollback") or {}
-    snap = os.path.join(p["skills_dir"], rb.get("snapshot", f".rollback/{name}"))
+    snap = _contained_snapshot(p, name, rb.get("snapshot"))
     if not os.path.isdir(snap):
         raise LibraryError(f"{name}: rollback snapshot missing at {snap}")
     dst = skill_dir(lib_root, repo, name)
@@ -913,11 +1036,11 @@ def accept_candidate(lib_root, repo, index, name, at=None):
     sfile = skill_file(lib_root, repo, name)
     if not os.path.isfile(sfile):
         raise LibraryError(f"{name}: SKILL.md missing at accept")
+    snap = _contained_snapshot(p, name, (entry.get("rollback") or {}).get("snapshot"))
     entry["status"] = "active"
     entry["sha256"] = sha256_file(sfile)
     entry["activated_at"] = at
     entry["candidate_since"] = None
-    snap = os.path.join(p["skills_dir"], (entry.get("rollback") or {}).get("snapshot", f".rollback/{name}"))
     if os.path.isdir(snap):
         shutil.rmtree(snap)
     _history(entry, entry.get("proposal"), entry.get("action", "patch"), "accepted", at)
@@ -974,6 +1097,33 @@ def append_log(lib_root, repo, line, at=None):
 
 def read_raw_ledger(lib_root, repo):
     return read_jsonl(paths(lib_root, repo)["raw_ledger"])
+
+
+def baseline_runs(lib_root, repo, window_size, before_iso=None):
+    """The frozen baseline for a candidate: the last `window_size` ledger rows
+    that are eligible and carry a real numeric score, ordered by
+    (ingested_at, file index) so a tie on ingested_at keeps append order.
+    When before_iso is given only rows with ingested_at < before_iso count.
+    Malformed rows (not a dict, a bool score, a non-numeric score) are
+    skipped. Returns [{"run_id", "score"}].
+
+    One definition: skill-admit.py freezes the baseline with it at admission
+    and skill-score.py applies the same rule when it closes a window.
+    """
+    rows = read_raw_ledger(lib_root, repo)
+    keep = []
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict) or not row.get("eligible"):
+            continue
+        sc = row.get("score")
+        if isinstance(sc, bool) or not isinstance(sc, (int, float)):
+            continue
+        at = row.get("ingested_at") or ""
+        if before_iso is not None and not at < before_iso:
+            continue
+        keep.append((at, i, {"run_id": row.get("run_id"), "score": float(sc)}))
+    keep.sort(key=lambda t: (t[0], t[1]))
+    return [k[2] for k in keep[-int(window_size):]] if window_size > 0 else []
 
 
 # --- git ----------------------------------------------------------------------

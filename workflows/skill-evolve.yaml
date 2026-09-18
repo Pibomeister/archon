@@ -17,23 +17,22 @@ nodes:
       test -s "$SRC/params.json" || { echo "PREFLIGHT=FAIL no params.json in $SRC"; exit 1; }
       case "$SRC" in /*) ;; *) echo "PREFLIGHT=FAIL run message must be an absolute path"; exit 1 ;; esac
       RID_SRC="$(basename "$SRC")"
-      # Same repo rule as trace-digest.py (the digest node cross-checks it):
-      # params.repo when present, else web-app when the run left web node
-      # outputs, else api.
-      REPO=$(python3 - "$SRC" <<'PY'
+      # Same repo rule as trace-digest.py (the digest node cross-checks it),
+      # and literally the same function: skill_library.detect_repo — params.repo
+      # when present, else web-app when the run left web node outputs, else api.
+      REPO=$(python3 - "$SETUP" "$SRC" <<'PY'
       import json, os, sys
-      src = sys.argv[1]
+      sys.path.insert(0, sys.argv[1])
+      import skill_library as sl
+      src = sys.argv[2]
       try:
           d = json.load(open(os.path.join(src, "params.json"), encoding="utf-8"))
       except Exception as exc:
           print("PREFLIGHT=FAIL params.json unreadable: %s" % exc)
           raise SystemExit(1)
-      repo = d.get("repo") if isinstance(d, dict) else None
-      if not repo:
-          repo = "web-app" if any(n.startswith("node-web-") for n in os.listdir(src)) else "api"
-      print(repo)
+      print(sl.detect_repo(src, d))
       PY
-      )
+      ) || { echo "${REPO:-PREFLIGHT=FAIL repo detection failed}"; exit 1; }
       case "$REPO" in PREFLIGHT=FAIL*) echo "$REPO"; exit 1 ;; esac
       KNOWN=0
       for r in $(bash "$SETUP/repo-profile.sh" --list); do [ "$r" = "$REPO" ] && KNOWN=1; done
@@ -49,17 +48,18 @@ nodes:
       import skill_library as sl
       print(",".join(sl.ensure_skeleton(sys.argv[2], sys.argv[3])))
       PY
-      )
+      ) || { echo "${CREATED:-PREFLIGHT=FAIL skeleton check failed}"; exit 1; }
       if [ -n "$CREATED" ]; then
         echo "LIBRARY_SKELETON=CREATED $CREATED"
-        python3 "$SETUP/skill-admit.py" commit "$REPO" --lib "$LIB_ROOT" --message "library($REPO): skeleton"
+        python3 "$SETUP/skill-admit.py" commit "$REPO" --lib "$LIB_ROOT" --evolve-run "$RID_SELF" --message "library($REPO): skeleton"
       else
         echo "LIBRARY_SKELETON=PRESENT"
       fi
       STATUS=$(python3 "$SETUP/skill-admit.py" status "$REPO" --lib "$LIB_ROOT") || { echo "$STATUS"; echo "PREFLIGHT=FAIL library index invalid"; exit 1; }
       echo "$STATUS"
       CAND=$(printf '%s\n' "$STATUS" | sed -n 's/^SKILL_INDEX=OK candidate=\([^ ]*\).*/\1/p')
-      INGESTED=$(python3 "$SETUP/skill-score.py" is-ingested "$REPO" "$RID_SRC" --lib "$LIB_ROOT")
+      INGESTED=$(python3 "$SETUP/skill-score.py" is-ingested "$REPO" "$RID_SRC" --lib "$LIB_ROOT") \
+        || { echo "${INGESTED:-}"; echo "PREFLIGHT=FAIL is-ingested check failed"; exit 1; }
       echo "$INGESTED"
       case "$INGESTED" in
         SKILL_INGESTED=YES*) echo "PREFLIGHT=FAIL run $RID_SRC is already in the $REPO raw ledger (one evolve per run)"; exit 1 ;;
@@ -67,6 +67,11 @@ nodes:
         *) echo "PREFLIGHT=FAIL is-ingested check failed"; exit 1 ;;
       esac
       python3 "$SETUP/skill-admit.py" git-check "$REPO" --lib "$LIB_ROOT" || { echo "PREFLIGHT=FAIL library/$REPO must be a clean git tree before evolving"; exit 1; }
+      # source-run.txt and repo.txt are written BEFORE the lock is taken: the
+      # report node reads repo.txt to find the lock it must release, so a kill
+      # between the two would otherwise leak a lock nobody can attribute.
+      printf '%s\n' "$SRC" > "$ARTIFACTS_DIR/source-run.txt"
+      printf '%s\n' "$REPO" > "$ARTIFACTS_DIR/repo.txt"
       # One evolve per repo at a time. The lock lives beside the repo dirs, not
       # inside one, so it never dirties the tree the gates require clean.
       LOCK="$LIB_ROOT/.locks/$REPO.evolve.lock"
@@ -74,8 +79,6 @@ nodes:
       mkdir "$LOCK" 2>/dev/null || { echo "PREFLIGHT=FAIL lock held: $LOCK (owner $(cat "$LOCK/owner" 2>/dev/null || echo unknown)); rm -rf it only if no skill-evolve run is live"; exit 1; }
       printf '%s\n' "$RID_SELF" > "$LOCK/owner"
       HEAD=$(git -C "$LIB_ROOT/$REPO" rev-parse HEAD 2>/dev/null || echo none)
-      printf '%s\n' "$SRC" > "$ARTIFACTS_DIR/source-run.txt"
-      printf '%s\n' "$REPO" > "$ARTIFACTS_DIR/repo.txt"
       python3 - "$ARTIFACTS_DIR/evolve-context.json" "$SRC" "$RID_SRC" "$REPO" "$RID_SELF" "$CAND" "$HEAD" "$LIB_ROOT" "$LOCK" <<'PY'
       import json, sys
       out, src, rid, repo, self_id, cand, head, lib, lock = sys.argv[1:10]
@@ -115,7 +118,7 @@ nodes:
       # the proposer runs: the proposer must read the outcome in skill-impact.
       python3 "$SETUP/skill-score.py" ingest "$REPO" "$ARTIFACTS_DIR/trace-digest.json" \
         --lib "$LIB_ROOT" --evolve-run "$RID_SELF" --out "$ARTIFACTS_DIR/score-result.json"
-      python3 "$SETUP/skill-admit.py" commit "$REPO" --lib "$LIB_ROOT" --message "ingest($REPO): run $RID_SRC (skill-evolve $RID_SELF)"
+      python3 "$SETUP/skill-admit.py" commit "$REPO" --lib "$LIB_ROOT" --evolve-run "$RID_SELF" --message "ingest($REPO): run $RID_SRC (skill-evolve $RID_SELF)"
 
   - id: evolve-route
     depends_on: [score-run]
@@ -334,12 +337,12 @@ nodes:
         --lib "$LIB_ROOT" --out "$ARTIFACTS_DIR" --record --evolve-run "$RID_SELF" || RC=$?
       ACTION=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("action") or "-")' "$ARTIFACTS_DIR/proposal-gate-result.json" 2>/dev/null || echo "-")
       if [ "$RC" != 0 ]; then
-        python3 "$SETUP/skill-admit.py" commit "$REPO" --lib "$LIB_ROOT" --message "gate($REPO): proposal refused (skill-evolve $RID_SELF)" || true
+        python3 "$SETUP/skill-admit.py" commit "$REPO" --lib "$LIB_ROOT" --evolve-run "$RID_SELF" --message "gate($REPO): proposal refused (skill-evolve $RID_SELF)" || true
         exit "$RC"
       fi
       if [ "$ACTION" = no_action ]; then
         python3 "$SETUP/skill-admit.py" record-no-action "$REPO" --proposal "$ARTIFACTS_DIR/skill-proposal.json" --lib "$LIB_ROOT" --evolve-run "$RID_SELF"
-        python3 "$SETUP/skill-admit.py" commit "$REPO" --lib "$LIB_ROOT" --message "propose($REPO): no_action (skill-evolve $RID_SELF)"
+        python3 "$SETUP/skill-admit.py" commit "$REPO" --lib "$LIB_ROOT" --evolve-run "$RID_SELF" --message "propose($REPO): no_action (skill-evolve $RID_SELF)"
       fi
 
   - id: skill-critic
@@ -423,7 +426,7 @@ nodes:
         3) MSG="admit($REPO): nothing to admit (skill-evolve $RID_SELF)" ;;
         *) exit "$RC" ;;
       esac
-      python3 "$SETUP/skill-admit.py" commit "$REPO" --lib "$LIB_ROOT" --message "$MSG"
+      python3 "$SETUP/skill-admit.py" commit "$REPO" --lib "$LIB_ROOT" --evolve-run "$RID_SELF" --message "$MSG"
 
   - id: report
     depends_on: [skill-admit, wiki-gate]
@@ -492,6 +495,13 @@ nodes:
       for p in tail:
               print("## " + p.strip() if not p.startswith("#") else p.strip())
       PY
+      fi
+      # A wiki-gate refusal stops the chain at its own node, so the proposal
+      # gate below never ran. Name that cause before the generic check, which
+      # would otherwise blame the proposer for a wiki failure.
+      if [ "$WIKI" = FAIL ]; then
+        echo "SKILL_EVOLVE=FAIL wiki-gate refused the patch; the proposal chain was skipped"
+        exit 1
       fi
       # A `when:` that fails to parse skips its node silently and the run still
       # reports SUCCESS (RUNBOOK section 3). The route said propose=yes, so the

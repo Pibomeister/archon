@@ -1625,9 +1625,9 @@ nodes:
     # PURPOSE.md are never staged. An empty library is SKIP, not FAIL.
     ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
     eval "$(bash "$ROOT/.archon/setup/params-env.sh" "$ARTIFACTS_DIR/params.json")"
-    python3 "$ROOT/.archon/setup/stage-skills-library.py" \
-      --library "$ROOT/.archon/library" \
-      --repo "$REPO" --artifacts "$ARTIFACTS_DIR"
+    python3 "$ROOT/.archon/setup/stage-skills-library.py" "$REPO" \
+      --lib "$ROOT/.archon/library" \
+      --artifacts "$ARTIFACTS_DIR"
 - id: fix-loop
   depends_on:
   - stage-skills

@@ -14,7 +14,7 @@ import skill_library as sl  # noqa: E402
 
 ARCHON = Path(__file__).resolve().parents[2]
 LIBRARY = ARCHON / "library"
-SKELETON = ("README.md", "raw/index.jsonl", "wiki/index.md", "wiki/log.md",
+SKELETON = (".gitattributes", "README.md", "raw/index.jsonl", "wiki/index.md", "wiki/log.md",
             "wiki/skill-impact.md", "wiki/skill-impact.jsonl", "wiki/patterns/.keep",
             "skills/index.json")
 
@@ -49,9 +49,18 @@ class Skeleton(unittest.TestCase):
             self.assertEqual(Path(p["impact_jsonl"]).read_text(), "")
             self.assertEqual(sorted(x.name for x in Path(p["patterns_dir"]).iterdir()), [".keep"])
 
+    def test_gitattributes_pins_the_bytes_git_checks_out(self):
+        # The registry pins each skill by the sha256 of its SKILL.md bytes, so
+        # a clone with core.autocrlf=true must not rewrite line endings here.
+        for repo in repos():
+            path = LIBRARY / repo / ".gitattributes"
+            self.assertEqual(path.read_text(), sl.GITATTRIBUTES)
+            self.assertEqual(path.read_text(), "* -text\n")
+
     def test_generated_files_match_the_module_templates(self):
         for repo in repos():
             p = sl.paths(LIBRARY, repo)
+            self.assertEqual(Path(p["gitattributes"]).read_text(), sl.GITATTRIBUTES)
             self.assertEqual(Path(p["readme"]).read_text(), sl.REPO_README.format(repo=repo))
             self.assertEqual(Path(p["wiki_index"]).read_text(), sl.WIKI_INDEX_HEADER.format(repo=repo))
             self.assertEqual(Path(p["wiki_log"]).read_text(), sl.WIKI_LOG_HEADER.format(repo=repo))

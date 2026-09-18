@@ -190,6 +190,17 @@ class Preflight(Base):
         self.assertFalse(self.lock().exists())
         self.assertFalse((self.ad / "repo.txt").exists())
 
+    def test_fail_unparseable_params_reports_the_python_reason(self):
+        # The heredoc prints its own PREFLIGHT=FAIL and exits 1. Under set -e a
+        # bare assignment would abort the node with that message still captured
+        # in the variable, so the guard has to echo it.
+        src = self.fixture()
+        (src / "params.json").write_text("{not json")
+        p = self.fail(src, "params.json unreadable")
+        self.assertTrue(self.last(p).startswith("PREFLIGHT=FAIL params.json unreadable"), p.stdout)
+        self.assertFalse(self.lock().exists())
+        self.assertFalse((self.ad / "repo.txt").exists())
+
     def test_fail_unknown_repo_before_touching_the_library(self):
         src = self.fixture()
         d = json.loads((src / "params.json").read_text())

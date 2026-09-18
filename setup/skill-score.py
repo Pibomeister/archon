@@ -16,7 +16,7 @@ Typed lines (the last one is the discriminator):
   SCORE_COMPONENT name=.. value=.. weight=..                           one per non-zero component
   SKILL_SCORE=OK run=.. score=.. eligible=.. window=none|open(n/K)|closed:accept|closed:rollback|closed:inconclusive
   SKILL_WINDOW=ACCEPT skill=.. baseline=.. candidate=..                when a window closes
-  SKILL_WINDOW=ROLLBACK skill=.. reason=tie|worse|score_version_mismatch|no_baseline baseline=.. candidate=..
+  SKILL_WINDOW=ROLLBACK skill=.. reason=tie|worse|score_version_mismatch|short_baseline|no_baseline baseline=.. candidate=..
   SKILL_SCORE=FAIL already ingested run=..                             exit 2
   SKILL_SCORE=FAIL <reason>                                            exit 1
   SKILL_INGESTED=YES|NO run=..                                         exit 0 either way
@@ -31,10 +31,23 @@ index at ingest time) and the run is eligible.
 
 Window rule (strict, asymmetric): when candidate_runs reaches window_size the
 candidate is accepted iff mean(candidate) < mean(baseline) - min_improvement.
-A tie rolls back (reason=tie). An empty baseline or a score_version that
-differs between the index and any ledger row in the window is inconclusive
-and rolls back (reason=no_baseline | score_version_mismatch). Baselines are
-frozen at admission by skill-admit.py via baseline_runs() below.
+A tie rolls back (reason=tie). An empty baseline, a baseline that is not
+exactly window_size runs long, or a score_version that differs between the
+index and any ledger row in the window is inconclusive and rolls back
+(reason=no_baseline | short_baseline | score_version_mismatch). Baselines are
+frozen at admission by skill-admit.py via skill_library.baseline_runs(), the
+one definition this helper also applies when it closes a window.
+
+The index carries the score_version a new candidate will be frozen against.
+`ingest` stamps SCORE_VERSION into it only when no candidate is pending, so a
+bump to the weight table costs at most the one window that was already open.
+
+SCORE_VERSION history:
+  1  initial weight table
+  2  loop_failure_tokens counts membership of skill_library.LOOP_FAILURE_TOKENS
+     only. Version 1 also matched any RCA_PLAN_* token by prefix, which scored
+     RCA_PLAN_REJECTED and RCA_PLAN_SCOPE_DISPUTE -- a reviewer's verdict on one
+     plan -- as a loop that gave up, at 20 rather than 10.
 
 This helper never commits; the calling bash node does.
 """
@@ -46,7 +59,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import skill_library as sl  # noqa: E402
 
-SCORE_VERSION = 1
+SCORE_VERSION = 2
 SCHEMA_SUMMARY = "archon.skill-score.v1"
 
 # One weight per component. A change here is a SCORE_VERSION bump.
@@ -66,11 +79,10 @@ WEIGHTS = {
     "terminal_failed": 50,
 }
 
-LOOP_FAILURE_TOKENS = {
-    "NO_PROGRESS", "FIXER_BLOCKED", "ROUND_CAP_REACHED", "DESLOP_ROUND_CAP",
-    "PLAN_NO_PROGRESS", "PLAN_ROUND_CAP", "SCOPE_BREACH",
-}
-LOOP_FAILURE_PREFIX = "RCA_PLAN_"
+# The token set itself lives in skill_library so trace-digest.py counts the
+# same bucket this scores. Membership only: a prefix rule swept the bugfix
+# lane's RCA_PLAN_REJECTED and RCA_PLAN_SCOPE_DISPUTE (a reviewer's verdict on
+# one plan) into the loop bucket at twice the weight they deserve.
 
 TERMINALS = ("completed", "no_change", "failed", "incomplete")
 
@@ -80,7 +92,7 @@ class ScoreError(Exception):
 
 
 def is_loop_failure_token(token):
-    return token in LOOP_FAILURE_TOKENS or str(token).startswith(LOOP_FAILURE_PREFIX)
+    return token in sl.LOOP_FAILURE_TOKENS
 
 
 def _int(value):
@@ -178,28 +190,6 @@ def attribution(index, digest):
     return None
 
 
-def baseline_runs(lib_root, repo, window_size, before_iso=None):
-    """The frozen baseline for a new candidate: the last `window_size` ledger
-    rows that are eligible and carry a non-null score, in ledger order
-    (append order, which is ingest order; ties on ingested_at keep file
-    order). When before_iso is given only rows with ingested_at < before_iso
-    count. Returns [{"run_id", "score"}]."""
-    rows = sl.read_raw_ledger(lib_root, repo)
-    keep = []
-    for i, row in enumerate(rows):
-        if not isinstance(row, dict) or not row.get("eligible"):
-            continue
-        sc = row.get("score")
-        if isinstance(sc, bool) or not isinstance(sc, (int, float)):
-            continue
-        at = row.get("ingested_at") or ""
-        if before_iso is not None and not at < before_iso:
-            continue
-        keep.append((at, i, {"run_id": row.get("run_id"), "score": float(sc)}))
-    keep.sort(key=lambda t: (t[0], t[1]))
-    return [k[2] for k in keep[-int(window_size):]] if window_size > 0 else []
-
-
 def _mean(runs):
     vals = [float(r["score"]) for r in runs if isinstance(r, dict) and r.get("score") is not None]
     return sum(vals) / len(vals) if vals else None
@@ -272,6 +262,11 @@ def close_window(lib_root, repo, index, name, evolve_run_id, at=None):
         decision, reason = "inconclusive", "score_version_mismatch"
     elif b_mean is None:
         decision, reason = "inconclusive", "no_baseline"
+    elif len(baseline) != scoring.get("window_size"):
+        # A baseline that is not exactly K runs long cannot be compared with
+        # the candidate window: the two means are over different sample sizes,
+        # so the strict-better rule would be comparing noise.
+        decision, reason = "inconclusive", "short_baseline"
     elif c_mean < b_mean - float(index.get("min_improvement") or 0.0):
         decision, reason = "accept", "better"
     elif c_mean == b_mean - float(index.get("min_improvement") or 0.0):
@@ -356,6 +351,12 @@ def ingest(lib_root, repo, digest_path, evolve_run_id, at=None):
             summary["window"] = {"state": f"open({len(runs)}/{k})", "skill": candidate,
                                  "runs": len(runs), "window_size": k,
                                  "baseline_mean": _mean(scoring.get("baseline_runs"))}
+    # The index's score_version is what the next candidate is frozen against.
+    # Bumping it under an open window would make that window inconclusive, so
+    # it is stamped only once no candidate is pending -- which includes the
+    # ingest that just closed one, so a version bump costs at most one window.
+    if sl.one_candidate(index) is None and index.get("score_version") != SCORE_VERSION:
+        index["score_version"] = SCORE_VERSION
     try:
         sl.save_index(lib_root, repo, index)
     except sl.LibraryError as exc:
@@ -438,27 +439,42 @@ def cmd_window(args):
     return 0
 
 
+MORE = "Typed lines, eligibility and the window rule: skill-score.py --help"
+
+REPO_HELP = "repository name, a directory under the library root"
+LIB_HELP = "library root, the directory holding <repo>/"
+DIGEST_HELP = "the run's trace digest, archon.trace-digest.v1 from trace-digest.py"
+
+
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    sub = ap.add_subparsers(dest="cmd", required=True)
-    s = sub.add_parser("score")
-    s.add_argument("digest")
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], epilog=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True, metavar="<command>")
+
+    def parser(name, what):
+        # The whole docstring is the top-level epilog; a subcommand points at
+        # it rather than repeating the weight table and the window rule.
+        return sub.add_parser(name, help=what, description=what, epilog=MORE,
+                              formatter_class=argparse.RawDescriptionHelpFormatter)
+
+    s = parser("score", "score one digest and print its components; reads nothing, writes nothing")
+    s.add_argument("digest", help=DIGEST_HELP)
     s.set_defaults(fn=cmd_score)
-    s = sub.add_parser("ingest")
-    s.add_argument("repo")
-    s.add_argument("digest")
-    s.add_argument("--lib", required=True)
-    s.add_argument("--evolve-run", required=True)
-    s.add_argument("--out")
+    s = parser("ingest", "score a run into the repo's ledger and close the window when it fills")
+    s.add_argument("repo", help=REPO_HELP)
+    s.add_argument("digest", help=DIGEST_HELP)
+    s.add_argument("--lib", required=True, help=LIB_HELP)
+    s.add_argument("--evolve-run", required=True, help="the skill-evolve run id doing the ingest")
+    s.add_argument("--out", help="write the ingest result to this JSON file")
     s.set_defaults(fn=cmd_ingest)
-    s = sub.add_parser("is-ingested")
-    s.add_argument("repo")
-    s.add_argument("run_id")
-    s.add_argument("--lib", required=True)
+    s = parser("is-ingested", "ask whether a run is already in the ledger; exit 0 either way")
+    s.add_argument("repo", help=REPO_HELP)
+    s.add_argument("run_id", help="the source run id to look for")
+    s.add_argument("--lib", required=True, help=LIB_HELP)
     s.set_defaults(fn=cmd_is_ingested)
-    s = sub.add_parser("window")
-    s.add_argument("repo")
-    s.add_argument("--lib", required=True)
+    s = parser("window", "report the open candidate's window: runs so far, K and the baseline")
+    s.add_argument("repo", help=REPO_HELP)
+    s.add_argument("--lib", required=True, help=LIB_HELP)
     s.set_defaults(fn=cmd_window)
     args = ap.parse_args(argv)
     return args.fn(args)
