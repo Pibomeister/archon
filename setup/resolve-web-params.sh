@@ -6,6 +6,7 @@
 # full-sdlc-web run cannot land on a full-sdlc-api run's port (which used to be
 # literally the same 4123, with both smoke checks passing against either server).
 set -euo pipefail
+LAYER="${ARCHON_LAYER:-$(cd "$(dirname "$0")/.." && pwd)}"
 ROOT="${1:?usage: resolve-web-params.sh <root> <handoff> <artifacts-dir> [api-port-base] [web-port-base]}"
 HANDOFF="${2-}"
 AD="${3:?usage: resolve-web-params.sh <root> <handoff> <artifacts-dir> [api-port-base] [web-port-base]}"
@@ -23,7 +24,7 @@ case "$FEATURE_SCOPE" in
     test -n "$HANDOFF" || { echo "WEB_PARAMS=FAIL no API handoff path in run message"; exit 1; }
     case "$HANDOFF" in /*) : ;; *) echo "WEB_PARAMS=FAIL API handoff path must be absolute, got: $HANDOFF"; exit 1 ;; esac
     test -f "$HANDOFF" || { echo "WEB_PARAMS=FAIL API handoff missing: $HANDOFF"; exit 1; }
-    python3 "$ROOT/.archon/setup/archon-run.py" verify-feature-handoff --provider "$PROVIDER" --lane "$LANE" --artifacts "$AD" "$HANDOFF"
+    python3 "$LAYER/setup/archon-run.py" verify-feature-handoff --provider "$PROVIDER" --lane "$LANE" --artifacts "$AD" "$HANDOFF"
     ;;
   web) : ;;
   repositories) : ;;
@@ -31,8 +32,8 @@ case "$FEATURE_SCOPE" in
 esac
 APIPORT=""; WEBPORT=""
 PORT_KEY="$(basename "${HANDOFF:-$CHAIN_ID}")"
-[ -n "$APIBASE" ] && { APIPORT=$(bash "$ROOT/.archon/setup/port-alloc.sh" "$APIBASE" "$PORT_KEY") || { echo "WEB_PARAMS=FAIL cannot allocate api port from base $APIBASE"; exit 1; }; }
-[ -n "$WEBBASE" ] && { WEBPORT=$(bash "$ROOT/.archon/setup/port-alloc.sh" "$WEBBASE" "$PORT_KEY") || { echo "WEB_PARAMS=FAIL cannot allocate web port from base $WEBBASE"; exit 1; }; }
+[ -n "$APIBASE" ] && { APIPORT=$(bash "$LAYER/setup/port-alloc.sh" "$APIBASE" "$PORT_KEY") || { echo "WEB_PARAMS=FAIL cannot allocate api port from base $APIBASE"; exit 1; }; }
+[ -n "$WEBBASE" ] && { WEBPORT=$(bash "$LAYER/setup/port-alloc.sh" "$WEBBASE" "$PORT_KEY") || { echo "WEB_PARAMS=FAIL cannot allocate web port from base $WEBBASE"; exit 1; }; }
 python3 - "$ROOT" "$HANDOFF" "$AD" "$APIPORT" "$WEBPORT" <<'PY'
 import hashlib, json, os, re, subprocess, sys
 from pathlib import Path

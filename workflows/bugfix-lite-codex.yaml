@@ -38,11 +38,14 @@ nodes:
   bash: |
     set -euo pipefail
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-preflight.out") 2> >(tee -a "$ARTIFACTS_DIR/node-preflight.out" >&2); fi
-    ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
+    : "${ARCHON_LAYER:?PREFLIGHT=FAIL ARCHON_LAYER unset}"
+    : "${PROJECT_ROOT:?PREFLIGHT=FAIL PROJECT_ROOT unset}"
+    test -f "$ARCHON_LAYER/setup/resolve-params.sh" || { echo "PREFLIGHT=FAIL ARCHON_LAYER missing helpers"; exit 1; }
+    ROOT="$PROJECT_ROOT"
     if [ -n "${ARCHON_BUGFIX_CONTINUATION_SEED:-}" ]; then
-      python3 "$ROOT/.archon/setup/archon-run.py" import-continuation --artifacts "$ARTIFACTS_DIR"
+      python3 "$ARCHON_LAYER/setup/archon-run.py" import-continuation --artifacts "$ARTIFACTS_DIR"
     fi
-    python3 "$ROOT/.archon/setup/repo-policy.py" snapshot --root "$ROOT" --artifacts "$ARTIFACTS_DIR" \
+    python3 "$ARCHON_LAYER/setup/repo-policy.py" snapshot --root "$ROOT" --artifacts "$ARTIFACTS_DIR" \
       || { echo "PREFLIGHT=FAIL repository policy snapshot"; exit 1; }
     SK="$ROOT/.claude/skills"
     test -f "$SK/ce-code-review/SKILL.md" || { echo "PREFLIGHT=FAIL staged ce-code-review missing"; exit 1; }
@@ -54,12 +57,6 @@ nodes:
     # mode:headless (now an alias for mode:agent) into references/modes-and-output.md
     # and the verdict field into references/finish-review.md. Either satisfies.
     { grep -q 'mode:headless' "$SK/ce-code-review/SKILL.md" && grep -q '"verdict"' "$SK/ce-code-review/SKILL.md"; }         || { grep -q 'mode:headless' "$SK/ce-code-review/references/modes-and-output.md" 2>/dev/null && grep -q '"verdict"' "$SK/ce-code-review/references/finish-review.md" 2>/dev/null; }         || { echo "PREFLIGHT=FAIL ce-code-review carries neither review contract (headless envelope nor agent JSON)"; exit 1; }
-    command -v bun >/dev/null || { echo "PREFLIGHT=FAIL bun missing"; exit 1; }
-    command -v pnpm >/dev/null || { echo "PREFLIGHT=FAIL pnpm missing"; exit 1; }
-    command -v mise >/dev/null || { echo "PREFLIGHT=FAIL mise missing"; exit 1; }
-    mise x node@20 -- node -v | grep -q '^v20' || { echo "PREFLIGHT=FAIL node20 via mise unavailable"; exit 1; }
-    command -v gh >/dev/null || { echo "PREFLIGHT=FAIL gh missing"; exit 1; }
-    gh auth status >/dev/null 2>&1 || { echo "PREFLIGHT=FAIL gh unauthenticated"; exit 1; }
     # Billing guard (codex): runs MUST bill the ChatGPT plan (auth_mode "chatgpt"
     # in the effective CODEX_HOME), never an API key. Fail closed when the auth
     # file is missing, unreadable, keyed to the API, or token-less.
@@ -105,27 +102,12 @@ nodes:
     # asserted free: port-alloc.sh walks past an occupied slot, which is what
     # lets a second run of this lane start while the first is still up.
     port_pids 4126 >/dev/null || { echo "PREFLIGHT=FAIL no port-inspection tool (need lsof, ss, or fuser)"; exit 1; }
-    test -d "$ROOT/api/.git" || { echo "PREFLIGHT=FAIL api repo missing"; exit 1; }
-    test -d "$ROOT/web-app/.git" || { echo "PREFLIGHT=FAIL web-app repo missing"; exit 1; }
-    # Run identity: message = absolute bug-report path (empty = hard fail).
-    # The worktree in params.json is PROVISIONAL — bind-repo rewrites it after the RCA gate.
-    # 4126/3126 are this lane's port BASES and the only place those literals
-    # still appear -- derive-lite.py's port map is a plain string substitution,
-    # so one literal site per lane is what keeps the lite twin derivable.
-    bash "$ROOT/.archon/setup/resolve-params.sh" "$ROOT" "${ARGUMENTS-}" "$ARTIFACTS_DIR" 4126 3126
-    eval "$(bash "$ROOT/.archon/setup/params-env.sh" "$ARTIFACTS_DIR/params.json")"
-    test -n "$APIPORT" && test -n "$WEBPORT" || { echo "PREFLIGHT=FAIL params.json carries no smoke ports"; exit 1; }
-    echo "PREFLIGHT_PORTS api=$APIPORT web=$WEBPORT (per-run, from bases 4126/3126)"
+    # 4126/3126 are parent bases; derive-lite substitutes them to 4126/3126.
+    bash "$ARCHON_LAYER/setup/profile-preflight.sh" 4126 bugfix-lite.yaml 3126 --checkouts
+    eval "$(bash "$ARCHON_LAYER/setup/params-env.sh" "$ARTIFACTS_DIR/params.json")"
     cp "$SPEC" "$ARTIFACTS_DIR/bug-report.md"
-    test -d "$ROOT/goodword-kb/wiki" || { echo "PREFLIGHT=FAIL knowledge base missing"; exit 1; }
-    git -C "$ROOT/goodword-kb" status --porcelain | sort > "$ARTIFACTS_DIR/kb-pre-porcelain.txt"
     mkdir -p "$ARTIFACTS_DIR/evidence"
-    # Soft prerequisites: warn, never fail — a local-only repro must run with
-    # zero external evidence sources.
-    # One probe per evidence source, written to capabilities.json and warned
-    # about here. Discovery only: capability-gate decides whether a missing
-    # source stops THIS report, because only it knows what the report needs.
-    python3 "$ROOT/.archon/setup/archon-run.py" capabilities --artifacts "$ARTIFACTS_DIR"
+    python3 "$ARCHON_LAYER/setup/archon-run.py" capabilities --artifacts "$ARTIFACTS_DIR"
     command -v docker-compose >/dev/null 2>&1 || echo "PREFLIGHT_WARN legacy docker-compose missing - integration-kind repro unavailable"
     echo "PREFLIGHT=PASS"
 - id: intake
@@ -241,13 +223,13 @@ nodes:
     assert tw is None or (isinstance(tw, dict) and tw.get("start") and tw.get("end")), "time_window malformed"
     PY
     if [ -n "${ARCHON_BUGFIX_CONTINUATION_SEED:-}" ]; then
-      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/archon-run.py \
+      python3 "$ARCHON_LAYER/setup/archon-run.py" \
         import-continuation --artifacts "$ARTIFACTS_DIR" --finalize-ledger \
         || { echo "INTAKE_GATE=FAIL continuation ledger import"; exit 1; }
     fi
-    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/bugfix-contract.py seal-ledger "$ARTIFACTS_DIR" \
+    python3 "$ARCHON_LAYER/setup/bugfix-contract.py" seal-ledger "$ARTIFACTS_DIR" \
       || { echo "INTAKE_GATE=FAIL symptom ledger"; exit 1; }
-    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/bugfix-contract.py bind-chain-ledger "$ARTIFACTS_DIR" \
+    python3 "$ARCHON_LAYER/setup/bugfix-contract.py" bind-chain-ledger "$ARTIFACTS_DIR" \
       || { echo "INTAKE_GATE=FAIL symptom ledger chain binding"; exit 1; }
     python3 - "$ARTIFACTS_DIR/triage.json" <<'PY' || { echo "INTAKE_GATE=FAIL triage shape"; exit 1; }
     import json, sys
@@ -268,8 +250,8 @@ nodes:
     # The operator relaunches the SAME report on bugfix; never edit the
     # envelope or the artifacts to pass. Output is persisted to
     # envelope-pre.txt for the packet / PR body and for resume.
-    bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/lite-envelope.sh \
-      /Users/eduardopicazo/Documents/Workspace/Goodword "$ARTIFACTS_DIR" bugfix pre
+    bash "$ARCHON_LAYER/setup/lite-envelope.sh" \
+      "$PROJECT_ROOT" "$ARTIFACTS_DIR" bugfix pre
 - id: kb-recon
   depends_on:
   - lite-envelope-pre
@@ -279,7 +261,11 @@ nodes:
     context a code explorer cannot see: recorded failure modes, footguns, and
     the history of this corner of the system. Ask no questions.
 
-    The knowledge base is at /Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb.
+    Read profile-runtime.json in the directory named by ARTIFACTS_DIR
+    (resolve via: echo "$ARTIFACTS_DIR"). If kbRequired is false or kbRootRel
+    is empty, write kb-context.md with every marker section saying
+    "Nothing found in the KB", a SOURCES section that is empty, and stop.
+    Otherwise the knowledge base is "$PROJECT_ROOT"/<kbRootRel>.
     Read ONLY — never edit anything there. For a bug, priority order is:
       wiki/change-history/ (recent lessons and incidents near this area),
       recorded FOOTGUNS on the relevant concept/pattern/system pages (route
@@ -314,12 +300,18 @@ nodes:
     for m in FOOTGUNS CHANGE-HISTORY TERMS DECISIONS SOURCES; do
       grep -q "<!-- $m -->" "$K" || { echo "KB_GATE=FAIL missing section $m"; exit 1; }
     done
+    # shellcheck disable=SC1091
+    source "$ARTIFACTS_DIR/profile-runtime.sh"
+    if [ "$KB_REQUIRED" != 1 ]; then
+      echo "KB_RECON_GATE=PASS kb=optional"
+      exit 0
+    fi
     OK=0
     for p in $(grep -oE '/[A-Za-z0-9._/-]+\.md' "$K" | sort -u | head -20); do
       test -f "$p" && OK=1 && break
     done
     test "$OK" = 1 || { echo "KB_GATE=FAIL no verifiable source path"; exit 1; }
-    git -C /Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb status --porcelain | sort > "$ARTIFACTS_DIR/kb-now.txt"
+    git -C "$PROJECT_ROOT/$KB_ROOT_REL" status --porcelain | sort > "$ARTIFACTS_DIR/kb-now.txt"
     # The knowledge base is HOST-GLOBAL: a concurrent full-sdlc-* run's
     # kb-capture drops an untracked file into wiki/change-history/ and a raw
     # cmp would blame this run's read-only scout for it. Compare everything
@@ -336,7 +328,7 @@ nodes:
   bash: |
     set -uo pipefail
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-evidence-cheap.out") 2> >(tee -a "$ARTIFACTS_DIR/node-evidence-cheap.out" >&2); fi
-    ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
+    ROOT="$PROJECT_ROOT"
     EV="$ARTIFACTS_DIR/evidence"; mkdir -p "$EV"
     EP="$ARTIFACTS_DIR/evidence-plan.json"
     : > "$EV/cheap.status"
@@ -431,7 +423,7 @@ nodes:
       (cd "$ROOT/$R" && gh pr list --state open --limit 50 --json number,title,headRefName,updatedAt,files,url > "$EV/open-prs-$R.json" 2>/dev/null) || printf '[]\n' > "$EV/open-prs-$R.json"
       (cd "$ROOT/$R" && gh pr list --state merged --limit 50 --json number,title,headRefName,updatedAt,mergedAt,files,url > "$EV/merged-prs-$R.json" 2>/dev/null) || printf '[]\n' > "$EV/merged-prs-$R.json"
     done
-    python3 "$ROOT/.archon/setup/change-context.py" build --artifacts "$ARTIFACTS_DIR" \
+    python3 "$ARCHON_LAYER/setup/change-context.py" build --artifacts "$ARTIFACTS_DIR" \
       || { echo "EVIDENCE_CHEAP=FAIL change-context"; exit 1; }
     echo "openprs=$OPENPRS" >> "$EV/cheap.status"
     echo "EVIDENCE_CHEAP sentry=$SENTRY linear=$LINEAR gitlog=$GITLOG openprs=$OPENPRS"
@@ -455,7 +447,7 @@ nodes:
     2. If the gitnexus MCP tools (mcp__gitnexus__query and friends) are not
        available in your session (a known `codex exec` upstream limitation),
        run exactly this trusted no-shell fallback:
-         python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/gitnexus-evidence.py --artifacts "$ARTIFACTS_DIR"
+         python3 "$ARCHON_LAYER/setup/gitnexus-evidence.py" --artifacts "$ARTIFACTS_DIR"
        Read evidence/gitnexus-cli.json and write gitnexus-findings.md with
        FIRST line exactly:
          GITNEXUS=GATHERED transport=cli-fallback
@@ -542,7 +534,7 @@ nodes:
     import json, os, subprocess, sys
     ad = sys.argv[1]
     manifest = json.load(open(os.path.join(ad, "evidence-manifest.json"), encoding="utf-8"))
-    helper = "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/evidence-provenance.py"
+    helper = "$ARCHON_LAYER/setup/evidence-provenance.py"
     for name, row in manifest["sources"].items():
         status = {"gathered": "complete", "skipped": "unavailable"}.get(row["status"], "unavailable")
         cmd = ["python3", helper, "record", "--artifacts", ad, "--source", name, "--status", status]
@@ -582,8 +574,8 @@ nodes:
     evidence-plan.json (repro_command, repro_observed),
     evidence-manifest.json plus every evidence/ file it marks gathered,
     change-context.json, kb-context.md, and the two main checkouts READ-ONLY at
-    /Users/eduardopicazo/Documents/Workspace/Goodword/api and
-    /Users/eduardopicazo/Documents/Workspace/Goodword/web-app. There is NO
+    "$PROJECT_ROOT"/api and
+    "$PROJECT_ROOT"/web-app. There is NO
     worktree yet — do not modify any repository, do not create branches.
     The checkouts may sit on a stale feature branch: read `bugfix-chain.json`, select `baseline.commits[<repo>]`, and inspect that immutable SHA (`git -C <repo> show <sha>:<path>`, `git -C <repo> ls-tree -r --name-only <sha>`). Cite paths at that SHA; the gate resolves citations against the same pinned baseline.
     The manifest tells you exactly which evidence exists; reason only from
@@ -641,7 +633,7 @@ nodes:
       {"links": [
         {"index": 1, "cause": "<one sentence>",
          "evidence": {"source": "code|db|logs|sentry|linear|gitlog|gitnexus|report",
-                      "file": "<absolute path, or path relative to /Users/eduardopicazo/Documents/Workspace/Goodword, or relative to the artifacts dir; for source gitlog cite the commit as api@<sha> or web-app@<sha> and quote a line of its message or diff, never a bare repo name, commit description, or URL>",
+                      "file": "<absolute path, or path relative to "$PROJECT_ROOT", or relative to the artifacts dir; for source gitlog cite the commit as api@<sha> or web-app@<sha> and quote a line of its message or diff, never a bare repo name, commit description, or URL>",
                       "quote": "<verbatim substring of that file, at least 10 chars — a gate greps for it>"}},
         ...,
         {"index": N, "cause": "<the root cause>", "evidence": {...},
@@ -704,8 +696,8 @@ nodes:
     On the lite lane "command" runs the test_file you name and uses the same
     runner and form as evidence-plan.json's repro_command (the reporter's
     own invocation is the proof that the runner works here).
-    Command shapes: api unit -> bun run test -- "<spec path>" (the -- form;
-    never bare bun test). web-app vitest -> pnpm test --run <spec path>.
+    Command shapes come from project-guidance.md in ARTIFACTS_DIR. Follow it.
+    Do not invent runners.
     Follow repo-policy.json: extend the existing owning spec when required, and
     give the failure one stable hermetic owner at the highest practical fidelity.
     Prefer kind=unit/vitest strongly: integration owns machine-global ports
@@ -716,8 +708,8 @@ nodes:
 
     verify.json — {"test_patterns": ["<pattern>", ...]}: the suites that
     must stay green after the fix (existing specs for the touched files
-    included), run as bun run test -- "<pattern>" (api) or
-    pnpm test --run <pattern> (web-app). UNIT specs only: the api unit
+    included), using the unit-test command from project-guidance.md for this
+    repository. UNIT specs only: the api unit
     runner ignores .int.spec.ts / .e2e.spec.ts / .ai.spec.ts / .ext.spec.ts
     ("No tests found"), so listing one fails the fix loop as a contract
     error. Name integration coverage in the fix plan's risks instead.
@@ -836,7 +828,7 @@ nodes:
   bash: |
     set -euo pipefail
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-rca-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-rca-gate.out" >&2); fi
-    ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
+    ROOT="$PROJECT_ROOT"
     AD="$ARTIFACTS_DIR"
     # rca-reassess may revise the ASSESSMENT after retrieval; the DIAGNOSIS is
     # not its to touch. probe-run checkpointed the six frozen artifacts.
@@ -869,7 +861,7 @@ nodes:
       fi
       REPO_FOR_BASELINE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['repo'])" "$AD/repo.json")
       if [ "$REPO_FOR_BASELINE" != both ]; then
-        python3 "$ROOT/.archon/setup/evidence-provenance.py" record \
+        python3 "$ARCHON_LAYER/setup/evidence-provenance.py" record \
           --artifacts "$AD" --source prod-probes --status complete \
           --file probe-results.txt --tool psql \
           --provider "$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['provider'])" "$AD/bugfix-chain.json")" \
@@ -892,7 +884,7 @@ nodes:
         # the entity and is class evidence; citing it for an occurrence picks
         # up the wrong row. Same window and watermark as the probe row.
         if [ -s "$AD/evidence/occurrence-logs.txt" ]; then
-          python3 "$ROOT/.archon/setup/evidence-provenance.py" record \
+          python3 "$ARCHON_LAYER/setup/evidence-provenance.py" record \
             --artifacts "$AD" --source occurrence-logs --status complete \
             --file evidence/occurrence-logs.txt --tool aws-logs \
             --provider "$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['provider'])" "$AD/bugfix-chain.json")" \
@@ -1049,7 +1041,7 @@ nodes:
     # copy would be two contracts drifting apart, and the drift would show up as
     # artifacts that pass here and fail after the loop, or worse, the reverse.
     SHAPE=0
-    OUT=$(bash "$ROOT/.archon/setup/rca-shape.sh" "$ARTIFACTS_DIR" RCA_GATE 2>&1) || SHAPE=$?
+    OUT=$(bash "$ARCHON_LAYER/setup/rca-shape.sh" "$ARTIFACTS_DIR" RCA_GATE 2>&1) || SHAPE=$?
     if [ "$SHAPE" != 0 ]; then
       # This node keeps its own typed token: RCA_GATE=FAIL <reason> is what
       # RUNBOOK.md and every existing grep over run logs look for. rca-shape.sh
@@ -1074,9 +1066,9 @@ nodes:
       esac
       exit 1
     fi
-    python3 "$ROOT/.archon/setup/repo-policy.py" validate-plan --root "$ROOT" --artifacts "$ARTIFACTS_DIR" \
+    python3 "$ARCHON_LAYER/setup/repo-policy.py" validate-plan --root "$ROOT" --artifacts "$ARTIFACTS_DIR" \
       || { echo "RCA_GATE=FAIL repository policy"; exit 1; }
-    python3 "$ROOT/.archon/setup/change-context.py" validate --artifacts "$ARTIFACTS_DIR" \
+    python3 "$ARCHON_LAYER/setup/change-context.py" validate --artifacts "$ARTIFACTS_DIR" \
       || { echo "RCA_GATE=FAIL change-history assessment"; exit 1; }
     # The RCA_NOTE=integration mutex line passes through; the RCA_SHAPE=OK line
     # is this gate's own token to print, with the link count only it knows.
@@ -1114,8 +1106,8 @@ nodes:
     Read fix-plan.json (fix_site, files, approach) and causal-chain.json (the
     final link's fix_site) there, and collect every existing symbol (function,
     class, method) the fix proposes to MODIFY. Read the code in the main
-    checkout at /Users/eduardopicazo/Documents/Workspace/Goodword/api or
-    /web-app (repo.json says which) to name them; there may be no worktree
+    checkout named by repo.json under "$PROJECT_ROOT" (or "$PROJECT_ROOT"
+    itself on a single-repo layout) to name them; there may be no worktree
     yet. Symbols the fix creates from scratch have no callers and do not
     belong in the list.
 
@@ -1123,16 +1115,15 @@ nodes:
     yourself explicitly and visibly:
     1. If the fix modifies no existing symbol, write impact.json with
        "status": "SKIPPED" and an empty "symbols" array.
-    2. If repo.json says web-app, the gitnexus MCP tools are not available, the
-       indexed repo "api" is absent/stale, OR ANY impact call errors or reports
-       that the repo/target is unavailable,
+    2. Read profile-runtime.json. gitnexusRepo is the indexed repo name. If it
+       is empty, repo.json names a different repository, the gitnexus MCP tools
+       are not available, that index is absent/stale, OR ANY impact call errors,
        write impact.json with "status": "UNAVAILABLE" and an empty "symbols"
-       array. On the lite lane this routes the ticket to the full lane; that
-       is correct (the index covers api/ only).
+       array. Whether that routes FULL is a profile policy (impactUnavailable).
     3. Otherwise call mcp__gitnexus__impact with
        {target: "<symbol>", direction: "upstream"} for each symbol, against
-       the indexed repo "api". Use "status": "GATHERED" ONLY when every call
-       succeeded against that repo.
+       the indexed repo named by gitnexusRepo. Use "status": "GATHERED" ONLY
+       when every call succeeded against that repo.
 
     impact.json is ALWAYS valid JSON and carries NO token prepended to it;
     the typed status line is this node's stdout only, never part of the file:
@@ -1142,7 +1133,7 @@ nodes:
                     "d1_callers": ["<caller symbol or path:line>", ...],
                     "risk": "LOW|MEDIUM|HIGH|CRITICAL",
                     "query_status": "GATHERED",
-                    "query_repo": "api",
+                    "query_repo": "<gitnexusRepo from profile-runtime.json>",
                     "query_target": "<exact target passed to the tool>"}]}
     Every d1_caller comes from successful tool output. Never invent one. A
     SUCCESSFUL query that returns no callers gets an empty list and risk "LOW";
@@ -1165,8 +1156,8 @@ nodes:
     # The operator relaunches the SAME report on bugfix; never edit the
     # envelope or the artifacts to pass. Output is persisted to
     # envelope-plan.txt for the packet / PR body and for resume.
-    bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/lite-envelope.sh \
-      /Users/eduardopicazo/Documents/Workspace/Goodword "$ARTIFACTS_DIR" bugfix plan
+    bash "$ARCHON_LAYER/setup/lite-envelope.sh" \
+      "$PROJECT_ROOT" "$ARTIFACTS_DIR" bugfix plan
 - id: rca-render
   depends_on:
   - lite-envelope
@@ -1273,10 +1264,10 @@ nodes:
     how the stage is supposed to end and not a failure. Then the four
     commands, each in its own code chip with a short label saying when to
     pick it:
-      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/archon-run.py approve <id> --token CONTROL_TOKEN_FROM_LAST_LAUNCH
-      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/archon-run.py reject <id> "why you are stopping it" --token CONTROL_TOKEN_FROM_LAST_LAUNCH
-      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/archon-run.py abandon <id> --token CONTROL_TOKEN_FROM_LAST_LAUNCH
-      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/archon-run.py resume <id> --token CONTROL_TOKEN_FROM_LAST_LAUNCH
+      python3 $ARCHON_LAYER/setup/archon-run.py approve <id> --token CONTROL_TOKEN_FROM_LAST_LAUNCH
+      python3 $ARCHON_LAYER/setup/archon-run.py reject <id> "why you are stopping it" --token CONTROL_TOKEN_FROM_LAST_LAUNCH
+      python3 $ARCHON_LAYER/setup/archon-run.py abandon <id> --token CONTROL_TOKEN_FROM_LAST_LAUNCH
+      python3 $ARCHON_LAYER/setup/archon-run.py resume <id> --token CONTROL_TOKEN_FROM_LAST_LAUNCH
     Say to run each command exactly as rendered: it already manages whether
     backgrounding is required for this provider. A failed continuation still
     leaves the approval recorded, so the rendered resume command picks it up.
@@ -1300,14 +1291,14 @@ nodes:
   timeout: 120000
   bash: |
     set -euo pipefail
-    ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
-    python3 "$ROOT/.archon/setup/bugfix-contract.py" write-lite-approval-manifest --artifacts "$ARTIFACTS_DIR"
+    ROOT="$PROJECT_ROOT"
+    python3 "$ARCHON_LAYER/setup/bugfix-contract.py" write-lite-approval-manifest --artifacts "$ARTIFACTS_DIR"
     RID="$(basename "$ARTIFACTS_DIR")"
     test -n "${ARCHON_BUGFIX_CHAIN_STATE-}" || { echo "LITE_ATTESTATION=FAIL no chain state"; exit 1; }
     test -n "${ARCHON_ATTESTATION_DIR-}" || { echo "LITE_ATTESTATION=FAIL no attestation dir"; exit 1; }
     SEAL="$ARCHON_ATTESTATION_DIR/$RID-lite-approval.json"
-    python3 "$ROOT/.archon/setup/controller-attest.py" lite-approval --artifacts "$ARTIFACTS_DIR" --chain-state "$ARCHON_BUGFIX_CHAIN_STATE" --out "$SEAL"
-    python3 "$ROOT/.archon/setup/controller-attest.py" lite-approval --verify --artifacts "$ARTIFACTS_DIR" --chain-state "$ARCHON_BUGFIX_CHAIN_STATE" --out "$SEAL"
+    python3 "$ARCHON_LAYER/setup/controller-attest.py" lite-approval --artifacts "$ARTIFACTS_DIR" --chain-state "$ARCHON_BUGFIX_CHAIN_STATE" --out "$SEAL"
+    python3 "$ARCHON_LAYER/setup/controller-attest.py" lite-approval --verify --artifacts "$ARTIFACTS_DIR" --chain-state "$ARCHON_BUGFIX_CHAIN_STATE" --out "$SEAL"
     H="$ARTIFACTS_DIR/rca-review.html"
     test -s "$H" || { echo "RENDER_GATE=FAIL no rca-review.html"; exit 1; }
     for m in GIST SYMPTOM EVIDENCE CHAIN EXPERIMENT RESIDUALS CRITIC FIX TEST DECIDE; do
@@ -1334,7 +1325,7 @@ nodes:
   depends_on:
   - rca-render-gate
   approval:
-    message: 'RCA review packet ready (the lite lane''s only gate): open <this run''s ARTIFACTS_DIR>/rca-review.html. Approval covers exactly the rendered and controller-attested plan; do not edit artifacts at the gate. Approve starts unattended RED -> fix -> negative-control -> review and ends at a draft PR; this lane has no in-app smoke gate. Reject records feedback only and does not revise this run because that would stale its manifest; abandon it and start the guarded successor named in the rejection receipt. Abandon ends without rework. Codex control requirement: use python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/archon-run.py for approve, reject, abandon, and resume with the token printed by the previous STARTED line; raw archon control is rejected by the one-time always-run guard.'
+    message: 'RCA review packet ready (the lite lane''s only gate): open <this run''s ARTIFACTS_DIR>/rca-review.html. Approval covers exactly the rendered and controller-attested plan; do not edit artifacts at the gate. Approve starts unattended RED -> fix -> negative-control -> review and ends at a draft PR; this lane has no in-app smoke gate. Reject records feedback only and does not revise this run because that would stale its manifest; abandon it and start the guarded successor named in the rejection receipt. Abandon ends without rework. Codex control requirement: use python3 $ARCHON_LAYER/setup/archon-run.py for approve, reject, abandon, and resume with the token printed by the previous STARTED line; raw archon control is rejected by the one-time always-run guard.'
     on_reject:
       max_attempts: 3
       prompt: |
@@ -1348,7 +1339,7 @@ nodes:
         any change requires a scope-preserving full-lane successor so proof and review
         run on the new artifacts. Read provider from bugfix-chain.json and include this
         exact command with the literal run id/provider filled in:
-        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/archon-run.py bugfix-successor-seed <run-id> --provider <provider> --transition-type human-rejection
+        python3 "$ARCHON_LAYER/setup/archon-run.py" bugfix-successor-seed <run-id> --provider <provider> --transition-type human-rejection
         End with: RCA_REJECTION_RECORDED
 - id: post-approval-integrity
   depends_on:
@@ -1356,13 +1347,13 @@ nodes:
   timeout: 120000
   bash: |
     set -euo pipefail
-    ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
+    ROOT="$PROJECT_ROOT"
     RID="$(basename "$ARTIFACTS_DIR")"
     test -n "${ARCHON_BUGFIX_CHAIN_STATE-}" || { echo "POST_APPROVAL=FAIL no chain state"; exit 1; }
     test -n "${ARCHON_ATTESTATION_DIR-}" || { echo "POST_APPROVAL=FAIL no attestation dir"; exit 1; }
-    python3 "$ROOT/.archon/setup/bugfix-contract.py" validate-current-manifest --artifacts "$ARTIFACTS_DIR" --kind lite-approval
+    python3 "$ARCHON_LAYER/setup/bugfix-contract.py" validate-current-manifest --artifacts "$ARTIFACTS_DIR" --kind lite-approval
     SEAL="$ARCHON_ATTESTATION_DIR/$RID-lite-approval.json"
-    python3 "$ROOT/.archon/setup/controller-attest.py" lite-approval --verify --artifacts "$ARTIFACTS_DIR" --chain-state "$ARCHON_BUGFIX_CHAIN_STATE" --out "$SEAL"
+    python3 "$ARCHON_LAYER/setup/controller-attest.py" lite-approval --verify --artifacts "$ARTIFACTS_DIR" --chain-state "$ARCHON_BUGFIX_CHAIN_STATE" --out "$SEAL"
     echo "POST_APPROVAL=PASS lite-manifest-and-attestation-current"
 - id: lite-impact-post
   depends_on:
@@ -1377,8 +1368,8 @@ nodes:
     Read fix-plan.json (fix_site, files, approach) and causal-chain.json (the
     final link's fix_site) there, and collect every existing symbol (function,
     class, method) the fix proposes to MODIFY. Read the code in the main
-    checkout at /Users/eduardopicazo/Documents/Workspace/Goodword/api or
-    /web-app (repo.json says which) to name them; there may be no worktree
+    checkout named by repo.json under "$PROJECT_ROOT" (or "$PROJECT_ROOT"
+    itself on a single-repo layout) to name them; there may be no worktree
     yet. Symbols the fix creates from scratch have no callers and do not
     belong in the list.
 
@@ -1386,16 +1377,15 @@ nodes:
     yourself explicitly and visibly:
     1. If the fix modifies no existing symbol, write impact.json with
        "status": "SKIPPED" and an empty "symbols" array.
-    2. If repo.json says web-app, the gitnexus MCP tools are not available, the
-       indexed repo "api" is absent/stale, OR ANY impact call errors or reports
-       that the repo/target is unavailable,
+    2. Read profile-runtime.json. gitnexusRepo is the indexed repo name. If it
+       is empty, repo.json names a different repository, the gitnexus MCP tools
+       are not available, that index is absent/stale, OR ANY impact call errors,
        write impact.json with "status": "UNAVAILABLE" and an empty "symbols"
-       array. On the lite lane this routes the ticket to the full lane; that
-       is correct (the index covers api/ only).
+       array. Whether that routes FULL is a profile policy (impactUnavailable).
     3. Otherwise call mcp__gitnexus__impact with
        {target: "<symbol>", direction: "upstream"} for each symbol, against
-       the indexed repo "api". Use "status": "GATHERED" ONLY when every call
-       succeeded against that repo.
+       the indexed repo named by gitnexusRepo. Use "status": "GATHERED" ONLY
+       when every call succeeded against that repo.
 
     impact.json is ALWAYS valid JSON and carries NO token prepended to it;
     the typed status line is this node's stdout only, never part of the file:
@@ -1405,7 +1395,7 @@ nodes:
                     "d1_callers": ["<caller symbol or path:line>", ...],
                     "risk": "LOW|MEDIUM|HIGH|CRITICAL",
                     "query_status": "GATHERED",
-                    "query_repo": "api",
+                    "query_repo": "<gitnexusRepo from profile-runtime.json>",
                     "query_target": "<exact target passed to the tool>"}]}
     Every d1_caller comes from successful tool output. Never invent one. A
     SUCCESSFUL query that returns no callers gets an empty list and risk "LOW";
@@ -1450,8 +1440,8 @@ nodes:
     # The operator relaunches the SAME report on bugfix; never edit the
     # envelope or the artifacts to pass. Output is persisted to
     # envelope-post.txt for the packet / PR body and for resume.
-    bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/lite-envelope.sh \
-      /Users/eduardopicazo/Documents/Workspace/Goodword "$ARTIFACTS_DIR" bugfix post
+    bash "$ARCHON_LAYER/setup/lite-envelope.sh" \
+      "$PROJECT_ROOT" "$ARTIFACTS_DIR" bugfix post
 - id: bind-repo
   depends_on:
   - lite-envelope-post
@@ -1459,8 +1449,8 @@ nodes:
   bash: |
     set -euo pipefail
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-bind-repo.out") 2> >(tee -a "$ARTIFACTS_DIR/node-bind-repo.out" >&2); fi
-    ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
-    python3 "$ROOT/.archon/setup/bind-repo.py" \
+    ROOT="$PROJECT_ROOT"
+    python3 "$ARCHON_LAYER/setup/bind-repo.py" \
       "$ARTIFACTS_DIR/params.json" "$ARTIFACTS_DIR/repo.json" "$ROOT"
     # Belt: bind-repo.py already refuses "both"; assert the binding landed.
     python3 -c "import json,sys;d=json.load(open(sys.argv[1]));assert d.get('repo') in ('api','web-app'), 'BIND=FAIL repo not bound'" "$ARTIFACTS_DIR/params.json"
@@ -1471,10 +1461,16 @@ nodes:
   bash: |
     set -euo pipefail
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-bootstrap.out") 2> >(tee -a "$ARTIFACTS_DIR/node-bootstrap.out" >&2); fi
-    ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
+    ROOT="$PROJECT_ROOT"
     REPO=$(cat "$ARTIFACTS_DIR/repo.txt")
-    eval "$(bash "$ROOT/.archon/setup/params-env.sh" "$ARTIFACTS_DIR/params.json")"
-    BASE="$ROOT/$REPO"
+    eval "$(bash "$ARCHON_LAYER/setup/params-env.sh" "$ARTIFACTS_DIR/params.json")"
+    # shellcheck disable=SC1091
+    source "$ARTIFACTS_DIR/profile-runtime.sh"
+    if [ "$PROFILE_LAYOUT" = single ]; then
+      BASE="$ROOT"
+    else
+      BASE="$ROOT/$REPO"
+    fi
     BASELINE=$(python3 - "$ARTIFACTS_DIR/bugfix-chain.json" "$REPO" <<'PY'
     import json,sys
     print(json.load(open(sys.argv[1], encoding="utf-8"))["baseline"]["commits"][sys.argv[2]])
@@ -1488,14 +1484,8 @@ nodes:
       git -C "$BASE" worktree add "$WT" -b "$BR" "$BASELINE"
       echo "BOOTSTRAP=CREATED"
     fi
-    cp "$BASE/.env" "$WT/.env"
-    if [ "$REPO" = web-app ]; then
-      # the pinned baseline pnpm-lock drifts from package.json (known project fact) — frozen refuses.
-      # Unfrozen install; pnpm-lock.yaml is excluded from every commit in this lane.
-      cd "$WT" && mise x node@20 -- pnpm install --no-frozen-lockfile > "$ARTIFACTS_DIR/install.log" 2>&1 || { tail -5 "$ARTIFACTS_DIR/install.log"; echo "BOOTSTRAP=FAIL pnpm install"; exit 1; }
-    else
-      cd "$WT" && bun install --frozen-lockfile > "$ARTIFACTS_DIR/install.log" 2>&1 || { tail -5 "$ARTIFACTS_DIR/install.log"; echo "BOOTSTRAP=FAIL bun install"; exit 1; }
-    fi
+    if [ -f "$BASE/.env" ]; then cp "$BASE/.env" "$WT/.env"; fi
+    cd "$WT" && "${CMD_INSTALL[@]}" > "$ARTIFACTS_DIR/install.log" 2>&1 || { tail -5 "$ARTIFACTS_DIR/install.log"; echo "BOOTSTRAP=FAIL install"; exit 1; }
     git -C "$WT" rev-parse HEAD > "$ARTIFACTS_DIR/bootstrap-head.txt"
     printf '{"worktree":"%s","branch":"%s","repo":"%s"}\n' "$WT" "$BR" "$REPO" > "$ARTIFACTS_DIR/worktrees.json"
     echo "WORKTREE=$WT BRANCH=$BR REPO=$REPO HEAD=$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")"
@@ -1531,14 +1521,9 @@ nodes:
     - LITE lane: no live experiment runs, so there is no premise-evidence contract
       to satisfy here; do not write premise_evidence into failing-test.json.
 
-    <repo-conventions repo="api">
-    Unit tests: bun run test -- "<spec path>" (the -- form; NEVER bare
-    `bun test` — it invokes bun's own runner and silently breaks jest mocks).
-    Unit specs live in __tests__/ dirs. TypeScript strict; no `any`.
-    </repo-conventions>
-    <repo-conventions repo="web-app">
-    Vitest: mise x node@20 -- pnpm test --run <spec path>. pnpm, never bun.
-    </repo-conventions>
+    Read project-guidance.md in the artifacts directory. Follow it. Do not
+    invent stack commands that are not in that file. Use the conventions
+    for the repository in repo.txt / params.json.
 
     Report the exact command you ran, its exit status, and the line of
     output containing the predicted signature.
@@ -1549,8 +1534,8 @@ nodes:
   timeout: 1200000
   bash: |
     set -euo pipefail
-    ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
-    SETUP="$ROOT/.archon/setup"
+    ROOT="$PROJECT_ROOT"
+    SETUP="$ARCHON_LAYER/setup"
     python3 "$SETUP/repo-policy.py" validate-plan --root "$ROOT" --artifacts "$ARTIFACTS_DIR" \
       || { echo "RED_GATE=FAIL repository policy"; exit 1; }
     eval "$(bash "$SETUP/params-env.sh" "$ARTIFACTS_DIR/params.json")"
@@ -1590,8 +1575,8 @@ nodes:
   bash: |
     set -euo pipefail
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-commit-red.out") 2> >(tee -a "$ARTIFACTS_DIR/node-commit-red.out" >&2); fi
-    ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
-    eval "$(bash "$ROOT/.archon/setup/params-env.sh" "$ARTIFACTS_DIR/params.json")"
+    ROOT="$PROJECT_ROOT"
+    eval "$(bash "$ARCHON_LAYER/setup/params-env.sh" "$ARTIFACTS_DIR/params.json")"
     REPO=$(cat "$ARTIFACTS_DIR/repo.txt")
     TESTF=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1], encoding='utf-8'))['test_file'])" "$ARTIFACTS_DIR/failing-test.json")
     cd "$WT"
@@ -1605,7 +1590,7 @@ nodes:
     # otherwise negcontrol can reject a causal fix merely because quote style
     # changed between the two exact-signature checks.
     RC=0
-    bash "$ROOT/.archon/setup/run-repro.sh" "$WT" "$ARTIFACTS_DIR" "$ARTIFACTS_DIR/red-committed-out.txt" >/dev/null 2>&1 || RC=$?
+    bash "$ARCHON_LAYER/setup/run-repro.sh" "$WT" "$ARTIFACTS_DIR" "$ARTIFACTS_DIR/red-committed-out.txt" >/dev/null 2>&1 || RC=$?
     test "$RC" != 0 || { echo "COMMIT_RED=FAIL committed repro passed"; exit 1; }
     test "$RC" != 97 || { echo "COMMIT_RED=FAIL committed repro harness error (see red-committed-out.txt)"; exit 1; }
     SIG=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1], encoding='utf-8'))['predicted_failure_signature'])" "$ARTIFACTS_DIR/failing-test.json")
@@ -1631,7 +1616,7 @@ nodes:
         case "$N" in '') N=0 ;; *[!0-9]*) echo "ATTEMPT_PRE=FAIL fix-attempt.txt is not an integer: [$N]"; exit 1 ;; esac
         N=$((N+1)); echo "$N" > "$C"
         mkdir -p "$ARTIFACTS_DIR/attempt-$N"
-        eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+        eval "$(bash "$ARCHON_LAYER/setup/params-env.sh" "$ARTIFACTS_DIR/params.json")"
         git -C "$WT" rev-parse HEAD > "$ARTIFACTS_DIR/attempt-$N/pre-head.txt"
         echo "ATTEMPT=$N head=$(cat "$ARTIFACTS_DIR/attempt-$N/pre-head.txt")"
     - id: fix
@@ -1667,15 +1652,9 @@ nodes:
         - Run the repro command yourself to check your work; the gate
           re-runs it authoritatively either way.
 
-        <repo-conventions repo="api">
-        bun@1.3.10. Unit tests: bun run test -- "<pattern>" (never bare
-        bun test). Typecheck: bun run typecheck. Lint: bun run lint.
-        TypeScript strict; no `any`.
-        </repo-conventions>
-        <repo-conventions repo="web-app">
-        pnpm via mise x node@20 --. Typecheck: pnpm typecheck. Lint:
-        pnpm lint. Tests: pnpm test --run <pattern>.
-        </repo-conventions>
+        Read project-guidance.md in the artifacts directory. Follow it.
+        Do not invent stack commands that are not in that file. Use the
+        conventions for the repository in repo.txt / params.json.
 
         Before finishing, write a ONE-LINE conventional commit message
         (fix(scope): description — no body, no attribution) to
@@ -1691,8 +1670,8 @@ nodes:
         # Exits 0 whatever the tests say: fix-converge owns the verdict. This
         # node only measures and writes attempt-N/green.json. The one exit 1 is
         # a corrupt fix-attempt.txt (GREEN_CHECK=FAIL), which would misroute green.json.
-        ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
-        SETUP="$ROOT/.archon/setup"
+        ROOT="$PROJECT_ROOT"
+        SETUP="$ARCHON_LAYER/setup"
         N=$(cat "$ARTIFACTS_DIR/fix-attempt.txt"); ADN="$ARTIFACTS_DIR/attempt-$N"
         case "$N" in ''|*[!0-9]*) echo "GREEN_CHECK=FAIL fix-attempt.txt is not an integer: [$N]"; exit 1 ;; esac
         eval "$(bash "$SETUP/params-env.sh" "$ARTIFACTS_DIR/params.json")"
@@ -1708,12 +1687,9 @@ nodes:
           test "$RC" = 0 || { GREEN=false; REASON="repro still failing rc=$RC"; }
         fi
         if [ "$GREEN" = true ]; then
-          if [ "$REPO" = web-app ]; then
-            mise x node@20 -- pnpm typecheck > "$ADN/typecheck.log" 2>&1 || { GREEN=false; REASON="typecheck failed"; }
-            test "$GREEN" = false || mise x node@20 -- pnpm lint > "$ADN/lint.log" 2>&1 || { GREEN=false; REASON="lint failed"; }
-          else
-            bun run typecheck > "$ADN/typecheck.log" 2>&1 || { GREEN=false; REASON="typecheck failed"; }
-            test "$GREEN" = false || bun run lint > "$ADN/lint.log" 2>&1 || { GREEN=false; REASON="lint failed"; }
+          "${CMD_TYPECHECK[@]}" > "$ADN/typecheck.log" 2>&1 || { GREEN=false; REASON="typecheck failed"; }
+          if [ "$GREEN" = true ] && [ "${#CMD_LINT[@]}" -gt 0 ]; then
+            "${CMD_LINT[@]}" > "$ADN/lint.log" 2>&1 || { GREEN=false; REASON="lint failed"; }
           fi
         fi
         if [ "$GREEN" = true ]; then
@@ -1738,11 +1714,7 @@ nodes:
               *.int.spec.ts|*.e2e.spec.ts|*.ai.spec.ts|*.ext.spec.ts) GREEN=false; REASON="verify.json pattern is not a unit spec: $PAT"; break ;;
             esac
             RC2=0
-            if [ "$REPO" = web-app ]; then
-              mise x node@20 -- pnpm test --run "$PAT" >> "$ADN/suite.log" 2>&1 || RC2=$?
-            else
-              bun run test -- "$PAT" >> "$ADN/suite.log" 2>&1 || RC2=$?
-            fi
+            "${CMD_TEST[@]}" "$PAT" >> "$ADN/suite.log" 2>&1 || RC2=$?
             # Decide AFTER reading the log: the runner exits 1 on "No tests found" too, so a
             # short-circuit on rc alone would file a contract error as a failed fix.
             if tail -20 "$ADN/suite.log" | grep -q "No tests found"; then GREEN=false; REASON="verify.json pattern matched no tests: $PAT"; break; fi
@@ -1766,7 +1738,7 @@ nodes:
       timeout: 300000
       bash: |
         set -uo pipefail
-        ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
+        ROOT="$PROJECT_ROOT"
         N=$(cat "$ARTIFACTS_DIR/fix-attempt.txt"); ADN="$ARTIFACTS_DIR/attempt-$N"
         case "$N" in ''|*[!0-9]*) echo "GREEN_GATE=FAIL fix-attempt.txt is not an integer: [$N]"; exit 1 ;; esac
         exec > >(tee "$ADN/converge.txt") 2>&1
@@ -1784,12 +1756,12 @@ nodes:
           "verify.json "*) echo "GREEN_GATE=FAIL VERIFY_CONTRACT attempt=$N reason=[$REASON] (fix verify.json test_patterns by hand, then resume)"; exit 1 ;;
         esac
         if [ "$GREEN" = true ]; then
-          eval "$(bash "$ROOT/.archon/setup/params-env.sh" "$ARTIFACTS_DIR/params.json")"
+          eval "$(bash "$ARCHON_LAYER/setup/params-env.sh" "$ARTIFACTS_DIR/params.json")"
           REPO=$(cat "$ARTIFACTS_DIR/repo.txt")
           cd "$WT"
           MSG=$(head -1 "$ARTIFACTS_DIR/commit-msg.txt" 2>/dev/null || true)
           test -n "$MSG" || MSG="fix($REPO): $SLUG"
-          python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
+          python3 "$ARCHON_LAYER/setup/check-scope.py" "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
           if git diff --cached --quiet; then echo "COMMITTED=NO (nothing staged)"; else git commit -m "$MSG"; fi
           test -z "$(git status --porcelain | grep -vE '^\?\? \.env$|^ M pnpm-lock\.yaml$')" || { echo "FIX_CONVERGE=FAIL dirty after commit"; exit 1; }
           echo "GREEN_ACHIEVED attempt=$N sha=$(git rev-parse HEAD)"
@@ -1803,9 +1775,9 @@ nodes:
   timeout: 1200000
   bash: |
     set -euo pipefail
-    ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
-    eval "$(bash "$ROOT/.archon/setup/params-env.sh" "$ARTIFACTS_DIR/params.json")"
-    bash "$ROOT/.archon/setup/negcontrol.sh" "$WT" "$(cat "$ARTIFACTS_DIR/red-sha.txt")" "$ARTIFACTS_DIR" postgreen
+    ROOT="$PROJECT_ROOT"
+    eval "$(bash "$ARCHON_LAYER/setup/params-env.sh" "$ARTIFACTS_DIR/params.json")"
+    bash "$ARCHON_LAYER/setup/negcontrol.sh" "$WT" "$(cat "$ARTIFACTS_DIR/red-sha.txt")" "$ARTIFACTS_DIR" postgreen
 - id: review-loop
   depends_on:
   - negcontrol
@@ -1825,14 +1797,14 @@ nodes:
         # Durable cap, checked BEFORE the round is spent (same doctrine as plan-round-pre,
         # full-sdlc-api.yaml: a cap enforced only in converge is walked past by resuming
         # after every group failure). accept-residuals.txt is the human bypass.
-        R="/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-reclaim.sh"
+        R="$ARCHON_LAYER/setup/round-reclaim.sh"
         N=$(bash "$R" "$ARTIFACTS_DIR" "$N" "round-" "review-summary.json" '"verdict"[[:space:]]*:[[:space:]]*"[^"]')
         CAP=$(cat "$ARTIFACTS_DIR/round-cap.txt" 2>/dev/null || echo 2)
         case "$CAP" in ''|*[!0-9]*) CAP=2 ;; esac
         if [ "$N" -ge "$CAP" ] && [ ! -f "$ARTIFACTS_DIR/accept-residuals.txt" ]; then echo "ROUND_CAP_REACHED round=$N cap=$CAP (pre-round: a resume does not buy another review; write accept-residuals.txt or raise round-cap.txt)"; exit 1; fi
         N=$((N+1)); echo "$N" > "$C"
         RD="$ARTIFACTS_DIR/round-$N"; mkdir -p "$RD"
-        eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+        eval "$(bash "$ARCHON_LAYER/setup/params-env.sh" "$ARTIFACTS_DIR/params.json")"
         cd "$WT"
         git rev-parse HEAD > "$RD/pre-head.txt"
         ls -1d "${CE_REVIEW_ROOT:-/tmp/compound-engineering/ce-code-review}"/*/ 2>/dev/null | LC_ALL=C sort > "$RD/prerun-dirs.txt" || true
@@ -1937,7 +1909,7 @@ nodes:
         printf '%s\n' "$OUT" > "$RD/review-envelope.txt"
         # Dual-contract parse: CE 3.2.0's markdown headless envelope OR the
         # newer skills' single raw JSON object (status/verdict fields).
-        eval "$(python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/parse-review-envelope.py "$RD/review-envelope.txt" | sed 's/^/ENV_/')"
+        eval "$(python3 "$ARCHON_LAYER/setup/parse-review-envelope.py" "$RD/review-envelope.txt" | sed 's/^/ENV_/')"
         G1="$ENV_G1"; G2="$ENV_G2"
         echo "GATE_1_review_complete_present=$G1 (contract=$ENV_VSRC)"
         echo "GATE_2_degraded_absent=$G2"
@@ -1966,7 +1938,7 @@ nodes:
         case "$VERDICT" in "Ready to merge"|"Ready with fixes"|"Not ready") G3=PASS ;; esac
         echo "GATE_3_verdict_in_enum=$G3 verdict=[$VERDICT] source=$VSRC rundir=[$RUNDIR]"
         DEGRADED=true; test "$G2" = PASS && DEGRADED=false
-        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/write-review-summary.py \
+        python3 "$ARCHON_LAYER/setup/write-review-summary.py" \
           "$RD/review-summary.json" "$VERDICT" "$DEGRADED"
         test "$G1" = PASS && test "$G2" = PASS && test "$G3" = PASS || { echo "REVIEW_GATE=FAIL round=$N"; exit 1; }
         echo "REVIEW_GATE=PASS round=$N"
@@ -1977,12 +1949,12 @@ nodes:
       bash: |
         set -euo pipefail
         if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-commit-fixes.out") 2> >(tee -a "$ARTIFACTS_DIR/node-commit-fixes.out" >&2); fi
-        eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+        eval "$(bash "$ARCHON_LAYER/setup/params-env.sh" "$ARTIFACTS_DIR/params.json")"
         cd "$WT"
         RED=$(cat "$ARTIFACTS_DIR/red-sha.txt")
         TESTF=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1], encoding='utf-8'))['test_file'])" "$ARTIFACTS_DIR/failing-test.json")
         test -z "$(git diff "$RED" -- "$TESTF")" || { echo "REVIEW_SCOPE=FAIL repro test modified before commit (restore it: git checkout $RED -- $TESTF)"; exit 1; }
-        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
+        python3 "$ARCHON_LAYER/setup/check-scope.py" "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
         if git diff --cached --quiet; then echo "COMMITTED=NO"; else
           git commit -m "fix(review): apply autofix feedback"; echo "COMMITTED=YES sha=$(git rev-parse HEAD)"
         fi
@@ -2072,9 +2044,9 @@ nodes:
       timeout: 300000
       bash: |
         set -euo pipefail
-        eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+        eval "$(bash "$ARCHON_LAYER/setup/params-env.sh" "$ARTIFACTS_DIR/params.json")"
         cd "$WT"
-        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
+        python3 "$ARCHON_LAYER/setup/check-scope.py" "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
         if git diff --cached --quiet; then echo "COMMITTED=NO"; else
           git commit -m "fix(review): apply fixer feedback"; echo "COMMITTED=YES sha=$(git rev-parse HEAD)"
         fi
@@ -2088,7 +2060,7 @@ nodes:
         N=$(cat "$ARTIFACTS_DIR/round.txt"); RD="$ARTIFACTS_DIR/round-$N"
         case "$N" in ''|*[!0-9]*) echo "CONVERGE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
         exec > >(tee "$RD/converge.txt") 2>&1
-        SETUP="/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup"
+        SETUP="$ARCHON_LAYER/setup"
         eval "$(bash "$SETUP/params-env.sh" "$ARTIFACTS_DIR/params.json")"
         cd "$WT"
         # Bugfix-lane hard stop: the repro test is frozen after RED.
@@ -2160,8 +2132,8 @@ nodes:
   bash: |
     set -euo pipefail
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-exit-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-exit-gate.out" >&2); fi
-    ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
-    SETUP="$ROOT/.archon/setup"
+    ROOT="$PROJECT_ROOT"
+    SETUP="$ARCHON_LAYER/setup"
     eval "$(bash "$SETUP/params-env.sh" "$ARTIFACTS_DIR/params.json")"
     REPO=$(cat "$ARTIFACTS_DIR/repo.txt")
     RED=$(cat "$ARTIFACTS_DIR/red-sha.txt")
@@ -2196,11 +2168,7 @@ nodes:
     test -s "$ARTIFACTS_DIR/exit-patterns.txt" || { echo "EXIT_GATE=FAIL verify.json yielded no patterns"; exit 1; }
     while IFS= read -r PAT; do
       test -n "$PAT" || continue
-      if [ "$REPO" = web-app ]; then
-        mise x node@20 -- pnpm test --run "$PAT" >/dev/null || { echo "EXIT_GATE=FAIL post-fix suite pattern=$PAT"; exit 1; }
-      else
-        bun run test -- "$PAT" >/dev/null || { echo "EXIT_GATE=FAIL post-fix suite pattern=$PAT"; exit 1; }
-      fi
+      "${CMD_TEST[@]}" "$PAT" >/dev/null || { echo "EXIT_GATE=FAIL post-fix suite pattern=$PAT"; exit 1; }
     done < "$ARTIFACTS_DIR/exit-patterns.txt"
     # The repro must pass on the final tree...
     RC=0
@@ -2275,8 +2243,8 @@ nodes:
     # check-scope.py) happens AFTER lite-envelope-post, so re-evaluate on the allowlist as it stands. Overwrites
     # envelope-post.txt (what prbody renders). Fail-closed: a widening past the cap
     # stops here; relaunch on bugfix.
-    bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/lite-envelope.sh \
-      /Users/eduardopicazo/Documents/Workspace/Goodword "$ARTIFACTS_DIR" bugfix post
+    bash "$ARCHON_LAYER/setup/lite-envelope.sh" \
+      "$PROJECT_ROOT" "$ARTIFACTS_DIR" bugfix post
 - id: smoke-skip
   depends_on:
   - lite-envelope-final
@@ -2392,7 +2360,7 @@ nodes:
   timeout: 120000
   bash: |
     set -euo pipefail
-    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-lite-prbody.py \
+    python3 "$ARCHON_LAYER/setup/check-lite-prbody.py" \
       bugfix "$ARTIFACTS_DIR"
 - id: ship
   depends_on:

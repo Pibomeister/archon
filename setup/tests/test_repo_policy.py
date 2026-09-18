@@ -257,7 +257,8 @@ class WorkflowIntegrationTest(unittest.TestCase):
     def test_policy_contract_uses_existing_nodes_only(self):
         import yaml
         archon = Path(__file__).resolve().parents[2]
-        for workflow in ("bugfix", "bugfix-codex", "bugfix-lite", "bugfix-lite-codex"):
+        for workflow in ("bugfix", "bugfix-codex", "bugfix-lite", "bugfix-lite-codex",
+                         "bugfix-grok", "bugfix-lite-grok"):
             doc = yaml.safe_load((archon / "workflows" / f"{workflow}.yaml").read_text())
             nodes = {node["id"]: node for node in doc["nodes"]}
             self.assertNotIn("repo-policy", nodes)
@@ -273,9 +274,10 @@ class WorkflowIntegrationTest(unittest.TestCase):
         import yaml
         archon = Path(__file__).resolve().parents[2]
         for workflow in ("bugfix", "bugfix-codex", "bugfix-lite", "bugfix-lite-codex",
-                         "full-sdlc-api", "full-sdlc-api-codex",
-                         "full-sdlc-api-lite", "full-sdlc-api-lite-codex",
-                         "full-sdlc-web", "full-sdlc-web-codex"):
+                         "bugfix-grok", "bugfix-lite-grok",
+                         "full-sdlc-api", "full-sdlc-api-codex", "full-sdlc-api-grok",
+                         "full-sdlc-api-lite", "full-sdlc-api-lite-codex", "full-sdlc-api-lite-grok",
+                         "full-sdlc-web", "full-sdlc-web-codex", "full-sdlc-web-grok"):
             with self.subTest(workflow=workflow):
                 doc = yaml.safe_load((archon / "workflows" / f"{workflow}.yaml").read_text())
                 preflight = next(node for node in doc["nodes"] if node["id"] == "preflight")["bash"]

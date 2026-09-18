@@ -9,5 +9,5 @@ bash: |
   # The operator relaunches the SAME report on bugfix; never edit the
   # envelope or the artifacts to pass. Output is persisted to
   # envelope-plan.txt for the packet / PR body and for resume.
-  bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/lite-envelope.sh \
-    /Users/eduardopicazo/Documents/Workspace/Goodword "$ARTIFACTS_DIR" bugfix plan
+  bash "$ARCHON_LAYER/setup/lite-envelope.sh" \
+    "$PROJECT_ROOT" "$ARTIFACTS_DIR" bugfix plan

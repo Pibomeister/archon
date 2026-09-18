@@ -2,6 +2,7 @@
 outside the engine: hardcoded absolute roots are rewritten to this checkout and
 `$<node>.output` template references are substituted with caller-supplied text."""
 import re
+import shlex
 from pathlib import Path
 
 import yaml
@@ -76,6 +77,11 @@ def runnable_body(workflow, node_id, outputs=None, root=None):
     archon_root = str(Path(root) / ".archon") if root else str(ARCHON_ROOT)
     body = body.replace(HARDCODED_ROOTS[0], archon_root)
     body = body.replace(HARDCODED_ROOTS[1], goodword_root)
+    preamble = (
+        f"export ARCHON_LAYER={shlex.quote(archon_root)}\n"
+        f"export PROJECT_ROOT={shlex.quote(goodword_root)}\n"
+    )
+    body = preamble + body
     for name, val in (outputs or {}).items():
         quoted = "'" + str(val).replace("'", "'\\''") + "'"
         body = re.sub(r"\$" + re.escape(name) + r"\.output\b", lambda _m: quoted, body)

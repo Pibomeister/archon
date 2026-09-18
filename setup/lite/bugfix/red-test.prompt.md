@@ -25,14 +25,9 @@ Rules — TDD verify-RED, applied literally:
 - LITE lane: no live experiment runs, so there is no premise-evidence contract
   to satisfy here; do not write premise_evidence into failing-test.json.
 
-<repo-conventions repo="api">
-Unit tests: bun run test -- "<spec path>" (the -- form; NEVER bare
-`bun test` — it invokes bun's own runner and silently breaks jest mocks).
-Unit specs live in __tests__/ dirs. TypeScript strict; no `any`.
-</repo-conventions>
-<repo-conventions repo="web-app">
-Vitest: mise x node@20 -- pnpm test --run <spec path>. pnpm, never bun.
-</repo-conventions>
+Read project-guidance.md in the artifacts directory. Follow it. Do not
+invent stack commands that are not in that file. Use the conventions
+for the repository in repo.txt / params.json.
 
 Report the exact command you ran, its exit status, and the line of
 output containing the predicted signature.

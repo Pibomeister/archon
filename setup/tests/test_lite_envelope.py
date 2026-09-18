@@ -229,6 +229,17 @@ class ApiPlanStage(Base):
         write(self.ad, "impact.json", {"status": "UNAVAILABLE", "symbols": []})
         self.assert_full(self.run_gate("api", "plan"), "impact")
 
+    def test_impact_unavailable_allowed_when_profile_says_so(self):
+        self.api_plan_baseline()
+        write(self.ad, "impact.json", {"status": "UNAVAILABLE", "symbols": []})
+        write(self.ad, "profile-runtime.json", {
+            "gitnexusRepo": "",
+            "impactUnavailable": "allow",
+        })
+        r = self.run_gate("api", "plan")
+        self.assert_lite(r)
+        self.assertIn("ENVELOPE impact=UNAVAILABLE OK (profile allows)", r.stdout)
+
     def test_impact_skipped_passes_with_zero(self):
         self.api_plan_baseline()
         write(self.ad, "impact.json", {"status": "SKIPPED", "symbols": []})

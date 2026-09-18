@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""converge: the cross-repo stop (all lanes) and the gated yield branch (full-sdlc-api only).
+"""converge: the cross-repo stop (all lanes) and the removed yield-stop shortcut.
 
 The three parent bodies come from the YAML via nodes.extract; the lite overlay
 runs as a bare script, in the style of test_lite_converge.py. Both are pointed at
@@ -26,7 +26,6 @@ from nodes.extract import runnable_body
 
 SETUP = Path(__file__).resolve().parent.parent
 OVERLAY = SETUP / "lite" / "api" / "review-loop.converge.bash.sh"
-ROOT_LITERAL = "/Users/eduardopicazo/Documents/Workspace/Goodword"
 LANES = ("full-sdlc-api", "bugfix", "full-sdlc-web")
 
 YIELD_STUB = """#!/usr/bin/env python3
@@ -106,29 +105,33 @@ class ConvergeYield(unittest.TestCase):
             sh("echo b > b.ts && git add . && git commit -qm fix", wt)
         m = self.mirror(tmp, broken_fixer_check)
         if lane == "lite":
-            body = OVERLAY.read_text(encoding="utf-8").replace(
-                ROOT_LITERAL + "/.archon/setup", str(m))
+            body = OVERLAY.read_text(encoding="utf-8")
+            self._lite_layer = str(m.parent)
         else:
             body = runnable_body(lane, "converge", root=str(tmp))
+            self._lite_layer = None
         return tmp, ad, body
 
     def run_converge(self, lane, scope="repositories", **kw):
         tmp, ad, body = self.build(lane, **kw)
         env = dict(os.environ, ARTIFACTS_DIR=str(ad), ARCHON_FEATURE_SCOPE=scope)
+        if getattr(self, "_lite_layer", None):
+            env["ARCHON_LAYER"] = self._lite_layer
+            env["PROJECT_ROOT"] = str(tmp)
         p = subprocess.run(["bash", "-c", body], capture_output=True,
                            encoding="utf-8", env=env, cwd=str(tmp))
         return p, ad
 
     # ---------------------------------------------------------- yield branch
-    def test_yield_converges_and_discloses_the_unreviewed_fix(self):
+    def test_yield_stop_cannot_converge_unreviewed_fixes(self):
         p, ad = self.run_converge("full-sdlc-api")
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        self.assertIn("CONVERGED round=2 (REVIEW_DIMINISHING", p.stdout)
-        self.assertIn("<promise>REVIEW_CONVERGED</promise>", p.stdout)
-        self.assertIn("LITE_FIXES_UNREVIEWED round=2 1 file(s)", p.stdout)
-        disclosure = (ad / "lite-fixes-unreviewed.txt").read_text()
-        self.assertIn("applied_findings=1", disclosure)
-        self.assertIn("  b.ts", disclosure)
+        self.assertIn("ROUND_PROGRESSED round=2", p.stdout)
+        self.assertNotIn("REVIEW_CONVERGED", p.stdout)
+        self.assertNotIn("LITE_FIXES_UNREVIEWED", p.stdout)
+        self.assertFalse((ad / "lite-fixes-unreviewed.txt").exists())
+        self.assertNotIn("yield-stop.txt", Path(
+            __file__).resolve().parents[2].joinpath("workflows/full-sdlc-api.yaml").read_text())
 
     def test_without_the_opt_in_file_the_round_only_progresses(self):
         p, ad = self.run_converge("full-sdlc-api", yield_stop=False)

@@ -23,12 +23,10 @@ The plan must contain exactly one implementation unit with these exact headings:
   ## Approach
   ## Test scenarios
   ## Verification
-Under Verification list exactly three commands (they are the shell gate):
-  bun run typecheck
-  bun run lint
-  bun run test -- "<pattern>"
-where <pattern> is the jest name pattern that selects every spec file this
-unit touches or creates (existing specs for edited files included).
+Read project-guidance.md in that same ARTIFACTS_DIR. Follow it. Do not
+invent stack commands that are not in that file. Under Verification list
+the gate commands from that file for this repository (they are the shell
+gate). <pattern> selects every spec file this unit touches or creates.
 Also write verify.json to that directory — the machine-readable mirror the
 shell gate executes: {"test_patterns": ["<pattern>", ...]} with at least
 one pattern, each matching the Verification commands exactly.

@@ -14,7 +14,7 @@ from pathlib import Path
 ARCHON = Path(__file__).resolve().parents[2]
 MANIFEST = ARCHON / "setup/package.sh"
 # Absolute or $ROOT/$SETUP-relative references to a shipped setup script.
-REF = re.compile(r'(?:\.archon/setup|\$SETUP)/([A-Za-z0-9_.-]+\.(?:sh|py))')
+REF = re.compile(r'(?:\.archon/setup|\$SETUP|\$ARCHON_LAYER/setup|\$LAYER/setup)/([A-Za-z0-9_.-]+\.(?:sh|py))')
 
 
 def manifest_entries():
@@ -73,6 +73,17 @@ class SetupScriptsArePackagedTest(unittest.TestCase):
         self.assertIn("feature-budget.py", manifest_entries())
         self.assertIn("feature_estimate.py", manifest_entries())
         self.assertIn("feature_chain.py", manifest_entries())
+
+    def test_generic_graph_helpers_are_shipped(self):
+        entries = manifest_entries()
+        self.assertIn("layer_root.py", entries)
+        self.assertIn("materialize_guidance.py", entries)
+        self.assertIn("graph_export.py", entries)
+        self.assertIn("graph_render.py", entries)
+        self.assertIn("profile_bind.py", entries)
+        self.assertIn("profile-preflight.sh", entries)
+        self.assertIn("derive-grok.py", entries)
+        self.assertIn("derive-codex.py", entries)
 
     def test_canonical_test_runner_is_shipped_and_used_by_package(self):
         package = MANIFEST.read_text(encoding="utf-8")

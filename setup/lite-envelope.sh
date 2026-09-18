@@ -22,7 +22,11 @@ ROOT="${1:?usage: lite-envelope.sh <root> <artifacts-dir> <api|bugfix> <pre|plan
 AD="${2:?usage: lite-envelope.sh <root> <artifacts-dir> <api|bugfix> <pre|plan|post>}"
 LANE="${3:?usage: lite-envelope.sh <root> <artifacts-dir> <api|bugfix> <pre|plan|post>}"
 STAGE="${4:?usage: lite-envelope.sh <root> <artifacts-dir> <api|bugfix> <pre|plan|post>}"
-ENVELOPE="${LITE_ENVELOPE_JSON:-$(cd "$(dirname "$0")" && pwd)/lite-envelope.json}"
+if [ -z "${LITE_ENVELOPE_JSON-}" ] && [ -f "$AD/lite-envelope.json" ]; then
+  ENVELOPE="$AD/lite-envelope.json"
+else
+  ENVELOPE="${LITE_ENVELOPE_JSON:-$(cd "$(dirname "$0")" && pwd)/lite-envelope.json}"
+fi
 
 OUT="$AD/envelope-$STAGE.txt"
 python3 - "$ROOT" "$AD" "$LANE" "$STAGE" "$ENVELOPE" > "$OUT.tmp" 2>&1 <<'PY'
@@ -183,13 +187,24 @@ def check_files(repo, entries):
         out("ENVELOPE hot_paths=0 OK")
 
 
+def profile_runtime():
+    data = load_json("profile-runtime.json", required=False)
+    return data if isinstance(data, dict) else {}
+
+
 def check_impact():
+    runtime = profile_runtime()
+    gitnexus = runtime.get("gitnexusRepo") or "api"
+    impact_policy = runtime.get("impactUnavailable") or "route-full"
     imp = load_json("impact.json")
     status = imp.get("status") if isinstance(imp, dict) else None
     if status not in ("GATHERED", "UNAVAILABLE", "SKIPPED"):
         full("malformed", "impact.json status not in GATHERED|UNAVAILABLE|SKIPPED")
     if status == "UNAVAILABLE":
-        full("impact", "impact.json status=UNAVAILABLE (gitnexus unavailable in the node session)")
+        if impact_policy == "allow":
+            out("ENVELOPE impact=UNAVAILABLE OK (profile allows)")
+        else:
+            full("impact", "impact.json status=UNAVAILABLE (gitnexus unavailable in the node session)")
     else:
         out(f"ENVELOPE impact={status} OK")
     syms = imp.get("symbols")
@@ -219,8 +234,8 @@ def check_impact():
             query_target = s.get("query_target")
             if query_status != "GATHERED":
                 full("impact", f"symbol {name!r} query_status={query_status!r}; every graph query must succeed")
-            if query_repo != "api":
-                full("impact", f"symbol {name!r} query_repo={query_repo!r}; expected the pinned api index")
+            if query_repo != gitnexus:
+                full("impact", f"symbol {name!r} query_repo={query_repo!r}; expected the pinned {gitnexus} index")
             if not isinstance(query_target, str) or not query_target.strip():
                 full("impact", f"symbol {name!r} has no query_target provenance")
         d1 += len(callers)

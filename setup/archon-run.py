@@ -73,6 +73,13 @@ FEATURE_SIGNATURE_FIELDS = {
     "receipt_mac",
 }
 LANES = set(CODEX_LANES)
+
+
+def apply_layer_env(env: dict) -> dict:
+    """Every launched workflow must see the pack root and the project root."""
+    env.setdefault("ARCHON_LAYER", str(ARCHON_DIR))
+    env.setdefault("PROJECT_ROOT", str(ROOT))
+    return env
 RUN_ID_PATTERN = r"(?=.{8,36}\Z)[0-9a-f]+(?:-[0-9a-f]+)*"
 FULL_RUN_ID_PATTERN = r"(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
 ID_RE = re.compile(RUN_ID_PATTERN, re.I)
@@ -3189,7 +3196,7 @@ def run_claude_lane(lane: str, report: Path, db: Path) -> dict:
     log_dir = Path(os.environ.get("ARCHON_RUN_LOG_DIR", Path.home() / ".archon" / "logs"))
     log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     log = log_dir / f"archon-{lane}-{int(time.time())}-{os.getpid()}.log"
-    env = dict(os.environ, DISABLE_OMC="1", ARCHON_DB=str(db))
+    env = apply_layer_env(dict(os.environ, DISABLE_OMC="1", ARCHON_DB=str(db)))
     pid, _ = detached(log, command_for("run", f"{lane}\0{report}"), env)
     run_id = wait_for_run_id(log, pid)
     row = resolve_any_run(db, run_id, {lane})
@@ -3720,7 +3727,7 @@ def main() -> None:
 
     next_control_token = secrets.token_urlsafe(32) if args.action != "abandon" else None
     guard_file = create_guard_file(args.control_dir) if args.action != "abandon" else None
-    env = dict(os.environ)
+    env = apply_layer_env(dict(os.environ))
     env.update({
         "ARCHON_DB": str(args.db),
         "ARCHON_CONTROL_DIR": str(args.control_dir),

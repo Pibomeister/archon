@@ -1,0 +1,15 @@
+{
+  "schema": "archon.repo-profiles.v1",
+  "profiles": {
+    "fluxkeep": {
+      "install": ["pnpm", "install"],
+      "typecheck": ["pnpm", "run", "typecheck"],
+      "lint": ["pnpm", "run", "lint"],
+      "test": ["pnpm", "exec", "jest", "--watchman=false", "--runInBand", "--runTestsByPath"],
+      "env_src": "",
+      "smoke": "",
+      "browser": "",
+      "impact": ""
+    }
+  }
+}

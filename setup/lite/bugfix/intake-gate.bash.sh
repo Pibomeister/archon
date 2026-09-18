@@ -18,13 +18,13 @@ tw = p.get("time_window")
 assert tw is None or (isinstance(tw, dict) and tw.get("start") and tw.get("end")), "time_window malformed"
 PY
 if [ -n "${ARCHON_BUGFIX_CONTINUATION_SEED:-}" ]; then
-  python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/archon-run.py \
+  python3 "$ARCHON_LAYER/setup/archon-run.py" \
     import-continuation --artifacts "$ARTIFACTS_DIR" --finalize-ledger \
     || { echo "INTAKE_GATE=FAIL continuation ledger import"; exit 1; }
 fi
-python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/bugfix-contract.py seal-ledger "$ARTIFACTS_DIR" \
+python3 "$ARCHON_LAYER/setup/bugfix-contract.py" seal-ledger "$ARTIFACTS_DIR" \
   || { echo "INTAKE_GATE=FAIL symptom ledger"; exit 1; }
-python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/bugfix-contract.py bind-chain-ledger "$ARTIFACTS_DIR" \
+python3 "$ARCHON_LAYER/setup/bugfix-contract.py" bind-chain-ledger "$ARTIFACTS_DIR" \
   || { echo "INTAKE_GATE=FAIL symptom ledger chain binding"; exit 1; }
 python3 - "$ARTIFACTS_DIR/triage.json" <<'PY' || { echo "INTAKE_GATE=FAIL triage shape"; exit 1; }
 import json, sys

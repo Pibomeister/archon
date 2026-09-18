@@ -9,5 +9,5 @@ bash: |
   # check-scope.py) happens AFTER lite-envelope-post, so re-evaluate on the allowlist as it stands. Overwrites
   # envelope-post.txt (what prbody renders). Fail-closed: a widening past the cap
   # stops here; relaunch on bugfix.
-  bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/lite-envelope.sh \
-    /Users/eduardopicazo/Documents/Workspace/Goodword "$ARTIFACTS_DIR" bugfix post
+  bash "$ARCHON_LAYER/setup/lite-envelope.sh" \
+    "$PROJECT_ROOT" "$ARTIFACTS_DIR" bugfix post

@@ -76,7 +76,7 @@ FLAGSHIP_MODEL = "gpt-5.6-sol"
 LITE_TARGETS = {"full-sdlc-api-lite", "bugfix-lite"}
 INJECTED_GUARD_TARGETS = {"full-sdlc-api"}
 GUARDED_TARGETS = LITE_TARGETS | {"bugfix", "full-sdlc-api", "full-sdlc-web"}
-CONTROL_SCRIPT = "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/archon-run.py"
+CONTROL_SCRIPT = "$ARCHON_LAYER/setup/archon-run.py"
 UNSUPPORTED_CODEX_FIELDS = {
     "allowed_tools", "denied_tools", "hooks", "agents", "thinking",
     "fallbackModel", "systemPrompt", "betas", "sandbox", "settingSources",

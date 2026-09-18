@@ -8,7 +8,7 @@ bash: |
   # reviewer, so re-run the mechanical gate on the tree as the fixer left it.
   # exit-gate (next) re-runs the plan's unit patterns and the scope check;
   # this node owns typecheck and lint, which exit-gate does not run.
-  eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+  eval "$(bash "$ARCHON_LAYER/setup/params-env.sh" "$ARTIFACTS_DIR/params.json")"
   cd "$WT"
   rm -rf .omc
   if [ -f "$ARTIFACTS_DIR/lite-fixes-unreviewed.txt" ]; then
@@ -16,6 +16,10 @@ bash: |
   else
     echo "POST_FIX_GATE no fixer changes landed; re-gating anyway"
   fi
-  bun run typecheck || { echo "GATE_TESTS=FAIL typecheck (post-fix)"; exit 1; }
-  bun run lint || { echo "GATE_TESTS=FAIL lint (post-fix)"; exit 1; }
+  "${CMD_TYPECHECK[@]}" || { echo "GATE_TESTS=FAIL typecheck (post-fix)"; exit 1; }
+  if [ "${#CMD_LINT[@]}" -gt 0 ]; then
+    "${CMD_LINT[@]}" || { echo "GATE_TESTS=FAIL lint (post-fix)"; exit 1; }
+  else
+    echo "POST_FIX_GATE_LINT=NOT_APPLICABLE ($REPO declares no lint command)"
+  fi
   echo "POST_FIX_GATE=PASS"

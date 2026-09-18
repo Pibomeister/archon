@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "max_files": 4,
+  "max_test_files": 3,
+  "max_d1_callers": 10,
+  "max_chain_links": 7,
+  "hot_paths": [
+    "api/libs/data-access/src/lib/rds/migrations/",
+    "api/libs/data-access/src/lib/rds/entities/",
+    "api/libs/data-access/src/lib/rds/baseline/",
+    "api/apps/api/src/auth/",
+    "api/apps/api/src/oauth/",
+    "api/apps/api/src/billing/",
+    "api/apps/api/src/global-search/",
+    "api/infra/",
+    "api/apps/integration-service/",
+    "api/apps/bridge-service/",
+    "web-app/app/services/api-client.d.ts"
+  ],
+  "repro_command_allow": [
+    "bun run test ",
+    "bun run test:integration ",
+    "pnpm test --run "
+  ]
+}

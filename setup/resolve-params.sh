@@ -34,11 +34,21 @@ while [ "$#" -gt 0 ]; do
 done
 set -- "${ARGV[@]+"${ARGV[@]}"}"
 
+LAYER="${ARCHON_LAYER:-$(cd "$(dirname "$0")/.." && pwd)}"
 ROOT="${1:?usage: resolve-params.sh <root> <arguments> <artifacts-dir> [api-port-base] [web-port-base] [--allow <csv>]}"
 ARGS="${2-}"
 AD="${3:?usage: resolve-params.sh <root> <arguments> <artifacts-dir> [api-port-base] [web-port-base] [--allow <csv>]}"
+export ARTIFACTS_DIR="${ARTIFACTS_DIR:-$AD}"
 APIBASE="${4-}"
 WEBBASE="${5-}"
+LAYOUT="siblings"
+DEFAULT_REPO="api"
+if [ -f "$AD/profile-runtime.sh" ]; then
+  # shellcheck disable=SC1091
+  source "$AD/profile-runtime.sh"
+  LAYOUT="${PROFILE_LAYOUT:-$LAYOUT}"
+  DEFAULT_REPO="${DEFAULT_REPO:-api}"
+fi
 
 SPEC="$ARGS"
 test -n "$SPEC" || { echo "PARAMS=FAIL no spec path in run message — invoke as: archon workflow run full-sdlc-api \"/abs/path/to/spec.md\""; exit 1; }
@@ -96,7 +106,7 @@ if [ -n "$BOUND" ]; then
   REPO="$BOUND"
   SELECTION="adopted"
 else
-  REPO="${WANT:-api}"
+  REPO="${WANT:-$DEFAULT_REPO}"
   SELECTION="new"
   case ",$ALLOW," in
     *",$REPO,"*) : ;;
@@ -106,28 +116,30 @@ fi
 
 # Capture-and-check: `eval "$(...)"` alone swallows a non-zero exit, so a helper
 # that dies with empty stdout would silently leave every profile value unset.
-PROFILE=$(bash "$ROOT/.archon/setup/repo-profile.sh" "$REPO") || { echo "PARAMS=FAIL repo-profile.sh failed for repo $REPO"; exit 1; }
+PROFILE=$(bash "$LAYER/setup/repo-profile.sh" "$REPO") || { echo "PARAMS=FAIL repo-profile.sh failed for repo $REPO"; exit 1; }
 eval "$PROFILE"
 
 APIPORT=""; WEBPORT=""
 if [ -n "$HAS_SMOKE" ]; then
   if [ -n "$APIBASE" ]; then
-    APIPORT=$(bash "$ROOT/.archon/setup/port-alloc.sh" "$APIBASE" "$SLUG") || { echo "PARAMS=FAIL cannot allocate api port from base $APIBASE"; exit 1; }
+    APIPORT=$(bash "$LAYER/setup/port-alloc.sh" "$APIBASE" "$SLUG") || { echo "PARAMS=FAIL cannot allocate api port from base $APIBASE"; exit 1; }
   fi
   if [ -n "$WEBBASE" ]; then
-    WEBPORT=$(bash "$ROOT/.archon/setup/port-alloc.sh" "$WEBBASE" "$SLUG") || { echo "PARAMS=FAIL cannot allocate web port from base $WEBBASE"; exit 1; }
+    WEBPORT=$(bash "$LAYER/setup/port-alloc.sh" "$WEBBASE" "$SLUG") || { echo "PARAMS=FAIL cannot allocate web port from base $WEBBASE"; exit 1; }
   fi
 fi
 
-python3 - "$AD/params.json" "$SPEC" "$SLUG" "$ROOT" "$APIPORT" "$WEBPORT" "$REPO" <<'PY'
+python3 - "$AD/params.json" "$SPEC" "$SLUG" "$ROOT" "$APIPORT" "$WEBPORT" "$REPO" "$LAYOUT" <<'PY'
 import json, sys
-out, spec, slug, root, api_port, web_port, repo = sys.argv[1:8]
+out, spec, slug, root, api_port, web_port, repo, layout = sys.argv[1:9]
+worktree = f"{root}/.worktrees/{slug}" if layout == "single" else f"{root}/{repo}/.worktrees/{slug}"
 params = {
     "spec": spec,
     "slug": slug,
     "branch": f"archon/{slug}",
     "repo": repo,
-    "worktree": f"{root}/{repo}/.worktrees/{slug}",
+    "worktree": worktree,
+    "layout": layout,
 }
 if api_port:
     params["api_port"] = int(api_port)

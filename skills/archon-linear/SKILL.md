@@ -1,6 +1,6 @@
 ---
 name: archon-linear
-description: Fetch a Linear issue into an immutable evidence snapshot and route supported Goodword defects, single-repo features, or repository-list features into the current provider's Archon lane. Use for `/archon-linear ENG-1234`, a Linear issue URL, or when selecting a Linear ticket as Archon input.
+description: Fetch a Linear issue into an immutable evidence snapshot and route supported defects, single-repo features, or repository-list features into the current provider's Archon lane. Use for `/archon-linear ENG-1234`, a Linear issue URL, or when selecting a Linear ticket as Archon input.
 ---
 
 <WORKFLOW-NODE-STOP>
@@ -12,6 +12,12 @@ the operator session that performs intake and launches runs from outside.
 
 Turn a product ticket into durable input. Linear is **read-only**: never create,
 update, comment on, assign, label, or transition an issue.
+
+Helpers live on `$ARCHON_LAYER` (this pack). Snapshots and project research live
+on `$PROJECT_ROOT` (the project folder). Prefer
+`python3 "$ARCHON_LAYER/setup/archon-run.py"`, which exports both. Do not launch
+via `<project>/.archon/setup/...` or a baked-in Goodword home. See `archon-sdlc`
+for the two-root table.
 
 ## Authorization boundary
 
@@ -45,7 +51,7 @@ update, comment on, assign, label, or transition an issue.
 
 ## Immutable snapshot
 
-Write under `<Goodword>/.omc/research/linear/` using
+Write under `$PROJECT_ROOT/.omc/research/linear/` using
 `<KEY>-<uuid>.md`. Some Linear MCP versions expose the human key in `id` but do
 not expose the internal issue UUID. In that case use
 `<KEY>-uuid-unavailable.md`, state that limitation in metadata and Intake gaps,
@@ -100,33 +106,33 @@ Classify from the ticket's requested outcome, not labels alone.
 
 - **Defect:** infer current client only inside this skill: Claude Code means
   `claude`; Codex means `codex`. Launch exactly:
-  `python3 <Goodword>/.archon/setup/archon-run.py bugfix --provider <provider> <absolute-snapshot>`.
+  `python3 "$ARCHON_LAYER/setup/archon-run.py" bugfix --provider <provider> <absolute-snapshot>`.
   The neutral launcher owns lite/full selection and same-provider fallback:
   Claude maps to `bugfix-lite`/`bugfix`; Codex maps to
   `bugfix-lite-codex`/`bugfix-codex`. Never cross that provider boundary.
 - **API-only feature:** launch the provider-neutral feature command and infer
   scope `api`:
-  `python3 <Goodword>/.archon/setup/archon-run.py feature --provider <provider> --scope api <absolute-snapshot>`.
+  `python3 "$ARCHON_LAYER/setup/archon-run.py" feature --provider <provider> --scope api <absolute-snapshot>`.
 - **API + web cross-repository feature:** for Codex, launch one joint plan with
-  `python3 <Goodword>/.archon/setup/archon-run.py feature --provider codex --scope api,web-app <absolute-snapshot>`.
+  `python3 "$ARCHON_LAYER/setup/archon-run.py" feature --provider codex --scope api,web-app <absolute-snapshot>`.
   Codex `--scope fullstack` is the same shorthand. Claude's scalar
   `--scope fullstack` retains the legacy API-first/web-second handoff chain.
   Never change provider between stages.
 - **API + goodword-mcp cross-repository feature:** launch the joint
   repository-list chain (`cross-repo-feature` does not imply web):
-  `python3 <Goodword>/.archon/setup/archon-run.py feature --provider <provider> --scope api,goodword-mcp <absolute-snapshot>`.
+  `python3 "$ARCHON_LAYER/setup/archon-run.py" feature --provider <provider> --scope api,goodword-mcp <absolute-snapshot>`.
   Claude advances it with `feature-advance --chain <id>` after each human
   `archon workflow approve`; Codex uses guarded `approve`/`resume`.
 - **Other supported repository combinations:** infer the smallest complete
   selected set from the requested feature and its interface dependencies. Read
-  `repo-profile.sh --list`; registered names initially include `api`,
+  `"$ARCHON_LAYER/setup/repo-profile.sh" --list`; registered names initially include `api`,
   `goodword-mcp`, and `web-app`. Pass canonical comma-separated names to
   `feature --provider <provider> --scope <repositories> <absolute-snapshot>`.
   A selected dependency must become an owned stage in the joint plan; do not
   silently omit it or expand scope beyond the ticket. List order is not execution
   order. Do not narrow an explicit list with `ARCHON_REPO`.
 - **Web-only feature:** use the existing standalone route:
-  `python3 <Goodword>/.archon/setup/archon-run.py feature --provider <provider> --scope web <absolute-snapshot>`.
+  `python3 "$ARCHON_LAYER/setup/archon-run.py" feature --provider <provider> --scope web <absolute-snapshot>`.
 - For unsupported repositories or requested work outside these lanes, stop with
   `ARCHON_LINEAR=UNSUPPORTED` and state the missing capability.
 - Missing evidence does not make a defect unsupported; thin reports belong in
@@ -195,8 +201,8 @@ active time; resumes do not replenish the allowance. Read the final joint
 receipt: only `locally_verified` with publication held is successful local
 delivery. A completed child, missing proof, zero tests, failed/skipped required
 verification, or disabled publication is not success. Do not claim the separate
-Claude path has this Codex watchdog/accounting guarantee. ENG-3866 remains
-deferred until the supervised two-repository qualification trial has passed.
+Claude path has this Codex watchdog/accounting guarantee. Repository-list
+qualification is established; see `archon-sdlc`.
 AWS CLI/session availability is not a launch, approval, rejection, or resume
 prerequisite for code workflows. Surface typed degraded AWS evidence; request
 login only when a specific downstream operation genuinely requires AWS.

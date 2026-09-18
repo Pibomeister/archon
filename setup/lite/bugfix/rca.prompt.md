@@ -24,8 +24,8 @@ bug-report-normalized.md (everything inside
 evidence-plan.json (repro_command, repro_observed),
 evidence-manifest.json plus every evidence/ file it marks gathered,
 change-context.json, kb-context.md, and the two main checkouts READ-ONLY at
-/Users/eduardopicazo/Documents/Workspace/Goodword/api and
-/Users/eduardopicazo/Documents/Workspace/Goodword/web-app. There is NO
+"$PROJECT_ROOT"/api and
+"$PROJECT_ROOT"/web-app. There is NO
 worktree yet — do not modify any repository, do not create branches.
 The checkouts may sit on a stale feature branch: read `bugfix-chain.json`, select `baseline.commits[<repo>]`, and inspect that immutable SHA (`git -C <repo> show <sha>:<path>`, `git -C <repo> ls-tree -r --name-only <sha>`). Cite paths at that SHA; the gate resolves citations against the same pinned baseline.
 The manifest tells you exactly which evidence exists; reason only from
@@ -83,7 +83,7 @@ causal-chain.json — the 5-whys chain, 2 to 7 links, symptom first:
   {"links": [
     {"index": 1, "cause": "<one sentence>",
      "evidence": {"source": "code|db|logs|sentry|linear|gitlog|gitnexus|report",
-                  "file": "<absolute path, or path relative to /Users/eduardopicazo/Documents/Workspace/Goodword, or relative to the artifacts dir; for source gitlog cite the commit as api@<sha> or web-app@<sha> and quote a line of its message or diff, never a bare repo name, commit description, or URL>",
+                  "file": "<absolute path, or path relative to "$PROJECT_ROOT", or relative to the artifacts dir; for source gitlog cite the commit as api@<sha> or web-app@<sha> and quote a line of its message or diff, never a bare repo name, commit description, or URL>",
                   "quote": "<verbatim substring of that file, at least 10 chars — a gate greps for it>"}},
     ...,
     {"index": N, "cause": "<the root cause>", "evidence": {...},
@@ -146,8 +146,8 @@ failing-test.json — the RED contract:
 On the lite lane "command" runs the test_file you name and uses the same
 runner and form as evidence-plan.json's repro_command (the reporter's
 own invocation is the proof that the runner works here).
-Command shapes: api unit -> bun run test -- "<spec path>" (the -- form;
-never bare bun test). web-app vitest -> pnpm test --run <spec path>.
+Command shapes come from project-guidance.md in ARTIFACTS_DIR. Follow it.
+Do not invent runners.
 Follow repo-policy.json: extend the existing owning spec when required, and
 give the failure one stable hermetic owner at the highest practical fidelity.
 Prefer kind=unit/vitest strongly: integration owns machine-global ports
@@ -158,8 +158,8 @@ mode from the chain), not because of a missing import or setup error.
 
 verify.json — {"test_patterns": ["<pattern>", ...]}: the suites that
 must stay green after the fix (existing specs for the touched files
-included), run as bun run test -- "<pattern>" (api) or
-pnpm test --run <pattern> (web-app). UNIT specs only: the api unit
+included), using the unit-test command from project-guidance.md for this
+repository. UNIT specs only: the api unit
 runner ignores .int.spec.ts / .e2e.spec.ts / .ai.spec.ts / .ext.spec.ts
 ("No tests found"), so listing one fails the fix loop as a contract
 error. Name integration coverage in the fix plan's risks instead.

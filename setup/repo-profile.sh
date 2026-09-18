@@ -33,8 +33,11 @@ set -euo pipefail
 REPO="${1:?usage: repo-profile.sh <repo>|--list|--json}"
 
 python3 - "$REPO" <<'PY'
+import json
+import os
 import shlex
 import sys
+from pathlib import Path
 
 repo = sys.argv[1]
 
@@ -95,6 +98,26 @@ PROFILES = {
         "impact":    "",
     },
 }
+
+def _merge_runtime(profiles):
+    ad = (os.environ.get("ARTIFACTS_DIR") or "").strip()
+    if not ad:
+        return profiles
+    path = Path(ad) / "profile-runtime.json"
+    if not path.is_file():
+        return profiles
+    try:
+        extra = json.loads(path.read_text(encoding="utf-8")).get("repos") or {}
+    except (OSError, json.JSONDecodeError):
+        return profiles
+    if isinstance(extra, dict):
+        merged = dict(profiles)
+        merged.update(extra)
+        return merged
+    return profiles
+
+
+PROFILES = _merge_runtime(PROFILES)
 
 profile = PROFILES.get(repo)
 if repo == "--list":

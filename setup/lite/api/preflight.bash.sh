@@ -1,16 +1,14 @@
 set -euo pipefail
-SK="/Users/eduardopicazo/Documents/Workspace/Goodword/.claude/skills"
+: "${ARCHON_LAYER:?PREFLIGHT=FAIL ARCHON_LAYER unset}"
+: "${PROJECT_ROOT:?PREFLIGHT=FAIL PROJECT_ROOT unset}"
+test -f "$ARCHON_LAYER/setup/resolve-params.sh" || { echo "PREFLIGHT=FAIL ARCHON_LAYER missing helpers"; exit 1; }
+SK="$PROJECT_ROOT/.claude/skills"
 test -f "$SK/ce-code-review/SKILL.md" || { echo "PREFLIGHT=FAIL staged ce-code-review missing"; exit 1; }
 test -f "$SK/ce-doc-review/SKILL.md"  || { echo "PREFLIGHT=FAIL staged ce-doc-review missing"; exit 1; }
 # Dual contract: CE 3.2.0 carries the markers in SKILL.md; newer CE moved
 # mode:headless (now an alias for mode:agent) into references/modes-and-output.md
 # and the verdict field into references/finish-review.md. Either satisfies.
 { grep -q 'mode:headless' "$SK/ce-code-review/SKILL.md" && grep -q '"verdict"' "$SK/ce-code-review/SKILL.md"; }         || { grep -q 'mode:headless' "$SK/ce-code-review/references/modes-and-output.md" 2>/dev/null && grep -q '"verdict"' "$SK/ce-code-review/references/finish-review.md" 2>/dev/null; }         || { echo "PREFLIGHT=FAIL ce-code-review carries neither review contract (headless envelope nor agent JSON)"; exit 1; }
-command -v bun >/dev/null || { echo "PREFLIGHT=FAIL bun missing"; exit 1; }
-command -v gh >/dev/null || { echo "PREFLIGHT=FAIL gh missing"; exit 1; }
-gh auth status >/dev/null 2>&1 || { echo "PREFLIGHT=FAIL gh unauthenticated"; exit 1; }
-command -v aws >/dev/null 2>&1 && aws sts get-caller-identity >/dev/null 2>&1 \
-  || echo "PREFLIGHT_WARN aws unavailable or expired - AWS evidence/runtime integrations may degrade; workflow control continues"
 # Billing guard: runs MUST bill the Claude subscription (OAuth /login), never the API.
 # Any of these outranks the subscription login in Claude Code's auth precedence.
 for v in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_PROFILE; do
@@ -39,15 +37,8 @@ port_pids() { # $1 = port
 # port-alloc.sh walks past an occupied slot, which is what lets a second run of
 # this lane start while the first is still up.
 port_pids 4123 >/dev/null || { echo "PREFLIGHT=FAIL no port-inspection tool (need lsof, ss, or fuser)"; exit 1; }
-test -d /Users/eduardopicazo/Documents/Workspace/Goodword/api/.git || { echo "PREFLIGHT=FAIL api repo missing"; exit 1; }
-# Run identity: message = absolute spec path (empty = hard fail). Single derivation point.
-bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/resolve-params.sh \
-  /Users/eduardopicazo/Documents/Workspace/Goodword "${ARGUMENTS-}" "$ARTIFACTS_DIR" 4123
-eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
-test -n "$APIPORT" || { echo "PREFLIGHT=FAIL params.json carries no smoke port"; exit 1; }
-echo "PREFLIGHT_PORTS api=$APIPORT (per-run, allocated from this lane's base)"
-test -d /Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb/wiki || { echo "PREFLIGHT=FAIL knowledge base missing"; exit 1; }
-git -C /Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb status --porcelain | sort > "$ARTIFACTS_DIR/kb-pre-porcelain.txt"
+# 4123 is the parent lane base; derive-lite substitutes this overlay to 4125.
+bash "$ARCHON_LAYER/setup/profile-preflight.sh" 4123 full-sdlc-api-lite.yaml
 echo "PREFLIGHT=PASS"
 # LITE lane: one review round. converge reads this durable cap; the lite
 # converge overlay treats a landed fix on round 1 as converged (fixes are
