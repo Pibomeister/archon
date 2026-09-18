@@ -1812,7 +1812,10 @@ nodes:
           echo "GREEN_ACHIEVED attempt=$N sha=$(git rev-parse HEAD)"
           echo "<promise>GREEN_ACHIEVED</promise>"
         else
-          echo "FIX_ATTEMPT_FAILED attempt=$N reason=[$REASON] (controller seals this patch and opens a pristine investigation successor)"
+          # $REASON can carry a verify.json pattern. This branch exits 0 without the
+          # promise, so nothing printed here may form <tag>GREEN_ACHIEVED</tag>.
+          SHOWN=$(printf '%s' "$REASON" | LC_ALL=C tr -c '[:print:]' '?' | tr '<>' '??')
+          echo "FIX_ATTEMPT_FAILED attempt=$N reason=[$SHOWN] (controller seals this patch and opens a pristine investigation successor)"
         fi
 - id: negcontrol
   depends_on:
@@ -1858,6 +1861,7 @@ nodes:
     - id: review
       depends_on:
       - round-pre
+      context: fresh
       timeout: 1800000
       prompt: |
         Use $ce-code-review explicitly for this node.
@@ -2082,6 +2086,11 @@ nodes:
         "producer_repo", "severity"}. Such a finding is neither advisory nor
         failed — it is not waivable and not fixable here, and it stops the
         run so the chain can route it to the repository that owns it.
+        If cross-repo-filed.json exists in the artifacts directory, a human has
+        filed some cross-repo findings; when you raise one of those same defects
+        again, copy its "finding" and "producer_repo" VERBATIM from
+        cross-repo-findings.json or the earlier round's fixer-result.json so its
+        acknowledgement still matches. Never create or edit cross-repo-filed.json.
         Writing the JSON result file is MANDATORY and comes BEFORE your final line —
         ending without it aborts the pipeline. Write it even when all arrays are
         empty. Then end with the single line: FIXER_DONE
@@ -2126,13 +2135,15 @@ nodes:
           "$ARTIFACTS_DIR/files-allowlist.json" "$WT" "$RED" --round "$N" --exclude pnpm-lock.yaml || exit 1
         if [ "$FIXOK" = NO ]; then echo "FIXER_BLOCKED round=$N $FIXMSG"; exit 1; fi
         # Cross-repo stop: a finding owned by another repository of this chain is
-        # not waivable here, so it must never reach update-waivers.py.
-        CROSSN=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1])).get('cross_repo') or []))" "$RD/fixer-result.json" 2>/dev/null || echo 0)
-        if [ "$CROSSN" != 0 ]; then
-          REPOS=$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]))['cross_repo'];json.dump(d,open(sys.argv[2],'w'),indent=1);print(','.join(sorted({str(e.get('producer_repo','?')) for e in d})))" "$RD/fixer-result.json" "$ARTIFACTS_DIR/cross-repo-findings.json")
-          echo "CROSS_REPO_FINDING round=$N count=$CROSSN repos=$REPOS"
+        # not waivable here, so it must never reach update-waivers.py unresolved. The
+        # only resolution is a human recording where it was filed in
+        # cross-repo-filed.json (cross-repo-keys.py prints the keys).
+        if ! CROSS=$(python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --gate "$RD/fixer-result.json"); then
+          printf '%s\n' "$CROSS" | sed '$d'
+          echo "CROSS_REPO_FINDING round=$N $(printf '%s\n' "$CROSS" | tail -n 1)"
           exit 1
         fi
+        [ -z "$CROSS" ] || printf '%s\n' "$CROSS"
         python3 "$SETUP/update-waivers.py" "$RD/fixer-result.json" "$ARTIFACTS_DIR/waivers.md"
         # Review yield, measured every round and printed for the operator.
         YIELD=$(python3 "$SETUP/review-yield.py" "$ARTIFACTS_DIR" "$N")
@@ -2189,8 +2200,10 @@ nodes:
     case "$N" in ''|*[!0-9]*) echo "EXIT_GATE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
     # Cross-repo belt: converge's stop is bypassable by a resume, and the
     # accept-residuals branch below skips the fixer re-check entirely.
-    CROSSN=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1])).get('cross_repo') or []))" "$RD/fixer-result.json" 2>/dev/null || echo 0)
-    test "$CROSSN" = 0 || { echo "EXIT_GATE=FAIL CROSS_REPO_FINDING round=$N count=$CROSSN"; exit 1; }
+    # Only a human acknowledgement in cross-repo-filed.json resolves an entry.
+    CROSS=$(python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --gate "$RD/fixer-result.json") \
+      || { printf '%s\n' "$CROSS" | sed '$d'; echo "EXIT_GATE=FAIL CROSS_REPO_FINDING round=$N $(printf '%s\n' "$CROSS" | tail -n 1)"; exit 1; }
+    [ -z "$CROSS" ] || printf '%s\n' "$CROSS"
     python3 "$SETUP/repo-policy.py" validate-diff --root "$ROOT" --artifacts "$ARTIFACTS_DIR" \
       || { echo "EXIT_GATE=FAIL repository policy"; exit 1; }
     # A human accepting residuals waives the verdict and fixer checks — never
@@ -2404,6 +2417,10 @@ nodes:
     after deploy: the log line, Sentry issue, or error string from the
     evidence — with its identifier. If the bug produced no production
     signal, say exactly: "No additional operational monitoring required."
+    After those sections, run: python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --prbody
+    When it prints anything, append that output VERBATIM as the last section of
+    pr-body.md (the "## Cross-repo findings filed" section: defects in other
+    repositories a human filed instead of fixing here).
     No co-author or attribution lines. End with the single line: PRBODY_WRITTEN
 - id: prbody-gate
   depends_on:

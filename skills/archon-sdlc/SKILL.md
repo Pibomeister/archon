@@ -249,7 +249,10 @@ For the guarded Codex path:
   the cause. It preserves the chain, selected worktrees, and shared budget;
   prior plan and critic/revision evidence are supplied as hashed, read-only
   `prior-planning-evidence.json` for refinement, without transferring approval.
-  It cannot replace approved or implemented work. A `RECOVERABLE` start supplies
+  It cannot replace approved or implemented work. To steer the successor planner on approach
+  (never scope) without editing the spec snapshot, add `--guidance-file <path>`;
+  it is hashed into chain state, shown in the plan packet, and ranked below the
+  spec (RUNBOOK "Feature launcher"). A `RECOVERABLE` start supplies
   usable control authority; retain its operator-held token. Never persist tokens
   in handoff documents or edit private state to bypass a failed check.
 - Finish only when the approved integration matrix passes against disposable
@@ -551,14 +554,15 @@ discriminator string is verbatim in `round-N/converge.txt` in the run's artifact
 | verdict acceptable, HEAD moved | Fixes landed; next round re-reviews them | None - expected |
 | `NO_PROGRESS` | `Not ready` AND HEAD unchanged - the fixer is not moving the needle | Escalate. Semantic, not budget-shaped |
 | `FIXER_BLOCKED` | Fixer reported a P0-P2 it cannot fix, or wrote no result file | Escalate. Read the `failed` partition first |
-| `CROSS_REPO_FINDING round=N count=N repos=<comma list>` | A fixer finding's defect lives in a different repository of this chain - not waivable, not fixable here | Escalate. Read `cross-repo-findings.json` |
+| `CROSS_REPO_FINDING round=N count=N repos=<comma list>` | A fixer finding's defect lives in a different repository of this chain - not waivable, not fixable here, and no human has recorded it as filed | Escalate. Read `cross-repo-findings.json`; a human files it and writes `cross-repo-filed.json` (RUNBOOK §3 recipe). Never write that file yourself |
 
 Three rules that decide most supervision calls:
 
 - **`round.txt` is the only number that means anything.** A failed `loop_group`
   resumes with a fresh iteration counter; `max_iterations` bounds per-invocation
   work only. The durable counter is `round.txt` in the artifacts dir (RUNBOOK §4).
-- **Resume is cheap.** Completed AI nodes never re-run; only failed bash gates
+- **Resume is cheap.** Completed AI nodes never re-run, except the body nodes of
+  a failed `loop_group`, which re-enters with a fresh iteration; only failed bash gates
   re-execute. Resume does not restore AI session context, and it does not need to -
   every post-gate node re-reads its inputs from disk.
 - **A disproved cause is not automatically a resolved ticket.** For a report
@@ -596,11 +600,13 @@ reviewer. Stops here:
 - `DESLOP_GATE=FAIL <guard>` (typecheck/lint/unit/scope/slop) - the writer's own
   cleanup broke something. Hand-fix the worktree, resume; resume re-enters the
   loop fresh and re-checkpoints.
-- `DESLOP=DIRTY round=N blocking=N` - the independent reviewer session filed a
-  finding at confidence >=75. There is no automatic writer retry: hand-fix the
-  flagged issue in the worktree yourself, then resume.
-- `DESLOP_ROUND_CAP round=N` - the DIRTY-verdict counter hit 2. Same
-  resume-after-hand-fix pattern, or accept and ship with the residual noted.
+- `DESLOP=DIRTY round=N blocking=N` + `DESLOP_RETRY=PASS` - not a stop. The
+  reviewer filed a finding at confidence >=75; the gate exits 0 and the next
+  loop iteration's `deslop-fix` applies only those findings, then recheck and a
+  fresh reviewer run. Nothing to do.
+- `DESLOP_ROUND_CAP round=N` - the second DIRTY verdict (the automatic fix did
+  not clear it). Hand-fix the findings in `deslop-round-N/blocking-findings.json`
+  in the worktree, then resume, or accept and ship with the residual noted.
 - `DESLOP_REVIEW=FAIL coverage incomplete round=N <reason>` /
   `DESLOP_REVIEW=FAIL malformed finding round=N <reason>` /
   `DESLOP_REVIEW=FAIL verdict inconsistent round=N declared DIRTY with 0
@@ -643,7 +649,10 @@ resume (RUNBOOK §3).
 - `PLAN_REJECTED`, `PLAN_NO_PROGRESS`, `PLAN_SCOPE_DISPUTE`, `PLAN_CONVERGE=FAIL`
   (RUNBOOK §3a) - the plan-loop critic and reviser disagree, or the loop stalled.
   Read `plan-round-N/critique.json` and `revision.json`, explain the disagreement,
-  hand back. `PLAN_ROUND_CAP` alone is resumable after raising the cap or
+  hand back. A cap round whose blocking findings were all applied (none declined, no P0)
+  converges to the plan gate with `plan-cap-unverified.json`; call those
+  un-recritiqued edits out by name at the gate like declined findings.
+  `PLAN_ROUND_CAP` alone is resumable after raising the cap or
   accepting the loop's last state by hand.
 - `PLAN_ROUND_PRE=FAIL` (RUNBOOK §3a) / `RCA_ROUND_PRE=FAIL` (RUNBOOK §12) - the
   round counter (`plan-round.txt` / `rca-round.txt`) is not an integer, or a
@@ -654,9 +663,9 @@ resume (RUNBOOK §3).
   junk **counter** does.
 - `DESLOP_REVIEW=FAIL reviewer modified tree` (RUNBOOK §3b) - **never plain-resume**;
   run the printed restore triple first (§4 above), then resume.
-- `DESLOP=DIRTY`, `beyond_five_guards` findings (bugfix lane, RUNBOOK §12) - hand-fix
-  the flagged issue in the worktree before resuming; there is no automatic writer
-  retry.
+- `DESLOP_ROUND_CAP` (including `beyond_five_guards` findings on the bugfix lane,
+  RUNBOOK §12) - the one automatic fixer pass did not clear the reviewer; hand-fix
+  the flagged issue in the worktree before resuming.
 
 More iterations on any of these only burn quota. When you escalate, say which
 discriminator fired, which artifact file holds the evidence, and what the RUNBOOK
@@ -694,7 +703,7 @@ worktrees are still cut under `<repo>/.worktrees/` as before.
 | Path lock, artifacts dir | per run |
 | Smoke ports | per run (`setup/port-alloc.sh`, recorded in `params.json`) |
 | api/web worktrees, incl. `bugfix-smoke-<slug>` | per run |
-| **e2e docker stack (54322/8001)** | **shared, serialized by `setup/e2e-mutex.sh`** |
+| **e2e docker stack (54322/8001)** | **shared, serialized by `setup/e2e-mutex.sh`** (bugfix gates: typed stop; joint integration and wrapped AI integration runs: bounded wait) |
 | **ce-code-review `/tmp` root** | **shared**; only the `head_sha` prefix match separates lanes |
 | **goodword-kb** | shared; the gates are scoped to each run's own file |
 
@@ -852,7 +861,8 @@ tee, quota). Differences that decide supervision calls:
   report anything else under `reported_not_fixed`; the reviewer diffs the
   writer's actual edits against that declaration and files
   `beyond_five_guards` for anything undeclared. It blocks like any other
-  finding — hand-fix (usually: revert the out-of-scope edit), then resume.
+  finding — the automatic fixer reverts the out-of-scope edit once; at
+  `DESLOP_ROUND_CAP` hand-fix (usually: revert the edit), then resume.
   `DESLOP_GATE=FAIL repro harness error rc=97` is a harness bug, not a
   regression — fix the environment, not the diff.
 - **Escalate, do not resume**, on: `CHAIN_CONFLICT` (blind verifier contradicts
@@ -921,7 +931,8 @@ tee, quota). Differences that decide supervision calls:
   fresh critic, deliberately, because a resumed round must not be judged by a
   critique written against the pre-edit plan.
 - **`E2E_MUTEX=FAIL`** means another run owns the shared e2e stack (§5a), not that
-  anything is broken. The message names the owner's artifacts dir. Let that run reach
+  anything is broken. `E2E_MUTEX=WAITING` lines in a feature run are normal queueing
+  behind another chain; only `E2E_MUTEX=FAIL timeout` (default 30 min) is a stop. The message names the owner's artifacts dir. Let that run reach
   its smoke gate and approve it, or release by hand once it is gone.
 - **Resume is not arbitrary rewind.** Archon resumes failed loop/node work while
   skipping completed nodes; it cannot safely jump behind a frozen RED or an

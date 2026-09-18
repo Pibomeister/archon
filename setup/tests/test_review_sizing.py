@@ -94,6 +94,38 @@ class ReviewSizingTest(unittest.TestCase):
         self.assertGreaterEqual(found[0].get("maxBudgetUsd", 0), 15)
 
 
+class ApiLaneCapsClearMeasuredCosts(unittest.TestCase):
+    """archon.db node costs for full-sdlc-api, max observed per node as of
+    2026-09-16: plan-critic hit its $4 cap (4.09), fixer hit $5, ralplan hit $3
+    on a two-repository plan (f07acb10/733e9012), review peaked at 13.04 of 15,
+    docreview 5.48, plan-revise 2.67, plan-render 2.19. Those peaks are
+    single-repository runs; a joint plan carries every selected repo's files,
+    tests and contracts through the same planning nodes, and archon has no
+    per-run cap scaling. Require ~1.5x headroom over each measured peak."""
+
+    PEAKS = {"ralplan": 3.12, "plan-critic": 4.09, "plan-revise": 2.67, "docreview": 5.48,
+             "plan-render": 2.19, "review": 13.04, "fixer": 5.0, "implement": 3.09,
+             # 343ad00e (joint verify-only stage): reader-audit hit its $3 cap.
+             "reader-audit": 3.0}
+
+    def test_caps_have_headroom_over_measured_peaks(self):
+        caps = {}
+
+        def walk(o):
+            if isinstance(o, dict):
+                if "maxBudgetUsd" in o:
+                    caps[o["id"]] = o["maxBudgetUsd"]
+                for v in o.values():
+                    walk(v)
+            elif isinstance(o, list):
+                for v in o:
+                    walk(v)
+        walk(yaml.safe_load((ARCHON / "workflows/full-sdlc-api.yaml").read_text()))
+        for node, peak in self.PEAKS.items():
+            with self.subTest(node=node):
+                self.assertGreaterEqual(caps[node], round(peak * 1.5, 2))
+
+
 class ReviewMustFinishItsFanOut(unittest.TestCase):
     """Run 38d72218 round 3: the review node returned while its personas were
     still running (archon logged dag.node_result_with_live_background_tasks).

@@ -142,6 +142,26 @@ class BugfixChainEnvOnResumeTest(unittest.TestCase):
             self.assertIn("chain-env.py", body)
             self.assertIn('env "${CHAIN_ENV[@]}"', body)
 
+    def test_feature_chain_env_is_restored_from_params_json(self):
+        # Resuming a repository-feature integration run died at joint-integration
+        # with "missing repository feature scope": the feature env lives in
+        # params.json, which neither control read.
+        import re, subprocess, sys, tempfile
+        setup = Path(__file__).resolve().parents[1]
+        tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        (tmp / "params.json").write_text(json.dumps({"feature_scope": "repositories", "feature_phase": "integration",
+                                                     "logical_chain_id": "c" * 32, "run_id": "r1"}), encoding="utf-8")
+        for name in ("resume.sh", "gate-approve.sh"):
+            body = (setup / name).read_text(encoding="utf-8")
+            snippet = re.search(r"python3 -c '(import sys; sys.path.insert\(0, sys.argv\[1\]\); from feature_env[^']*)'", body)
+            self.assertIsNotNone(snippet, name)
+            env = {k: v for k, v in os.environ.items() if not k.startswith("ARCHON_FEATURE_")}
+            r = subprocess.run([sys.executable, "-c", snippet.group(1), str(setup), str(tmp)],
+                               capture_output=True, encoding="utf-8", env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("ARCHON_FEATURE_SCOPE=repositories", r.stdout.splitlines(), name)
+            self.assertIn("ARCHON_FEATURE_PHASE=integration", r.stdout.splitlines(), name)
+
     def test_chain_env_helper_is_silent_for_a_lane_without_a_chain(self):
         import subprocess, sys, tempfile
         tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)

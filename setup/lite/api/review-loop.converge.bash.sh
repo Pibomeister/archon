@@ -1,6 +1,18 @@
 set -uo pipefail
 N=$(cat "$ARTIFACTS_DIR/round.txt"); RD="$ARTIFACTS_DIR/round-$N"
 exec > >(tee "$RD/converge.txt") 2>&1
+# AUTHORIZATION, and it is load-bearing on THIS lane specifically. converge now
+# carries trigger_rule: all_done, because the group's last node is the only one
+# whose completion promise the engine honours (probe 4). That also means it runs
+# after a FAILED upstream -- and v1's safety here was accidental: a failed
+# review-gate used to skip every node behind it, converge included. It no longer
+# does. review-summary.json is written before the gate's final checks and stays
+# readable with a Ready verdict, so reading that alone would converge a round
+# whose review was never gated. The parent's converge checks this inside
+# round-state.py; this overlay replaces the parent body wholesale, so it has to
+# check it here or not at all.
+test -f "$RD/review.ok" || { echo "REVIEW_UNAUTHORIZED round=$N (no gated review envelope)"; exit 1; }
+test -f "$RD/fixer.ok" || { echo "FIXER_ABSENT round=$N (commit-fixer left no attestation)"; exit 1; }
 eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
 cd "$WT"
 V=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['verdict'])" "$RD/review-summary.json" 2>/dev/null || echo UNKNOWN)
@@ -17,13 +29,15 @@ python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-sc
   "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" --round "$N" || exit 1
 if [ "$FIXOK" = NO ]; then echo "FIXER_BLOCKED round=$N $FIXMSG"; exit 1; fi
 # Cross-repo stop: a finding owned by another repository of this chain is
-# not waivable here, so it must never reach update-waivers.py.
-CROSSN=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1])).get('cross_repo') or []))" "$RD/fixer-result.json" 2>/dev/null || echo 0)
-if [ "$CROSSN" != 0 ]; then
-  REPOS=$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]))['cross_repo'];json.dump(d,open(sys.argv[2],'w'),indent=1);print(','.join(sorted({str(e.get('producer_repo','?')) for e in d})))" "$RD/fixer-result.json" "$ARTIFACTS_DIR/cross-repo-findings.json")
-  echo "CROSS_REPO_FINDING round=$N count=$CROSSN repos=$REPOS"
+# not waivable here, so it must never reach update-waivers.py unresolved. The
+# only resolution is a human recording where it was filed in
+# cross-repo-filed.json (cross-repo-keys.py prints the keys).
+if ! CROSS=$(python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --gate "$RD/fixer-result.json"); then
+  printf '%s\n' "$CROSS" | sed '$d'
+  echo "CROSS_REPO_FINDING round=$N $(printf '%s\n' "$CROSS" | tail -n 1)"
   exit 1
 fi
+[ -z "$CROSS" ] || printf '%s\n' "$CROSS"
 # Waiver ledger: record this round's advisory declines so later rounds
 # do not re-litigate them without new evidence.
 python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/update-waivers.py \

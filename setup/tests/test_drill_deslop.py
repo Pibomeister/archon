@@ -178,6 +178,8 @@ class DeslopTamperRestoreResumeTest(DeslopDrillBase):
         before = self.manifest(R)
         r = self.run_node("deslop-recheck", AD)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)  # round=2
+        # The recheck clears the previous round's review; the reviewer writes its own.
+        write_json(AD / "deslop-review.json", CLEAN_REVIEW)
         ck = (AD / "deslop-round-2" / "checkpoint-tree.txt").read_text().strip()
 
         def tamper_edit_delete():
@@ -238,6 +240,7 @@ class DeslopTamperRestoreResumeTest(DeslopDrillBase):
                 self.assertEqual(r3.returncode, 0, f"{label}: resume recheck failed: {r3.stdout + r3.stderr}")
                 n = (AD / "deslop-round.txt").read_text().strip()
                 ck = (AD / f"deslop-round-{n}" / "checkpoint-tree.txt").read_text().strip()
+                write_json(AD / "deslop-review.json", CLEAN_REVIEW)
                 r4 = self.run_node("deslop-review-gate", AD)
                 self.assertEqual(r4.returncode, 0, f"{label}: gate not clean after resume: {r4.stdout + r4.stderr}")
                 self.assertIn("<promise>DESLOP_CLEAN</promise>", r4.stdout)
@@ -310,6 +313,7 @@ class DeslopReviewGateSchemaTest(DeslopDrillBase):
         self.R, self.AD = self.mkfix("E")
         r = self.run_node("deslop-recheck", self.AD)
         assert r.returncode == 0, r.stdout + r.stderr
+        write_json(self.AD / "deslop-review.json", CLEAN_REVIEW)
 
     def test_e1_clean_produces_promise(self):
         r = self.run_node("deslop-review-gate", self.AD)
@@ -324,8 +328,10 @@ class DeslopReviewGateSchemaTest(DeslopDrillBase):
         }]
         write_json(self.AD / "deslop-review.json", review)
         r = self.run_node("deslop-review-gate", self.AD)
-        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        # Below the cap DIRTY exits 0 without the promise: the loop retries.
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("DESLOP=DIRTY", r.stdout)
+        self.assertIn("DESLOP_RETRY=PASS round=1 dirty_rounds=1", r.stdout)
         self.assertNotIn("<promise>", r.stdout)
 
     def test_e3_declared_dirty_with_zero_blocking_is_inconsistent(self):
@@ -527,8 +533,10 @@ class DeslopBeyondFiveGuardsTest(DeslopDrillBase):
         }]
         write_json(self.AD / "deslop-review.json", review)
         r = self.run_node("deslop-review-gate", self.AD)
-        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("DESLOP=DIRTY", r.stdout)
+        self.assertIn("DESLOP_RETRY=PASS round=1 dirty_rounds=1", r.stdout)
+        self.assertNotIn("<promise>", r.stdout)
         self.assertIn("DESLOP_FINDING guard=beyond_five_guards", r.stdout)
 
     def test_j2_beyond_five_guards_below_confidence_75_passes(self):

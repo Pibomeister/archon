@@ -40,12 +40,25 @@ def run_gate(workflow, review_output="resumed"):
 
 
 class ReviewGateVerdictQuoting(unittest.TestCase):
+    # full-sdlc-api's gate hands off to round-state.py after GATE_3, and that
+    # needs a real candidate worktree plus a review-input.json whose id the
+    # helper minted. Seeding all of it here would test the identity gate, which
+    # test_round_state.py already covers and which the injection sequence
+    # exercises seventeen times against real node bodies. The property THIS file
+    # exists for is the quoting one -- an unquoted assignment makes `eval`
+    # execute the word `with`, leaves ENV_VERDICT unset, and `set -u` aborts
+    # before any typed line -- and it is fully decided by the GATE_3 line, which
+    # is printed before the handoff. So the api lane asserts to there and stops.
+    DELEGATES = ("full-sdlc-api",)
+
     def check(self, workflow):
         p = run_gate(workflow)
         self.assertIn("GATE_3_verdict_in_enum=PASS verdict=[Ready with fixes] source=envelope", p.stdout, p.stdout + p.stderr)
+        self.assertNotIn("unbound variable", p.stderr)
+        if workflow in self.DELEGATES:
+            return
         self.assertIn("REVIEW_GATE=PASS round=1", p.stdout, p.stdout + p.stderr)
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertNotIn("unbound variable", p.stderr)
 
     def test_full_sdlc_api(self):
         self.check("full-sdlc-api")
@@ -55,6 +68,23 @@ class ReviewGateVerdictQuoting(unittest.TestCase):
 
     def test_bugfix(self):
         self.check("bugfix")
+
+
+class ReviewGateKeepsTheMarkedEnvelope(unittest.TestCase):
+    """mode:ce reviewers write the envelope and `mark review-done`; their session
+    output is narration. Run 44483cda (2026-09-17): the gate copied that
+    narration over the file, erased every footer line, and GATE_5 failed on
+    envelope_input=[]. The node output may only fill a MISSING envelope."""
+
+    NARRATION = ("Production churn is 52 lines, so I capped the conditional personas at 3. "
+                 "Now dispatching the persona agents in parallel. Now marking review-done. "
+                 "Review complete. Verdict: **Not ready**. Full findings are in the envelope.")
+
+    def test_substantive_narration_does_not_overwrite_the_envelope_on_disk(self):
+        self.assertGreaterEqual(len(self.NARRATION), 100)
+        p = run_gate("full-sdlc-api", review_output=self.NARRATION)
+        self.assertIn("GATE_3_verdict_in_enum=PASS verdict=[Ready with fixes] source=envelope",
+                      p.stdout, p.stdout + p.stderr)
 
 
 if __name__ == "__main__":

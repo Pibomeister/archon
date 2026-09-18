@@ -113,7 +113,7 @@ def fail(reason: str) -> NoReturn:
     raise SystemExit(1)
 
 
-def resolve_run(db: Path, prefix: str) -> dict:
+def resolve_run(db: Path, prefix: str, lanes: set[str] = LANES) -> dict:
     if not ID_RE.fullmatch(prefix):
         fail(f"bad-id-format [{prefix}]")
     con = sqlite3.connect(db)
@@ -129,7 +129,7 @@ def resolve_run(db: Path, prefix: str) -> dict:
     if len(rows) != 1:
         fail(f"ambiguous prefix={prefix} matches={len(rows)}")
     row = dict(rows[0])
-    if row["workflow_name"] not in LANES:
+    if row["workflow_name"] not in lanes:
         fail(f"run {row['id'][:8]} is {row['workflow_name']}, not a guarded Codex lane")
     return row
 
@@ -537,10 +537,13 @@ def command_for(action: str, target: str, reason: str | None = None) -> list[str
         return command
     if action == "resume":
         return ["bash", str(SETUP / "resume.sh"), target]
+    # SQLITE_BUSY under concurrent runs: retried while the run row is untouched;
+    # a recorded decision whose resume hit the lock continues via resume.sh.
+    retry = ["bash", str(SETUP / "archon-lock-retry.sh"), action.upper(), target, "--"]
     if action == "approve":
-        return [archon, "workflow", "approve", target]
+        return [*retry, archon, "workflow", "approve", target]
     if action == "reject":
-        return [archon, "workflow", "reject", target, reason or ""]
+        return [*retry, archon, "workflow", "reject", target, reason or ""]
     if action == "abandon":
         return [archon, "workflow", "abandon", target, "--json"]
     fail(f"unknown action {action}")
@@ -2695,11 +2698,15 @@ def print_feature_chain_pause(args: argparse.Namespace, chain_id: str) -> None:
     gate = probe.get("gate") or probe.get("status")
     advance_command = f"python3 {Path(__file__).resolve()} feature-advance --chain {chain_id}"
     label = {"gate": "PAUSED", "handoff": "RUNNING"}.get(probe["state"], probe["state"].upper())
+    # approve only releases a paused gate; a failed/cancelled run is resumed after
+    # its cause is fixed (or its planning is replanned), never approved.
+    next_step = (f"archon workflow approve {row['id'][:8]}" if probe["state"] == "gate"
+                 else f"bash {SETUP / 'resume.sh'} {row['id'][:8]}")
     print(
         f"ARCHON_FEATURE_REPOSITORY_CHAIN={label} "
         f"chain={chain_id} phase={(current or {}).get('phase')} run={row['id'][:8]} "
         f"lane={row['workflow_name']} status={probe.get('status')} gate={gate} "
-        f"next=\"archon workflow approve {row['id'][:8]}\" then=\"{advance_command}\""
+        f"next=\"{next_step}\" then=\"{advance_command}\""
     )
 
 
@@ -2883,10 +2890,17 @@ def feature_shepherd_command(args: argparse.Namespace) -> None:
             print("BUDGET_SHEPHERD=WARN forecast exceeds allowance; continuing under the unchanged hard cap")
 
 
+def resolve_feature_control_run(args: argparse.Namespace) -> dict:
+    # A claude chain's run is a claude feature lane, which the codex-only guard
+    # would reject before the chain's own provider check.
+    lanes = LANES | set(FEATURE_LANES["claude"].values()) if args.chain else LANES
+    return resolve_run(args.db, args.run_id, lanes)
+
+
 def feature_budget_update_command(args: argparse.Namespace) -> None:
     validate_control_location(args.control_dir)
-    row = resolve_run(args.db, args.run_id)
-    result = repository_feature_call("budget_update_command", args, row)
+    row = resolve_feature_control_run(args)
+    result = repository_feature_call("budget_update_command", args, row, args.chain)
     active_part = ""
     if result.get("total_active_minutes") is not None:
         active_part = f"total_active_minutes={result['total_active_minutes']} "
@@ -2901,13 +2915,33 @@ def feature_budget_update_command(args: argparse.Namespace) -> None:
 
 def feature_scope_amend_command(args: argparse.Namespace) -> None:
     validate_control_location(args.control_dir)
-    row = resolve_run(args.db, args.run_id)
-    result = repository_feature_call("scope_amend_command", args, row)
+    row = resolve_feature_control_run(args)
+    result = repository_feature_call("scope_amend_command", args, row, args.chain)
     status = "UNCHANGED" if result.get("already_applied") else "APPLIED"
     print(
         f"ARCHON_FEATURE_SCOPE_AMEND={status} "
         f"chain={result['chain']} run={row['id'][:8]} repo={result['repo']} "
         f"add_file={result['add_file']} amendment={result['amendment_id']}"
+    )
+
+
+def feature_pin_amend_command(args: argparse.Namespace) -> None:
+    """Recovery for a PIN_BREACH on a pin the spec got wrong.
+
+    feature-scope-amend is allowlist-only and cannot say "this symbol may change
+    after all"; without this, the only route past a wrong pin is re-planning the
+    stage. The plan digest is part of the review identity, so the stopped round's
+    completed review is invalidated and re-runs on resume -- intended, because it
+    judged the code against the old pin.
+    """
+    validate_control_location(args.control_dir)
+    row = resolve_feature_control_run(args)
+    result = repository_feature_call("pin_amend_command", args, row, args.chain)
+    status = "UNCHANGED" if result.get("already_applied") else "APPLIED"
+    print(
+        f"ARCHON_FEATURE_PIN_AMEND={status} "
+        f"chain={result['chain']} run={row['id'][:8]} repo={result['repo']} "
+        f"symbol={result['symbol']} amendment={result['amendment_id']}"
     )
 
 
@@ -3454,16 +3488,25 @@ def parser() -> argparse.ArgumentParser:
     shepherd.add_argument("--json", action="store_true")
     budget_update = sub.add_parser("feature-budget-update", help="guarded token allowance amendment for an existing repository-list feature chain")
     budget_update.add_argument("run_id")
-    budget_update.add_argument("--token", required=True)
+    budget_update.add_argument("--token", help="codex chains: CONTROL_TOKEN_FROM_LAST_LAUNCH")
+    budget_update.add_argument("--chain", help="claude chains (no control token): the chain id")
     budget_update.add_argument("--total-tokens", type=int, required=True)
     budget_update.add_argument("--total-active-minutes", type=int)
     budget_update.add_argument("--enable-shepherd", action="store_true")
     budget_update.add_argument("--reason", required=True)
     scope_amend = sub.add_parser("feature-scope-amend", help="guarded allowlist-only scope amendment for a stopped repository-list feature chain")
     scope_amend.add_argument("run_id")
-    scope_amend.add_argument("--token", required=True)
+    scope_amend.add_argument("--token", help="codex chains: CONTROL_TOKEN_FROM_LAST_LAUNCH")
+    scope_amend.add_argument("--chain", help="claude chains (no control token): the chain id")
     scope_amend.add_argument("--add-file", required=True)
     scope_amend.add_argument("--reason", required=True)
+    pin_amend = sub.add_parser("feature-pin-amend", help="guarded pinned-symbol amendment for a stopped repository-list feature chain")
+    pin_amend.add_argument("run_id")
+    pin_amend.add_argument("--token", help="codex chains: CONTROL_TOKEN_FROM_LAST_LAUNCH")
+    pin_amend.add_argument("--chain", help="claude chains (no control token): the chain id")
+    pin_amend.add_argument("--symbol", required=True)
+    pin_amend.add_argument("--allowed-change", required=True)
+    pin_amend.add_argument("--reason", required=True)
     review_policy_update = sub.add_parser("feature-review-policy-update", help="guarded review policy amendment for a stopped repository-list feature chain")
     review_policy_update.add_argument("run_id")
     review_policy_update.add_argument("--token", required=True)
@@ -3483,13 +3526,17 @@ def parser() -> argparse.ArgumentParser:
     reopen.add_argument("--chain", required=True)
     reopen.add_argument("--repo", required=True)
     reopen.add_argument("--reason", required=True)
+    reopen.add_argument("--verify-only", action="store_true",
+                        help="re-verify a hand fix already in the stage worktree instead of re-implementing")
     reopen.add_argument("--no-watch", action="store_true")
     reopen.add_argument("--watch-timeout-seconds", type=int, default=86400)
     publish = sub.add_parser("feature-publish", help="push each verified candidate branch and open draft PRs in dependency order")
     publish.add_argument("--chain", required=True)
     replan = sub.add_parser("feature-replan")
     replan.add_argument("run_id")
-    replan.add_argument("--token", required=True)
+    replan.add_argument("--token", help="codex chains: CONTROL_TOKEN_FROM_LAST_LAUNCH")
+    replan.add_argument("--chain", help="claude chains (no control token): the chain id")
+    replan.add_argument("--guidance-file", help="operator guidance for the planner (approach, not scope); hashed into chain state and shown in the plan-review packet")
     replan.add_argument("--no-watch", action="store_true")
     replan.add_argument("--watch-timeout-seconds", type=int, default=86400)
     bugfix = sub.add_parser("bugfix")
@@ -3537,9 +3584,15 @@ def main() -> None:
     args = parser().parse_args()
     if args.action == "feature-replan":
         validate_control_location(args.control_dir)
-        row = resolve_run(args.db, args.run_id)
-        control = require_control_token(row, args.control_dir, args.token)
-        replanned = repository_feature_call("restart_planning", args, row, control)
+        row = resolve_feature_control_run(args)
+        if args.chain:
+            replanned = repository_feature_call("restart_planning_unguarded", args, row, args.chain)
+            if isinstance(replanned, dict) and replanned.get("result") is None:
+                print_feature_chain_pause(args, args.chain)
+                return
+        else:
+            control = require_control_token(row, args.control_dir, args.token)
+            replanned = repository_feature_call("restart_planning", args, row, control)
         result = replanned.get("result")
         if isinstance(result, dict):
             print("ARCHON_FEATURE_SUPERVISION=" + result["state"].upper() + " " + redact_control_tokens(str(result)))
@@ -3563,6 +3616,9 @@ def main() -> None:
         return
     if args.action == "feature-scope-amend":
         feature_scope_amend_command(args)
+        return
+    if args.action == "feature-pin-amend":
+        feature_pin_amend_command(args)
         return
     if args.action == "feature-review-policy-update":
         feature_review_policy_update_command(args)
@@ -3723,6 +3779,9 @@ def main() -> None:
     env = dict(os.environ)
     env.update({
         "ARCHON_DB": str(args.db),
+        # archon-lock-retry.sh must give up before wait_for_watchdog_arm's 15 s
+        # window, or the timeout path terminates the launcher mid-attempt.
+        "ARCHON_LOCK_RETRY_DEADLINE_S": "10",
         "ARCHON_CONTROL_DIR": str(args.control_dir),
         "DISABLE_OMC": "1",
         "CODEX_HOME": str(args.codex_home),

@@ -73,6 +73,36 @@ class PlanShapeTest(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("browser-evidence.json/.sha256 missing or malformed", r.stdout)
 
+    def test_integration_spec_pattern_is_rejected_before_approval(self):
+        # api's unit jest config ignores .int.spec.ts: gate-tests would exit
+        # "No tests found" after implement, where no resume can repair it.
+        (self.ad / "verify.json").write_text(json.dumps(
+            {"test_patterns": ["apps/api/src/x/foo.int.spec.ts"]}), encoding="utf-8")
+        r = run(self.ad, self.wt, self.spec)
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("UNIT_PATTERNS=FAIL repo=api pattern=apps/api/src/x/foo.int.spec.ts", r.stdout)
+
+    def test_stem_selecting_only_excluded_tracked_specs_is_rejected(self):
+        subprocess.run(["git", "init", "-q", str(self.wt)], check=True)
+        for rel in ("src/home-airports.int.spec.ts", "src/other.spec.ts"):
+            (self.wt / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.wt / rel).write_text("x\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.wt), "add", "."], check=True)
+        (self.ad / "params.json").write_text(json.dumps(
+            {"repo": "api", "worktree": str(self.wt)}), encoding="utf-8")
+        (self.ad / "verify.json").write_text(json.dumps({"test_patterns": ["home-airports"]}), encoding="utf-8")
+        r = run(self.ad, self.wt, self.spec)
+        self.assertIn("UNIT_PATTERNS=FAIL repo=api pattern=home-airports", r.stdout)
+        (self.ad / "verify.json").write_text(json.dumps({"test_patterns": ["other"]}), encoding="utf-8")
+        self.assertNotIn("UNIT_PATTERNS=FAIL", run(self.ad, self.wt, self.spec).stdout,
+                         "control: a pattern selecting a unit spec is accepted")
+
+    def test_joint_stage_patterns_use_their_own_repo_excludes(self):
+        (self.ad / "joint-plan.json").write_text(json.dumps({"stages": {
+            "goodword-mcp": {"test_patterns": ["tests/tool.e2e.test.ts"]}}}), encoding="utf-8")
+        r = run(self.ad, self.wt, self.spec)
+        self.assertIn("UNIT_PATTERNS=FAIL repo=goodword-mcp", r.stdout)
+
 
 class PlanShapeWithPremisesTest(unittest.TestCase):
     def setUp(self):
@@ -108,6 +138,20 @@ class PlanShapeWithPremisesTest(unittest.TestCase):
         r = run(self.ad, self.wt, self.spec)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_premise_cited_from_another_selected_repo_worktree_passes(self):
+        # A joint planning run anchors WT on one repo; a premise about the other
+        # repo's code used to be searched for under the anchor only.
+        other = self.tmp / "other-repo"
+        shutil.copytree(self.wt, other)
+        empty_anchor = self.tmp / "anchor"
+        empty_anchor.mkdir()
+        shutil.copyfile(WITH_PREMISES / "premises-cited.json", self.ad / "premises.json")
+        self.assertEqual(1, run(self.ad, empty_anchor, self.spec).returncode, "control: anchor alone lacks the quote")
+        (self.ad / "params.json").write_text(json.dumps({"repo": "api", "worktrees_by_repo": {
+            "api": str(empty_anchor), "goodword-mcp": str(other)}}), encoding="utf-8")
+        r = run(self.ad, empty_anchor, self.spec)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
     def test_missing_premises_json_fails(self):
         r = run(self.ad, self.wt, self.spec)  # premises.json never copied in
         self.assertEqual(r.returncode, 1)
@@ -141,6 +185,33 @@ class PlanShapeInterfaceTest(unittest.TestCase):
         shutil.copyfile(WITH_INTERFACE / "joint-plan-bar.json", self.ad / "joint-plan.json")
         with open(self.ad / "plan.md", "a", encoding="utf-8") as f:
             f.write("\ndeviation: src/api/bar.ts\n")
+        r = run(self.ad, self.wt, self.spec)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.strip(), "PLAN_SHAPE=OK")
+
+    def test_missing_pinned_decisions_fails(self):
+        plan = json.loads((WITH_INTERFACE / "joint-plan-foo.json").read_text(encoding="utf-8"))
+        del plan["pinned_decisions"]
+        (self.ad / "joint-plan.json").write_text(json.dumps(plan), encoding="utf-8")
+        r = run(self.ad, self.wt, self.spec)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("PLAN_SHAPE=FAIL pinned_decisions missing", r.stdout)
+
+    def test_pinned_decision_missing_a_field_fails(self):
+        plan = json.loads((WITH_INTERFACE / "joint-plan-foo.json").read_text(encoding="utf-8"))
+        del plan["pinned_decisions"][0]["rule"]
+        (self.ad / "joint-plan.json").write_text(json.dumps(plan), encoding="utf-8")
+        r = run(self.ad, self.wt, self.spec)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("PLAN_SHAPE=FAIL pinned_decisions missing", r.stdout)
+
+    def test_unpinned_spec_does_not_require_pinned_decisions(self):
+        # Negative control: the gate keys on the spec section, not on the
+        # joint plan. Drop the section and the same plan passes.
+        plan = json.loads((WITH_INTERFACE / "joint-plan-foo.json").read_text(encoding="utf-8"))
+        del plan["pinned_decisions"]
+        (self.ad / "joint-plan.json").write_text(json.dumps(plan), encoding="utf-8")
+        self.spec.write_text("# Spec\n", encoding="utf-8")
         r = run(self.ad, self.wt, self.spec)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(r.stdout.strip(), "PLAN_SHAPE=OK")

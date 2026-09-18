@@ -88,6 +88,54 @@ class FeatureScope(unittest.TestCase):
             pause.assert_called_once_with(args, "c" * 32)
             legacy.assert_not_called()
 
+    def pause_line(self, probe_state, status):
+        args = Namespace(control_dir=Path("/c"), db=Path("/db"))
+        state = {"status": "running", "current_run": {"run_id": "r" * 32, "phase": "implement"}}
+        controller = mock.Mock(read_state=mock.Mock(return_value=state))
+        out = io.StringIO()
+        with mock.patch.object(ar, "feature_repository_controller", return_value=controller), \
+                mock.patch.object(ar, "run_row_by_id", return_value={"id": "r" * 32, "workflow_name": "full-sdlc-api"}), \
+                mock.patch.object(ar, "supervise_exact_run", return_value={"state": probe_state, "status": status}), \
+                contextlib.redirect_stdout(out):
+            ar.print_feature_chain_pause(args, "c" * 32)
+        return out.getvalue()
+
+    def test_pause_line_says_approve_only_at_a_gate(self):
+        self.assertIn('next="archon workflow approve rrrrrrrr"', self.pause_line("gate", "paused"))
+        failed = self.pause_line("terminal", "failed")
+        self.assertNotIn("approve", failed)
+        self.assertIn("resume.sh rrrrrrrr", failed)
+
+    def test_replan_parser_accepts_chain_without_token(self):
+        args = ar.parser().parse_args(["feature-replan", "abc12345", "--chain", "c" * 32])
+        self.assertEqual((args.chain, args.token), ("c" * 32, None))
+        args = ar.parser().parse_args(["feature-replan", "abc12345", "--chain", "c" * 32, "--guidance-file", "/g.md"])
+        self.assertEqual("/g.md", args.guidance_file)
+
+    def test_claude_chain_replan_reaches_the_chain_with_a_claude_lane_run(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "archon.db"
+            import sqlite3
+            con = sqlite3.connect(db)
+            con.execute("CREATE TABLE remote_agent_workflow_runs (id TEXT, workflow_name TEXT, "
+                        "user_message TEXT, status TEXT, output_root TEXT, started_at TEXT)")
+            con.execute("INSERT INTO remote_agent_workflow_runs VALUES "
+                        "('abc12345-0000-0000-0000-000000000000', 'full-sdlc-api', '', 'failed', '', '1')")
+            con.commit()
+            con.close()
+            argv = ["archon-run.py", "--db", str(db), "feature-replan", "abc12345", "--chain", "c" * 32]
+            with mock.patch("sys.argv", argv), \
+                 mock.patch.object(ar, "validate_control_location"), \
+                 mock.patch.object(ar, "repository_feature_call", return_value={"result": None}) as call, \
+                 mock.patch.object(ar, "print_feature_chain_pause"):
+                ar.main()
+            self.assertEqual(call.call_args.args[0], "restart_planning_unguarded")
+            with mock.patch("sys.argv", argv[:-2] + ["--token", "t"]), \
+                 mock.patch.object(ar, "validate_control_location"), \
+                 contextlib.redirect_stdout(io.StringIO()), \
+                 self.assertRaises(SystemExit):
+                ar.main()
+
     def test_parser_accepts_feature_advance(self):
         args = ar.parser().parse_args(["feature-advance", "--chain", "c" * 32])
         self.assertEqual(args.action, "feature-advance")
@@ -96,6 +144,11 @@ class FeatureScope(unittest.TestCase):
     def test_parser_accepts_feature_reopen(self):
         args = ar.parser().parse_args(["feature-reopen", "--chain", "c" * 32, "--repo", "api", "--reason", "why"])
         self.assertEqual((args.action, args.repo, args.reason), ("feature-reopen", "api", "why"))
+
+    def test_parser_accepts_feature_reopen_verify_only(self):
+        base = ["feature-reopen", "--chain", "c" * 32, "--repo", "api", "--reason", "why"]
+        self.assertTrue(ar.parser().parse_args([*base, "--verify-only"]).verify_only)
+        self.assertFalse(ar.parser().parse_args(base).verify_only)
 
     def test_parser_accepts_feature_publish(self):
         args = ar.parser().parse_args(["feature-publish", "--chain", "c" * 32])

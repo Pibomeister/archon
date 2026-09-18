@@ -177,7 +177,8 @@ def run_node(body, fake, env=None, timeout=None):
 class FakeRoot:
     """A throwaway <root>/.archon/setup with just the resolver's dependencies."""
 
-    FILES = ("port-alloc.sh", "resolve-params.sh", "params-env.sh", "repo-profile.sh")
+    FILES = ("port-alloc.sh", "resolve-params.sh", "params-env.sh", "repo-profile.sh",
+             "feature-env.sh", "feature_env.py")
 
     def __enter__(self):
         self.td = Path(tempfile.mkdtemp())
@@ -1033,7 +1034,7 @@ class BrowserPolicyIsRepoGated(unittest.TestCase):
     say-so. Accepting `not_applicable` from any repo turns the api gate off with
     one added string -- which is what the first implementation did."""
 
-    def _check(self, repo, kind):
+    def _check(self, repo, kind, allowlist=("a.ts",), web_allowlist=()):
         with tempfile.TemporaryDirectory() as td:
             d = Path(td)
             (d / "wt").mkdir()
@@ -1044,8 +1045,8 @@ class BrowserPolicyIsRepoGated(unittest.TestCase):
                 "## Goal\n## Files\n## Approach\n## Test scenarios\n## Verification\n",
                 encoding="utf-8")
             (d / "verify.json").write_text('{"test_patterns":["p"]}', encoding="utf-8")
-            (d / "files-allowlist.json").write_text('["a.ts"]', encoding="utf-8")
-            (d / "web-files-allowlist.json").write_text("[]", encoding="utf-8")
+            (d / "files-allowlist.json").write_text(json.dumps(list(allowlist)), encoding="utf-8")
+            (d / "web-files-allowlist.json").write_text(json.dumps(list(web_allowlist)), encoding="utf-8")
             (d / "reader-audit.json").write_text('{"columns":[]}', encoding="utf-8")
             (d / "web-reader-audit.json").write_text('{"columns":[]}', encoding="utf-8")
             if kind == "not_applicable":
@@ -1103,6 +1104,22 @@ class BrowserPolicyIsRepoGated(unittest.TestCase):
                                capture_output=True, encoding="utf-8")
             self.assertNotEqual(0, r.returncode,
                                 "a legacy params.json must not gain an exemption")
+
+    def test_p11d_api_exemption_is_derived_from_profile_globs_not_the_string(self):
+        backend = ("libs/data-access/src/lib/rds/migrations/1-add-x.ts", "scripts/probe.ts",
+                   "apps/analytic-service/src/functions/ingest.ts", "apps/api/src/x/x.service.spec.ts")
+        self.assertTrue(self._check("api", "not_applicable", allowlist=backend),
+                        "a change confined to profile-declared non-surface paths must be exemptable")
+        self.assertTrue(self._check("api", "populated", allowlist=backend))
+
+    def test_p11e_one_surface_path_voids_the_derived_exemption(self):
+        mixed = ("scripts/probe.ts", "apps/api/src/help/help.controller.ts")
+        self.assertFalse(self._check("api", "not_applicable", allowlist=mixed))
+        self.assertFalse(self._check("api", "not_applicable", allowlist=("scripts/probe.ts",),
+                                     web_allowlist=("app/routes/home.tsx",)),
+                         "a web path in scope keeps the browser gate on")
+        self.assertFalse(self._check("web-app", "not_applicable", allowlist=("docs/x.md",)),
+                         "web-app declares no exempt globs")
 
     def test_a4_mcp_may_use_the_typed_disposition(self):
         self.assertTrue(self._check("goodword-mcp", "not_applicable"))

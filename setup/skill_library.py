@@ -98,14 +98,24 @@ PASS_TOKENS = {
     "PLAN_CONVERGED", "RCA_PLAN_CONVERGED",
     "PLAN_ROUND_PROGRESSED", "RCA_PLAN_ROUND_PROGRESSED",
     "CONVERGED", "ROUND_PROGRESSED",
+    # The pin guard and the two JSON-only nodes of the v2 review loop: bare
+    # tokens with no =VALUE, so they have to be enumerated like the rows above.
+    "PIN_OK", "ROUND_REUSE", "FIX_PLAN",
     "CRITIQUE", "PRE_OK", "GREEN_CHECK",
 }
 FAIL_TOKENS = {
-    "PLAN_ROUND_CAP", "RCA_PLAN_ROUND_CAP", "ROUND_CAP_REACHED", "DESLOP_ROUND_CAP",
+    "PLAN_ROUND_CAP", "RCA_PLAN_ROUND_CAP", "ROUND_CAP_REACHED", "ROUND_CAP_EXCEEDED", "DESLOP_ROUND_CAP",
     "PLAN_REJECTED", "RCA_PLAN_REJECTED",
     "PLAN_NO_PROGRESS", "RCA_PLAN_NO_PROGRESS", "NO_PROGRESS",
     "PLAN_SCOPE_DISPUTE", "RCA_PLAN_SCOPE_DISPUTE",
     "FIXER_BLOCKED", "SCOPE_BREACH", "CROSS_REPO_FINDING",
+    # Two-hour convergence work and the durable round checkpoints (RUNBOOK 3,
+    # 3c). Each is a bare-token stop that exits its node non-zero.
+    "REVIEW_TREE_DRIFT", "REOPEN", "CHAIN_BUDGET",
+    "REVIEW_UNAUTHORIZED", "REVIEW_WROTE_TREE",
+    "FIXER_ABSENT", "FIXER_INCOMPLETE", "FIXER_TREE_DRIFT",
+    "NOT_READY_WITHOUT_BLOCKER", "PIN_CONFLICT",
+    "PIN_BREACH", "PIN_UNRESOLVED",
 }
 # The fail tokens that mean a loop gave up rather than a step failing. Scored
 # as one bucket by setup/skill-score.py and counted by setup/trace-digest.py,

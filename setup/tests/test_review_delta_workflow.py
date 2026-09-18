@@ -74,7 +74,14 @@ class DeltaWorkflowTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("derive_lite_delta_test", SETUP / "derive-lite.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        source = module.load_yaml(str(SETUP.parent / "workflows/full-sdlc-api-codex.yaml"))
+        # bugfix-codex, not full-sdlc-api-codex: the api lane's review-loop is the
+        # v2 seven-node shape now (round-pre, review, review-gate, fix-plan, fixer,
+        # commit-fixer, converge), and transform() pins the v1 list and refuses on
+        # anything else. That refusal is TYPED and deliberate -- the pilot must
+        # re-capture the api lane once transform learns the v2 list -- so this test
+        # follows the v1 shape to the lane that still has it rather than asserting
+        # a rewrite that would be wrong.
+        source = module.load_yaml(str(SETUP.parent / "workflows/bugfix-codex.yaml"))
         transformed = rw.transform(source, SETUP)
         for before, after in zip(source["nodes"], transformed["nodes"]):
             if before["id"] != "review-loop":

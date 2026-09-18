@@ -54,6 +54,9 @@
       "lite-envelope-post",
       "stage-skills"
     ],
+    "gate-tests": [
+      "implement"
+    ],
     "commit-impl": [
       "gate-tests"
     ],
@@ -444,6 +447,9 @@
     ],
     "implement": [
       "when",
+      "trigger_rule"
+    ],
+    "gate-tests": [
       "trigger_rule"
     ],
     "stage-skills": [

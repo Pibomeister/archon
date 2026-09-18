@@ -43,19 +43,52 @@ repo = sys.argv[1]
 PROFILES = {
     "api": {
         "install":   ["bun", "install", "--frozen-lockfile"],
+        # lockfile_scope.py: the lockfile follows package.json into scope. A
+        # frozen install never rewrites it, so lockfile-only drift is a breach.
+        "lockfiles": ["bun.lock", "bun.lockb"],
+        "lockfile_install_drift": "",
         "typecheck": ["bun", "run", "typecheck"],
         "lint":      ["bun", "run", "lint"],
         # jest's positional arg is a testPathPattern; the `--` keeps it out of
         # bun's own argument parsing. Pattern is appended by the call site.
         "test":      ["bun", "run", "test", "--"],
+        # Regexes for spec paths the unit config above IGNORES (api/jest.config.js
+        # testPathIgnorePatterns). check-unit-patterns.py rejects a verify.json
+        # pattern that can only select these: jest exits "No tests found".
+        "unit_test_excludes": [r"\.int\.spec\.ts$", r"\.ai\.spec\.ts$", r"\.ext\.spec\.ts$",
+                               r"apps/api-e2e/src/load-tests"],
         "env_src":   ".env",
+        # What a checkout needs before its own commands run, beyond tracked files
+        # (candidate_env.py). A detached candidate outside <repo>/.worktrees/ has
+        # no ancestor node_modules, and ignored env files never follow a checkout.
+        # .env.e2e is what apps/api-e2e/src/setup-tests.ts loads for
+        # `bun run test:integration`.
+        "runtime_deps":      ["node_modules"],
+        "runtime_env_files": [".env", ".env.e2e"],
         "smoke":     "1",
         "browser":   "1",
+        # Paths with NO browser-reachable surface (browser-exemption.py). Only
+        # these may carry a not_applicable browser policy; every other path is
+        # presumed reachable. Migrations alone change no page; scripts/tools/
+        # the CLI/e2e harness are operator-side; the three async lambdas never
+        # run in the local smoke stack a browser check would hit. `*` crosses /.
+        "browser_exempt": [
+            "libs/data-access/src/lib/rds/migrations/*",
+            "scripts/*", "tools/*", "docs/*",
+            "apps/utilities-cli/*", "apps/api-e2e/*",
+            "apps/analytic-service/*", "apps/enrichment-service/*", "apps/notification-service/*",
+            "*.spec.ts", "*.md",
+        ],
+        # Files a framework loads by glob, so no import names their exports
+        # (check-slop.py yagni). TypeORM: rds/utils.ts `migrations/*{.ts,.js}`.
+        "framework_loaded": ["libs/data-access/src/lib/rds/migrations/*"],
         "impact":    "mono",
     },
     "goodword-mcp": {
         # Node 20 via mise: the system default is 25 and the repo's CI pins 20.
         "install":   ["mise", "x", "node@20", "--", "pnpm", "install", "--frozen-lockfile"],
+        "lockfiles": ["pnpm-lock.yaml"],
+        "lockfile_install_drift": "",
         # `build` is `tsc && copy-static-assets`, so --noEmit IS the typecheck.
         "typecheck": ["mise", "x", "node@20", "--", "pnpm", "exec", "tsc", "--noEmit"],
         # No lint script in package.json. Declared absent, not inferred.
@@ -71,13 +104,17 @@ PROFILES = {
                       "pnpm", "exec", "jest",
                       "--testPathIgnorePatterns", r"\.(e2e|smoke)\.test\.ts$",
                       "--testPathPatterns"],
+        "unit_test_excludes": [r"\.(e2e|smoke)\.test\.ts$"],
         "env_src":   "",
+        "runtime_deps":      ["node_modules"],
+        "runtime_env_files": [],
         # setup/mcp-smoke.sh. Declaring it is what allocates APIPORT: the port is
         # allocated only when HAS_SMOKE is non-empty (resolve-params.sh:113), and
         # the lane treats a missing APIPORT for a smoke-bearing repo as a hard
         # PREFLIGHT=FAIL. An empty value here would leave the smoke with no port.
         "smoke":     "1",
         "browser":   "",
+        "browser_exempt": [],
         "impact":    "",
     },
     # web-app is NOT speculative future scope: bind-repo.py accepts it and
@@ -86,12 +123,23 @@ PROFILES = {
     # lane itself uses resolve-web-params.sh and consumes none of these.
     "web-app": {
         "install":   ["mise", "x", "node@20", "--", "pnpm", "install", "--no-frozen-lockfile"],
+        # The unfrozen install rewrites pnpm-lock.yaml at bootstrap (main's lock
+        # drifts from package.json), so UNCOMMITTED lockfile-only drift is
+        # expected here and is tolerated, never staged.
+        "lockfiles": ["pnpm-lock.yaml"],
+        "lockfile_install_drift": "1",
         "typecheck": ["mise", "x", "node@20", "--", "pnpm", "typecheck"],
         "lint":      ["mise", "x", "node@20", "--", "pnpm", "lint"],
         "test":      ["mise", "x", "node@20", "--", "pnpm", "test", "--run"],
+        # vite.config.ts test.exclude: tests/ holds the Playwright suites.
+        "unit_test_excludes": [r"(^|/)tests/"],
         "env_src":   "",
+        "runtime_deps":      ["node_modules"],
+        "runtime_env_files": [],
         "smoke":     "1",
         "browser":   "1",
+        # Every web-app path is presumed page-reachable.
+        "browser_exempt": [],
         "impact":    "",
     },
 }

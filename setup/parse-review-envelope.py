@@ -68,7 +68,10 @@ def main():
         return
     g1 = "PASS" if "Review complete" in text else "FAIL"
     g2 = "FAIL" if "Code review degraded (headless mode)" in text else "PASS"
-    m = re.search(r"Verdict: (Ready to merge|Ready with fixes|Not ready)", text)
+    # The reviewer sometimes emphasises the value (`Verdict: **Ready with fixes**`,
+    # observed live 2026-09-15 on run 8ddb9cce round 1); markdown emphasis or
+    # backticks around the enum carry no meaning and must not read as "no verdict".
+    m = re.search(r"Verdict:\s*[*_`]*\s*(Ready to merge|Ready with fixes|Not ready)", text)
     v = m.group(1) if m else ""
     print(f"G1={shlex.quote(g1)}")
     print(f"G2={shlex.quote(g2)}")

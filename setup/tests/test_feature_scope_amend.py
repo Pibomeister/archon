@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+import contextlib
 import importlib.util
+import io
 import json
 import sqlite3
 import subprocess
@@ -128,7 +130,7 @@ class FeatureScopeAmend(unittest.TestCase):
             con.execute("INSERT INTO remote_agent_workflow_runs VALUES (?,?,?,?,?,?)", (RUN, self.row["workflow_name"], self.row["user_message"], status, str(self.output_root), "2026-09-13 00:00:00"))
 
     def prepare_state(self) -> None:
-        args = Namespace(spec=str(self.spec), provider="codex", control_dir=self.control, wall_minutes=240, max_total_tokens=30_000_000)
+        args = Namespace(spec=str(self.spec), provider=getattr(self, "provider", "codex"), control_dir=self.control, wall_minutes=240, max_total_tokens=30_000_000)
         state = fc.make_initial_state(self.host, args, ["api", "goodword-mcp"])
         state["logical_chain_id"] = CHAIN
         state["chain_secret"] = "s" * 48
@@ -214,6 +216,8 @@ class FeatureScopeAmend(unittest.TestCase):
         self.assertIn("Guarded scope amendment", (amend_root / "plan.md").read_text(encoding="utf-8"))
         self.assertIn("Guarded scope amendment approval packet", (amend_root / "approval-packet-notice.md").read_text(encoding="utf-8"))
         self.assertEqual(["src/api.ts", self.args.add_file], json.loads((self.artifacts / "files-allowlist.json").read_text(encoding="utf-8")))
+        symbols = json.loads((self.artifacts / "contract-symbols.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["approval"]["plan_digest"], symbols["plan_digest"])
         revisions = json.loads((self.artifacts / "candidate-revisions.json").read_text(encoding="utf-8"))
         self.assertEqual(state["approval"]["plan_digest"], revisions["plan_digest"])
         self.assertEqual(state["approval"]["plan_digest"], revisions["approved_plan_digest"])
@@ -283,6 +287,21 @@ class FeatureScopeAmend(unittest.TestCase):
             state = self.state(); state[key] = {} if key == "candidate_handoffs" else None; state.pop("status", None); fc.write_state(self.control, state)
         state = self.state(); state["approved_plan"]["contracts"][0]["artifact"] = "changed.json"; fc.write_state(self.control, state)
         with self.assertRaisesRegex(fc.FeatureChainError, "approval"):
+            fc.scope_amend_command(self.host, self.args, self.row)
+
+    def test_another_stages_verified_handoff_does_not_close_this_stage(self):
+        # Chain 1f7a896a: api verified, goodword-mcp took a one-file breach, and the
+        # whole-map handoff check refused the only writer that re-signs both copies.
+        state = self.state(); state["candidate_handoffs"] = {"goodword-mcp": {"candidate_head": "1" * 40}}
+        fc.write_state(self.control, state)
+        with mock.patch("builtins.print"):
+            fc.scope_amend_command(self.host, self.args, self.row)
+        latest = self.state()
+        self.assertIn(self.args.add_file, latest["approved_plan"]["stages"]["api"]["files_allowlist"])
+        # Negative control: this stage's own handoff still refuses.
+        state = self.state(); state["candidate_handoffs"] = {"api": {"candidate_head": "0" * 40}}
+        fc.write_state(self.control, state)
+        with self.assertRaisesRegex(fc.FeatureChainError, "handoffs"):
             fc.scope_amend_command(self.host, self.args, self.row)
 
     def test_path_must_be_safe_tracked_current_repo_file_and_not_symlink(self):
@@ -387,6 +406,316 @@ class FeatureScopeAmend(unittest.TestCase):
 
         self.assertEqual("feature-scope-amend", parsed.action)
         self.assertEqual("src/api.ts", parsed.add_file)
+
+
+class ClaudeChainScopeAmend(unittest.TestCase):
+    """feature-scope-amend --chain through ar.main(): Claude launches have no control token."""
+
+    COMMAND = "feature-scope-amend"
+    APPLIED = "ARCHON_FEATURE_SCOPE_AMEND"
+    LEDGER = "scope_amendments"
+    FIXTURE = "FeatureScopeAmend"
+
+    def extra_args(self):
+        return ["--add-file", self.fx.args.add_file, "--reason", self.fx.args.reason]
+
+    def setUp(self):
+        self.fx = globals()[self.FIXTURE]("test_parser_registers_feature_scope_amend")
+        self.fx.provider = "claude"
+        self.fx.setUp()
+        self.addCleanup(self.fx.doCleanups)
+        ar.control_state_path(self.fx.row, self.fx.control).unlink()
+        self.set_run("full-sdlc-api", "failed")
+
+    def set_run(self, workflow: str, status: str) -> None:
+        with sqlite3.connect(self.fx.db) as con:
+            con.execute("UPDATE remote_agent_workflow_runs SET workflow_name=?, status=? WHERE id=?", (workflow, status, RUN))
+
+    def set_provider(self, provider: str) -> None:
+        state = self.fx.state()
+        state["provider"] = provider
+        fc.write_state(self.fx.control, state)
+
+    def main(self, *auth: str) -> str:
+        argv = ["archon-run.py", "--db", str(self.fx.db), "--control-dir", str(self.fx.control),
+                self.COMMAND, RUN, *auth, *self.extra_args()]
+        out = io.StringIO()
+        with mock.patch("sys.argv", argv), mock.patch.object(ar, "validate_control_location"), \
+             contextlib.redirect_stdout(out):
+            ar.main()
+        return out.getvalue()
+
+    def assert_refused(self, *auth: str, message: str) -> None:
+        before = self.fx.state()
+        out = io.StringIO()
+        with mock.patch.object(ar, "fail", side_effect=SystemExit) as failed, contextlib.redirect_stdout(out):
+            with self.assertRaises(SystemExit):
+                self.main(*auth)
+        self.assertIn(message, failed.call_args.args[0])
+        after = self.fx.state()
+        self.assertNotIn(self.LEDGER, after)
+        self.assertEqual(before["approval"], after["approval"])
+
+    def test_claude_chain_amend_adds_file_and_refreshes_bound_artifacts(self):
+        before = self.fx.state()
+        out = self.main("--chain", CHAIN)
+        state = self.fx.state()
+
+        self.assertIn(f"{self.APPLIED}=APPLIED", out)
+        self.assertEqual(["src/api.ts", self.fx.args.add_file], state["stages"]["api"]["plan"]["files_allowlist"])
+        self.assertEqual(["src/tool.ts"], state["stages"]["goodword-mcp"]["plan"]["files_allowlist"])
+        self.assertEqual([before["approval"]], state["approval_history"])
+        fc.verify_approval(state)
+        artifacts = self.fx.artifacts
+        self.assertEqual(["src/api.ts", self.fx.args.add_file], json.loads((artifacts / "files-allowlist.json").read_text()))
+        revisions = json.loads((artifacts / "candidate-revisions.json").read_text())
+        self.assertEqual(state["approval"]["plan_digest"], revisions["approved_plan_digest"])
+        self.assertNotEqual(before["approval"]["plan_digest"], revisions["approved_plan_digest"])
+        self.assertIn(self.fx.args.add_file, json.loads((artifacts / fc.JOINT_PLAN_ARTIFACT).read_text())["stages"]["api"]["files_allowlist"])
+        self.assertIn(f"{self.APPLIED}=UNCHANGED", self.main("--chain", CHAIN))
+
+    def test_codex_chain_is_refused_without_its_token(self):
+        self.set_provider("codex")
+        self.assert_refused("--chain", CHAIN, message="codex chains require --token")
+        self.set_run("full-sdlc-api-codex", "failed")
+        self.fx.write_control()
+        self.assert_refused(message="requires --token")
+
+    def test_claude_lane_run_requires_the_chain_flag(self):
+        self.assert_refused(message="not a guarded Codex lane")
+
+    def test_live_run_and_live_claims_are_refused(self):
+        self.set_run("full-sdlc-api", "running")
+        self.assert_refused("--chain", CHAIN, message="requires a stopped run")
+        self.set_run("full-sdlc-api", "failed")
+        state = self.fx.state()
+        state["pending_control"] = {"owner_pid": fc.os.getpid(), "owner_fingerprint": fc.process_fingerprint()}
+        fc.write_state(self.fx.control, state)
+        self.assert_refused("--chain", CHAIN, message="control already in progress")
+        state = self.fx.state()
+        state["pending_control"] = None
+        state["dispatch_reservation"] = {"phase": "implement"}
+        fc.write_state(self.fx.control, state)
+        self.assert_refused("--chain", CHAIN, message="dispatch already in progress")
+
+    def test_incomplete_budget_amendment_and_stale_run_are_refused(self):
+        state = self.fx.state()
+        state["budget_amendment"] = {"status": "in_progress"}
+        fc.write_state(self.fx.control, state)
+        self.assert_refused("--chain", CHAIN, message="budget amendment is incomplete")
+        state = self.fx.state()
+        state["budget_amendment"] = None
+        state["current_run"]["run_id"] = "e" * 32
+        fc.write_state(self.fx.control, state)
+        self.assert_refused("--chain", CHAIN, message="stale")
+
+class FeaturePinAmend(FeatureScopeAmend):
+    """feature-pin-amend: the recovery scope-amend cannot express.
+
+    feature-scope-amend is allowlist-only, so a PIN_BREACH on a pin the spec got
+    wrong had no route but re-planning the stage. This is the same operation
+    shape -- same refusal rule, same approval path, same audit row -- over the
+    pinned decision's allowed_change instead of the allowlist.
+
+    It inherits scope-amend's suite deliberately: the guards are the contract,
+    and a copy of them would drift from the original the first time either moved.
+    """
+
+    PIN = "shareGroup"
+
+    def plan(self):
+        body = super().plan()
+        body["pinned_decisions"] = [{
+            "symbol": self.PIN,
+            "file": "src/api.ts",
+            "rule": "No other change to `POST /group/share`.",
+            "spec_line": 12,
+            "allowed_change": "none",
+        }]
+        return body
+
+    def setUp(self):
+        super().setUp()
+        self.args.symbol = self.PIN
+        self.args.allowed_change = "the managed-group sentence only"
+        self.args.action = "feature-pin-amend"
+
+    def amend(self):
+        return fc.pin_amend_command(self.host, self.args, self.row)
+
+    def pin_entry(self, state):
+        return fc.plan_pin_entries(state["approved_plan"], "api")[0]
+
+    def test_the_pin_is_rewritten_and_the_approval_is_resigned(self):
+        before = self.state()
+        old_approval = dict(before["approval"])
+        self.assertEqual("none", self.pin_entry(before)["allowed_change"])
+
+        result = self.amend()
+        state = self.state()
+
+        self.assertEqual((CHAIN, "api", self.PIN), (result["chain"], result["repo"], result["symbol"]))
+        self.assertEqual(self.args.allowed_change, self.pin_entry(state)["allowed_change"])
+        self.assertEqual([old_approval], state["approval_history"])
+        self.assertNotEqual(old_approval["approval_digest"], state["approval"]["approval_digest"])
+        fc.verify_approval(state)
+
+    def test_the_plan_digest_moves_so_the_completed_review_is_invalidated(self):
+        """The review identity includes the plan digest; that is the whole point."""
+        before = self.state()["approval"]["plan_digest"]
+        self.amend()
+        self.assertNotEqual(before, self.state()["approval"]["plan_digest"])
+
+    def test_the_stage_artifacts_are_refreshed_with_the_new_plan(self):
+        self.amend()
+        state = self.state()
+        staged = json.loads((self.artifacts / fc.JOINT_PLAN_ARTIFACT).read_text(encoding="utf-8"))
+        self.assertEqual(self.args.allowed_change,
+                         fc.plan_pin_entries(staged, "api")[0]["allowed_change"])
+        revisions = json.loads((self.artifacts / "candidate-revisions.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["approval"]["plan_digest"], revisions["plan_digest"])
+        self.assertEqual(state["approval"]["plan_digest"], revisions["approved_plan_digest"])
+
+    def test_the_approval_packet_records_the_amendment(self):
+        self.amend()
+        amend_root = Path(self.state()["approval"]["source_artifacts"]["root"])
+        notice = json.loads((amend_root / "pin-amendment.json").read_text(encoding="utf-8"))
+        self.assertEqual((self.PIN, "api"), (notice["symbol"], notice["repo"]))
+        self.assertEqual(self.args.allowed_change, notice["allowed_change"])
+        self.assertTrue((amend_root / "original-joint-plan.json").is_file())
+        self.assertIn("Guarded pin amendment", (amend_root / "plan.md").read_text(encoding="utf-8"))
+
+    def test_the_amendment_is_idempotent(self):
+        first = self.amend()
+        second = self.amend()
+        state = self.state()
+        self.assertTrue(second["already_applied"])
+        self.assertEqual(first["amendment_id"], second["amendment_id"])
+        self.assertEqual(1, len(state["pin_amendments"]))
+
+    def test_a_matching_incomplete_journal_is_retried(self):
+        state = self.state()
+        amendment_id = fc.digest(fc.pin_amendment_payload(
+            CHAIN, RUN, "api", self.PIN, self.args.allowed_change, self.args.reason))
+        state["pin_amendment"] = {
+            **fc.pin_amendment_payload(CHAIN, RUN, "api", self.PIN,
+                                       self.args.allowed_change, self.args.reason),
+            "amendment_id": amendment_id, "status": "in_progress",
+            "started_at": "2026-09-13T00:00:00Z"}
+        fc.write_state(self.control, state)
+
+        result = self.amend()
+
+        self.assertEqual(amendment_id, result["amendment_id"])
+        self.assertIsNone(self.state().get("pin_amendment"))
+
+    def test_a_verified_candidate_handoff_refuses_the_amendment(self):
+        state = self.state()
+        state["candidate_handoffs"] = {"api": {"candidate_head": "a" * 40}}
+        fc.write_state(self.control, state)
+        with self.assertRaisesRegex(fc.FeatureChainError, "feature-pin-amend cannot modify"):
+            self.amend()
+
+    def test_a_locally_verified_chain_refuses_the_amendment(self):
+        state = self.state()
+        state["status"] = "locally_verified"
+        fc.write_state(self.control, state)
+        with self.assertRaisesRegex(fc.FeatureChainError, "after integration"):
+            self.amend()
+
+    def test_a_symbol_the_plan_does_not_pin_is_refused(self):
+        self.args.symbol = "noSuchSymbol"
+        with self.assertRaisesRegex(fc.FeatureChainError, "no pinned decision for symbol"):
+            self.amend()
+
+    def test_an_amendment_that_changes_nothing_is_refused(self):
+        self.args.allowed_change = "none"
+        with self.assertRaisesRegex(fc.FeatureChainError, "already allows"):
+            self.amend()
+
+    def test_an_empty_allowed_change_is_refused(self):
+        """`none` is the pin; an empty string records nothing at all."""
+        self.args.allowed_change = "   "
+        with self.assertRaisesRegex(fc.FeatureChainError, "requires --allowed-change"):
+            self.amend()
+
+    def test_a_reason_is_required(self):
+        self.args.reason = ""
+        with self.assertRaisesRegex(fc.FeatureChainError, "requires a reason"):
+            self.amend()
+
+    def test_an_incomplete_pin_amendment_blocks_the_next_dispatch(self):
+        state = self.state()
+        state["pin_amendment"] = {"status": "in_progress"}
+        with self.assertRaisesRegex(fc.FeatureChainError, "pin amendment is incomplete"):
+            fc.require_no_incomplete_pin_amendment(state)
+
+    def test_the_cli_parses_the_amendment_flags(self):
+        parsed = ar.parser().parse_args([
+            "feature-pin-amend", RUN, "--token", "t", "--symbol", self.PIN,
+            "--allowed-change", "the managed-group sentence only", "--reason", "spec was wrong"])
+        self.assertEqual("feature-pin-amend", parsed.action)
+        self.assertEqual(self.PIN, parsed.symbol)
+        self.assertEqual("the managed-group sentence only", parsed.allowed_change)
+
+    # The inherited scope-amend cases exercise fc.scope_amend_command, which this
+    # subclass's plan() does not change; running them twice buys nothing.
+    def test_guarded_scope_amend_adds_only_current_repo_allowlist_and_resigns(self):
+        self.skipTest("covered by FeatureScopeAmend")
+
+    def test_duplicate_retry_is_idempotent(self):
+        self.skipTest("covered by FeatureScopeAmend")
+
+    def test_retries_matching_incomplete_journal(self):
+        self.skipTest("covered by FeatureScopeAmend")
+
+
+class ClaudeChainPinAmend(ClaudeChainScopeAmend):
+    """feature-pin-amend --chain: the same problem scope-amend had, same answer.
+
+    A claude launch writes no control token, so the guarded path was unreachable
+    for the very lane this plan targets -- a claude chain stopped on PIN_BREACH
+    could not authorize the relaxation at all. Both commands now share
+    guarded_feature_binding and authorize_stopped_run, so this subclass inherits
+    every refusal case rather than copying them: stopped run, live claims,
+    codex-requires-token, claude-lane-requires-chain, incomplete budget
+    amendment, stale current run.
+    """
+
+    COMMAND = "feature-pin-amend"
+    APPLIED = "ARCHON_FEATURE_PIN_AMEND"
+    LEDGER = "pin_amendments"
+    FIXTURE = "FeaturePinAmend"
+
+    def extra_args(self):
+        return ["--symbol", FeaturePinAmend.PIN,
+                "--allowed-change", "the managed-group sentence only",
+                "--reason", self.fx.args.reason]
+
+    def test_claude_chain_amend_adds_file_and_refreshes_bound_artifacts(self):
+        """The scope-amend body asserts allowlist growth; a pin amendment moves
+        allowed_change and leaves the allowlist alone."""
+        before = self.fx.state()
+        out = self.main("--chain", CHAIN)
+        state = self.fx.state()
+
+        self.assertIn("ARCHON_FEATURE_PIN_AMEND=APPLIED", out)
+        self.assertEqual("the managed-group sentence only",
+                         fc.plan_pin_entries(state["approved_plan"], "api")[0]["allowed_change"])
+        self.assertEqual(["src/api.ts"], state["stages"]["api"]["plan"]["files_allowlist"])
+        self.assertEqual([before["approval"]], state["approval_history"])
+        self.assertNotEqual(before["approval"]["plan_digest"], state["approval"]["plan_digest"])
+        fc.verify_approval(state)
+        revisions = json.loads((self.fx.artifacts / "candidate-revisions.json").read_text())
+        self.assertEqual(state["approval"]["plan_digest"], revisions["approved_plan_digest"])
+        self.assertIn("ARCHON_FEATURE_PIN_AMEND=UNCHANGED", self.main("--chain", CHAIN))
+
+    def test_a_verified_handoff_still_refuses_the_claude_path(self):
+        """The --chain route relaxes authorization, never the amendment window."""
+        state = self.fx.state()
+        state["candidate_handoffs"] = {"api": {"candidate_head": "a" * 40}}
+        fc.write_state(self.fx.control, state)
+        self.assert_refused("--chain", CHAIN, message="feature-pin-amend cannot modify")
 
 
 if __name__ == "__main__":

@@ -71,6 +71,9 @@ except Exception:
 " "$AD/params.json")
 fi
 WANT="${ARCHON_REPO-}"
+# A plain `archon workflow resume` drops the launcher's chain env; without the
+# fallback a repository-list run would fall through to repo adoption below.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/feature-env.sh" "$AD"
 FEATURE_SCOPE="${ARCHON_FEATURE_SCOPE-}"
 FEATURE_PHASE="${ARCHON_FEATURE_PHASE-}"
 # Repository-list chains: the launcher's controller writes params.json right

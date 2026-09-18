@@ -8,9 +8,11 @@ strict transitions needed for repository-list feature runs.
 """
 from __future__ import annotations
 
+import datetime
 import fcntl
 import hashlib
 import hmac
+import importlib.util
 import json
 import os
 import re
@@ -26,6 +28,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 import control_contract
+import lockfile_scope
 import review_delta_workflow
 import review_qualification
 import yaml
@@ -56,12 +59,23 @@ DEFAULT_INTEGRATION_LANE = {"claude": "full-sdlc-api", "codex": "full-sdlc-api-c
 JOINT_PLAN_ARTIFACT = "joint-plan.json"
 PLANNING_REQUEST_ARTIFACT = "feature-chain-request.json"
 PRIOR_PLANNING_EVIDENCE_ARTIFACT = "prior-planning-evidence.json"
+OPERATOR_GUIDANCE_ARTIFACT = "operator-guidance.md"
+OPERATOR_GUIDANCE_MAX_BYTES = 32_000
 INTEGRATION_EVIDENCE_ARTIFACT = "integration-evidence.json"
+REOPEN_CONTEXT_ARTIFACT = "reopen-context.json"
+CONTRACT_SYMBOLS_ARTIFACT = "contract-symbols.json"
+# Failure evidence a reopened stage's implementer should read, when the stopped
+# run left it: an integration run's result/log, or a consumer's cross-repo finding.
+REOPEN_EVIDENCE_FILES = (
+    "joint-integration-result.json", INTEGRATION_EVIDENCE_ARTIFACT, "node-joint-integration.out",
+    "cross-repo-findings.json",
+)
 PLANNING_SUPPORT_ARTIFACTS = (
     "plan.md", "premises.json", "reader-audit.json", "web-premises.json",
     "web-reader-audit.json", "browser-evidence.json", "browser-evidence.sha256",
     "smoke-probe.json", "kb-context.md", "docreview-envelope.txt", "docreview.diff",
     "plan-review.html", "plan-round.txt", "plan.post-critic.md", "plan.post-docreview.md",
+    OPERATOR_GUIDANCE_ARTIFACT,
 )
 PLANNING_ROUND_EVIDENCE = ("critique.json", "revision.json", "impact.json")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}", re.I)
@@ -1447,6 +1461,22 @@ def write_prior_planning_evidence(artifacts_dir: Path, state: dict) -> dict | No
     }
 
 
+def write_operator_guidance(artifacts_dir: Path, state: dict) -> dict | None:
+    guidance = state.get("operator_guidance")
+    if not guidance:
+        return None
+    path = artifacts_dir / OPERATOR_GUIDANCE_ARTIFACT
+    path.write_bytes(guidance["content_text"].encode("utf-8"))
+    if file_digest(path) != guidance["sha256"]:
+        raise FeatureChainError("operator guidance artifact does not match its recorded sha256")
+    return {
+        "artifact": OPERATOR_GUIDANCE_ARTIFACT,
+        "sha256": guidance["sha256"],
+        "planning_generation": guidance["planning_generation"],
+        "authority": "below the spec for scope and requirements; above prior planning evidence and planner judgment for approach",
+    }
+
+
 def prior_planning_attempt_summary(item: dict) -> dict:
     summary = {"run_id": item.get("run_id"), "spec_sha256": item.get("spec_sha256")}
     if item.get("evidence_sha256"):
@@ -1527,13 +1557,54 @@ def restart_planning(host: Any, args: Any, row: dict, control: dict) -> dict:
     feature = control.get("feature_chain", {})
     if feature.get("scope") != "repositories" or feature.get("phase") != "planning":
         raise FeatureChainError("feature-replan requires a repository-list planning run")
+    return _restart_planning(host, args, row, feature["logical_chain_id"], guarded=True)
+
+
+def restart_planning_unguarded(host: Any, args: Any, row: dict, chain_id: str) -> dict:
+    """Claude chain replan: no control token exists for a Claude launch.
+
+    A Claude planning node can be recorded COMPLETED with no plan written (run
+    f07acb10), and archon never re-runs a completed AI node on resume, so without
+    this the only recovery was a whole new chain. Authority matches
+    feature-advance: the operator names the chain, whose private state is sealed;
+    every other refusal (terminal run, stale action, approved or implemented work,
+    budget) is the guarded path's, verbatim.
+    """
+    return _restart_planning(host, args, row, chain_id, guarded=False)
+
+
+def read_operator_guidance(path_value: Any) -> dict | None:
+    """Operator guidance for a replan: approach direction that must not edit the
+    immutable spec snapshot. Read and validated before any state changes."""
+    if not path_value:
+        return None
+    path = Path(str(path_value)).expanduser()
+    try:
+        data = path.read_bytes()
+        text = data.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise FeatureChainError(f"operator guidance file unreadable: {path}: {exc}") from exc
+    if not text.strip():
+        raise FeatureChainError(f"operator guidance file is empty: {path}")
+    if len(data) > OPERATOR_GUIDANCE_MAX_BYTES:
+        raise FeatureChainError(f"operator guidance file exceeds {OPERATOR_GUIDANCE_MAX_BYTES} bytes: {path}")
+    return {"sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data), "content_text": text,
+            "source_path": str(path.resolve())}
+
+
+def _restart_planning(host: Any, args: Any, row: dict, chain_id: str, *, guarded: bool) -> dict:
     if row.get("status") not in {"failed", "completed"}:
         raise FeatureChainError("feature-replan requires a terminal planning run")
-    chain_id = feature["logical_chain_id"]
+    guidance = read_operator_guidance(getattr(args, "guidance_file", None))
     with chain_lock(Path(args.control_dir), chain_id):
-        revalidate_control_token(host, args, row)
+        if guarded:
+            revalidate_control_token(host, args, row)
         state = read_state(Path(args.control_dir), chain_id)
+        if not guarded and state.get("provider") != "claude":
+            raise FeatureChainError("feature-replan --chain is for claude chains; codex chains require --token")
         current = state.get("current_run")
+        if not guarded and isinstance(current, dict) and current.get("phase") != "planning":
+            raise FeatureChainError("feature-replan requires a repository-list planning run")
         reservation = state.get("dispatch_reservation")
         retry = (not current and isinstance(reservation, dict)
                  and reservation.get("phase") == "planning"
@@ -1552,6 +1623,10 @@ def restart_planning(host: Any, args: Any, row: dict, control: dict) -> dict:
             )
             state["planning_generation"] = state.get("planning_generation", 0) + 1
             state["spec_sha256"] = file_digest(Path(state["spec"]))
+        if guidance:
+            # Replaces any earlier guidance; a replan without the flag keeps it.
+            state["operator_guidance"] = dict(guidance, planning_generation=state.get("planning_generation", 0),
+                                              recorded_at=now())
         state["current_run"] = None
         state["dispatch_reservation"] = {
             "phase": "planning", "repo": None, "source_run_id": row["id"],
@@ -1562,14 +1637,16 @@ def restart_planning(host: Any, args: Any, row: dict, control: dict) -> dict:
     args.wall_minutes = state["budget"]["wall_minutes"]
     args.max_total_tokens = state["budget"]["max_total_tokens"]
     result = dispatch_planning(host, args, state)
+    carried = state.get("operator_guidance")
     print(
-        f"ARCHON_FEATURE_REPLAN=STARTED chain={chain_id} predecessor={row['id']} run={result['row']['id']}",
+        f"ARCHON_FEATURE_REPLAN=STARTED chain={chain_id} predecessor={row['id']} run={result['row']['id']} "
+        f"guidance={carried['sha256'] if carried else 'none'}",
         flush=True,
     )
     return result
 
 
-def planning_request_payload(state: dict, prior_evidence: dict | None = None) -> dict:
+def planning_request_payload(state: dict, prior_evidence: dict | None = None, guidance: dict | None = None) -> dict:
     return {
         "schema_version": 1,
         "kind": "repository-list-feature-planning-request",
@@ -1590,6 +1667,7 @@ def planning_request_payload(state: dict, prior_evidence: dict | None = None) ->
             "integration": "object with non-empty scenarios",
         },
         "prior_planning_evidence": prior_evidence,
+        "operator_guidance": guidance,
         "write_policy": "planning workers may write only planning artifacts; repository worktrees are read-only until approval",
         "created_at": now(),
     }
@@ -1598,9 +1676,10 @@ def planning_request_payload(state: dict, prior_evidence: dict | None = None) ->
 def write_planning_request(artifacts_dir: Path, state: dict) -> Path:
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     prior_evidence = write_prior_planning_evidence(artifacts_dir, state)
+    guidance = write_operator_guidance(artifacts_dir, state)
     path = artifacts_dir / PLANNING_REQUEST_ARTIFACT
     tmp = path.with_suffix(f".tmp.{os.getpid()}")
-    tmp.write_text(json.dumps(planning_request_payload(state, prior_evidence), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.write_text(json.dumps(planning_request_payload(state, prior_evidence, guidance), indent=2, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(path)
     return path
 
@@ -1756,6 +1835,7 @@ def dispatch_lane(host: Any, args: Any, lane: str, message: Path, env: dict[str,
                 dispatch_state = read_state(Path(args.control_dir), env["ARCHON_FEATURE_CHAIN_ID"])
                 require_no_incomplete_amendment(dispatch_state)
                 require_no_incomplete_scope_amendment(dispatch_state)
+                require_no_incomplete_pin_amendment(dispatch_state)
                 db = Path(args.db) if getattr(args, "db", None) is not None else None
                 require_review_policy_integrity(dispatch_state, db=db)
                 shepherd_checkpoint(args, env["ARCHON_FEATURE_CHAIN_ID"])
@@ -1857,7 +1937,12 @@ def params_payload(state: dict, phase: str, repo: str | None, row: dict) -> dict
     }
     if "executable_plan_contract" in state:
         payload["executable_plan_contract"] = state["executable_plan_contract"]
-    if "api" in state["repositories"]:
+    # The smoke port follows the repository PROFILE, not the name "api": the
+    # lane preflight requires APIPORT for any repo declaring HAS_SMOKE, so a
+    # single-repo goodword-mcp (or web-app) chain keyed on "api" got no port
+    # and died at PREFLIGHT=FAIL params.json carries no smoke port.
+    profiles = repo_profiles()
+    if any(profiles.get(name, {}).get("smoke") for name in state["repositories"]):
         payload["api_port"] = allocate_port(4123, slug)
     if "web-app" in state["repositories"]:
         payload["web_port"] = allocate_port(3127, slug)
@@ -1872,7 +1957,29 @@ def params_payload(state: dict, phase: str, repo: str | None, row: dict) -> dict
                 raise FeatureChainError("approved API fixture revision drifted")
             payload["api_fixture_worktree"] = str(fixture.resolve())
             payload["api_fixture_head_sha"] = stage["api_fixture_head_sha"]
+    if phase == "implement" and repo in state["repositories"]:
+        previous_head = state["stages"][repo].get("verify_only_head")
+        if previous_head:
+            payload["feature_verify_only"] = "yes"
+            payload["feature_previous_head"] = str(previous_head)
+        reopen_context = state["stages"][repo].get("reopen_context")
+        if isinstance(reopen_context, dict):
+            payload["feature_reopen_context_sha256"] = reopen_context["sha256"]
+        if isinstance(state.get("approved_plan"), dict):
+            payload["feature_contract_symbols_sha256"] = digest_json_file_payload(
+                contract_symbols(state, repo, approval_plan_markdown(state)))
     return payload
+
+
+def repo_profiles() -> dict:
+    result = subprocess.run(
+        ["bash", str(Path(__file__).resolve().parent / "repo-profile.sh"), "--json"],
+        capture_output=True,
+        encoding="utf-8",
+    )
+    if result.returncode != 0:
+        raise FeatureChainError((result.stderr or result.stdout).strip() or "cannot read repository profiles")
+    return json.loads(result.stdout)["profiles"]
 
 
 def allocate_port(base: int, slug: str) -> int:
@@ -1914,6 +2021,7 @@ def write_phase_artifacts(artifacts: Path, state: dict, phase: str, repo: str | 
             for original, target in (("web-premises.json", "premises.json"), ("web-reader-audit.json", "reader-audit.json")):
                 if original in source["files"]:
                     (artifacts / target).write_bytes((source_root / original).read_bytes())
+    write_stage_reader_audit(artifacts, state, repo, stage, source)
     candidate_inputs = {}
     for dependency in stage["depends_on"]:
         candidate = state["candidate_handoffs"].get(dependency)
@@ -1940,6 +2048,85 @@ def write_phase_artifacts(artifacts: Path, state: dict, phase: str, repo: str | 
     plan_md = approval_plan_markdown(state)
     if plan_md:
         (artifacts / "plan.md").write_text(plan_md, encoding="utf-8")
+    write_json_atomic(artifacts / CONTRACT_SYMBOLS_ARTIFACT, contract_symbols(state, repo, plan_md))
+    reopen_context = state["stages"][repo].get("reopen_context")
+    if isinstance(reopen_context, dict):
+        path = artifacts / REOPEN_CONTEXT_ARTIFACT
+        path.write_text(reopen_context["content_text"], encoding="utf-8")
+        if file_digest(path) != reopen_context["sha256"]:
+            raise FeatureChainError("reopen context artifact does not match its recorded sha256")
+
+
+CONTRACT_SPAN_RE = re.compile(r"`([^`]+)`")
+CONTRACT_WORD_RE = re.compile(r"[A-Za-z_$][\w$]*")
+
+
+def _contract_identifier(word: str) -> bool:
+    # Prose around a contract is mostly English ("shape", "type", "optional");
+    # only code-shaped words name a symbol: camelCase, PascalCase or snake_case.
+    return "_" in word or any(a.islower() and b.isupper() for a, b in zip(word, word[1:]))
+
+
+def contract_symbols(state: dict, repo: str, plan_md: str) -> dict:
+    """Symbols the approved plan declares as this stage's contract, per file.
+
+    Derived only from approval-bound bytes, so a deslop reviewer reading "no
+    caller yet" on a reserved contract field is answered mechanically
+    (check-slop.py --contract-symbols, deslop-review-gate). Sources: each
+    contract this repo produces (its description, plus approved plan.md lines
+    naming the artifact path; backticked spans count whole unless they are
+    paths, prose counts only code-shaped words), and each pinned_decisions entry
+    whose file is in this stage's allowlist.
+    """
+    files: dict[str, set] = {}
+    plan = state["approved_plan"]
+    for contract in plan.get("contracts") or []:
+        artifact = contract.get("artifact") if isinstance(contract, dict) else None
+        if contract.get("producer") != repo or not isinstance(artifact, str) or not artifact:
+            continue
+        lines = [str(contract.get("description") or "")]
+        lines += [line for line in plan_md.splitlines() if artifact in line]
+        symbols = files.setdefault(artifact, set())
+        for line in lines:
+            for span in CONTRACT_SPAN_RE.findall(line):
+                if "/" not in span:
+                    symbols.update(CONTRACT_WORD_RE.findall(span))
+            symbols.update(w for w in CONTRACT_WORD_RE.findall(CONTRACT_SPAN_RE.sub(" ", line)) if _contract_identifier(w))
+    allowlist = set(plan["stages"][repo].get("files_allowlist") or [])
+    for pin in plan.get("pinned_decisions") or []:
+        if isinstance(pin, dict) and pin.get("file") in allowlist and isinstance(pin.get("symbol"), str):
+            files.setdefault(pin["file"], set()).update(CONTRACT_WORD_RE.findall(pin["symbol"]))
+    return {"schema": "archon.contract-symbols.v1", "repo": repo,
+            "plan_digest": state["approval"]["plan_digest"],
+            "contracts": [{"artifact": path, "symbols": sorted(names)} for path, names in sorted(files.items())]}
+
+
+def write_stage_reader_audit(artifacts: Path, state: dict, repo: str, stage: dict, source: dict) -> None:
+    """Each stage audits its OWN repository's columns.
+
+    The planning run writes one reader-audit.json for the repository it is
+    anchored on (params_payload's planning repo), and every stage used to get a
+    copy: a goodword-mcp stage then grepped goodword-mcp for api columns and
+    passed having audited nothing. The approved joint plan's
+    stages.<repo>.reader_audit wins. A legacy plan without one keeps the copy
+    only where it is scoped to the stage (the anchor, or web-app's
+    web-reader-audit.json); any other stage derives its own declaration from
+    its diff (the reader-audit node's stage-diff branch)."""
+    audit = stage.get("reader_audit")
+    if isinstance(audit, dict):
+        write_json_atomic(artifacts / "reader-audit.json", audit)
+        return
+    repos = state["repositories"]
+    anchor = "api" if "api" in repos else repos[0]
+    files = source.get("files", {}) if isinstance(source, dict) else {}
+    if len(repos) == 1 or repo == anchor or (repo == "web-app" and "web-reader-audit.json" in files):
+        return
+    write_json_atomic(artifacts / "reader-audit.json", {
+        "columns": [],
+        "derive": "stage-diff",
+        "reason": f"approved joint plan declares no stages.{repo}.reader_audit; "
+                  f"the planning reader-audit.json is {anchor}-scoped",
+    })
 
 
 def approval_plan_markdown(state: dict) -> str:
@@ -2191,8 +2378,14 @@ def current_implementation_repo(state: dict, row: dict) -> str:
     return repo
 
 
-def require_scope_amendment_open(state: dict) -> None:
-    if state.get("candidate_handoffs"):
+def require_scope_amendment_open(state: dict, repo: str | None = None) -> None:
+    """A stage that has already verified is closed to amendment. Keyed on the
+    stage being amended, not on the whole map: in a two-repository chain the
+    second stage is amended exactly when the first has verified (chain
+    1f7a896a), and the whole-map check left it no guarded lever at all."""
+    handoffs = state.get("candidate_handoffs") or {}
+    closed = handoffs.get(repo) if repo else handoffs
+    if closed:
         raise FeatureChainError("feature-scope-amend cannot modify a chain with verified candidate handoffs")
     if state.get("integration") or state.get("status") == "locally_verified":
         raise FeatureChainError("feature-scope-amend cannot modify a chain after integration")
@@ -2420,6 +2613,277 @@ def build_scope_amendment(control_dir: Path, state: dict, repo: str,
     return final_scope_amendment_state(state, repo, new_plan, validation, new_approval, source_artifacts)
 
 
+# --- guarded pin amendment -------------------------------------------------
+#
+# feature-scope-amend is allowlist-only: it cannot say "this pinned symbol may
+# change after all". Without a way to say it, a PIN_BREACH on a pin the spec got
+# wrong has no recovery but re-planning the whole stage. This is that operation,
+# under scope-amend's refusal rule, through scope-amend's approval path.
+#
+# The plan digest is part of the review identity, so an amendment invalidates the
+# stopped round's completed review and the next resume re-runs it. That is the
+# point: the review that passed judged the code against the old pin.
+
+
+def require_no_incomplete_pin_amendment(state: dict) -> None:
+    amendment = state.get("pin_amendment")
+    if isinstance(amendment, dict) and amendment.get("status") == "in_progress":
+        raise FeatureChainError("pin amendment is incomplete; retry feature-pin-amend before dispatch")
+
+
+def require_pin_amendment_open(state: dict, repo: str | None = None) -> None:
+    """Scope-amend's refusal rule verbatim, reworded for whoever ran this command."""
+    try:
+        require_scope_amendment_open(state, repo)
+    except FeatureChainError as exc:
+        raise FeatureChainError(str(exc).replace("feature-scope-amend", "feature-pin-amend")) from exc
+
+
+def validate_pin_symbol(symbol: object) -> str:
+    if not isinstance(symbol, str) or not symbol.strip():
+        raise FeatureChainError("feature-pin-amend requires --symbol")
+    if symbol != symbol.strip() or "\x00" in symbol or "\n" in symbol:
+        raise FeatureChainError("pin symbol must be a single-line name")
+    return symbol
+
+
+def validate_allowed_change(text: object) -> str:
+    """`none` is the pin; anything else is the exception the spec now states.
+
+    Empty is refused rather than read as `none`: the whole operation is a human
+    writing down what may change, and an empty string records nothing.
+    """
+    if not isinstance(text, str) or not text.strip():
+        raise FeatureChainError("feature-pin-amend requires --allowed-change")
+    return text.strip()
+
+
+def plan_pin_entries(plan: dict, repo: str) -> list[dict]:
+    pools = [plan.get("pinned_decisions")]
+    stages = plan.get("stages")
+    if isinstance(stages, dict):
+        pools.append((stages.get(repo) or {}).get("pinned_decisions"))
+    elif isinstance(stages, list):
+        pools.extend(stage.get("pinned_decisions") for stage in stages
+                     if isinstance(stage, dict) and stage.get("repo") == repo)
+    return [entry for pool in pools if isinstance(pool, list)
+            for entry in pool if isinstance(entry, dict)]
+
+
+def plan_with_amended_pin(plan: dict, repo: str, symbol: str, allowed_change: str) -> dict:
+    amended = json.loads(json.dumps(plan))
+    matches = [entry for entry in plan_pin_entries(amended, repo)
+               if entry.get("symbol") == symbol]
+    if not matches:
+        raise FeatureChainError(f"approved plan has no pinned decision for symbol {symbol}")
+    if len(matches) > 1:
+        raise FeatureChainError(f"approved plan pins {symbol} more than once; amend the plan by hand")
+    if matches[0].get("allowed_change") == allowed_change:
+        raise FeatureChainError(f"pinned decision for {symbol} already allows that change")
+    matches[0]["allowed_change"] = allowed_change
+    return amended
+
+
+def pin_amendment_payload(chain_id: str, run_id: str, repo: str, symbol: str,
+                          allowed_change: str, reason: str) -> dict:
+    return {
+        "kind": "feature-pin-amend",
+        "logical_chain_id": chain_id,
+        "run_id": run_id,
+        "repo": repo,
+        "symbol": symbol,
+        "allowed_change": allowed_change,
+        "reason": reason,
+    }
+
+
+def validate_current_stage_pin_artifacts(state: dict, row: dict, repo: str,
+                                         symbol: str, allowed_change: str) -> None:
+    artifacts_path = current_stage_artifacts(state, row)
+    revisions = read_json_artifact(artifacts_path / "candidate-revisions.json",
+                                   "candidate-revisions.json")
+    allowed = {state["approval"]["plan_digest"]}
+    if isinstance(state.get("pin_amendment"), dict):
+        # A retry after a crash mid-amendment: the stage may already carry the
+        # amended digest, and that is the one state we are allowed to resume into.
+        allowed.add(digest(plan_with_amended_pin(state["approved_plan"], repo, symbol,
+                                                 allowed_change)))
+    plan_digest = revisions.get("plan_digest")
+    if plan_digest != revisions.get("approved_plan_digest") or plan_digest not in allowed:
+        raise FeatureChainError("current stage candidate revisions do not match the approved plan digest")
+
+
+def write_pin_amendment_artifacts(root: Path, state: dict, old_plan: dict, new_plan: dict,
+                                  repo: str, symbol: str, allowed_change: str, reason: str,
+                                  amendment_id: str) -> dict:
+    amend_root = prepare_scope_amendment_dir(root, amendment_id)
+    source = state.get("approval", {}).get("source_artifacts", {})
+    files = source.get("files", {}) if isinstance(source, dict) else {}
+    copied: dict[str, str] = {}
+    for name in (JOINT_PLAN_ARTIFACT, *PLANNING_SUPPORT_ARTIFACTS):
+        if name not in files:
+            continue
+        src = root / name
+        if src.is_file():
+            ensure_owned_not_symlink(src, "approved planning source artifact")
+            dst = amend_root / ("original-" + name)
+            dst.write_bytes(src.read_bytes())
+            copied[dst.name] = file_digest(dst)
+    write_json_atomic(amend_root / "original-approval.json", state["approval"])
+    write_json_atomic(amend_root / "original-approved-plan.json", old_plan)
+    write_json_atomic(amend_root / JOINT_PLAN_ARTIFACT, new_plan)
+    recorded_at = state.get("pin_amendment", {}).get("started_at") or now()
+    notice = {
+        "schema_version": 1,
+        "kind": "feature-pin-amendment-notice",
+        "logical_chain_id": state["logical_chain_id"],
+        "amendment_id": amendment_id,
+        "repo": repo,
+        "symbol": symbol,
+        "allowed_change": allowed_change,
+        "reason": reason,
+        "previous_plan_digest": state["approval"]["plan_digest"],
+        "new_plan_digest": digest(new_plan),
+        "recorded_at": recorded_at,
+    }
+    write_json_atomic(amend_root / "pin-amendment.json", notice)
+    notice_md = (
+        "# Guarded pin amendment approval packet\n\n"
+        + f"- Chain: `{state['logical_chain_id']}`\n"
+        + f"- Amendment: `{amendment_id}`\n"
+        + f"- Repository: `{repo}`\n"
+        + f"- Pinned symbol: `{symbol}`\n"
+        + f"- Allowed change: {allowed_change}\n"
+        + f"- Previous approval digest: `{state['approval']['approval_digest']}`\n"
+        + f"- New plan digest: `{digest(new_plan)}`\n"
+    )
+    (amend_root / "approval-packet-notice.md").write_text(notice_md, encoding="utf-8")
+    addendum = (
+        approval_plan_markdown(state).rstrip()
+        + "\n\n## Guarded pin amendment\n\n"
+        + f"- Repository: `{repo}`\n"
+        + f"- Pinned symbol: `{symbol}`\n"
+        + f"- Allowed change: {allowed_change}\n"
+        + f"- Reason: {reason}\n"
+        + f"- Amendment id: `{amendment_id}`\n"
+    )
+    (amend_root / "plan.md").write_text(addendum + "\n", encoding="utf-8")
+    return {"root": str(amend_root), "files": {
+        JOINT_PLAN_ARTIFACT: file_digest(amend_root / JOINT_PLAN_ARTIFACT),
+        "plan.md": file_digest(amend_root / "plan.md"),
+        "pin-amendment.json": file_digest(amend_root / "pin-amendment.json"),
+        "approval-packet-notice.md": file_digest(amend_root / "approval-packet-notice.md"),
+        **copied,
+    }}
+
+
+def final_pin_amendment_state(state: dict, repo: str, validation: dict,
+                              new_approval: dict, source_artifacts: dict) -> dict:
+    old_approval = state["approval"]
+    amendment = dict(state["pin_amendment"])
+    amendment.update({
+        "status": "applied",
+        "applied_at": now(),
+        "approval_digest": new_approval["approval_digest"],
+        "previous_approval_digest": old_approval.get("approval_digest"),
+        "source_artifacts": source_artifacts,
+    })
+    final = dict(state)
+    final.setdefault("approval_history", []).append(old_approval)
+    final.setdefault("pin_amendments", []).append(amendment)
+    final["approval"] = new_approval
+    final["approved_plan"] = validation["plan"]
+    final["dependency_order"] = validation["dependency_order"]
+    final["stages"] = dict(state["stages"])
+    final["stages"][repo] = dict(final["stages"][repo])
+    final["stages"][repo]["plan"] = validation["stages"][repo]
+    final["pin_amendment"] = None
+    final["updated_at"] = now()
+    return final
+
+
+def build_pin_amendment(control_dir: Path, state: dict, repo: str, symbol: str,
+                        allowed_change: str, reason: str, amendment_id: str) -> dict:
+    old_approval = state.get("approval")
+    old_plan = state.get("approved_plan")
+    if not isinstance(old_approval, dict) or not isinstance(old_plan, dict):
+        raise FeatureChainError("feature-pin-amend requires an approved joint plan")
+    verify_approval(state)
+    source_root = planning_source_root(state)
+    new_plan = plan_with_amended_pin(old_plan, repo, symbol, allowed_change)
+    validation = validate_plan(new_plan, state["repositories"],
+                               state.get("executable_plan_contract") == 1)
+    source_artifacts = write_pin_amendment_artifacts(
+        source_root, state, old_plan, new_plan, repo, symbol, allowed_change, reason, amendment_id)
+    new_approval = approval_snapshot(state, new_plan, validation, source_artifacts)
+    return final_pin_amendment_state(state, repo, validation, new_approval, source_artifacts)
+
+
+def pin_amend_command(host: Any, args: Any, row: dict, chain_id: str | None = None) -> dict:
+    """Relax one pinned decision's allowed_change.
+
+    ``chain_id`` selects the Claude path (``--chain``); omitted, the codex
+    run-control record and ``--token`` authorize it. A claude chain that stops
+    on PIN_BREACH has the same problem scope-amend had: a claude launch writes
+    no control token, so the guarded path was unreachable for the exact lane
+    this plan targets.
+    """
+    symbol = validate_pin_symbol(getattr(args, "symbol", ""))
+    allowed_change = validate_allowed_change(getattr(args, "allowed_change", ""))
+    reason = str(getattr(args, "reason", "")).strip()
+    if not reason:
+        raise FeatureChainError("pin amendment requires a reason")
+    feature = None
+    if chain_id is None:
+        feature, chain_id = guarded_feature_binding(host, args, row, "feature-pin-amend")
+    applied: dict | None = None
+    with chain_lock(Path(args.control_dir), chain_id):
+        row = authorize_stopped_run(host, args, row, "feature-pin-amend", feature)
+        state = read_state(Path(args.control_dir), chain_id)
+        if feature is None:
+            require_claude_chain(state, "feature-pin-amend")
+        require_no_incomplete_amendment(state)
+        require_no_incomplete_scope_amendment(state)
+        pending = state.get("pending_control")
+        if pending is not None and (not isinstance(pending, dict) or process_claim_alive(pending)):
+            raise FeatureChainError("repository-list feature control already in progress")
+        if state.get("dispatch_reservation") is not None:
+            raise FeatureChainError("repository-list feature dispatch already in progress")
+        repo = current_implementation_repo(state, row)
+        require_pin_amendment_open(state, repo)
+        payload = pin_amendment_payload(chain_id, row["id"], repo, symbol, allowed_change, reason)
+        amendment_id = digest(payload)
+        existing = state.get("pin_amendment")
+        if isinstance(existing, dict) and existing.get("status") == "in_progress" \
+                and existing.get("amendment_id") != amendment_id:
+            raise FeatureChainError("a different pin amendment is incomplete")
+        for prior in state.get("pin_amendments", []):
+            if prior.get("amendment_id") == amendment_id:
+                if prior.get("symbol") != symbol or prior.get("repo") != repo:
+                    raise FeatureChainError("pin amendment id was already used for a different change")
+                refresh_current_stage_artifacts(state, row, repo)
+                return {"chain": chain_id, "repo": repo, "symbol": symbol,
+                        "allowed_change": allowed_change, "amendment_id": amendment_id,
+                        "already_applied": True}
+        verify_approval(state)
+        validate_current_stage_pin_artifacts(state, row, repo, symbol, allowed_change)
+        preflight_scope_amendment_destination(planning_source_root(state), amendment_id)
+        if not (isinstance(existing, dict) and existing.get("status") == "in_progress"):
+            state["pin_amendment"] = {**payload, "amendment_id": amendment_id,
+                                      "status": "in_progress", "started_at": now()}
+            state["updated_at"] = now()
+            state = write_state(Path(args.control_dir), state)
+        final_state = build_pin_amendment(Path(args.control_dir), state, repo, symbol,
+                                          allowed_change, reason, amendment_id)
+        refresh_current_stage_artifacts(final_state, row, repo)
+        state = write_state(Path(args.control_dir), final_state)
+        applied = {"chain": chain_id, "repo": repo, "symbol": symbol,
+                   "allowed_change": allowed_change, "amendment_id": amendment_id,
+                   "already_applied": False}
+    assert applied is not None
+    return applied
+
+
 def final_review_policy_state(state: dict, amendment: dict, qualification: dict | None = None,
                               applied_at: str | None = None) -> dict:
     applied_at = applied_at or now()
@@ -2556,6 +3020,7 @@ def review_policy_update_command(host: Any, args: Any, row: dict) -> dict:
             raise FeatureChainError("feature-review-policy-update requires a Codex repository-list feature chain")
         require_no_incomplete_amendment(state)
         require_no_incomplete_scope_amendment(state)
+        require_no_incomplete_pin_amendment(state)
         pending = state.get("pending_control")
         if pending is not None and (not isinstance(pending, dict) or process_claim_alive(pending)):
             raise FeatureChainError("repository-list feature control already in progress")
@@ -2706,38 +3171,78 @@ def refresh_current_stage_artifacts(state: dict, row: dict, repo: str) -> None:
     plan_md = approval_plan_markdown(state)
     if plan_md:
         (artifacts_path / "plan.md").write_text(plan_md, encoding="utf-8")
+    write_json_atomic(artifacts_path / CONTRACT_SYMBOLS_ARTIFACT, contract_symbols(state, repo, plan_md))
+    if (artifacts_path / "params.json").is_file():
+        params = read_json_artifact(artifacts_path / "params.json", "params.json")
+        params["feature_contract_symbols_sha256"] = file_digest(artifacts_path / CONTRACT_SYMBOLS_ARTIFACT)
+        write_json_atomic(artifacts_path / "params.json", params)
 
 
-def scope_amend_command(host: Any, args: Any, row: dict) -> dict:
-    add_file_arg = str(getattr(args, "add_file", ""))
-    reason = str(getattr(args, "reason", "")).strip()
-    if not reason:
-        raise FeatureChainError("scope amendment requires a reason")
+def guarded_feature_binding(host: Any, args: Any, row: dict, command: str) -> tuple[dict, str]:
+    """Codex path: the run-control record names the repository-list chain."""
     control = getattr(host, "read_control_state")(row, Path(args.control_dir))
     feature = control_feature({"control": control})
     if feature.get("scope") != "repositories":
-        raise FeatureChainError("feature-scope-amend requires a repository-list feature run")
+        raise FeatureChainError(f"{command} requires a repository-list feature run")
     chain_id = feature.get("logical_chain_id")
     if not isinstance(chain_id, str):
         raise FeatureChainError("run-control record is missing feature chain id")
-    applied: dict | None = None
-    with chain_lock(Path(args.control_dir), chain_id):
-        row = host.run_row_by_id(Path(args.db), row["id"])
-        if not isinstance(row, dict) or row.get("status") not in {"failed", "paused", "completed", "cancelled"}:
-            raise FeatureChainError("feature-scope-amend requires a stopped run")
+    return feature, chain_id
+
+
+def authorize_stopped_run(host: Any, args: Any, row: dict, command: str, feature: dict | None) -> dict:
+    """Under the chain lock: the run must be stopped, then prove operator authority.
+
+    Codex (``feature`` set): the control token, the unchanged run-control binding,
+    and no live launcher/watchdog process group. Claude (``feature`` None): a
+    Claude launch writes no control token or process record; authority is naming
+    the chain (as feature-advance and feature-replan --chain do), and liveness is
+    the archon run status plus the chain's pending-control and dispatch claims,
+    which every caller still checks.
+    """
+    row = host.run_row_by_id(Path(args.db), row["id"])
+    if not isinstance(row, dict) or row.get("status") not in {"failed", "paused", "completed", "cancelled"}:
+        raise FeatureChainError(f"{command} requires a stopped run")
+    if feature is not None:
         control = host.require_control_token(row, Path(args.control_dir), getattr(args, "token", None))
         if control.get("feature_chain") != feature:
             raise FeatureChainError("feature control binding changed while acquiring the chain lock")
         require_no_live_control_processes(control)
+    return row
+
+
+def require_claude_chain(state: dict, command: str) -> None:
+    if state.get("provider") != "claude":
+        raise FeatureChainError(f"{command} --chain is for claude chains; codex chains require --token")
+
+
+def scope_amend_command(host: Any, args: Any, row: dict, chain_id: str | None = None) -> dict:
+    """Add one tracked file to the current stage allowlist.
+
+    ``chain_id`` selects the Claude path (``--chain``); omitted, the codex
+    run-control record and ``--token`` authorize it.
+    """
+    add_file_arg = str(getattr(args, "add_file", ""))
+    reason = str(getattr(args, "reason", "")).strip()
+    if not reason:
+        raise FeatureChainError("scope amendment requires a reason")
+    feature = None
+    if chain_id is None:
+        feature, chain_id = guarded_feature_binding(host, args, row, "feature-scope-amend")
+    applied: dict | None = None
+    with chain_lock(Path(args.control_dir), chain_id):
+        row = authorize_stopped_run(host, args, row, "feature-scope-amend", feature)
         state = read_state(Path(args.control_dir), chain_id)
+        if feature is None:
+            require_claude_chain(state, "feature-scope-amend")
         require_no_incomplete_amendment(state)
         pending = state.get("pending_control")
         if pending is not None and (not isinstance(pending, dict) or process_claim_alive(pending)):
             raise FeatureChainError("repository-list feature control already in progress")
         if state.get("dispatch_reservation") is not None:
             raise FeatureChainError("repository-list feature dispatch already in progress")
-        require_scope_amendment_open(state)
         repo = current_implementation_repo(state, row)
+        require_scope_amendment_open(state, repo)
         add_file = validate_scope_add_file(state, repo, add_file_arg)
         payload = scope_amendment_payload(chain_id, row["id"], repo, add_file, reason)
         amendment_id = digest(payload)
@@ -2773,7 +3278,13 @@ def scope_amend_command(host: Any, args: Any, row: dict) -> dict:
     return applied
 
 
-def budget_update_command(host: Any, args: Any, row: dict) -> dict:
+def budget_update_command(host: Any, args: Any, row: dict, chain_id: str | None = None) -> dict:
+    """Raise a chain's shared allowance.
+
+    ``chain_id`` selects the Claude path (``--chain``): the chain ledger is
+    amended, but there is no private run-control record to update and no
+    budget shepherd to enable, since both exist only for codex launches.
+    """
     total_tokens = int(getattr(args, "total_tokens", 0))
     total_active_minutes = getattr(args, "total_active_minutes", None)
     if total_active_minutes is not None:
@@ -2784,15 +3295,13 @@ def budget_update_command(host: Any, args: Any, row: dict) -> dict:
         raise FeatureChainError("total token allowance must be positive")
     if not str(getattr(args, "reason", "")).strip():
         raise FeatureChainError("budget amendment requires a reason")
-    control = getattr(host, "read_control_state")(row, Path(args.control_dir))
-    feature = control_feature({"control": control})
-    if feature.get("scope") != "repositories":
-        raise FeatureChainError("feature-budget-update requires a repository-list feature run")
-    if feature.get("provider") != "codex":
-        raise FeatureChainError("feature-budget-update requires a Codex repository-list feature run")
-    chain_id = feature.get("logical_chain_id")
-    if not isinstance(chain_id, str):
-        raise FeatureChainError("run-control record is missing feature chain id")
+    feature = None
+    if chain_id is None:
+        feature, chain_id = guarded_feature_binding(host, args, row, "feature-budget-update")
+        if feature.get("provider") != "codex":
+            raise FeatureChainError("feature-budget-update requires a Codex repository-list feature run")
+    elif getattr(args, "enable_shepherd", False):
+        raise FeatureChainError("feature-budget-update --enable-shepherd is codex-only")
     amendment_payload = {
         "kind": "feature-budget-update",
         "logical_chain_id": chain_id,
@@ -2805,15 +3314,11 @@ def budget_update_command(host: Any, args: Any, row: dict) -> dict:
         amendment_payload["total_active_minutes"] = total_active_minutes
     amendment_id = digest(amendment_payload)
     with chain_lock(Path(args.control_dir), chain_id):
-        row = host.run_row_by_id(Path(args.db), row["id"])
-        if not isinstance(row, dict) or row.get("status") not in {"failed", "paused", "completed", "cancelled"}:
-            raise FeatureChainError("feature-budget-update requires a stopped run")
-        control = host.require_control_token(row, Path(args.control_dir), getattr(args, "token", None))
-        if control.get("feature_chain") != feature:
-            raise FeatureChainError("feature control binding changed while acquiring the chain lock")
-        require_no_live_control_processes(control)
+        row = authorize_stopped_run(host, args, row, "feature-budget-update", feature)
         state = read_state(Path(args.control_dir), chain_id)
-        if state.get("provider") != "codex":
+        if feature is None:
+            require_claude_chain(state, "feature-budget-update")
+        elif state.get("provider") != "codex":
             raise FeatureChainError("feature-budget-update requires a Codex repository-list feature chain")
         pending = state.get("pending_control")
         if pending is not None and (not isinstance(pending, dict) or process_claim_alive(pending)):
@@ -2841,8 +3346,9 @@ def budget_update_command(host: Any, args: Any, row: dict) -> dict:
                 continue
             if applied.get("total_tokens") != total_tokens or applied.get("total_active_minutes") != total_active_minutes:
                 raise FeatureChainError("amendment id was already used for a different allowance")
-            control = getattr(host, "require_control_token")(row, Path(args.control_dir), getattr(args, "token", None))
-            update_run_control_allowance(host, args, row, control, total_tokens, total_active_minutes)
+            if feature is not None:
+                control = getattr(host, "require_control_token")(row, Path(args.control_dir), getattr(args, "token", None))
+                update_run_control_allowance(host, args, row, control, total_tokens, total_active_minutes)
             return {"chain": chain_id, "total_tokens": total_tokens, "total_active_minutes": total_active_minutes, "amendment_id": amendment_id}
         if total_tokens < current_limit:
             raise FeatureChainError("feature-budget-update may only increase the token ceiling")
@@ -2868,8 +3374,9 @@ def budget_update_command(host: Any, args: Any, row: dict) -> dict:
             state["updated_at"] = now()
             state = write_state(Path(args.control_dir), state)
         budget_amend_allowance(args, chain_id, total_tokens, total_active_minutes, amendment_id, getattr(args, "reason", ""))
-        control = getattr(host, "require_control_token")(row, Path(args.control_dir), getattr(args, "token", None))
-        update_run_control_allowance(host, args, row, control, total_tokens, total_active_minutes)
+        if feature is not None:
+            control = getattr(host, "require_control_token")(row, Path(args.control_dir), getattr(args, "token", None))
+            update_run_control_allowance(host, args, row, control, total_tokens, total_active_minutes)
         amendment = dict(state["budget_amendment"])
         state.setdefault("budget", {})["max_total_tokens"] = total_tokens
         if total_active_minutes is not None:
@@ -3325,10 +3832,22 @@ def candidate_from_artifacts(repo: str, row: dict, artifacts: Path, state: dict)
     git_output(worktree, "merge-base", "--is-ancestor", baseline, head)
     allowed = set(state["stages"][repo]["plan"]["files_allowlist"])
     changed = set(diff_files_since(worktree, baseline, head))
-    outside = sorted(changed - allowed)
+    # Same lockfile rule as check-scope.py: the lockfile that commit nodes staged
+    # with an in-scope package.json is part of the candidate, not a breach.
+    lockfiles, _ = lockfile_scope.judge(lockfile_scope.profile(repo), allowed, changed, set())
+    outside = sorted(changed - allowed - lockfiles)
     if outside:
         raise FeatureChainError(f"{repo} candidate changed files outside approved allowlist: {','.join(outside)}")
     assert_clean_worktree(worktree, repo)
+    reopen_ctx = state["stages"][repo].get("reopen_context")
+    # A verify-only reopen carries no context but has the same obligation.
+    previous = state["stages"][repo].get("verify_only_head")
+    if isinstance(reopen_ctx, dict):
+        # Every exit of the stage (gate-tests, commit-impl, a fixer that reverted the
+        # fix) ends here, and private state cannot be edited by the run.
+        previous = json.loads(reopen_ctx["content_text"]).get("previous_head")
+    if previous and git_output(worktree, "rev-parse", f"{previous}^{{tree}}") == git_output(worktree, "rev-parse", f"{head}^{{tree}}"):
+        raise FeatureChainError(f"{repo} reopen produced no change: candidate tree equals previous head {previous[:12]}")
     params = read_json_artifact(artifacts / "params.json", "params.json")
     if params.get("worktree") != str(worktree):
         raise FeatureChainError(f"{repo} params worktree does not match private state")
@@ -3425,6 +3944,251 @@ def finalize_integration(control_dir: Path, chain_id: str, evidence: dict, artif
         return finalize_integration_unlocked(control_dir, read_state(control_dir, chain_id), evidence, artifacts)
 
 
+# --- chain timing: report-only wall accounting across the chain's own run rows ---
+
+CHAIN_WALL_BUDGET_SECONDS = 10800
+
+
+def timing_path(control_dir: Path, chain_id: str) -> Path:
+    return state_dir(control_dir) / f"{chain_id}-chain-timing.json"
+
+
+def parse_run_timestamp(value: object) -> float | None:
+    """`remote_agent_workflow_runs` stores `YYYY-MM-DD HH:MM:SS`; ISO-8601 also reads."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        stamp = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=datetime.timezone.utc)
+    return stamp.timestamp()
+
+
+def run_intervals(db: Path, run_ids: list[str]) -> dict[str, tuple[float | None, float | None]]:
+    """Start/end epoch seconds per run id. An unreadable database yields nothing."""
+    if not run_ids:
+        return {}
+    try:
+        with sqlite3.connect(db) as con:
+            if not {"id", "started_at", "completed_at"} <= table_columns(con, "remote_agent_workflow_runs"):
+                return {}
+            placeholders = ",".join("?" for _ in run_ids)
+            rows = con.execute(
+                f"SELECT id, started_at, completed_at FROM remote_agent_workflow_runs WHERE id IN ({placeholders})",
+                run_ids,
+            ).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {str(row[0]): (parse_run_timestamp(row[1]), parse_run_timestamp(row[2])) for row in rows}
+
+
+SEGMENT_END_EVENTS = ("approval_requested", "workflow_paused", "workflow_failed", "workflow_completed")
+
+
+def run_segments(db: Path, run_ids: list[str]) -> dict[str, list[tuple[float, float | None]]]:
+    """Active segments per run from the event log: each `workflow_started` up to the
+    next gate/failure/completion (or the next start). A run row's started_at is
+    overwritten on every resume, so the runs table alone reports only the last
+    resume segment (chain 3460c074 read api=1482 s for a 3.5 h stage) and a gate
+    wait would count as work. Runs with no events yield nothing here."""
+    if not run_ids:
+        return {}
+    try:
+        with sqlite3.connect(db) as con:
+            if not {"workflow_run_id", "event_type", "created_at"} <= table_columns(con, "remote_agent_workflow_events"):
+                return {}
+            placeholders = ",".join("?" for _ in run_ids)
+            rows = con.execute(
+                "SELECT workflow_run_id, event_type, created_at FROM remote_agent_workflow_events "
+                f"WHERE workflow_run_id IN ({placeholders}) AND event_type IN ({','.join('?' for _ in SEGMENT_END_EVENTS)}, 'workflow_started') "
+                "ORDER BY workflow_run_id, created_at, rowid",
+                [*run_ids, *SEGMENT_END_EVENTS],
+            ).fetchall()
+    except sqlite3.Error:
+        return {}
+    segments: dict[str, list[tuple[float, float | None]]] = {}
+    for run_id, event_type, created_at in rows:
+        stamp = parse_run_timestamp(created_at)
+        if stamp is None:
+            continue
+        current = segments.setdefault(str(run_id), [])
+        if event_type == "workflow_started":
+            if current and current[-1][1] is None:
+                current[-1] = (current[-1][0], stamp)
+            current.append((stamp, None))
+        elif current and current[-1][1] is None:
+            current[-1] = (current[-1][0], stamp)
+    return segments
+
+
+CHAIN_ACTIVE_BUDGET_SECONDS = 7200
+ROUND_TELEMETRY_KEYS = ("rounds", "review_invocations", "review_reused", "review_duplicates",
+                        "fixer_invocations", "fixer_duplicates")
+
+
+def stage_artifacts_dirs(state: dict) -> dict[str, Path]:
+    """Artifacts directory per repository, from the chain's own run bindings."""
+    dirs: dict[str, Path] = {}
+    for item in state.get("phase_runs") or []:
+        if not isinstance(item, dict) or item.get("phase") not in {"implement", "verify"}:
+            continue
+        repo, artifacts = item.get("repo"), item.get("artifacts_dir")
+        if isinstance(repo, str) and isinstance(artifacts, str) and artifacts:
+            dirs[repo] = Path(artifacts)
+    return dirs
+
+
+def read_round_activity(round_dir: Path) -> list[dict]:
+    try:
+        text = (round_dir / "activity.jsonl").read_text(encoding="utf-8")
+    except OSError:
+        return []
+    entries = []
+    for line in text.splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
+
+
+def round_telemetry(artifacts: Path) -> dict:
+    """Review and fixer counts for one stage, read from its round directories.
+
+    A duplicate is a `run` whose id (review) or tree (fixer) a `done` earlier in
+    the SAME round already recorded. It is derived here rather than asserted by
+    round-state.py, which is the component whose refusal to duplicate is the
+    thing under measurement: a check whose pass condition is "the code that made
+    the decision agrees with the decision" cannot see that decision being wrong.
+    """
+    counts = {key: 0 for key in ROUND_TELEMETRY_KEYS}
+    if not artifacts.is_dir():
+        return counts
+
+    def index(path: Path) -> int:
+        tail = path.name.split("-", 1)[1]
+        return int(tail) if tail.isdigit() else 0
+
+    round_dirs = sorted((p for p in artifacts.glob("round-*") if p.is_dir()), key=index)
+    counts["rounds"] = len(round_dirs)
+    for round_dir in round_dirs:
+        done: dict[str, set[str]] = {"review": set(), "fixer": set()}
+        for entry in read_round_activity(round_dir):
+            kind, decision = entry.get("kind"), entry.get("decision")
+            if kind not in ("review", "fixer"):
+                continue
+            token = str(entry.get("id" if kind == "review" else "tree") or "")
+            if decision == "done":
+                done[kind].add(token)
+            elif decision == "run":
+                counts[f"{kind}_invocations"] += 1
+                if token and token in done[kind]:
+                    counts[f"{kind}_duplicates"] += 1
+            elif kind == "review" and decision == "reuse":
+                counts["review_reused"] += 1
+    return counts
+
+
+def chain_activity(state: dict) -> dict:
+    return {repo: round_telemetry(path) for repo, path in stage_artifacts_dirs(state).items()}
+
+
+def active_seconds(timing: dict) -> int | None:
+    """The chain's ACTIVE sum: what the 2-hour claim is about.
+
+    Wall includes every human gate, so budgeting on it measures how long someone
+    took to read a plan-gate rather than how much work the lane did.
+    """
+    parts = [timing.get("planning_s"), timing.get("integration_s"),
+             *(timing.get("stages") or {}).values()]
+    known = [value for value in parts if isinstance(value, int)]
+    return sum(known) if known else None
+
+
+def active_budget_seconds() -> int:
+    raw = os.environ.get("ARCHON_CHAIN_BUDGET_S", "")
+    return int(raw) if raw.strip().isdigit() and int(raw) > 0 else CHAIN_ACTIVE_BUDGET_SECONDS
+
+
+def chain_timing(state: dict, db: Path) -> dict:
+    """Wall and per-phase seconds for the chain. A run row we cannot read stays null."""
+    records = [item for item in state.get("phase_runs") or [] if isinstance(item, dict)]
+    run_ids = [item["run_id"] for item in records if isinstance(item.get("run_id"), str)]
+    intervals = run_intervals(db, run_ids)
+    segments = run_segments(db, run_ids)
+    starts: list[float] = []
+    ends: list[float] = []
+    totals: dict[str, float] = {}
+    for item in records:
+        run_id = str(item.get("run_id"))
+        spans = segments.get(run_id) or [intervals.get(run_id, (None, None))]
+        phase, repo = item.get("phase"), item.get("repo")
+        key = phase if phase in {"planning", "integration"} else repo
+        for started, completed in spans:
+            if started is not None:
+                starts.append(started)
+            if completed is not None:
+                ends.append(completed)
+            if started is None or completed is None:
+                continue
+            if isinstance(key, str):
+                totals[key] = totals.get(key, 0.0) + max(0.0, completed - started)
+
+    def seconds(key: str) -> int | None:
+        return None if key not in totals else round(totals[key])
+
+    return {
+        "wall_s": round(max(ends) - min(starts)) if starts and ends and max(ends) >= min(starts) else None,
+        "planning_s": seconds("planning"),
+        "stages": {repo: seconds(repo) for repo in state.get("repositories") or []},
+        "integration_s": seconds("integration"),
+        "activity": chain_activity(state),
+        "updated_at": now(),
+    }
+
+
+def timing_field(value: object) -> str:
+    return "null" if value is None else str(value)
+
+
+def record_chain_timing(args: Any, state: dict) -> dict | None:
+    """Write chain-timing.json and print the typed lines. Report only: never blocks a transition."""
+    try:
+        timing = chain_timing(state, Path(args.db))
+        write_json_atomic(timing_path(Path(args.control_dir), state["logical_chain_id"]), timing)
+    except (OSError, KeyError, ValueError, sqlite3.Error):
+        return None
+    stages = ",".join(f"{repo}:{timing_field(value)}" for repo, value in timing["stages"].items())
+    print(
+        f"CHAIN_TIMING wall={timing_field(timing['wall_s'])} planning={timing_field(timing['planning_s'])} "
+        f"stages={stages} integration={timing_field(timing['integration_s'])}"
+    )
+    if isinstance(timing["wall_s"], int) and timing["wall_s"] > CHAIN_WALL_BUDGET_SECONDS:
+        print(f"CHAIN_BUDGET=EXCEEDED wall={timing['wall_s']} cap={CHAIN_WALL_BUDGET_SECONDS}")
+    activity = timing.get("activity") or {}
+    totals = {key: sum(int(counts.get(key, 0)) for counts in activity.values())
+              for key in ROUND_TELEMETRY_KEYS}
+    print(
+        f"CHAIN_TIMING reviews={totals['review_invocations']}/{totals['review_reused']} "
+        f"rounds={totals['rounds']} review_duplicates={totals['review_duplicates']} "
+        f"fixers={totals['fixer_invocations']} fixer_duplicates={totals['fixer_duplicates']}"
+    )
+    active, cap = active_seconds(timing), active_budget_seconds()
+    if isinstance(active, int):
+        print(f"CHAIN_ACTIVE active={active} cap={cap} wall={timing_field(timing['wall_s'])}")
+        if active > cap:
+            print(f"CHAIN_BUDGET=EXCEEDED active={active} cap={cap} "
+                  f"wall={timing_field(timing['wall_s'])}")
+    return timing
+
+
 def advance(host: Any, args: Any, row: dict, result: dict) -> dict:
     control_dir = Path(args.control_dir)
     feature = (result.get("feature_chain") if isinstance(result, dict) else None) or {}
@@ -3495,6 +4259,7 @@ def advance(host: Any, args: Any, row: dict, result: dict) -> dict:
             artifacts = Path(str(current.get("artifacts_dir") or result.get("artifacts") or row.get("output_root", "")))
             evidence = read_json_artifact(artifacts / INTEGRATION_EVIDENCE_ARTIFACT, INTEGRATION_EVIDENCE_ARTIFACT)
             state = finalize_integration_unlocked(control_dir, state, evidence, artifacts)
+            record_chain_timing(args, state)
             receipt_path = artifacts / "feature-chain-receipt.json"
             write_json_atomic(receipt_path, state["integration"])
             launcher = getattr(host, "__file__", "archon-run.py")
@@ -3517,6 +4282,7 @@ def advance(host: Any, args: Any, row: dict, result: dict) -> dict:
                     state = write_state(control_dir, state)
                 return {"state": state, "paused": result.get("state") != "terminal", "phase": phase, "repo": repo}
             candidate = verify_stage_result(state, repo, row, result)
+            state["stages"][repo].pop("reopen_context", None)
             state["candidate_handoffs"][repo] = candidate
             state["stages"][repo]["status"] = "verified"
             state["stages"][repo]["candidate"] = candidate
@@ -3534,6 +4300,7 @@ def advance(host: Any, args: Any, row: dict, result: dict) -> dict:
                 "reserved_at": now(),
             }
             state = write_state(control_dir, state)
+            record_chain_timing(args, state)
     if dispatch_repo is not None:
         dispatched = dispatch_repository_stage(host, args, state, dispatch_repo)
         if dispatched.get("result") is not None:
@@ -3650,6 +4417,7 @@ def before_control(host: Any, args: Any, row: dict, control: dict | None) -> dic
         stopping_action = action in {"reject", "abandon"}
         if not stopping_action:
             require_no_incomplete_scope_amendment(state)
+            require_no_incomplete_pin_amendment(state)
             require_review_policy_integrity(state, row, Path(args.db))
         phase = str(feature.get("phase") or "implement")
         if phase in {"planning", "integration"}:
@@ -3690,6 +4458,11 @@ def write_local_integration_evidence(path: Path, state: dict, evidence: dict) ->
     receipt = integration_receipt(state, evidence)
     write_json_atomic(path, receipt)
     return path
+
+
+def digest_json_file_payload(value: dict) -> str:
+    """sha256 of the bytes write_json_atomic writes for ``value``."""
+    return hashlib.sha256((json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")).hexdigest()
 
 
 def write_json_atomic(path: Path, value: dict) -> Path:
@@ -3824,6 +4597,14 @@ def _last_round_advisory(artifacts: Path) -> list[str]:
     return []
 
 
+def cross_repo_keys():
+    """setup/cross-repo-keys.py, which owns the cross-repo acknowledgement contract."""
+    spec = importlib.util.spec_from_file_location("cross_repo_keys", setup_dir() / "cross-repo-keys.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def publication_body(state: dict, repo: str, publications: dict) -> str:
     candidate = state["candidate_handoffs"][repo]
     artifacts = Path(candidate["artifacts"])
@@ -3873,6 +4654,9 @@ def publication_body(state: dict, repo: str, publications: dict) -> str:
     if advisory:
         residual_lines += ["Last-round fixer advisory:", ""] + [f"- {a}" for a in advisory] + [""]
     out += residual_lines or ["None recorded.", ""]
+    filed = cross_repo_keys().prbody(artifacts)
+    if filed:
+        out += [filed]
     changed = diff_files_since(Path(state["worktrees"][repo]["worktree"]), state["worktrees"][repo]["baseline"], candidate["candidate_head"])
     out += ["## Post-Deploy Monitoring & Validation", "",
             "- Watch error rates (4xx/5xx or tool failures) on the surfaces changed by this PR after release.",
@@ -4017,13 +4801,58 @@ def assert_reopenable_run(host: Any, args: Any, current: object, affected: list[
             raise FeatureChainError(f"run {run_id[:8]} is still running; wait or abandon it first")
 
 
-def reopen(host: Any, args: Any, chain_id: str, repo: str, reason: str) -> dict:
+def reopen_evidence(artifacts_dir: Any) -> list[str]:
+    if not isinstance(artifacts_dir, str) or not artifacts_dir:
+        return []
+    root = Path(artifacts_dir)
+    found = [root / name for name in REOPEN_EVIDENCE_FILES] + sorted(root.glob("joint-integration-*.log"))
+    return [str(path) for path in found if path.is_file()]
+
+
+def phase_run_artifacts(state: dict, run_id: Any) -> str | None:
+    for entry in reversed(state.get("phase_runs") or []):
+        if isinstance(entry, dict) and entry.get("run_id") == run_id:
+            return entry.get("artifacts_dir")
+    return None
+
+
+def reopen_context(record: dict, previous_head: str | None) -> dict:
+    """The reopen reason as mandatory implement-node input, stored with its sha256
+    so the dispatched artifact is bound the same way operator guidance is."""
+    content = {
+        "schema": "archon.stage-reopen-context.v1",
+        "repo": record["repo"],
+        "reason": record["reason"],
+        "previous_head": previous_head,
+        "stopped_run_id": record["stopped_run_id"],
+        "stopped_run_artifacts": record["stopped_run_artifacts"],
+        "evidence": record["evidence"],
+        "reopened_at": record["reopened_at"],
+    }
+    text = json.dumps(content, indent=2, sort_keys=True) + "\n"
+    return {"content_text": text, "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
+
+
+def reopen(host: Any, args: Any, chain_id: str, repo: str, reason: str, verify_only: bool = False) -> dict:
     """Reset a verified stage (and its consumers) to pending and re-dispatch it.
 
     Only between integration attempts: the chain must not be locally_verified,
     and the current run must be a terminal integration run. The stage worktree is
     kept as-is, so the re-run starts from the previous candidate plus any hand fix.
+
+    ``verify_only`` (also taken from ``--verify-only`` on args) re-verifies a hand
+    fix that is already in the reopened stage's worktree instead of re-implementing:
+    that stage records its previous candidate head, so its params carry
+    ``feature_verify_only``/``feature_previous_head``. Reset consumers are not
+    marked; their verified input changed, so they are implemented again.
+
+    Otherwise the reopened stage carries ``reopen_context`` (reason, previous head,
+    stopped run and its failure evidence), dispatched as ``reopen-context.json``
+    under ``feature_reopen_context_sha256``; the implement node must address it and
+    gate-tests fails a run that changed nothing. A reopened stage whose implement
+    run stopped may itself be reopened again.
     """
+    verify_only = bool(verify_only or getattr(args, "verify_only", False))
     control_dir = Path(args.control_dir)
     if not isinstance(reason, str) or not reason.strip():
         raise FeatureChainError("reopen requires a reason")
@@ -4033,7 +4862,25 @@ def reopen(host: Any, args: Any, chain_id: str, repo: str, reason: str) -> dict:
             raise FeatureChainError("cannot reopen a locally verified chain; its receipt would be invalidated")
         if repo not in state["repositories"]:
             raise FeatureChainError(f"reopen repository is outside selected scope: {repo}")
-        if state["stages"][repo].get("status") != "verified":
+        current = state.get("current_run") or {}
+        # A reopened stage whose own implement run then stopped (e.g. a deslop cap) is
+        # reopened again from the same previous candidate; any other unverified stage
+        # has nothing to reopen. "Own" means: the latest reopen touching this repo
+        # reopened THIS repo, and the stopped run was bound after it.
+        prior = next((r for r in reversed(state.get("reopens") or []) if repo in (r.get("affected") or [r.get("repo")])), None)
+        again = (prior is not None and prior.get("repo") == repo
+                 and current.get("phase") == "implement" and current.get("repo") == repo
+                 and str(current.get("bound_at") or "") >= str(prior.get("reopened_at") or "~"))
+        # A stage whose FIRST implement run failed has no candidate handoff, so the
+        # two branches above do not cover it and nothing else re-dispatches it:
+        # `advance` only records the failed status for a terminal non-completed run.
+        # That stranded chain 1f7a896a on a harness defect (review-gate overwrote the
+        # round's marked envelope, 2026-09-17) with its candidate committed in the
+        # stage worktree. The stage's own failed run is the evidence, so the same
+        # not-mid-flight rules apply as for `again`.
+        first_failure = (prior is None and state["stages"][repo].get("status") == "failed"
+                         and current.get("phase") == "implement" and current.get("repo") == repo)
+        if state["stages"][repo].get("status") != "verified" and not again and not first_failure:
             raise FeatureChainError(f"{repo} stage is not verified; nothing to reopen")
         reservation = state.get("dispatch_reservation")
         if isinstance(reservation, dict) and reservation.get("status") != "failed" and process_claim_alive(reservation):
@@ -4041,15 +4888,61 @@ def reopen(host: Any, args: Any, chain_id: str, repo: str, reason: str) -> dict:
         verify_approval(state)
         affected = [repo] + consumers_of(state, repo)
         assert_reopenable_run(host, args, state.get("current_run"), affected)
+        lookup = getattr(host, "run_row_by_id", None)
+        if (again or first_failure) and callable(lookup):
+            row = lookup(args.db, current.get("run_id"))
+            # A run recorded completed without feature-result.json skipped its gates and
+            # verified nothing (run e21573ca); it is as stopped as a failed one.
+            stopped_dir = current.get("artifacts_dir")
+            unverified = (isinstance(row, dict) and row.get("status") == "completed" and isinstance(stopped_dir, str)
+                          and bool(stopped_dir) and not (Path(stopped_dir) / "feature-result.json").is_file())
+            if not unverified and (not isinstance(row, dict) or row.get("status") not in {"failed", "cancelled"}):
+                raise FeatureChainError(f"reopen again needs the stopped {repo} run to be failed, cancelled, "
+                                        f"or completed without feature-result.json, got {(row or {}).get('status')}")
+        previous_heads = dict(prior["previous_heads"]) if again else {}
+        previous_heads.update({r: state["candidate_handoffs"][r]["candidate_head"] for r in affected if r in state["candidate_handoffs"]})
+        if first_failure and repo not in previous_heads:
+            # A first failure verified no candidate, so its "previous head" is the
+            # stage's pinned baseline, NOT the worktree HEAD: bootstrap rewrites
+            # bootstrap-head.txt to this sha, and every gate, the review diff and the
+            # candidate squash then see previous..worktree HEAD. Using the worktree
+            # HEAD would make that range empty and stop the run on
+            # `verify-only reopen has no change since previous head`.
+            previous_heads[repo] = str(state["worktrees"][repo]["baseline"])
+        stopped_artifacts = current.get("artifacts_dir")
+        evidence = reopen_evidence(stopped_artifacts)
+        if again:
+            # A stopped reopen run left no integration evidence of its own; the failure
+            # the stage still has to fix is carried forward from the prior reopen (a
+            # record from before evidence was recorded re-derives it from its run).
+            carried = prior["evidence"] if isinstance(prior.get("evidence"), list) else \
+                reopen_evidence(phase_run_artifacts(state, prior.get("stopped_run_id")))
+            evidence = carried + evidence
         record = {
             "repo": repo, "reason": reason.strip(), "affected": affected,
-            "previous_heads": {r: state["candidate_handoffs"][r]["candidate_head"] for r in affected if r in state["candidate_handoffs"]},
-            "stopped_run_id": (state.get("current_run") or {}).get("run_id"), "reopened_at": now(),
+            "previous_heads": previous_heads,
+            "stopped_run_id": current.get("run_id"), "reopened_at": now(),
+            "stopped_run_artifacts": stopped_artifacts,
+            "evidence": list(dict.fromkeys(evidence)),
         }
+        record["verify_only"] = verify_only
         for name in affected:
             state["stages"][name]["status"] = "pending"
             state["stages"][name].pop("candidate", None)
             state["candidate_handoffs"].pop(name, None)
+            # Only the reopened stage holds a hand fix. A consumer was reset because its
+            # verified input changed, so it has to be implemented again, not re-verified.
+            previous_head = record["previous_heads"].get(name) if name == repo else None
+            if verify_only and previous_head:
+                state["stages"][name]["verify_only_head"] = previous_head
+            else:
+                state["stages"][name].pop("verify_only_head", None)
+            # The reason is work for the reopened stage's implementer; a consumer's
+            # input changed, and a verify-only pass implements nothing.
+            if name == repo and not verify_only:
+                state["stages"][name]["reopen_context"] = reopen_context(record, previous_head)
+            else:
+                state["stages"][name].pop("reopen_context", None)
         state.setdefault("reopens", []).append(record)
         state["integration"] = None
         state["current_run"] = None

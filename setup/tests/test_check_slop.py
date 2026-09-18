@@ -3,6 +3,7 @@
 four guards, the legacy-excess REPORT-not-FAIL distinction, a clean fixture,
 the working-tree-vs-base..HEAD anchoring negative control, and the C-quoted
 porcelain paths that used to drop a file with a space in its name."""
+import json
 import shutil
 import subprocess
 import sys
@@ -242,6 +243,71 @@ class CheckSlopTest(unittest.TestCase):
         self.assertIn("src/new name.ts", r.stdout, r.stdout + r.stderr)
         self.assertNotIn("src/old name.ts", r.stdout)
         self.assertIn("SLOP=FAIL narrating_comment", r.stdout)
+
+    def _base_repo(self):
+        repo = self.tmp / "yagni"
+        init_repo(repo)
+        (repo / "README.md").write_text("x\n", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "base")
+        return repo, git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    def test_yagni_counts_a_same_file_reference(self):
+        # run 48c1c1c5: a DTO referenced as a property type in its own file.
+        repo, base = self._base_repo()
+        (repo / "help.dto.ts").write_text(
+            "export class SetupHomeDto {\n  url!: string;\n}\n\n"
+            "export class HelpDto {\n  home!: SetupHomeDto;\n}\n"
+            "export const unusedThing = 42;\n", encoding="utf-8")
+        (repo / "use.ts").write_text("import { HelpDto } from './help.dto';\n", encoding="utf-8")
+        r = run(repo, base)
+        self.assertNotIn("export=SetupHomeDto", r.stdout)
+        self.assertIn("export=unusedThing reason=unreferenced", r.stdout,
+                      "control: a symbol named only on its declaration line is still flagged")
+
+    def test_yagni_skips_profile_framework_loaded_files(self):
+        repo, base = self._base_repo()
+        mig = repo / "libs/data-access/src/lib/rds/migrations/1792010000000-add-x.ts"
+        mig.parent.mkdir(parents=True)
+        mig.write_text("export class AddX1792010000000 {}\n", encoding="utf-8")
+        self.assertIn("export=AddX1792010000000", run(repo, base).stdout,
+                      "control: without --repo the glob-loaded class is flagged")
+        r = run(repo, base, "--repo", "api")
+        self.assertEqual(0, r.returncode, r.stdout)
+        self.assertNotIn("yagni", r.stdout)
+
+    def test_yagni_reports_an_approved_contract_symbol_instead_of_failing(self):
+        # chain 42b42a13: the plan reserved TravelCandidatesDto on the response DTO.
+        repo, base = self._base_repo()
+        (repo / "dto").mkdir()
+        (repo / "dto" / "briefing-response.dto.ts").write_text(
+            "export class TravelCandidatesDto {}\nexport const unusedThing = 42;\n", encoding="utf-8")
+        contracts = self.tmp / "contract-symbols.json"
+        contracts.write_text(json.dumps({"contracts": [
+            {"artifact": "dto/briefing-response.dto.ts", "symbols": ["TravelCandidatesDto"]},
+            {"artifact": "dto/other.dto.ts", "symbols": ["unusedThing"]},
+        ]}), encoding="utf-8")
+        self.assertIn("SLOP=FAIL yagni file=dto/briefing-response.dto.ts line=1 export=TravelCandidatesDto",
+                      run(repo, base).stdout, "control: without the contract the export is flagged")
+        r = run(repo, base, "--contract-symbols", str(contracts))
+        self.assertIn("SLOP=REPORT yagni file=dto/briefing-response.dto.ts line=1 export=TravelCandidatesDto "
+                      "reason=approved-contract", r.stdout)
+        self.assertNotIn("SLOP=FAIL yagni file=dto/briefing-response.dto.ts line=1", r.stdout)
+        # A symbol declared for ANOTHER file does not cover this one.
+        self.assertIn("SLOP=FAIL yagni file=dto/briefing-response.dto.ts line=2 export=unusedThing", r.stdout)
+        self.assertEqual(1, r.returncode, r.stdout)
+
+    def test_an_unreadable_contract_file_keeps_the_strict_guard(self):
+        repo, base = self._base_repo()
+        (repo / "x.ts").write_text("export class Reserved {}\n", encoding="utf-8")
+        r = run(repo, base, "--contract-symbols", str(self.tmp / "missing.json"))
+        self.assertIn("SLOP=FAIL yagni file=x.ts line=1 export=Reserved", r.stdout)
+
+    def test_untracked_files_in_a_new_directory_are_scanned(self):
+        repo, base = self._base_repo()
+        (repo / "newmod" / "deep").mkdir(parents=True)
+        (repo / "newmod" / "deep" / "x.ts").write_text("export const unusedThing = 42;\n", encoding="utf-8")
+        self.assertIn("file=newmod/deep/x.ts", run(repo, base).stdout)
 
     def test_max_complexity_override(self):
         repo, base = self._dirty_repo()

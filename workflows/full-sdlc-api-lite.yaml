@@ -166,7 +166,17 @@ nodes:
       cp "$REPO_DIR/$ENV_SRC" "$WT/$ENV_SRC"
     fi
     cd "$WT" && "${CMD_INSTALL[@]}" >/dev/null
+    # A chain stage's implement node runs the approved stage verification,
+    # integration commands included, in this worktree. Resolve the profile's
+    # runtime files the same way joint-integration candidates get them (api:
+    # .env.e2e, which ENV_SRC never seeded).
+    if [ "${ARCHON_FEATURE_SCOPE-}" = repositories ]; then
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/candidate_env.py "$REPO" "$WT" "$WT" \
+        || { echo "BOOTSTRAP=FAIL stage runtime environment unresolved (CANDIDATE_ENV line above)"; exit 1; }
+    fi
     git -C "$WT" rev-parse HEAD > "$ARTIFACTS_DIR/bootstrap-head.txt"
+    # A verify-only reopen verifies previous-candidate..HEAD, not an empty diff.
+    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/verify-only-base.py "$ARTIFACTS_DIR" "$WT"
     # api_worktree is the key archon-run.py:2054 and resolve-web-params.sh:75
     # read; it keeps its name. "repo" is additive so the artifact stops
     # implying every run targets api.
@@ -191,7 +201,7 @@ nodes:
   - bootstrap
   - kb-recon-gate
   model: sonnet
-  maxBudgetUsd: 3
+  maxBudgetUsd: 10
   timeout: 1200000
   prompt: |
     You are the planning node in an unattended workflow. Ask no questions; make
@@ -374,7 +384,7 @@ nodes:
   depends_on:
   - lite-envelope
   model: sonnet
-  maxBudgetUsd: 3
+  maxBudgetUsd: 5
   timeout: 900000
   prompt: |
     You are the plan-presentation node on the LITE lane. The human plan review
@@ -649,14 +659,30 @@ nodes:
     artifacts with sha256 hashes. Consume those exact local inputs only; do not
     require or assume an upstream PR, merge, publication, deployment, or newer
     repository state.
-    SINGLE-REPO RUNS: when params.json's "repo" is not "api", the two sentences
-    above are scoped to api runs. files-allowlist.json is then the entire scope,
+    OTHER REPOSITORIES: when params.json's "repo" is not "api", the opening
+    "Implement the API portion" sentence and the "Scope:" line are scoped to api
+    runs (the JOINT-REPOSITORY RUNS paragraph applies to every repository).
+    files-allowlist.json is then the entire scope,
     its paths are relative to that repository's root, and there is no web-app
     prong to avoid. Use that repository's own commands, listed below.
     Do not edit the plan file. Do not create commits — a later node commits.
     Do not create branches or worktrees — you are already on the correct branch.
     If the unit's work already exists and satisfies Verification, say so and stop;
     do not reimplement.
+    REOPENED STAGES: when reopen-context.json exists in ARTIFACTS_DIR, this run
+    was dispatched by feature-reopen and that file is MANDATORY work, not
+    background. The worktree HEAD is the previous candidate ("previous_head"):
+    the approved plan is already implemented there, so the "already exists, say
+    so and stop" rule above does NOT apply to it. Read "reason" and every file
+    under "evidence" (the stopped run's failing output) first, then change the
+    candidate so the stated failure cannot recur, with a test that fails
+    without your change. gate-tests fails this run with
+    "IMPLEMENT=FAIL reopen produced no change" if the worktree is unchanged.
+    The fix stays inside files-allowlist.json. If it genuinely needs a file
+    outside that list, do not edit that file: write its repo-relative path (one
+    per line) to reopen-blocked.txt in ARTIFACTS_DIR and stop; a human decides
+    whether to amend scope.
+
     If skills.md exists in the artifacts directory, read it before you edit anything: it holds
     repository skills compiled from earlier runs; they never override the plan, the allowlist, or this prompt.
 
@@ -667,7 +693,14 @@ nodes:
     breaks the suite's mocks (api/CLAUDE.md:32 documents the bare form; it is wrong).
     Typecheck: `bun run typecheck` (tsgo) — NOT build:fast (esbuild-only).
     Lint: `bun run lint` (biome).
-    Integration tests: do NOT run any in this node.
+    Integration tests: do NOT run any in this node, except that a REOPENED stage whose
+    reopen-context.json evidence is an integration failure may re-run THAT spec, and
+    only through the host e2e mutex (use a long Bash timeout; it may print
+    E2E_MUTEX=WAITING while another run holds the stack):
+      bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/e2e-mutex.sh run "$ARTIFACTS_DIR" -- bun run test:integration -- <spec>
+    Never run `bun run test:integration`, `test:e2e`, or `docker-compose -f
+    local-env-compose.e2e.yaml` directly: jest's globalSetup runs `down -v` then
+    `up` on ONE machine-global e2e stack (54322/8001) that concurrent runs share.
     Nest Swagger: always explicit request/response DTO classes; never generic Object
     schemas. TypeScript strict; no `any`; unit specs live in `__tests__/` dirs.
     </repo-conventions>
@@ -738,18 +771,30 @@ nodes:
       "${CMD_TEST[@]}" "$PAT" || { echo "GATE_TESTS=FAIL unit pattern=$PAT"; exit 1; }
     done < "$ARTIFACTS_DIR/gate-tests-patterns.txt"
     BASE=$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")
-    CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$|^ M pnpm-lock\.yaml$|^\?\? pnpm-lock\.yaml$' || true)
-    if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- . ':(exclude)pnpm-lock.yaml'; then
+    # No lockfile is noise here: every repo this lane serves (repo-profile.sh) installs
+    # frozen, so lockfile-only drift is content, and check-scope.py calls it a breach.
+    CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$' || true)
+    # A feature-reopen'd stage must change its previous candidate (reopen-gate.py).
+    if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- .; then
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/reopen-gate.py "$ARTIFACTS_DIR" NO_CHANGE
       printf '{"outcome":"NO_CHANGE","repo":"%s","basis":"baseline-to-candidate content","baseline":"%s","head":"%s","pr_url":null}\n' "$REPO" "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
       echo "GATE_TESTS=PASS outcome=NO_CHANGE"
       exit 0
     fi
     printf '{"outcome":"CHANGED","repo":"%s","basis":"baseline-to-candidate content","baseline":"%s","head":"%s"}\n' "$REPO" "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
-    test -s "$ARTIFACTS_DIR/commit-msg.txt" || { echo "GATE_TESTS=FAIL no commit-msg.txt from implement"; exit 1; }
+    test -s "$ARTIFACTS_DIR/commit-msg.txt" || {
+      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/node-no-output.py "$ARTIFACTS_DIR" implement commit-msg.txt
+      echo "GATE_TESTS=FAIL no commit-msg.txt from implement"; exit 1; }
+    # Before scope: a declared reopen-blocked.txt is the actionable stop, not a breach.
+    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/reopen-gate.py "$ARTIFACTS_DIR" CHANGED
     # Scope guard: catch implement-node creep before the first review round.
     python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py \
       "$ARTIFACTS_DIR/files-allowlist.json" "$WT" "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" \
       || { echo "GATE_TESTS=FAIL scope breach"; exit 1; }
+    # A not_applicable browser policy was derived at plan time from the
+    # allowlist; what ships is the diff, so re-derive it from the diff.
+    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/browser-exemption.py diff \
+      "$ARTIFACTS_DIR" "$WT" "$BASE" || { echo "GATE_TESTS=FAIL browser exemption void"; exit 1; }
     echo "GATE_TESTS=PASS"
 - id: commit-impl
   depends_on:
@@ -763,14 +808,24 @@ nodes:
     MSG=$(head -1 "$ARTIFACTS_DIR/commit-msg.txt" 2>/dev/null || true)
     test -n "$MSG" || MSG="feat(api): $SLUG"
     BASE=$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")
-    CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$|^ M pnpm-lock\.yaml$|^\?\? pnpm-lock\.yaml$' || true)
-    if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- . ':(exclude)pnpm-lock.yaml'; then
+    # No lockfile is noise here: every repo this lane serves (repo-profile.sh) installs
+    # frozen, so lockfile-only drift is content, and check-scope.py calls it a breach.
+    CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$' || true)
+    if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- .; then
       printf '{"outcome":"NO_CHANGE","repo":"%s","basis":"baseline-to-candidate content","baseline":"%s","head":"%s","pr_url":null}\n' "$REPO" "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
       echo "COMMIT_IMPL=SKIP outcome=NO_CHANGE"
       exit 0
     fi
     python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
     git diff --cached --name-only
+    # Pin guard, AFTER git add and BEFORE git commit, so it reads the STAGED
+    # blob -- what will actually be committed, not what happens to be sitting
+    # in the worktree. A symbol the approved plan froze and this diff changed
+    # fails here with the edit left staged, which is the state the recovery
+    # recipes in RUNBOOK 3c expect. A symbol the guard cannot find is
+    # PIN_UNRESOLVED and also a stop: a silently missed span is the worse
+    # failure of the two.
+    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/pin-guard.py "$ARTIFACTS_DIR" "$BASE" || exit 1
     if git diff --cached --quiet; then echo "COMMIT_IMPL=SKIP already committed"; else git commit -m "$MSG"; fi
     test -z "$(git status --porcelain | grep -v '^?? \.env')" || { echo "COMMIT_IMPL=FAIL dirty"; exit 1; }
     echo "COMMIT_IMPL=OK sha=$(git rev-parse HEAD)"
@@ -784,100 +839,214 @@ nodes:
     - id: round-pre
       timeout: 120000
       bash: |
-        set -euo pipefail
+        set -uo pipefail
+        # STDOUT CARRIES ONE BARE JSON LINE AND NOTHING ELSE, exactly as the parent
+        # does: this overlay replaces the parent body wholesale, but it does NOT replace
+        # the sibling `review` node, whose `when: $round-pre.review == 'run'` still
+        # parses this node's output. A human line on stdout here makes that condition
+        # unparseable, and an unparseable `when:` silently skips the reviewer while the
+        # run still reports SUCCESS (RUNBOOK 3).
+        if [ -n "${ARTIFACTS_DIR-}" ]; then exec 2> >(tee -a "$ARTIFACTS_DIR/node-round-pre.out" >&2); fi
+        # The ONLY thing this lane does differently is the cap: one review round, to
+        # match the converge overlay. Seed it rather than branch on it, so the decision
+        # procedure below is byte-for-byte the parent's -- a second implementation of
+        # reuse, identity and base validation is exactly the drift the lite overlays
+        # keep producing, and it is why review-input.json has to be written by the same
+        # code on both lanes for the inherited review-gate's GATE_5 to mean anything.
+        # Seeded only when absent: an operator who raised the cap and resumed keeps it.
+        test -f "$ARTIFACTS_DIR/round-cap.txt" || echo 1 > "$ARTIFACTS_DIR/round-cap.txt"
+        # Reuse is not a lite/full distinction. A lite resume that re-reviews a candidate
+        # whose envelope already matches is the same wasted invocation it is on the full
+        # lane, and the lite lane inherits the gate, fix-plan and commit-fixer that make
+        # the completion records meaningful. What lite does not inherit is converge, so
+        # no decision.json is ever written here and the terminal-replay branch is dead
+        # code on this lane rather than a behaviour difference.
         C="$ARTIFACTS_DIR/round.txt"
         N=$(cat "$C" 2>/dev/null || echo 0)
-        # Hand-editable counter: reject junk before it is incremented or used as a path.
-        case "$N" in '') N=0 ;; *[!0-9]*) echo "ROUND_PRE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
-        # LITE lane: default cap 1 (one review round), matching the converge overlay.
-        # Durable cap, checked BEFORE the round is spent (same doctrine as plan-round-pre,
-        # full-sdlc-api.yaml: a cap enforced only in converge is walked past by resuming
-        # after every group failure). accept-residuals.txt is the human bypass.
-        R="/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-reclaim.sh"
-        N=$(bash "$R" "$ARTIFACTS_DIR" "$N" "round-" "review-summary.json" '"verdict"[[:space:]]*:[[:space:]]*"[^"]')
+        case "$N" in '') N=0 ;; *[!0-9]*) echo "ROUND_PRE=FAIL round.txt is not an integer: [$N]" >&2; exit 1 ;; esac
+        # Same durable cap as the parent, and it has to be duplicated rather than
+        # inherited because this overlay replaces the parent body wholesale. The
+        # DEFAULT differs (1, not 4) and that is the only reason this lane has an
+        # overlay at all; the seed above only bites when preflight wrote no cap file.
         CAP=$(cat "$ARTIFACTS_DIR/round-cap.txt" 2>/dev/null || echo 1)
         case "$CAP" in ''|*[!0-9]*) CAP=1 ;; esac
-        if [ "$N" -ge "$CAP" ] && [ ! -f "$ARTIFACTS_DIR/accept-residuals.txt" ]; then echo "ROUND_CAP_REACHED round=$N cap=$CAP (pre-round: a resume does not buy another review; write accept-residuals.txt or raise round-cap.txt)"; exit 1; fi
-        N=$((N+1)); echo "$N" > "$C"
-        RD="$ARTIFACTS_DIR/round-$N"; mkdir -p "$RD"
-        eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
-        cd "$WT"
-        git rev-parse HEAD > "$RD/pre-head.txt"
-        ls -1d "${CE_REVIEW_ROOT:-/tmp/compound-engineering/ce-code-review}"/*/ 2>/dev/null | LC_ALL=C sort > "$RD/prerun-dirs.txt" || true
-        touch "$RD/prerun-dirs.txt"
-        echo "ROUND=$N head=$(cat "$RD/pre-head.txt")"
+        if [ "$N" -gt "$CAP" ]; then echo "ROUND_CAP_EXCEEDED round=$N cap=$CAP (acceptance covers the cap round only; raise round-cap.txt to spend more)" >&2; exit 1; fi
+        if [ "$N" -ge "$CAP" ] && [ ! -f "$ARTIFACTS_DIR/accept-residuals.txt" ]; then echo "ROUND_CAP_REACHED round=$N cap=$CAP (pre-round: a resume does not buy another review; write accept-residuals.txt or raise round-cap.txt)" >&2; exit 1; fi
+        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py pre "$ARTIFACTS_DIR"
     - id: review
       depends_on:
       - round-pre
+      when: $round-pre.review == 'run'
+      context: fresh
       model: sonnet
-      maxBudgetUsd: 15
+      maxBudgetUsd: 20
       timeout: 1800000
       skills:
       - ce-code-review
       prompt: |
-        The repository checkout to review is the "worktree" field of
-        params.json in the directory named by the ARTIFACTS_DIR environment
-        variable (you are NOT cwd'd there — cd into it for every git
-        command). It is already on the branch to be reviewed.
+        YOUR FIRST ACTION, before reading anything else, is to run exactly:
+          python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py mark "$ARTIFACTS_DIR" review-start
+        YOUR LAST ACTION, after your output is complete, is to save the envelope and run
+        exactly:
+          python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py mark "$ARTIFACTS_DIR" review-done <path to the envelope you wrote>
+        The envelope on disk is what every downstream gate reads; a review that ends
+        without that second call is an interrupted review and the next round re-runs it,
+        so the whole invocation is wasted.
 
-        Resolve the artifacts directory by running: echo "$ARTIFACTS_DIR"
+        YOU ARE READ-ONLY. Do not edit, create, delete or revert any file in the
+        worktree, and do not commit. The gate takes a tree snapshot before you start and
+        compares it after, so an edit made here is not an unreviewed fix that slips
+        through -- it fails the round.
 
-        Persona selection happens in this session, so three instructions
-        BEFORE you invoke the skill:
-        - Measure the diff first: in the worktree, run
-          git diff --stat "$(cat <that directory>/bootstrap-head.txt)"..HEAD
-          Size the review on PRODUCTION churn: count changed lines EXCLUDING
-          test/spec files, generated files, and lockfiles — the same basis
-          ce-code-review's own catalog sizes a review on. Test volume is proof
-          of the change, not production risk surface, so counting it inflates
-          the persona fan-out exactly where the tests are most thorough.
-          Under roughly 150 production lines, cap the conditional personas at
-          3 beyond the always-on set, and record the decision (production
-          lines, total lines, cap applied or not, personas chosen) in the
-          envelope's Coverage section so the choice is observable.
-        - Task one reviewer lens with exactly this: "extract the
-          assumptions this diff encodes — in-diff comments are the primary
-          source — and verify each against out-of-diff code; report
-          mismatches as findings." Feed its findings through the skill's
-          normal merge pipeline like any other reviewer's.
-        - If waivers.json exists in the artifacts directory, read that ledger first.
-          A finding whose normalized key matches a ledger entry goes under a
-          "Previously waived" heading in the envelope — NOT as a new actionable
-          finding — unless the reviewer states specific new evidence that was
-          absent when the waiver was recorded.
+        SCOPE OF THIS ROUND. Read round.txt in the artifacts directory for the current
+        round number N, then read round-N/review-scope.txt. If it reads `verify`, this
+        round does not rediscover the candidate: read
+        /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/prompts/review-verify.md and follow it instead of everything
+        below, which is the `full` scope. Absent or `full`, continue here.
 
-        Then invoke the ce-code-review skill with arguments exactly:
-          mode:headless base:origin/main plan:<that directory>/plan.md
-        Do not expand scope beyond the diff against that base.
-        The staged ce-code-review may be either contract generation: CE 3.2.0's
-        markdown headless envelope, or the newer agent-JSON contract (there
-        mode:headless aliases mode:agent and the skill returns ONE raw JSON
-        object with status and verdict fields). Invoke with the same
-        arguments either way and relay the skill's full return VERBATIM
-        (envelope or raw JSON) as part of your output.
-        Do not return until every persona the skill dispatched has reported.
-        A relayed envelope that stops mid-fan-out, or that carries an empty
-        verdict, is not a completed review: the round is billed and every
-        downstream gate rejects it. If a persona cannot finish, say which one
-        and why in the envelope and still emit a verdict. External/cross-model
-        review is PROHIBITED in this unattended pipeline: never send the
-        diff to any external peer, regardless of what the skill's own
-        references permit.
+        You are the review session for one round of the Archon review loop, running
+        `mode:ce`. This mode is the existing `ce-code-review` skill invocation, with the
+        skill's own persona selection and its own validator pass, exactly as the v1
+        lane ran it. Nothing about the skill's coverage is reduced; what this mode adds
+        is the round's execution contract (the marks, the read-only rule, the envelope
+        identity lines) so the loop can reuse the review instead of re-running it.
+
+        Read `/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/review-contract.md` now. It is the contract; everything below is
+        how this mode implements it. Where the two disagree, the contract wins.
+
+        YOUR FIRST ACTION, before reading anything else, is exactly:
+
+            python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py mark "$ARTIFACTS_DIR" review-start
+
+        YOUR LAST ACTION, after the envelope file is written, is exactly:
+
+            python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py mark "$ARTIFACTS_DIR" review-done "$ARTIFACTS_DIR/round-$N/review-envelope.txt"
+
+        You are read-only in the candidate worktree (contract section 1). `review-gate`
+        compares the tree before and after this session; an edit fails the round. The
+        skill's autofix path is prohibited here: invoke it in report-only terms and
+        apply nothing.
+
+        ## Step 1 — locate the round
+
+            echo "$ARTIFACTS_DIR"
+            N=$(cat "$ARTIFACTS_DIR/round.txt")
+
+        Read from `$ARTIFACTS_DIR/round-$N/`:
+
+        - `review-input.json` — the review id goes into the envelope's `Input:` verbatim.
+        - `review-scope.txt` — `full` for this mode.
+        - `review-base.txt` — the base sha.
+
+        The worktree to review is the `worktree` field of `$ARTIFACTS_DIR/params.json`.
+        You are NOT cwd'd there: `cd` into it for every git command.
+
+        ## Step 2 — persona selection is the skill's
+
+        Let `ce-code-review` select its always-on and conditional personas by its own
+        rules for this diff, and run its validator pass. Do not cap the set below what
+        the skill's own sizing rule gives: a measured fixed cap (three personas) saved
+        no wall time and lost a P1 the full set had found.
+
+        Measure the diff first: in the worktree, run
+        `git diff --stat <base>..HEAD` with the base from `review-base.txt`.
+        Size the review on PRODUCTION churn: count changed lines EXCLUDING
+        test/spec files, generated files, and lockfiles — the same basis
+        ce-code-review's own catalog sizes a review on. Test volume is proof
+        of the change, not production risk surface, so counting it inflates
+        the persona fan-out exactly where the tests are most thorough.
+        Under roughly 150 production lines, cap the conditional personas at
+        3 beyond the always-on set, and record the decision (production
+        lines, total lines, cap applied or not, personas chosen) in the
+        envelope's Coverage section so the choice is observable.
+
+        ## Step 3 — invoke the skill
+
+            ce-code-review  mode:headless  base:<the sha from review-base.txt>  plan:$ARTIFACTS_DIR/plan.md
+
+        with these instructions carried into the invocation:
+
+        - Do not expand scope beyond `<base>..HEAD`.
+        - Findings carry the extra field `finding_id` computed as contract section 4
+          defines. Every finding cites a `file` and `line` that exists at Head.
+        - Contract section 3 governs pinned decisions: read `pinned_decisions` from
+          `$ARTIFACTS_DIR/joint-plan.json` verbatim and route anything a pin covers to
+          the `Pinned decisions` heading as advisory, whatever its severity.
+        - If `$ARTIFACTS_DIR/waivers.json` or the previous round's
+          `$ARTIFACTS_DIR/round-$((N-1))/ledger.json` exists, read it first. A finding
+          whose `finding_id` matches an entry there goes under `Previously waived`, not
+          into the actionable set, unless the reviewer states specific new evidence that
+          was absent when the entry was recorded.
+        - External or cross-model review is prohibited, regardless of what the skill's
+          own references permit.
+
+        The staged skill may be either contract generation: CE 3.2.0's markdown headless
+        envelope, or the newer agent-JSON contract where `mode:headless` aliases
+        `mode:agent` and the skill returns one raw JSON object. Invoke with the same
+        arguments either way.
+
+        Do not return until every persona the skill dispatched has reported, and until
+        the validator pass has run. A relayed envelope that stops mid-fan-out, or that
+        carries an empty verdict, is not a completed review: the round is billed and
+        every downstream gate rejects it. If a persona cannot finish, say which one and
+        why in the envelope and still emit a verdict.
+
+        ## Step 4 — write the envelope
+
+        Not before now: after the skill has returned and its validator pass has run. An
+        envelope written mid-fan-out is a billed round whose gate cannot tell it from a
+        finished one.
+
+        Relay the skill's full return verbatim, write it to
+        `$ARTIFACTS_DIR/round-$N/review-envelope.txt`, and append the footer below. Its
+        final six lines are exactly, one per line, nothing after them:
+
+            Scope: full
+            Base: <base sha>
+            Head: <head sha>
+            Input: <the review id from review-input.json>
+            Verdict: <Ready to merge|Ready with fixes|Not ready>
+            Review complete
+
+        The verdict is the skill's, mapped into the enum unchanged. `Not ready` asserts
+        an open P0 or P1; do not emit it otherwise — the round stops with
+        `NOT_READY_WITHOUT_BLOCKER`.
+
+        Then run the `mark review-done` command from the top of this prompt.
+
+        If a persona cannot finish, say which one and why in the envelope and still emit
+        the footer.
     - id: review-gate
       depends_on:
       - review
+      trigger_rule: all_done
       timeout: 300000
       bash: |
         set -uo pipefail
         if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-review-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-review-gate.out" >&2); fi
         N=$(cat "$ARTIFACTS_DIR/round.txt"); RD="$ARTIFACTS_DIR/round-$N"
         case "$N" in ''|*[!0-9]*) echo "REVIEW_GATE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
-        OUT=$review.output
+        # The reviewer writes the envelope itself (`mark review-done`), so the
+        # file is the primary source and the node output is the belt. The
+        # reference is made with `set +u` because `review` may have been
+        # SKIPPED this round: what the engine substitutes for a skipped node's
+        # output template is not documented, and an unset expansion under
+        # `set -u` would abort this node before it printed any typed line.
+        # Both outcomes -- substituted-empty and left-literal -- land on the
+        # short-string branch below, where the disk copy wins.
+        set +u; OUT=$review.output; set -u
         # Resume resilience: node outputs may not survive a resume; the envelope file does.
-        if [ "${#OUT}" -lt 100 ] && [ -s "$RD/review-envelope.txt" ]; then
-          OUT=$(cat "$RD/review-envelope.txt")
+        # The node output only fills a MISSING envelope. In mode:ce the reviewer
+        # writes the file and marks it done while its session output is
+        # narration; overwriting the file with that output erased every
+        # footer line and failed GATE_5 on run 44483cda. A stale envelope from
+        # an earlier attempt cannot pass instead: GATE_5 binds the file to the
+        # current review id and generation.
+        if [ ! -s "$RD/review-envelope.txt" ] && [ "${#OUT}" -ge 100 ]; then
+          printf '%s\n' "$OUT" > "$RD/review-envelope.txt"
         fi
-        printf '%s\n' "$OUT" > "$RD/review-envelope.txt"
+        test -s "$RD/review-envelope.txt" || { echo "REVIEW_GATE=FAIL round=$N no envelope at round-$N/review-envelope.txt"; exit 1; }
+        OUT=$(cat "$RD/review-envelope.txt")
         # Dual-contract parse: CE 3.2.0's markdown headless envelope OR the
         # newer skills' single raw JSON object (status/verdict fields).
         eval "$(python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/parse-review-envelope.py "$RD/review-envelope.txt" | sed 's/^/ENV_/')"
@@ -889,9 +1058,21 @@ nodes:
         # then diffs against a foreign list — silently picking the wrong
         # ce-code-review run directory to read the verdict from.
         ls -1d "${CE_REVIEW_ROOT:-/tmp/compound-engineering/ce-code-review}"/*/ 2>/dev/null | LC_ALL=C sort > "$RD/post-dirs.txt" || true
-        NEW=$(comm -13 "$RD/prerun-dirs.txt" "$RD/post-dirs.txt")
+        # No baseline, no scan. prerun-dirs.txt is the list of ce-code-review
+        # run directories that existed BEFORE the reviewer started, and the
+        # whole point of the comm is that a directory is only this round's if
+        # it appeared after that moment. Treating a missing baseline as an
+        # empty one would make every directory on the host look new, which is
+        # precisely the foreign-verdict failure the comment above describes —
+        # so the scan is skipped instead and the verdict comes from the
+        # envelope, which is the skill's primary handoff anyway.
         PREHEAD=$(cat "$RD/pre-head.txt")
-        VERDICT=""; RUNDIR=""
+        VERDICT=""; RUNDIR=""; NEW=""
+        if [ -f "$RD/prerun-dirs.txt" ]; then
+          NEW=$(comm -13 "$RD/prerun-dirs.txt" "$RD/post-dirs.txt")
+        else
+          echo "GATE_3_baseline_absent=SKIP (no prerun-dirs.txt; verdict from the envelope)"
+        fi
         for d in $NEW; do
           M="$d/metadata.json"; test -f "$M" || continue
           SHA=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('head_sha',''))" "$M" 2>/dev/null)
@@ -917,30 +1098,68 @@ nodes:
         DEGRADED=true; test "$G2" = PASS && DEGRADED=false
         python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/write-review-summary.py \
           "$RD/review-summary.json" "$VERDICT" "$DEGRADED"
-        test "$G1" = PASS && test "$G2" = PASS && test "$G3" = PASS || { echo "REVIEW_GATE=FAIL round=$N"; exit 1; }
+        # The resolved verdict, so every later reader takes the SAME value
+        # this gate typed rather than re-deriving it from a ce-code-review run
+        # directory that no longer exists after a resume.
+        printf '%s\n' "$VERDICT" > "$RD/review-verdict.txt"
+        # Envelope shape first: an envelope that is incomplete, degraded, or
+        # carries a verdict outside the enum is not a review, so it must never
+        # reach the identity gate. And it must not leave a STALE review.ok
+        # behind either -- a previous attempt's authorization outliving the
+        # attempt that replaced it is how a repair gets made for one envelope
+        # generation and committed under another. The failure is therefore
+        # recorded THROUGH the helper (`gate --fail`), which writes gate.txt
+        # and deletes review.ok, rather than by exiting here.
+        if ! { test "$G1" = PASS && test "$G2" = PASS && test "$G3" = PASS; }; then
+          python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py gate "$ARTIFACTS_DIR" --fail "envelope g1=$G1 g2=$G2 g3=$G3"
+          exit 1
+        fi
+        # Everything that is state rather than parsing: GATE_5 (the envelope's
+        # Input: is this round's review identity and its Head: is the recorded
+        # candidate -- v1's GATE_4 compared a Scope STRING, which since 789b2a1
+        # labels the bootstrap-head comparison `delta` and is ambiguous), the
+        # read-only guard against the pre-review tree snapshot, gate.txt, the
+        # ledger merge, and review.ok -- the ONLY artifact downstream nodes
+        # accept as authorization. review-summary.json stays readable either
+        # way, which is exactly why a readable Ready summary is not enough.
+        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py gate "$ARTIFACTS_DIR" || exit 1
         echo "REVIEW_GATE=PASS round=$N"
-    - id: commit-fixes
+    - id: fix-plan
       depends_on:
       - review-gate
-      timeout: 300000
+      timeout: 120000
       bash: |
-        set -euo pipefail
-        eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
-        cd "$WT"
-        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
-        if git diff --cached --quiet; then echo "COMMITTED=NO"; else
-          git commit -m "fix(review): apply autofix feedback"; echo "COMMITTED=YES sha=$(git rev-parse HEAD)"
-        fi
-        echo "COMMIT_FIXES=OK"
+        set -uo pipefail
+        # JSON only on stdout: `fixer`'s `when:` parses it. Same contract, and
+        # the same silent-skip failure mode, as round-pre above.
+        if [ -n "${ARTIFACTS_DIR-}" ]; then exec 2> >(tee -a "$ARTIFACTS_DIR/node-fix-plan.out" >&2); fi
+        # Decides run / reuse-committed / reuse-uncommitted / unauthorized from
+        # the round's completion records, bound to the gated envelope
+        # generation in review.ok. A repair made for an earlier generation --
+        # before a rejection or a failed gate -- is never reused even when the
+        # review identity is unchanged, and an unaccounted edit to the tree is
+        # FIXER_TREE_DRIFT rather than a silent re-run over someone's work.
+        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py fix-plan "$ARTIFACTS_DIR"
     - id: fixer
       depends_on:
-      - commit-fixes
+      - fix-plan
+      when: $fix-plan.fixer == 'run'
       model: sonnet
-      maxBudgetUsd: 5
+      maxBudgetUsd: 8
       timeout: 1200000
       prompt: |
         You are the fixer node in an unattended review-fix pipeline. Ask no questions.
         Resolve the artifacts directory by running: echo "$ARTIFACTS_DIR"
+        YOUR FIRST ACTION, before reading or editing anything, is to run exactly:
+          python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py mark "$ARTIFACTS_DIR" repair-start
+        From that call onwards the worktree is yours: partial edits are your
+        provenance, which is what lets an interrupted repair RESUME over its
+        own half-finished tree instead of being read as an unreviewed change.
+        Skipping it means your first edit fails the round.
+        YOUR LAST ACTION, after the result file is written, is to run exactly:
+          python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py mark "$ARTIFACTS_DIR" repair-done
+        That records the durable completion of this repair. Without it the
+        commit step reports FIXER_INCOMPLETE and your work is re-attempted.
         Read the current round number from round.txt in that directory, then read
         the review envelope at round-<N>/review-envelope.txt there.
         The envelope is either CE 3.2.0's markdown headless envelope or the
@@ -957,6 +1176,20 @@ nodes:
           manual, write the JSON result with all arrays empty (advisory may list P3
           waivers) and stop. Do not invent work.
         - Fix unresolved P0-P2 gated_auto/manual findings by editing repository files.
+        - P0 and P1 are ALWAYS applied. P2 is applied ONLY when the finding
+          carries a "suggested_fix" and that fix adds no method, no exported
+          symbol, and no call into a pinned symbol. Every other P2 goes in
+          "advisory" with its action starting "Deferred:" and one line saying
+          which of those three it would have added. This is not triage by
+          taste: a P2 whose repair grows the design turns the next round into
+          a full re-discovery, and in v1 that is what turned a two-round loop
+          into seven.
+        - When a P0/P1 repair DOES add a method, an exported symbol, or a call
+          into a pinned symbol, apply it and set "design_expanded": true on
+          that entry. Saying so costs the next round a full review instead of
+          a verification pass, which is the correct price: a verification pass
+          re-checks the findings it was given and cannot see an assumption the
+          new behaviour broke outside its hunks.
         - P3/advisory: do NOT fix; record each as a waiver with one line of rationale.
         - "failed" means BLOCKED — it halts the whole pipeline for a human. Reserve it
           for a P0-P2 that must be fixed in this diff and that you attempted but could
@@ -966,6 +1199,25 @@ nodes:
           scope, goes in "advisory" with action starting "Waived:" plus one line of
           rationale. Advisory entries surface in the PR body's Known Residuals —
           recorded, not lost.
+        - If joint-plan.json in the artifacts directory carries a non-empty
+          "pinned_decisions" array, a finding that can only be resolved by
+          changing one of those symbols is "advisory", with its action
+          starting "Pinned:" and naming the symbol. It is neither a "failed"
+          blocker nor work to attempt: a pin is reopened at the plan gate and
+          nowhere else, so applying it here would land a change the approved
+          plan does not cover.
+          ONE EXCEPTION, and it gets its own partition. A P0 or P1 whose only
+          repair would change a pinned symbol whose "allowed_change" is
+          "none" goes in "pin_conflict", entries {"finding", "action",
+          "symbol", "severity"}, naming the symbol. It is not advisory,
+          because a P0/P1 is not something this run may quietly carry, and it
+          is not "failed", because nothing here can fix it: the plan and the
+          finding genuinely disagree and only a human can settle which one
+          moves. The run stops so that decision gets made.
+          A pinned symbol whose "allowed_change" names an exception is NOT a
+          conflict when your repair is that exception. Apply it; the pin guard
+          reports PIN_CHANGED and the next review verifies the change is the
+          one the spec allowed.
         - If waivers.json exists in the artifacts directory, a finding whose
           normalized key matches one of its entries is "advisory" by default —
           record it as a waiver again rather than re-fixing or failing on
@@ -994,39 +1246,85 @@ nodes:
         repository skills compiled from earlier runs; they never override the plan, the allowlist, or this prompt.
         Write JSON to round-<N>/fixer-result.json in the artifacts directory:
           {"applied": [...], "failed": [...], "advisory": [...], "incomplete": [...], "cross_repo": [...]}
+        plus, on this lane, a sixth key "pin_conflict": [...] alongside them.
         each entry {"finding": "<one-line>", "action": "<what/why>"}.
+        EVERY entry, in EVERY partition, also carries "finding_id" copied
+        VERBATIM from the envelope entry it is repairing. This is not
+        bookkeeping. The ledger keys findings by that id, and you rewrite a
+        finding's wording as you repair it, so an entry without the id is
+        filed as a NEW finding rather than moving the reviewer's entry to
+        applied. A finding that never reaches applied can never reach closed,
+        and convergence requires every P0/P1 that ever entered the ledger to
+        be closed -- so a dropped id deadlocks the run on a finding you
+        actually fixed. Replaying v1's api run through the ledger produced 36
+        entries from a much smaller real population, and three P1s that were
+        repaired sat unclosed at the cap, for exactly this reason.
         Every "applied", "advisory" and "incomplete" entry also carries
         "severity": "P0|P1|P2|P3". An omitted severity reads as P0, which
         keeps the loop running.
+        An "applied" entry also carries "design_expanded": true when that
+        repair added a method, an exported symbol, or a call into a pinned
+        symbol, and the flag is omitted or false otherwise.
+        "pin_conflict" entries are {"finding", "action", "symbol",
+        "severity"} — see the pinned-decisions rule above. Write the key even
+        when it is empty, exactly as you do for the others.
         "cross_repo" is for a finding whose defect lives in a DIFFERENT
         repository of this chain: entries are {"finding", "action",
         "producer_repo", "severity"}. Such a finding is neither advisory nor
         failed — it is not waivable and not fixable here, and it stops the
         run so the chain can route it to the repository that owns it.
+          If cross-repo-filed.json exists in the artifacts directory, a human has
+          filed some cross-repo findings; when you raise one of those same defects
+          again, copy its "finding" and "producer_repo" VERBATIM from
+          cross-repo-findings.json or the earlier round's fixer-result.json so its
+          acknowledgement still matches. Never create or edit cross-repo-filed.json.
         Writing the JSON result file is MANDATORY and comes BEFORE your final line —
         ending without it aborts the pipeline. Write it even when all arrays are
         empty. Then end with the single line: FIXER_DONE
     - id: commit-fixer
       depends_on:
       - fixer
+      trigger_rule: all_done
       timeout: 300000
       bash: |
-        set -euo pipefail
+        set -uo pipefail
+        if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-commit-fixer.out") 2> >(tee -a "$ARTIFACTS_DIR/node-commit-fixer.out" >&2); fi
+        # In order, each step idempotent so a kill anywhere is recovered by
+        # re-running this node or by round-pre's pending-commit reconciliation:
+        # validate the fixer's durable completion record, merge its result into
+        # the ledger, run the pin guard ON THE STAGED INDEX (what will actually
+        # be committed, not what happens to be in the worktree), then either
+        # attest a no-change result without an empty commit or commit and
+        # attest the new HEAD.
         eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
         cd "$WT"
+        # Staging comes FIRST and stays in the node: check-scope.py is what
+        # decides which paths may be staged at all, and the pin guard inside
+        # the helper reads the staged index. A pin guard run before staging
+        # would be reading the wrong tree.
         python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
-        if git diff --cached --quiet; then echo "COMMITTED=NO"; else
-          git commit -m "fix(review): apply fixer feedback"; echo "COMMITTED=YES sha=$(git rev-parse HEAD)"
-        fi
-        echo "COMMIT_FIXER=OK"
+        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py commit-fixer "$ARTIFACTS_DIR"
     - id: converge
       depends_on:
       - commit-fixer
+      trigger_rule: all_done
       timeout: 300000
       bash: |
         set -uo pipefail
         N=$(cat "$ARTIFACTS_DIR/round.txt"); RD="$ARTIFACTS_DIR/round-$N"
         exec > >(tee "$RD/converge.txt") 2>&1
+        # AUTHORIZATION, and it is load-bearing on THIS lane specifically. converge now
+        # carries trigger_rule: all_done, because the group's last node is the only one
+        # whose completion promise the engine honours (probe 4). That also means it runs
+        # after a FAILED upstream -- and v1's safety here was accidental: a failed
+        # review-gate used to skip every node behind it, converge included. It no longer
+        # does. review-summary.json is written before the gate's final checks and stays
+        # readable with a Ready verdict, so reading that alone would converge a round
+        # whose review was never gated. The parent's converge checks this inside
+        # round-state.py; this overlay replaces the parent body wholesale, so it has to
+        # check it here or not at all.
+        test -f "$RD/review.ok" || { echo "REVIEW_UNAUTHORIZED round=$N (no gated review envelope)"; exit 1; }
+        test -f "$RD/fixer.ok" || { echo "FIXER_ABSENT round=$N (commit-fixer left no attestation)"; exit 1; }
         eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
         cd "$WT"
         V=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['verdict'])" "$RD/review-summary.json" 2>/dev/null || echo UNKNOWN)
@@ -1043,13 +1341,15 @@ nodes:
           "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" --round "$N" || exit 1
         if [ "$FIXOK" = NO ]; then echo "FIXER_BLOCKED round=$N $FIXMSG"; exit 1; fi
         # Cross-repo stop: a finding owned by another repository of this chain is
-        # not waivable here, so it must never reach update-waivers.py.
-        CROSSN=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1])).get('cross_repo') or []))" "$RD/fixer-result.json" 2>/dev/null || echo 0)
-        if [ "$CROSSN" != 0 ]; then
-          REPOS=$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]))['cross_repo'];json.dump(d,open(sys.argv[2],'w'),indent=1);print(','.join(sorted({str(e.get('producer_repo','?')) for e in d})))" "$RD/fixer-result.json" "$ARTIFACTS_DIR/cross-repo-findings.json")
-          echo "CROSS_REPO_FINDING round=$N count=$CROSSN repos=$REPOS"
+        # not waivable here, so it must never reach update-waivers.py unresolved. The
+        # only resolution is a human recording where it was filed in
+        # cross-repo-filed.json (cross-repo-keys.py prints the keys).
+        if ! CROSS=$(python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --gate "$RD/fixer-result.json"); then
+          printf '%s\n' "$CROSS" | sed '$d'
+          echo "CROSS_REPO_FINDING round=$N $(printf '%s\n' "$CROSS" | tail -n 1)"
           exit 1
         fi
+        [ -z "$CROSS" ] || printf '%s\n' "$CROSS"
         # Waiver ledger: record this round's advisory declines so later rounds
         # do not re-litigate them without new evidence.
         python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/update-waivers.py \
@@ -1133,8 +1433,18 @@ nodes:
     case "$N" in ''|*[!0-9]*) echo "EXIT_GATE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
     # Cross-repo belt: converge's stop is bypassable by a resume, and the
     # accept-residuals branch below skips the fixer re-check entirely.
-    CROSSN=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1])).get('cross_repo') or []))" "$RD/fixer-result.json" 2>/dev/null || echo 0)
-    test "$CROSSN" = 0 || { echo "EXIT_GATE=FAIL CROSS_REPO_FINDING round=$N count=$CROSSN"; exit 1; }
+    # Only a human acknowledgement in cross-repo-filed.json resolves an entry.
+    CROSS=$(python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --gate "$RD/fixer-result.json") \
+      || { printf '%s\n' "$CROSS" | sed '$d'; echo "EXIT_GATE=FAIL CROSS_REPO_FINDING round=$N $(printf '%s\n' "$CROSS" | tail -n 1)"; exit 1; }
+    [ -z "$CROSS" ] || printf '%s\n' "$CROSS"
+    # AUTHORIZATION, and it comes before everything the operator can waive.
+    # review-summary.json is written BEFORE review-gate's final checks and
+    # stays readable with a Ready verdict, so reading the verdict alone lets a
+    # resume that walked past converge's stop reach ship on a round no gate
+    # ever passed. review.ok for the current identity and fixer.ok at HEAD are
+    # the only things that say otherwise, and accept-residuals waives the
+    # VERDICT, never this.
+    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py exit-check "$ARTIFACTS_DIR" || exit 1
     # A human accepting residuals waives the verdict and fixer checks — never
     # the clean-tree, scope, or unit-test checks (accepted findings, not a broken tree).
     if [ -f "$ARTIFACTS_DIR/accept-residuals.txt" ]; then
@@ -1149,10 +1459,19 @@ nodes:
     python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py \
       "$ARTIFACTS_DIR/files-allowlist.json" "$WT" "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" \
       || { echo "EXIT_GATE=FAIL scope breach"; exit 1; }
+    # Browser exemption belt: the fixer and a widened allowlist can both move
+    # the diff onto a browser surface after gate-tests derived the exemption.
+    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/browser-exemption.py diff \
+      "$ARTIFACTS_DIR" "$WT" "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" \
+      || { echo "EXIT_GATE=FAIL browser exemption void"; exit 1; }
     # Reader-audit belt: declared columns must have a passing result on disk.
     NC=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1]))['columns']))" "$ARTIFACTS_DIR/reader-audit.json" 2>/dev/null || echo 0)
-    if [ "$NC" != 0 ]; then
+    DERIVE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('derive',''))" "$ARTIFACTS_DIR/reader-audit.json" 2>/dev/null || echo "")
+    if [ "$NC" != 0 ] || [ "$DERIVE" = stage-diff ]; then
       test -s "$ARTIFACTS_DIR/reader-audit-result.json" || { echo "EXIT_GATE=FAIL READER_AUDIT_FAIL missing reader-audit-result.json"; exit 1; }
+      if [ "$DERIVE" = stage-diff ]; then
+        python3 -c "import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get('derived') is True else 1)" "$ARTIFACTS_DIR/reader-audit-result.json" || { echo "EXIT_GATE=FAIL READER_AUDIT_FAIL stage-diff audit result is not marked derived"; exit 1; }
+      fi
       python3 -c "import json,sys; cols=json.load(open(sys.argv[1]))['columns']; aff=[r for c in cols for r in c.get('readers',[]) if r.get('class')=='affected']; sys.exit('affected readers: %s' % aff) if aff else None" "$ARTIFACTS_DIR/reader-audit-result.json" || { echo "EXIT_GATE=FAIL READER_AUDIT_FAIL affected reader"; exit 1; }
     fi
     # Materialize-then-`test -s`, same as gate-tests and deslop-recheck: a process
@@ -1282,6 +1601,10 @@ nodes:
     must say exactly: "No additional operational monitoring required."
     Mention verification evidence: unit gate, typecheck, lint, and the live
     smoke result exactly as recorded in smoke-result.txt in that directory.
+    After those sections, run: python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --prbody
+    When it prints anything, append that output VERBATIM as the last section of
+    pr-body.md (the "## Cross-repo findings filed" section: defects in other
+    repositories a human filed instead of fixing here).
     No co-author or attribution lines. End with the single line: PRBODY_WRITTEN
 - id: prbody-gate
   depends_on:
