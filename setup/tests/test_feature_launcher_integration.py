@@ -258,6 +258,51 @@ class FeatureLauncherIntegrationTest(unittest.TestCase):
         self.assertEqual("1", expanded["HAS_SMOKE"])
         self.assertEqual(str(params["api_port"]), expanded["APIPORT"])
 
+    def test_single_repo_web_chain_gets_the_web_port_its_profile_requires(self):
+        self.init_repo("web-app")
+        args = Namespace(**dict(vars(self.args), provider="claude", db=self.root / "archon.db"))
+        with sqlite3.connect(args.db) as con:
+            con.execute("CREATE TABLE remote_agent_workflow_run_node_sessions "
+                        "(workflow_run_id TEXT, provider TEXT, node_id TEXT, provider_session_id TEXT)")
+            con.execute("CREATE TABLE remote_agent_workflow_events "
+                        "(workflow_run_id TEXT, created_at TEXT, event_type TEXT, node_name TEXT, payload TEXT)")
+        state = fc.write_state(self.control, fc.make_initial_state(self.host, args, ["web-app"]))
+        fc.budget_init(args, state)
+
+        def dispatch_feature_phase(host_args, lane, message, env):
+            row = self.row("d" * 32, self.root / "artifacts" / "web-planning", lane=lane)
+            fc.before_dispatch_bind(self.host, host_args, row)
+            return row
+
+        self.host.dispatch_feature_phase = dispatch_feature_phase
+        fc.dispatch_planning(self.host, args, state)
+        params_path = self.root / "artifacts" / "web-planning" / "params.json"
+        params = read_json(params_path)
+        self.assertEqual("web-app", params["repo"])
+        self.assertIn("web_port", params)
+        self.assertIn("api_port", params)
+
+    def test_base_pins_the_worktree_to_a_local_parent_commit(self):
+        mcp = self.root / "goodword-mcp"
+        parent = git(mcp, "rev-parse", "HEAD")
+        (mcp / "later.txt").write_text("later\n", encoding="utf-8")
+        git(mcp, "add", "later.txt")
+        git(mcp, "commit", "-qm", "later")
+        args = Namespace(**dict(vars(self.args), base=[f"goodword-mcp={parent}"]))
+        state = fc.make_initial_state(self.host, args, ["goodword-mcp"])
+        worktree = Path(state["worktrees"]["goodword-mcp"]["worktree"])
+        self.assertEqual(parent, state["baselines"]["commits"]["goodword-mcp"])
+        self.assertEqual(parent, git(worktree, "rev-parse", "HEAD"))
+        self.assertFalse((worktree / "later.txt").exists())
+
+    def test_base_outside_scope_or_missing_sha_is_refused(self):
+        args = Namespace(**dict(vars(self.args), base=["api=" + "a" * 40]))
+        with self.assertRaisesRegex(fc.FeatureChainError, "outside selected scope"):
+            fc.make_initial_state(self.host, args, ["goodword-mcp"])
+        args = Namespace(**dict(vars(self.args), base=["goodword-mcp=" + "a" * 40]))
+        with self.assertRaisesRegex(fc.FeatureChainError, "not a local commit"):
+            fc.make_initial_state(self.host, args, ["goodword-mcp"])
+
 
 if __name__ == "__main__":
     unittest.main()

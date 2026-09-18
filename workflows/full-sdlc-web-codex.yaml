@@ -856,11 +856,16 @@ nodes:
         if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-review-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-review-gate.out" >&2); fi
         N=$(cat "$ARTIFACTS_DIR/round.txt"); RD="$ARTIFACTS_DIR/round-$N"
         case "$N" in ''|*[!0-9]*) echo "REVIEW_GATE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
-        OUT=$review.output
-        if [ "${#OUT}" -lt 100 ] && [ -s "$RD/review-envelope.txt" ]; then
-          OUT=$(cat "$RD/review-envelope.txt")
+        set +u; OUT=$review.output; set -u
+        # The node output only fills a MISSING envelope. In mode:ce the reviewer
+        # writes the file and marks it done while its session output is
+        # narration; overwriting the file with that output erased every
+        # footer line and failed GATE_5 on run 44483cda.
+        if [ ! -s "$RD/review-envelope.txt" ] && [ "${#OUT}" -ge 100 ]; then
+          printf '%s\n' "$OUT" > "$RD/review-envelope.txt"
         fi
-        printf '%s\n' "$OUT" > "$RD/review-envelope.txt"
+        test -s "$RD/review-envelope.txt" || { echo "REVIEW_GATE=FAIL round=$N no envelope at round-$N/review-envelope.txt"; exit 1; }
+        OUT=$(cat "$RD/review-envelope.txt")
         # Dual-contract parse: CE 3.2.0's markdown headless envelope OR the
         # newer skills' single raw JSON object (status/verdict fields).
         eval "$(python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/parse-review-envelope.py "$RD/review-envelope.txt" | sed 's/^/ENV_/')"

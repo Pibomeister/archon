@@ -44,16 +44,13 @@ if [ -n "$(port_pids "$PORT")" ]; then
   echo "JOINT_E2E=FAIL port $PORT already in use"; exit 1
 fi
 
-if [ ! -f "$API_WT/.env" ]; then
-  test -f "$ENV_SRC/.env" || { echo "JOINT_E2E=FAIL no api .env at $ENV_SRC/.env"; exit 1; }
-  cp "$ENV_SRC/.env" "$API_WT/.env"
-fi
-if [ ! -d "$API_WT/node_modules" ]; then
-  (cd "$API_WT" && bun install --frozen-lockfile > "$OUT/api-install.log" 2>&1) || { echo "JOINT_E2E=FAIL api install (see $OUT/api-install.log)"; exit 1; }
-fi
-if [ ! -d "$MCP_WT/node_modules" ]; then
-  (cd "$MCP_WT" && mise x node@20 -- pnpm install --frozen-lockfile > "$OUT/mcp-install.log" 2>&1) || { echo "JOINT_E2E=FAIL mcp install (see $OUT/mcp-install.log)"; exit 1; }
-fi
+SETUP="$(cd "$(dirname "$0")" && pwd)"
+python3 "$SETUP/candidate_env.py" api "$API_WT" "$ENV_SRC" \
+  > "$OUT/api-candidate-env.log" 2>&1 \
+  || { echo "JOINT_E2E=FAIL class=infrastructure api candidate env (see $OUT/api-candidate-env.log)"; exit 1; }
+python3 "$SETUP/candidate_env.py" goodword-mcp "$MCP_WT" "$MCP_WT" \
+  > "$OUT/mcp-candidate-env.log" 2>&1 \
+  || { echo "JOINT_E2E=FAIL class=infrastructure mcp candidate env (see $OUT/mcp-candidate-env.log)"; exit 1; }
 
 # The server must not inherit this script's stdout/stderr: run-joint-integration.py
 # reads our output through a pipe and waits for EOF, so a server still holding
@@ -71,11 +68,16 @@ trap 'kill -- -"$SRV" 2>/dev/null; sleep 1; P=$(port_pids "$PORT"); test -n "$P"
 
 CODE=000
 for _ in $(seq 1 90); do
+  if ! kill -0 "$SRV" 2>/dev/null; then
+    echo "JOINT_E2E=FAIL class=infrastructure api-boot exited before ready (see $OUT/api-boot.log)"
+    echo "RECOVERY=restart the local postgres-db/dynamodb-local stack and re-run joint integration"
+    exit 1
+  fi
   CODE=$(curl -s -o /dev/null -w '%{http_code}' "$URL/api-docs-json" || echo 000)
   test "$CODE" = "200" && break
   sleep 2
 done
-test "$CODE" = "200" || { echo "JOINT_E2E=FAIL api boot code=$CODE (see $OUT/api-boot.log)"; exit 1; }
+test "$CODE" = "200" || { echo "JOINT_E2E=FAIL class=infrastructure api boot code=$CODE (see $OUT/api-boot.log)"; exit 1; }
 
 json_field() {
   python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2]) or '')" "$1" "$2" 2>/dev/null || true
@@ -115,6 +117,16 @@ TOKEN=$(mint_token "$OTP_EMAIL" otp) \
 # needs a non-owner (403 paths, ownership checks) gets one it did not create.
 TOKEN_SECOND=$(mint_token "$OTP_EMAIL_SECOND" otp-second) \
   || { echo "JOINT_E2E=FAIL could not mint a token for $OTP_EMAIL_SECOND (see $OUT/otp-second-*.json)"; exit 1; }
+
+# Missing billing_subscriptions for the second identity surfaces as 401, which
+# looks like a product auth bug (C2, user 537). Probe before jest.
+SECOND_PROBE=$(curl -s -o /dev/null -w '%{http_code}' \
+  -H "Authorization: Bearer $TOKEN_SECOND" "$URL/connection/search?search=probe" || echo 000)
+if [ "$SECOND_PROBE" = "401" ]; then
+  echo "JOINT_E2E=FAIL class=infrastructure second-identity-unsubscribed code=401"
+  echo "RECOVERY=insert an active billing_subscriptions row for $OTP_EMAIL_SECOND mirroring the first identity"
+  exit 1
+fi
 
 RC=0
 (cd "$MCP_WT" && GOODWORD_API_URL="$URL" GOODWORD_API_TOKEN="$TOKEN" \

@@ -117,6 +117,9 @@ Classify from the ticket's requested outcome, not labels alone.
   `python3 <Goodword>/.archon/setup/archon-run.py feature --provider <provider> --scope api,goodword-mcp <absolute-snapshot>`.
   Claude advances it with `feature-advance --chain <id>` after each human
   `archon workflow approve`; Codex uses guarded `approve`/`resume`.
+- **goodword-mcp-only feature:** `--scope goodword-mcp`. The smoke port follows
+  the profile's `HAS_SMOKE`, not the name `api`. Do not fall back to a plain
+  session.
 - **Other supported repository combinations:** infer the smallest complete
   selected set from the requested feature and its interface dependencies. Read
   `repo-profile.sh --list`; registered names initially include `api`,
@@ -127,6 +130,10 @@ Classify from the ticket's requested outcome, not labels alone.
   order. Do not narrow an explicit list with `ARCHON_REPO`.
 - **Web-only feature:** use the existing standalone route:
   `python3 <Goodword>/.archon/setup/archon-run.py feature --provider <provider> --scope web <absolute-snapshot>`.
+- **Stacked on an unmerged parent:** add `--base <repo>=<40-hex>` per selected
+  repository. The sha must already be local (fetch the parent PR first).
+  Approval binds those baselines. Recipes:
+  `<Goodword>/.archon/docs/operator-recovery.md`.
 - For unsupported repositories or requested work outside these lanes, stop with
   `ARCHON_LINEAR=UNSUPPORTED` and state the missing capability.
 - Missing evidence does not make a defect unsupported; thin reports belong in
@@ -195,8 +202,10 @@ active time; resumes do not replenish the allowance. Read the final joint
 receipt: only `locally_verified` with publication held is successful local
 delivery. A completed child, missing proof, zero tests, failed/skipped required
 verification, or disabled publication is not success. Do not claim the separate
-Claude path has this Codex watchdog/accounting guarantee. ENG-3866 remains
-deferred until the supervised two-repository qualification trial has passed.
+Claude path has this Codex token-ledger/watchdog guarantee. Claude chains
+do stop the next dispatch on `CHAIN_BUDGET=EXCEEDED active=` (see
+`archon-sdlc` and `docs/operator-recovery.md`). Repository-list qualification
+is established (chain `2205cded…` locally_verified, receipt `7da448da…`).
 AWS CLI/session availability is not a launch, approval, rejection, or resume
 prerequisite for code workflows. Surface typed degraded AWS evidence; request
 login only when a specific downstream operation genuinely requires AWS.

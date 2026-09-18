@@ -46,6 +46,7 @@ MANIFEST=(
   # Portable lane: captured workflow resources and explicit project profile.
   docs/portable-single-repo.md
   docs/risk-delta-v1-pilot.md
+  docs/operator-recovery.md
   profiles/fluxkeep-next.v1.json
   profiles/project-profile.v1.schema.json
   profiles/project-profile.v2.schema.json

@@ -1109,15 +1109,35 @@ def repo_is_dirty(repo: Path) -> bool:
     return bool(result.stdout.strip())
 
 
-def capture_baselines(host: Any, repos: list[str]) -> dict:
+def parse_base_overrides(values: object, repos: list[str], host: Any) -> dict[str, str]:
+    """`--base repo=<40-hex>` pins that repository's worktree. Sha must already be local."""
+    overrides: dict[str, str] = {}
+    for raw in values or []:
+        if not isinstance(raw, str) or "=" not in raw:
+            raise FeatureChainError("--base requires repo=<40-hex-sha>")
+        repo, sha = raw.split("=", 1)
+        if repo not in repos:
+            raise FeatureChainError(f"--base repository is outside selected scope: {repo}")
+        if not COMMIT_RE.fullmatch(sha):
+            raise FeatureChainError(f"--base sha is not a full commit: {sha}")
+        repo_path = _root(host) / repo
+        check = _git(repo_path, "cat-file", "-e", f"{sha}^{{commit}}")
+        if check.returncode != 0:
+            raise FeatureChainError(f"--base sha is not a local commit in {repo}: {sha}")
+        overrides[repo] = sha
+    return overrides
+
+
+def capture_baselines(host: Any, repos: list[str], overrides: dict[str, str] | None = None) -> dict:
     root = _root(host)
     commits = {}
     dirty = {}
+    pinned = overrides or {}
     for repo in repos:
         repo_path = root / repo
         if not (repo_path / ".git").exists():
             raise FeatureChainError(f"selected repository is missing: {repo}")
-        commits[repo] = repo_head(repo_path, repo)
+        commits[repo] = pinned[repo] if repo in pinned else repo_head(repo_path, repo)
         dirty[repo] = repo_is_dirty(repo_path)
     baseline = {"commits": commits, "dirty": dirty}
     baseline["sha256"] = digest(baseline)
@@ -1165,7 +1185,8 @@ def make_initial_state(host: Any, args: Any, repos: list[str]) -> dict:
     if provider not in DEFAULT_PLANNING_LANE:
         raise FeatureChainError("repository-list feature runs are unsupported for provider=" + provider)
     chain_id = secrets.token_hex(16)
-    baselines = capture_baselines(host, repos)
+    overrides = parse_base_overrides(getattr(args, "base", None), repos, host)
+    baselines = capture_baselines(host, repos, overrides)
     worktrees = prepare_worktrees(host, chain_id, repos, baselines, slug_for_spec(spec))
     wall_minutes = getattr(args, "wall_minutes", None) or DEFAULT_WALL_MINUTES
     max_total_tokens = getattr(args, "max_total_tokens", None) or DEFAULT_MAX_TOTAL_TOKENS
@@ -2404,6 +2425,13 @@ def validate_scope_add_file(state: dict, repo: str, add_file: str) -> str:
         raise FeatureChainError("scope amendment path cannot target git metadata")
     worktree = Path(str(state["worktrees"][repo]["worktree"]))
     candidate = worktree / raw
+    if not candidate.is_file():
+        artifacts = Path(str((state.get("current_run") or {}).get("artifacts_dir") or ""))
+        stray = artifacts / "strays" / normalized
+        if not artifacts.is_dir() or not stray.is_file() or stray.is_symlink():
+            raise FeatureChainError(f"scope amendment file is unavailable: {add_file}")
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(stray), str(candidate))
     try:
         resolved = candidate.resolve(strict=True)
         worktree_resolved = worktree.resolve(strict=True)
@@ -2422,9 +2450,6 @@ def validate_scope_add_file(state: dict, repo: str, add_file: str) -> str:
         raise FeatureChainError("scope amendment file must be an existing non-symlink file")
     if hasattr(os, "getuid") and resolved.stat().st_uid != os.getuid():
         raise FeatureChainError("scope amendment file is not owned by the current operator")
-    tracked = _git(worktree, "ls-files", "--error-unmatch", "--", normalized)
-    if tracked.returncode != 0:
-        raise FeatureChainError("scope amendment file must already be tracked in the selected repository")
     return normalized
 
 
@@ -3217,7 +3242,7 @@ def require_claude_chain(state: dict, command: str) -> None:
 
 
 def scope_amend_command(host: Any, args: Any, row: dict, chain_id: str | None = None) -> dict:
-    """Add one tracked file to the current stage allowlist.
+    """Add one worktree (or strays/) file to the current stage allowlist.
 
     ``chain_id`` selects the Claude path (``--chain``); omitted, the codex
     run-control record and ``--token`` authorize it.
@@ -4158,8 +4183,26 @@ def timing_field(value: object) -> str:
     return "null" if value is None else str(value)
 
 
+def require_active_budget(state: dict, timing: dict | None) -> None:
+    """Stop the next dispatch when active time is already over the cap.
+
+    Report-after-finish is the C3 bug: CHAIN_BUDGET=EXCEEDED printed once the
+    chain was locally_verified. Wall-clock stays advisory (human gates, outages).
+    """
+    if not timing or state.get("status") == "locally_verified":
+        return
+    active, cap = active_seconds(timing), active_budget_seconds()
+    if isinstance(active, int) and active > cap:
+        chain = state.get("logical_chain_id") or "<chain-id>"
+        print(
+            f"RECOVERY=python3 .archon/setup/archon-run.py feature-budget-update "
+            f"<run-id> --chain {chain} --reason \"authorized budget raise\""
+        )
+        raise FeatureChainError(f"CHAIN_BUDGET=EXCEEDED active={active} cap={cap}")
+
+
 def record_chain_timing(args: Any, state: dict) -> dict | None:
-    """Write chain-timing.json and print the typed lines. Report only: never blocks a transition."""
+    """Write chain-timing.json and print the typed lines."""
     try:
         timing = chain_timing(state, Path(args.db))
         write_json_atomic(timing_path(Path(args.control_dir), state["logical_chain_id"]), timing)
@@ -4280,6 +4323,17 @@ def advance(host: Any, args: Any, row: dict, result: dict) -> dict:
                     state["stages"][repo]["status"] = str(result.get("status") or "failed")
                     state["updated_at"] = now()
                     state = write_state(control_dir, state)
+                    launcher = getattr(host, "__file__", "archon-run.py")
+                    print(
+                        f"ARCHON_FEATURE_REPOSITORY_CHAIN=STAGE_FAILED "
+                        f"chain={state['logical_chain_id']} repo={repo} "
+                        f"status={state['stages'][repo]['status']}"
+                    )
+                    print(
+                        f"RECOVERY=python3 {launcher} feature-reopen "
+                        f"--chain {state['logical_chain_id']} --repo {repo} "
+                        f"--reason \"retry failed implement stage\""
+                    )
                 return {"state": state, "paused": result.get("state") != "terminal", "phase": phase, "repo": repo}
             candidate = verify_stage_result(state, repo, row, result)
             state["stages"][repo].pop("reopen_context", None)
@@ -4300,7 +4354,7 @@ def advance(host: Any, args: Any, row: dict, result: dict) -> dict:
                 "reserved_at": now(),
             }
             state = write_state(control_dir, state)
-            record_chain_timing(args, state)
+            require_active_budget(state, record_chain_timing(args, state))
     if dispatch_repo is not None:
         dispatched = dispatch_repository_stage(host, args, state, dispatch_repo)
         if dispatched.get("result") is not None:

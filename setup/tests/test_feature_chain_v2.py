@@ -478,12 +478,30 @@ class FeatureChainV2(unittest.TestCase):
         git(worktree, "add", "."); git(worktree, "commit", "-qm", f"feat({repo}): candidate")
         row = self.row("7" * 32)
         fc.bind_phase_run(self.control, state["logical_chain_id"], phase="implement", repo=repo, row=row)
-        state = fc.advance(self.host, self.args, dict(row), {
-            "state": "terminal", "status": "failed",
-            "feature_chain": {"logical_chain_id": state["logical_chain_id"], "repo": repo},
-        })["state"]
+        with mock.patch("builtins.print"):
+            state = fc.advance(self.host, self.args, dict(row), {
+                "state": "terminal", "status": "failed",
+                "feature_chain": {"logical_chain_id": state["logical_chain_id"], "repo": repo},
+            })["state"]
         self.host.run_row_by_id = lambda db, run_id: {"status": "failed"}
         return fc.read_state(self.control, state["logical_chain_id"]), worktree
+
+    def test_advance_of_a_failed_implement_stage_prints_reopen_recovery(self):
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        state = fc.approve_plan(self.control, launched["state"]["logical_chain_id"], self.plan())
+        row = self.row("7" * 32)
+        fc.bind_phase_run(self.control, state["logical_chain_id"], phase="implement", repo="api", row=row)
+        printed = []
+        with mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(str(x) for x in a))):
+            fc.advance(self.host, self.args, dict(row), {
+                "state": "terminal", "status": "failed",
+                "feature_chain": {"logical_chain_id": state["logical_chain_id"], "repo": "api"},
+            })
+        out = "\n".join(printed)
+        self.assertIn("ARCHON_FEATURE_REPOSITORY_CHAIN=STAGE_FAILED", out)
+        self.assertIn("RECOVERY=", out)
+        self.assertIn("feature-reopen", out)
+        self.assertIn("--repo api", out)
 
     def test_reopen_admits_a_first_failure_stage_verify_only_from_its_baseline(self):
         state, worktree = self.failed_first_stage()
@@ -893,6 +911,12 @@ class FeatureChainV2(unittest.TestCase):
             output = self.record_timing(10801, "e" * 32)
         self.assertIn("CHAIN_ACTIVE active=10801 cap=20000", output)
         self.assertNotIn("CHAIN_BUDGET=EXCEEDED active=", output)
+
+    def test_active_over_cap_stops_before_locally_verified_and_not_after(self):
+        timing = {"planning_s": 8000, "stages": {"api": 0}, "integration_s": None, "wall_s": 8000}
+        with self.assertRaisesRegex(fc.FeatureChainError, "CHAIN_BUDGET=EXCEEDED active=8000 cap=7200"):
+            fc.require_active_budget({"status": "running", "logical_chain_id": "c" * 32}, timing)
+        fc.require_active_budget({"status": "locally_verified", "logical_chain_id": "c" * 32}, timing)
 
     def test_a_junk_active_cap_falls_back_to_the_default(self):
         for junk in ("", "0", "-1", "two hours"):

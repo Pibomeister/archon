@@ -341,6 +341,8 @@ Then hand off to `archon-sdlc` for, for example:
 ```bash
 python3 "$ROOT/.archon/setup/archon-run.py" feature --provider codex \
   --scope api,goodword-mcp "/absolute/path/to/spec.md"
+python3 "$ROOT/.archon/setup/archon-run.py" feature --provider claude \
+  --scope goodword-mcp --base goodword-mcp=<40-hex-parent> "/absolute/path/to/spec.md"
 ```
 
 Keep the Codex controller and shared-budget ledger outside worker-writable
@@ -348,7 +350,6 @@ roots. New Codex repository-list chains default to 240 active minutes and
 30 million tokens for the whole chain; approval waits are excluded, retries
 share the remaining allowance, and exact sessions include native subagents.
 Missing accounting must fail containment. The endpoint is `locally_verified`
-with publication held, not a push or PR. A successful installation or parsed
-scope list does not qualify the feature: require the supervised two-repository
-trial through human approval, repository stages, and local integration before
-starting deferred ENG-3866 work.
+with publication held, not a push or PR. Qualification is established
+(chain `2205cded…`, receipt `7da448da…`). Operator stop recipes after a
+launch: `$ROOT/.archon/docs/operator-recovery.md` and `archon-sdlc`.

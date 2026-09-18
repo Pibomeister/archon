@@ -1,6 +1,6 @@
 ---
 name: archon-sdlc
-description: Use when driving or supervising a Goodword Archon SDLC, repository-list feature, bugfix, or backfill run - starting full-sdlc-api on a feature spec, bugfix on a bug report, or backfill on a backfill spec, reading the plan-gate, RCA-gate, or backfill-packet, interpreting loop exits (CONVERGED, NO_PROGRESS, FIXER_BLOCKED, SCOPE_BREACH, ROUND_CAP_REACHED, CHAIN_CONFLICT, FIX_STALLED, ARCHITECTURE_SUSPECT, NEGCONTROL=FAIL, CLAIM_DIVERGED, SAMPLE_SUSPECT, BOUND_BREACH, RECONCILE_FAIL, PLAN_REJECTED, PLAN_NO_PROGRESS, PLAN_SCOPE_DISPUTE, PLAN_ROUND_CAP, RCA_PLAN_REJECTED, RCA_PLAN_SCOPE_DISPUTE, RCA_PLAN_SHAPE=FAIL, CRITIC_GATE=FAIL, IMPACT=UNAVAILABLE, IMPACT=SKIPPED, DESLOP=DIRTY, DESLOP_GATE=FAIL, DESLOP_REVIEW=FAIL, DESLOP_ROUND_CAP, ROUTE=FULL, LITE_FIXES_UNREVIEWED, PROOF_SELF_CONTRADICTED, RCA_PLAN_FINDING_RESTATED, RCA_PLAN_SCOPE_WIDENED, RCA_PLAN_CRITIQUE_ORPHANED, E2E_MUTEX=FAIL, CROSS_REPO_FINDING), choosing between a lite lane (full-sdlc-api-lite, bugfix-lite) and the full lane, deciding resume vs escalate, or running babysit/cleanup afterwards. Triggers on "archon run", "start the SDLC lane", "archon bugfix", "archon backfill", "the run is stuck", "resume the run", or any mention of a paused/failed archon workflow.
+description: Use when driving or supervising a Goodword Archon SDLC, repository-list feature, bugfix, or backfill run - starting full-sdlc-api on a feature spec, bugfix on a bug report, or backfill on a backfill spec, reading the plan-gate, RCA-gate, or backfill-packet, interpreting loop exits (CONVERGED, NO_PROGRESS, FIXER_BLOCKED, SCOPE_BREACH, ALLOWLIST_DRIFT, COMMIT_SCOPE, STAGE_FAILED, CHAIN_BUDGET, ROUND_CAP_REACHED, CHAIN_CONFLICT, FIX_STALLED, ARCHITECTURE_SUSPECT, NEGCONTROL=FAIL, CLAIM_DIVERGED, SAMPLE_SUSPECT, BOUND_BREACH, RECONCILE_FAIL, PLAN_REJECTED, PLAN_NO_PROGRESS, PLAN_SCOPE_DISPUTE, PLAN_ROUND_CAP, RCA_PLAN_REJECTED, RCA_PLAN_SCOPE_DISPUTE, RCA_PLAN_SHAPE=FAIL, CRITIC_GATE=FAIL, IMPACT=UNAVAILABLE, IMPACT=SKIPPED, DESLOP=DIRTY, DESLOP_GATE=FAIL, DESLOP_REVIEW=FAIL, DESLOP_ROUND_CAP, ROUTE=FULL, LITE_FIXES_UNREVIEWED, PROOF_SELF_CONTRADICTED, RCA_PLAN_FINDING_RESTATED, RCA_PLAN_SCOPE_WIDENED, RCA_PLAN_CRITIQUE_ORPHANED, E2E_MUTEX=FAIL, CROSS_REPO_FINDING), choosing between a lite lane (full-sdlc-api-lite, bugfix-lite) and the full lane, deciding resume vs escalate, or running babysit/cleanup afterwards. Triggers on "archon run", "start the SDLC lane", "archon bugfix", "archon backfill", "the run is stuck", "resume the run", or any mention of a paused/failed archon workflow.
 ---
 
 <WORKFLOW-NODE-STOP>
@@ -35,10 +35,14 @@ work a human may want.
 **Never merge a PR, never close one, never delete a remote branch that has an
 open PR.** The pipeline's terminal state is merge-ready, by design (RUNBOOK §8).
 
-**Never write `accept-residuals.txt`, and never edit `files-allowlist.json` to
-clear a `SCOPE_BREACH`.** Both are defined as human acts - the edit *is* the
-approval (RUNBOOK §3). You may read them, diff them, and explain exactly what
-edit would unblock the run. You may not make it.
+**Never write `accept-residuals.txt`, and never edit `files-allowlist.json`.**
+Both are human acts. `files-allowlist.json` is a projection of the signed
+joint-plan allowlist; editing it is `ALLOWLIST_DRIFT=FAIL` on the next
+repository-list commit, not an approval. For `SCOPE_BREACH` /
+`COMMIT_SCOPE=QUARANTINED` / `ALLOWLIST_DRIFT`, print the
+`feature-scope-amend --add-file` command (RUNBOOK "Feature launcher" and
+`.archon/docs/operator-recovery.md`). You may read the files, diff them, and
+name the command. You may not run it.
 
 ## 1. Starting a run
 
@@ -83,7 +87,26 @@ Feature runs now use the provider-neutral launcher:
 
 ```bash
 python3 "$ROOT/.archon/setup/archon-run.py" feature --provider claude --scope api "/abs/path/to/spec.md"
+python3 "$ROOT/.archon/setup/archon-run.py" feature --provider claude --scope goodword-mcp "/abs/path/to/spec.md"
+python3 "$ROOT/.archon/setup/archon-run.py" feature --provider claude \
+  --scope goodword-mcp --base goodword-mcp=<40-hex-parent> "/abs/path/to/spec.md"
+python3 "$ROOT/.archon/setup/archon-run.py" feature --provider claude --scope web-app "/abs/path/to/spec.md"
 python3 "$ROOT/.archon/setup/archon-run.py" feature --provider codex --scope api,goodword-mcp "/abs/path/to/spec.md"
+```
+
+`--base repo=<40-hex>` pins that repository's worktree to a local commit
+instead of current HEAD (fetch the parent PR first). Repeat per repo. Do not
+fall back to a plain session because the ticket is mcp-only, web-only, or
+stacked on an unmerged parent. Recipes: `$ROOT/.archon/docs/operator-recovery.md`.
+
+Claude repository-list recovery uses `--chain` (no control token). Print the
+command; do not run it (§0):
+
+```bash
+python3 "$ROOT/.archon/setup/archon-run.py" feature-scope-amend <run-id> \
+  --chain <chain-id> --add-file <repo-relative-path> --reason "Authorized scope recovery"
+python3 "$ROOT/.archon/setup/archon-run.py" feature-reopen --chain <chain-id> \
+  --repo <repo> --reason "retry failed implement stage"
 ```
 
 Direct shell use must pass both `--provider` and `--scope`. `archon-linear`
@@ -158,7 +181,10 @@ For the guarded Codex path:
   and keep the run stopped until a sufficient allowance is explicitly authorized.
   Resumes never replenish the budget. Unavailable accounting is a containment
   failure, and exhausted budgets prevent dispatch. Do not claim this Codex
-  watchdog/accounting guarantee for the separate Claude path.
+  watchdog/accounting guarantee for the separate Claude path. Claude
+  repository-list chains **do** stop the next dispatch when
+  `CHAIN_BUDGET=EXCEEDED active=` and work remains; that is wall-clock-excluded
+  active time, not the Codex token ledger. Recipe: `docs/operator-recovery.md`.
   Before launching a large repository-list Codex feature, run a forecast without
   launching AI:
 
@@ -211,26 +237,30 @@ For the guarded Codex path:
   captured workflow or model. Verify preserved usage and all allowance records
   before guarded resume. A review-cap increase requires separate authorization
   and preserves the existing round counter/findings; it does not waive review.
-  If a stopped repository implementation run needs exactly one existing tracked
-  file added to the current stage allowlist, use guarded scope recovery instead
-  of hand-editing approval artifacts:
+  If a stopped repository implementation run needs a file added to the current
+  stage allowlist, use guarded scope recovery instead of hand-editing approval
+  artifacts:
 
   ```bash
-  python3 "$ROOT/.archon/setup/archon-run.py" feature-scope-amend <run-id> --token <operator-token> --add-file <repo-relative-tracked-file> --reason "Authorized scope recovery"
+  python3 "$ROOT/.archon/setup/archon-run.py" feature-scope-amend <run-id> --token <operator-token> --add-file <repo-relative-path> --reason "Authorized scope recovery"
   ```
 
   This command authenticates under the chain lock, refuses live processes,
-  pending controls/dispatch, incomplete budget amendments, and any verified
-  handoff/integration/publication. It is add-only for the current repository's
-  safe owned non-symlink tracked file; it preserves contracts, repo order, tests,
-  spec bytes, workflow source, worktrees, budget/accounting, approval history,
-  and operator authority. It journals `scope_amendment`, writes a deterministic
-  amendment packet under the original planning artifacts, refreshes only the
-  current stage's bound plan/allowlist/candidate-revision digests/rendered plan,
-  then signs the new approval snapshot. If interrupted, retry the identical
-  command with the same token, file, and reason. Pending scope amendments block
-  resume/approve and dispatch; abandon/reject containment remains available.
-  Normal guarded resume still rotates the token.
+  pending controls/dispatch, incomplete budget amendments, **this stage's**
+  verified handoff, integration, or publication. A verified predecessor does
+  not close the current stage. It is add-only for a safe owned non-symlink
+  path: already tracked, newly untracked in the stage worktree, or sitting
+  under `<artifacts>/strays/` (restored, then allowlisted). It preserves
+  contracts, repo order, tests, spec bytes, workflow source, worktrees,
+  budget/accounting, approval history, and operator authority. It journals
+  `scope_amendment`, writes a deterministic amendment packet under the original
+  planning artifacts, refreshes only the current stage's bound
+  plan/allowlist/candidate-revision digests/rendered plan, then signs the new
+  approval snapshot. If interrupted, retry the identical command with the same
+  token, file, and reason. Pending scope amendments block resume/approve and
+  dispatch; abandon/reject containment remains available. Normal guarded resume
+  still rotates the token. Full recipes:
+  `$ROOT/.archon/docs/operator-recovery.md`.
   Guarded Codex controls deny unexpected Claude invocations before model startup
   (`ARCHON_CODEX_PROVIDER_GUARD=FAIL`). Stock rejection hooks cannot pin their
   provider through scoped hook fields; do not add ignored configuration keys.
@@ -644,8 +674,13 @@ resume (RUNBOOK §3).
 - a cross-repo divergence (one repo converged, the other exhausted)
 - **the same node hitting its budget cap on consecutive resumes**
 - `PREMISE_CONFLICT id=N`, `READER_AUDIT_FAIL`, `SCOPE_BREACH`,
-  `ROUND_CAP_REACHED` - each is a designed human stop with its own recipe in
-  RUNBOOK §3. Read the artifact, explain what the fix would be, hand back.
+  `ALLOWLIST_DRIFT=FAIL`, `COMMIT_SCOPE=QUARANTINED`, `STAGE_FAILED`,
+  `CHAIN_BUDGET=EXCEEDED active=`, `SMOKE=FAIL … class=infrastructure`,
+  `JOINT_E2E=FAIL class=infrastructure`, `ROUND_CAP_REACHED` - each is a
+  designed human stop. Print the `RECOVERY=` line the gate already emitted;
+  recipes live in `$ROOT/.archon/docs/operator-recovery.md` and RUNBOOK §3.
+  Do not resume a first-attempt implement failure that failed on a harness
+  defect in captured YAML: reopen. Do not edit `files-allowlist.json`.
 - `PLAN_REJECTED`, `PLAN_NO_PROGRESS`, `PLAN_SCOPE_DISPUTE`, `PLAN_CONVERGE=FAIL`
   (RUNBOOK §3a) - the plan-loop critic and reviser disagree, or the loop stalled.
   Read `plan-round-N/critique.json` and `revision.json`, explain the disagreement,
@@ -786,6 +821,14 @@ Full list in RUNBOOK §6. The ones that most often look like a code bug:
   time. Do not "fix" one to a relative path.
 - On Linux: the packet opener is `xdg-open`; `/usr/bin/open` there is util-linux's
   `openvt(1)`, a different program. The gate prints the `file://` path regardless.
+- **`SMOKE=FAIL … code=000` without `class=infrastructure` is the old shrug.**
+  A dead api process or a stopped `postgres-db`/`dynamodb-local` now prints
+  `class=infrastructure`. Do not treat that as the feature, and do not stop
+  those containers from a node-scoped cleanup (RUNBOOK §6).
+- **Joint e2e 401 on the second OTP identity is a missing subscription row**,
+  not product auth. Stale `api/.worktrees/*/.env` after a key rotation is the
+  same class: `candidate_env.py` prefers the git clone. See
+  `docs/operator-recovery.md`.
 
 ## 9. The bugfix lane
 

@@ -3474,6 +3474,8 @@ def parser() -> argparse.ArgumentParser:
     feature = sub.add_parser("feature")
     feature.add_argument("--provider", choices=("claude", "codex"), required=True)
     feature.add_argument("--scope", required=True, help="registered repository names separated by commas; web and fullstack aliases supported")
+    feature.add_argument("--base", action="append", default=[], metavar="REPO=SHA",
+                         help="pin a selected repository worktree to a local 40-hex commit instead of current HEAD")
     feature.add_argument("--no-watch", action="store_true")
     feature.add_argument("--watch-timeout-seconds", type=int, default=86400)
     feature.add_argument("spec")

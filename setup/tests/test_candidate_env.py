@@ -72,20 +72,21 @@ class CandidateEnv(Fixture):
         self.assertEqual("E2E=root\n", (self.target / ".env.e2e").read_text())
         self.assertEqual("", git("-C", str(self.target), "status", "--porcelain"))
 
-    def test_the_source_worktree_wins_over_the_clone(self):
+    def test_the_source_worktree_wins_deps_but_clone_wins_env(self):
         (self.source / "node_modules").mkdir()
+        (self.source / "node_modules" / "marker").write_text("stage")
         (self.source / ".env.e2e").write_text("E2E=stage\n")
         result = ce.prepare("api", self.target, self.source)
         self.assertEqual(f"linked:{self.source / 'node_modules'}", result["deps"]["node_modules"])
-        self.assertEqual("E2E=stage\n", (self.target / ".env.e2e").read_text())
+        self.assertEqual("E2E=root\n", (self.target / ".env.e2e").read_text())
 
-    def test_present_entries_are_left_alone(self):
+    def test_present_dep_is_left_alone_but_stale_env_is_replaced(self):
         (self.target / "node_modules").mkdir()
-        (self.target / ".env").write_text("ENV=mine\n")
+        (self.target / ".env").write_text("ENV=stale\n")
         result = ce.prepare("api", self.target, self.source)
         self.assertEqual("present", result["deps"]["node_modules"])
-        self.assertEqual("present", result["env_files"][".env"])
         self.assertFalse((self.target / "node_modules").is_symlink())
+        self.assertEqual("ENV=root\n", (self.target / ".env").read_text())
 
     def test_missing_env_file_fails_naming_every_place_searched(self):
         (self.clone / ".env.e2e").unlink()
@@ -102,12 +103,12 @@ class CandidateEnv(Fixture):
             ce.prepare("api", self.target, self.source)
 
     def test_relative_paths_still_produce_resolving_links(self):
-        (self.source / ".env.e2e").write_text("E2E=stage\n")  # found first, so linked via the relative source
+        (self.source / ".env.e2e").write_text("E2E=stage\n")
         cwd = os.getcwd()
         os.chdir(self.root)
         self.addCleanup(os.chdir, cwd)
         ce.prepare("api", self.target.relative_to(self.root), self.source.relative_to(self.root))
-        self.assertEqual("E2E=stage\n", (self.target / ".env.e2e").read_text())
+        self.assertEqual("E2E=root\n", (self.target / ".env.e2e").read_text())
 
     def test_changed_lockfile_installs_instead_of_linking_stale_dependencies(self):
         (self.target / "bun.lock").write_text("lock-v2\n")

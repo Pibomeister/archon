@@ -85,7 +85,7 @@ Operator guide for the Goodword two-lane Archon pipeline (`full-sdlc-api` → `f
 
 Platform note: macOS or desktop Linux. The workflows surface human packets through a browser opener (`xdg-open`, else `open`) and always print the `file://` path, so a host without an opener degrades to "read the path" rather than failing. §6 has the Linux-specific traps.
 
-Driving this from Claude Code or Codex: three operator skills ship with the layer and are staged into both `<root>/.claude/skills/` and `<root>/.agents/skills/` by the installer — `archon-install` (set up or repair the stack), `archon-sdlc` (start, supervise, and escalate a run), and `archon-linear` (immutable Linear intake and supported routing). They are not exposed in the dedicated workflow-node Codex home. These are decision procedures; this runbook stays the reference they cite.
+Driving this from Claude Code or Codex: three operator skills ship with the layer and are staged into both `<root>/.claude/skills/` and `<root>/.agents/skills/` by the installer — `archon-install` (set up or repair the stack), `archon-sdlc` (start, supervise, and escalate a run), and `archon-linear` (immutable Linear intake and supported routing). They are not exposed in the dedicated workflow-node Codex home. These are decision procedures; this runbook stays the reference they cite. Repository-list stop recipes (one allowlist, quarantine, first-failure reopen, infrastructure smoke/e2e, active-time budget, `--base`): [operator recovery](docs/operator-recovery.md).
 
 ---
 
@@ -263,7 +263,7 @@ Hardening gates added after the ENG-3605 retrospective (2026-08-14) — each is 
 |---|---|---|
 | Run stops at premise-gate | `PREMISE_CONFLICT id=N` | The blind re-derivation contradicts the planner's answer to spec premise N (read `premises.json` vs `premise-verify.json` in artifacts). Same handling class as a plan-gate reject: fix the plan and/or spec so they match the code, then `archon workflow resume <run-id>`. Never "fix" the verifier. |
 | Run stops at reader-audit-gate (or exit-gate belt) | `READER_AUDIT_FAIL` | A reader of a column whose semantics this plan changes was classified `affected` — the plan missed a consumer. Read `reader-audit-result.json`, extend the plan/diff to cover the reader (or re-classify with justification), resume. |
-| Converge / gate-tests / exit-gate stops on a file | `SCOPE_BREACH round=N file=<path>` (round tag absent outside converge) | A change landed outside `files-allowlist.json`. Legitimate scope growth is a HUMAN act: edit `files-allowlist.json` in the run's artifacts to include the path (the edit is the approval), then resume. Otherwise revert the file in the worktree and resume. Lockfiles are not listed by hand: `setup/lockfile_scope.py` puts the repo profile's lockfile (`bun.lock` api, `pnpm-lock.yaml` goodword-mcp/web-app) in scope, staged and committed, whenever an allowlisted `package.json` changed. A lockfile breach suffixed `(lockfile changed without an in-scope package.json change)` is lockfile-only drift: revert it, or a human allowlists it. web-app's unfrozen install drift stays tolerated while uncommitted. |
+| Converge / gate-tests / exit-gate stops on a file | `SCOPE_BREACH round=N file=<path>` / `COMMIT_SCOPE=QUARANTINED` / `ALLOWLIST_DRIFT=FAIL` | A change landed outside the **signed** stage allowlist. `files-allowlist.json` is a projection; editing it is not an approval (`ALLOWLIST_DRIFT=FAIL` on the next repository-list commit). Legitimate scope growth is `feature-scope-amend --add-file <path>` (untracked worktree files and files under `<artifacts>/strays/` are admitted), then resume. Otherwise revert the file and resume. A new file the fixer created is moved to `strays/` and the round **stops** (`COMMIT_SCOPE=FAIL`); restore via the printed `RECOVERY=` line. Lockfiles are not listed by hand: `setup/lockfile_scope.py` puts the repo profile's lockfile (`bun.lock` api, `pnpm-lock.yaml` goodword-mcp/web-app) in scope, staged and committed, whenever an allowlisted `package.json` changed. A lockfile breach suffixed `(lockfile changed without an in-scope package.json change)` is lockfile-only drift: revert it, or amend it. web-app's unfrozen install drift stays tolerated while uncommitted. |
 | Review loop stops at the round cap | `ROUND_CAP_REACHED round=N` | The durable round counter hit the cap (default 4, override via `round-cap.txt`) without converging. Read the final round's envelope and fixer result, then either raise the cap or accept residuals (recipes below), then resume. |
 | Review loop stops one round past the cap | `ROUND_CAP_EXCEEDED round=N cap=<c>` | `accept-residuals.txt` buys the cap round only: with it present, converge counts every non-regressed P0/P1 as accepted (`CLOSURE_ACCEPTED round=N ids=…`, `CONVERGED round=N (residuals accepted: k P0/P1)`) on a ready verdict, so the loop ends on that round. Reaching this line means the accepted round did not converge (a regression, or a `Not ready` verdict). Raise `round-cap.txt` to spend more, or fix the regression and resume. |
 
@@ -313,7 +313,11 @@ Two-hour convergence work (repository-scope runs) added the typed lines below. E
 | `IMPLEMENT=FAIL reopen-context.json missing or altered` | The bound reopen context no longer hashes to `params.json`'s `feature_reopen_context_sha256`. | Engineer. Nothing may edit it; reopen again to re-dispatch a fresh copy. |
 | `PLAN_SHAPE=FAIL pinned_decisions missing` | `plan-shape.sh` found the spec's `## Interface (pinned)` section but no matching `pinned_decisions` array in `joint-plan.json` — the planner dropped a decision the spec had already made. | Re-run planning, or add the array to `joint-plan.json` by hand (entries are `{"symbol","file","rule"}`) and resume. |
 | `CHAIN_TIMING reviews=<n>/<reused> rounds=<n> review_duplicates=<n> fixers=<n> fixer_duplicates=<n>`, with `CHAIN_ACTIVE active=<s> cap=<s> wall=<s>` beside it | Per-phase accounting for a repository-scope chain, printed so the two-hour budget is measured rather than assumed. The live acceptance gate reads `review_duplicates` and `fixer_duplicates`: both must be 0, where a duplicate is a `run` for an activity whose completion record already matched the current identity and candidate. Informational by itself. | None, unless a duplicate count is non-zero — then the loop paid twice for something and `node-round-pre.out` / `node-fix-plan.out` name which round. |
-| `CHAIN_BUDGET=EXCEEDED ...` | The chain spent more wall-clock than its declared budget. | Engineer. Decide whether to raise the budget or stop the chain; the run does not decide that for you. |
+| `CHAIN_BUDGET=EXCEEDED active=<s> cap=<s>` | Active agent time (not wall-clock; human gates and outages do not count) exceeded the chain cap. On a chain that still has a stage or integration to dispatch, **the next dispatch is refused**. A chain already `locally_verified` only reports. | Human. `feature-budget-update` with an authorized ceiling (Codex: `--token`; Claude: `--chain`). Active minutes are not replenished. Recipe: [operator recovery](docs/operator-recovery.md). |
+| `CHAIN_BUDGET=EXCEEDED wall=<s> cap=<s>` | Wall-clock (includes human gates) exceeded the advisory wall cap. Informational. | None unless active time also exceeded. |
+| `ARCHON_FEATURE_REPOSITORY_CHAIN=STAGE_FAILED chain=<id> repo=<repo> status=failed` | A repository implement run ended terminal-failed, including a **first attempt that never verified**. `advance` records the stage as failed and prints `RECOVERY=`. Resume of captured source is the wrong tool when the failure was a harness defect in the snapshot. | `feature-reopen --chain <id> --repo <repo> --reason "…"`. Add `--verify-only` if the candidate is already committed in the worktree. Recipe: [operator recovery](docs/operator-recovery.md). |
+| `ALLOWLIST_DRIFT=FAIL` / `COMMIT_SCOPE=QUARANTINED file=<path> -> <dest>` | Repository-list `files-allowlist.json` no longer matches the signed joint-plan allowlist, or a new unallowlisted file was moved to `strays/` and the commit node **stopped** (it does not print `COMMIT_SCOPE=OK`). | `feature-scope-amend --add-file <path>`. Do not edit the json. Quarantined files are restored from `strays/` by that command. Recipe: [operator recovery](docs/operator-recovery.md). |
+| `SMOKE=FAIL … class=infrastructure` / `JOINT_E2E=FAIL class=infrastructure …` | Boot or joint e2e blamed the stack, a dead process, a stale `.env`, or a missing second-identity subscription — not the feature. | Follow the printed `RECOVERY=`. Do not treat `code=000` as a product bug. Recipe: [operator recovery](docs/operator-recovery.md). |
 
 Transient provider stream drops (`dag.node_empty_output`, "provider stream closed without yielding content") are cured by a plain `archon workflow resume`, and the two-hour acceptance allows one hand resume per run for exactly this; per-node `retry:` keys are not the fix, because the CLI does not honour them — a retry probe produced one `node_started` and one `node_failed`, never a second attempt.
 
@@ -685,6 +689,10 @@ the copy beside them.
 - **The e2e stack is one shared Postgres for the whole machine** and `docker compose ... up -d --wait` attaches to a running one rather than failing. `setup/e2e-mutex.sh` makes a second boot a typed stop instead of a silent re-seed over live rows; a run that dies before `smoke-teardown` strands the lock and the message prints the `rm -rf` that clears it. See §5a.
 - **`CE_REVIEW_ROOT` overrides where the review gate looks for ce-code-review run dirs** (default `/tmp/compound-engineering/ce-code-review`). `round-pre` and `review-gate` both honor it, so set it for the whole run or not at all. **Read side only** — the skill still writes to the default root, so this is an isolation/override knob (it is what makes `review-gate` testable), not a per-run guarantee: two lanes reviewing the *same* head sha can still each see the other's dir as new, and the `head_sha` prefix match cannot separate them.
 - **Both ce-code-review listings are `LC_ALL=C sort`ed on purpose — do not drop it.** `round-pre` writes `prerun-dirs.txt` and `review-gate` writes `post-dirs.txt` in separate node executions, and a resume can come from a differently-configured shell. Collate the two lists differently and `comm -13` reports a **pre-existing** dir as new — silently, exit 0, no warning — which is how the gate ends up reading a foreign run's verdict. Regression-tested in `setup/tests/test_node_stress.py::ReviewGateScanIsolation`, negative control included.
+- **`SMOKE=FAIL api-docs-json code=000` without `class=infrastructure` is the old shrug.** Since VERSION 2026.09.18-1 a dead api process prints `api-boot exited before ready class=infrastructure`, and a missing `postgres-db`/`dynamodb-local` prints `reason=stack-down`. Do not treat `code=000` as the feature. Do not stop those containers from a node-scoped cleanup.
+- **Joint e2e env and the second identity.** `joint-api-mcp-e2e.sh` uses `candidate_env.py`: the git clone's `.env` wins over a stale `api/.worktrees/*/.env` (OpenAI key rotation reached the clone and not the stage copies). A 401 from the second OTP identity (`edy+archon2@…`) before jest is `class=infrastructure second-identity-unsubscribed`, not a product auth bug. Recipes: [operator recovery](docs/operator-recovery.md).
+- **Editing `files-allowlist.json` is not an approval.** The signed joint-plan allowlist is the source of truth. A repository-list commit node that sees drift prints `ALLOWLIST_DRIFT=FAIL` and a `feature-scope-amend` recovery. A fixer-created file with no stem sibling is quarantined to `strays/` and the round **stops**.
+- **Envelope fill-if-missing.** Review and doc-review gates write `review-envelope.txt` / `docreview-envelope.txt` only when that file is empty. A captured-source run that still clobbers the envelope is a harness defect: reopen, do not resume. Recipe: [operator recovery](docs/operator-recovery.md).
 
 ### 6a. Linux notes
 
@@ -745,7 +753,7 @@ DISABLE_OMC=1 archon workflow run cleanup "teardown" </dev/null 2>&1 | tee /tmp/
 
 ## 11. When to hand it to an engineer
 
-Stop resuming and escalate when you see any of: `FIXER_BLOCKED` (semantic defect the fixer can't clear), `NO_PROGRESS` (review and fixer are deadlocked), `CI_RED`, a cross-repo divergence (one repo converged, the other exhausted — the run fails with the converged PR left in draft, by design), or the same node hitting its budget cap on consecutive resumes. These are the taxonomy's "needs a human who can read code" states; more iterations only burn quota.
+Stop resuming and escalate when you see any of: `FIXER_BLOCKED` (semantic defect the fixer can't clear), `NO_PROGRESS` (review and fixer are deadlocked), `CI_RED`, a cross-repo divergence (one repo converged, the other exhausted — the run fails with the converged PR left in draft, by design), or the same node hitting its budget cap on consecutive resumes. These are the taxonomy's "needs a human who can read code" states; more iterations only burn quota. Repository-list typed stops (`ALLOWLIST_DRIFT`, `COMMIT_SCOPE=QUARANTINED`, `STAGE_FAILED`, `CHAIN_BUDGET=EXCEEDED active=`, `SMOKE`/`JOINT_E2E` `class=infrastructure`) are also not resume candidates; recipes: [operator recovery](docs/operator-recovery.md).
 
 ## 12. The bugfix lane (`bugfix`)
 
@@ -1228,9 +1236,15 @@ provider:
 ```bash
 python3 .archon/setup/archon-run.py feature --provider claude \
   --scope api,goodword-mcp /absolute/path/to/spec.md
+python3 .archon/setup/archon-run.py feature --provider claude \
+  --scope goodword-mcp --base goodword-mcp=<40-hex-parent> /absolute/path/to/spec.md
+python3 .archon/setup/archon-run.py feature --provider claude \
+  --scope web-app /absolute/path/to/spec.md
 python3 .archon/setup/archon-run.py feature --provider codex \
   --scope api,goodword-mcp /absolute/path/to/spec.md
 ```
+
+`--base repo=<40-hex>` pins that repository's worktree to a **local** commit instead of current HEAD. Repeat the flag per repo. The sha must already exist in that clone (fetch the parent PR first). Approval binds the pinned baselines the same way it binds HEAD baselines. This is how an mcp-only or web-app stage stacks on an unmerged parent instead of falling back to a plain session. Scalar `--scope goodword-mcp` allocates a smoke port from the profile's `HAS_SMOKE`, not from the name `api`. Operator stop recipes (allowlist, quarantine, first-failure reopen, infrastructure smoke, budget): [operator recovery](docs/operator-recovery.md).
 
 Repository names come from `setup/repo-profile.sh --list`. `web` aliases
 `web-app`; standalone `fullstack` expands to `api,web-app`. Comma order is
@@ -1420,25 +1434,29 @@ is blocked. See [the policy](workflows/risk-delta-v1.md) and
 [the ENG-3866 pilot evidence and allowance proposal](docs/risk-delta-v1-pilot.md).
 Do not edit private qualification state to bypass this boundary.
 
-If a stopped repository implementation run has one verified, existing tracked
-file missing from its approved stage allowance, use the guarded scope amendment
-rather than editing `files-allowlist.json` or approval artifacts by hand:
+If a stopped repository implementation run needs a file added to the current
+stage allowlist, use the guarded scope amendment rather than editing
+`files-allowlist.json` or approval artifacts by hand. The json is a projection
+of the signed joint plan; a hand edit is `ALLOWLIST_DRIFT=FAIL` on the next
+repository-list commit. Full recipes: [operator recovery](docs/operator-recovery.md).
 
 ```bash
-python3 .archon/setup/archon-run.py feature-scope-amend <run-id> --token <operator-token> --add-file <repo-relative-tracked-file> --reason "Authorized scope recovery"
+python3 .archon/setup/archon-run.py feature-scope-amend <run-id> --token <operator-token> --add-file <repo-relative-path> --reason "Authorized scope recovery"
 ```
 
 `feature-scope-amend` is intentionally narrower than re-approval. It authenticates
 the current operator token under the chain lock, requires the current run to be
 stopped in an implementation/verification phase, refuses live launcher/watchdog
 process groups, competing controls, dispatch reservations, incomplete budget
-amendments, and chains that already have verified candidate handoffs,
-integration, or publication. The file must be a safe repository-relative path in
-the currently selected repository worktree, already tracked by git, owned by the
-operator, and free of symlink components. The command only adds that path to the
-current repository's stage allowlist; it does not change repositories, contracts,
-dependency order, tests, spec bytes, workflow source, worktrees, budget ledgers,
-control tokens, or human approval requirements.
+amendments, **this stage's** verified candidate handoff, integration, or
+publication. A verified predecessor in a two-repo chain does not close the
+current stage. The path must be a safe repository-relative path, owned by the
+operator, and free of symlink components. It may already be tracked, a new
+untracked file in the stage worktree, or a file under `<artifacts>/strays/`
+(restored into the worktree, then allowlisted). The command only adds that path
+to the current repository's stage allowlist; it does not change repositories,
+contracts, dependency order, tests, spec bytes, workflow source, worktrees,
+budget ledgers, control tokens, or human approval requirements.
 
 The controller writes an in-progress private `scope_amendment` journal, preserves
 the old approval packet, creates a deterministic amendment packet under the
@@ -1453,7 +1471,7 @@ preserves operator authority; normal guarded resume still rotates the token.
 On a Claude repository-list chain (no control token), name the chain instead:
 
 ```bash
-python3 .archon/setup/archon-run.py feature-scope-amend <run-id> --chain <chain-id> --add-file <repo-relative-tracked-file> --reason "Authorized scope recovery"
+python3 .archon/setup/archon-run.py feature-scope-amend <run-id> --chain <chain-id> --add-file <repo-relative-path> --reason "Authorized scope recovery"
 bash .archon/setup/resume.sh <run-id>
 ```
 
@@ -1462,8 +1480,8 @@ chain still requires `--token`. Authority is naming the chain, as with
 `feature-advance` and `feature-replan --chain`. Every other refusal is
 unchanged: the archon run must be stopped, and pending controls, dispatch
 reservations, incomplete budget amendments, a stale current run, approval drift,
-verified handoffs/integration/publication, and unsafe or untracked files all
-still refuse. A Claude launch records no launcher/watchdog process group, so
+verified handoffs/integration/publication, and unsafe paths all
+still refuse. Untracked worktree files and `strays/` files are admitted. A Claude launch records no launcher/watchdog process group, so
 liveness is the archon run status plus those chain claims. Claude resume is a
 plain `archon workflow resume` that does not read the chain journal: if an
 amendment is interrupted, repeat the identical command before `resume.sh`
@@ -1559,14 +1577,19 @@ gate's reject-with-reason needs a run paused at that gate, `feature-scope-amend`
 only adds a file to an approved stage, and a run-local `AGENTS.md` reaches Codex
 nodes only and must already sit in the new run's artifacts directory.
 
-Claude chains record the same budget ledger but, like every Claude lane, run
-without the Codex watchdog and control tokens, and no session accounting: the
-ledger's `--require-sessions` check applies to codex chains only, so a claude
-chain is bounded by its per-run gates and the wall ledger, not by tokens. Claude `--scope fullstack` still uses the legacy
-API-to-web handoff chain; `--scope api,web-app` uses the joint chain. Persisted
-legacy API/web chains keep their original schemas, handoff receipts, and
-budgets. GitNexus and AWS remain optional evidence capabilities.
+Claude chains record the same budget ledger but run without the Codex watchdog,
+control tokens, or session accounting (`--require-sessions` is Codex-only). They
+are not bounded by the Codex token ledger. They **do** stop the next dispatch on
+`CHAIN_BUDGET=EXCEEDED active=` unless the chain is already `locally_verified`.
+Wall-clock remains advisory. Recipe: [operator recovery](docs/operator-recovery.md).
+Claude `--scope fullstack` still uses the legacy API-to-web handoff chain;
+`--scope api,web-app` uses the joint chain. Persisted legacy API/web chains keep
+their original schemas, handoff receipts, and budgets. GitNexus and AWS remain
+optional evidence capabilities.
 
-Qualification evidence and outstanding live-trial requirements are recorded in
-`audit/repository-list-qualification.md`. ENG-3866 remains deferred until the
-two-repository trial completes through human approval and local verification.
+Repository-list qualification is established: chain `2205cded…` reached
+`locally_verified` under `claude` with receipt `7da448da…`, publication held
+(`feature-publish` opened draft PRs api#2359 and goodword-mcp#32). The earlier
+Codex Sol/medium trial pause is recorded in
+`audit/repository-list-qualification.md`. Operator stop recipes:
+[operator recovery](docs/operator-recovery.md).

@@ -49,7 +49,7 @@ Three operator skills are staged into both `<root>/.claude/skills/` and `<root>/
 
 This gist ships fourteen workflows: the nine Claude workflows (`babysit`, `bugfix`, `bugfix-lite`, `bugfix-smoke-deployed`, `cleanup`, `full-sdlc-api`, `full-sdlc-api-lite`, `full-sdlc-web`, `register-probe`) plus five generated Codex twins. The two `-lite` lanes and all `-codex` lanes are generated; never hand-edit them. If a workflow is missing, compare against `<root>/.archon/VERSION`.
 
-Read `archon__RUNBOOK.md` (installed to `<root>/.archon/RUNBOOK.md`). Claude lanes use `DISABLE_OMC=1 archon workflow run …`. Lite Codex lanes MUST use `python3 .archon/setup/archon-run.py`; it validates the dedicated home/external index, forces narrow workspace-write roots through a private wrapper, and arms the watchdog. Preserve the control token printed on each `STARTED` line and use it in the packet-rendered gate command.
+Read `archon__RUNBOOK.md` (installed to `<root>/.archon/RUNBOOK.md`). Claude lanes use `DISABLE_OMC=1 archon workflow run …`. Lite Codex lanes MUST use `python3 .archon/setup/archon-run.py`; it validates the dedicated home/external index, forces narrow workspace-write roots through a private wrapper, and arms the watchdog. Preserve the control token printed on each `STARTED` line and use it in the packet-rendered gate command. Repository-list stop recipes (allowlist, quarantine, first-failure reopen, infrastructure smoke, active-time budget, `--base`) live in `<root>/.archon/docs/operator-recovery.md`. Do not edit `files-allowlist.json`.
 
 ## File naming
 

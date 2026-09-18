@@ -168,10 +168,6 @@ class StageMode(unittest.TestCase):
         self.assertEqual(self.staged(), [])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class StrayTriage(unittest.TestCase):
     """--quarantine resolves a stray instead of paging a human, on the one axis
     that separates the two things agents actually leave behind. Run 38d72218
@@ -194,10 +190,16 @@ class StrayTriage(unittest.TestCase):
         (self.wt / "lib/other.service.ts").write_text("export const b = 2;\n")
         run("git add -A && git commit -qm base")
         self.allow = self.art / "files-allowlist.json"
-        self.allow.write_text(json.dumps([
+        self.allow_paths = [
             "lib/commit-import.service.ts",
             "lib/__tests__/commit-import-note-resolution.spec.ts",
-        ]))
+        ]
+        self.allow.write_text(json.dumps(self.allow_paths))
+        (self.art / "params.json").write_text(json.dumps({"repo": "api"}))
+        (self.art / "joint-plan.json").write_text(json.dumps({
+            "schema": "archon.joint-feature-plan.v1",
+            "stages": {"api": {"files_allowlist": list(self.allow_paths)}},
+        }))
 
     def stage(self, feature_scope=None):
         env = os.environ.copy()
@@ -256,19 +258,50 @@ class StrayTriage(unittest.TestCase):
         probe = self.wt / "lib/__tests__/zzz-timing-check.spec.ts"
         probe.write_text("it('probe', () => {});\n")
         r = self.stage()
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("COMMIT_SCOPE=QUARANTINED file=lib/__tests__/zzz-timing-check.spec.ts", r.stdout)
+        self.assertIn("COMMIT_SCOPE=FAIL", r.stdout)
+        self.assertIn("RECOVERY=", r.stdout)
+        self.assertNotIn("COMMIT_SCOPE=OK", r.stdout)
         self.assertFalse(probe.exists(), "the stray must leave the worktree")
         kept = self.art / "strays/lib/__tests__/zzz-timing-check.spec.ts"
         self.assertTrue(kept.exists(), "quarantine must keep the file, never delete it")
         self.assertNotIn("lib/__tests__/zzz-timing-check.spec.ts", self.staged())
         self.assertNotIn("zzz-timing-check", self.allow.read_text())
 
+    def test_c4_unrelated_new_file_on_repository_list_quarantines_and_stops(self):
+        # Chain 42b42a13: fixer created a new module with no stem sibling; the
+        # gate moved it to strays/ and printed COMMIT_SCOPE=OK, so the next
+        # round compiled against an import of a file that was gone.
+        created = self.wt / "lib/new-module.ts"
+        created.write_text("export const n = 1;\n")
+        r = self.stage(feature_scope="repositories")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("COMMIT_SCOPE=QUARANTINED file=lib/new-module.ts", r.stdout)
+        self.assertIn("COMMIT_SCOPE=FAIL", r.stdout)
+        self.assertIn("RECOVERY=", r.stdout)
+        self.assertNotIn("COMMIT_SCOPE=OK", r.stdout)
+        self.assertFalse(created.exists())
+        self.assertTrue((self.art / "strays/lib/new-module.ts").exists())
+        self.assertEqual(self.staged(), [])
+
+    def test_hand_edited_allowlist_on_repository_list_is_drift(self):
+        edited = list(self.allow_paths) + ["lib/sneak.ts"]
+        self.allow.write_text(json.dumps(edited))
+        r = self.stage(feature_scope="repositories")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("ALLOWLIST_DRIFT=FAIL", r.stdout)
+        self.assertIn("RECOVERY=", r.stdout)
+        self.assertNotIn("COMMIT_SCOPE=OK", r.stdout)
+        self.assertEqual(self.staged(), [])
+
     def test_a_sibling_in_another_directory_is_not_adopted(self):
         # The stem alone is not the unit; the directory is half the rule.
         (self.wt / "lib/__tests__/commit-import.util.ts").write_text("export const d = 4;\n")
         r = self.stage()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("COMMIT_SCOPE=QUARANTINED file=lib/__tests__/commit-import.util.ts", r.stdout)
+        self.assertIn("RECOVERY=", r.stdout)
 
     def test_an_edit_to_an_unallowlisted_tracked_file_still_stops(self):
         # Adoption is for NEW files. Editing code someone else owns is a scope
@@ -296,3 +329,7 @@ class StrayTriage(unittest.TestCase):
             capture_output=True, encoding="utf-8")
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("COMMIT_SCOPE=STRAY file=lib/commit-import.util.ts", r.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()

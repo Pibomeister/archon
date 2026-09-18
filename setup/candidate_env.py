@@ -113,12 +113,26 @@ def resolve_dep(name: str, target: Path, roots: list[Path], profile: dict) -> st
 
 
 def resolve_env_file(name: str, target: Path, roots: list[Path]) -> str:
-    if present(target, name):
-        return "present"
-    for root in roots:
-        if (root / name).is_file():
-            return link(target, name, root)
-    raise CandidateEnvError(f"{name}: not found in {[str(r) for r in roots]}")
+    # Secret rotation reaches the git clone first (chain C3: api/.env live,
+    # every api/.worktrees/*/.env dead). Prefer the clone (last search root)
+    # over a stale copy already in the target or source worktree.
+    preferred = next((root / name for root in reversed(roots) if (root / name).is_file()), None)
+    if preferred is None:
+        if present(target, name):
+            return "present"
+        raise CandidateEnvError(f"{name}: not found in {[str(r) for r in roots]}")
+    dest = target / name
+    if dest.is_symlink() and not dest.exists():
+        raise CandidateEnvError(f"{name}: {dest} is a dangling symlink to {dest.readlink()}")
+    if dest.exists() or dest.is_symlink():
+        try:
+            same = dest.resolve() == preferred.resolve()
+        except OSError:
+            same = False
+        if same:
+            return "present"
+        dest.unlink()
+    return link(target, name, preferred.parent)
 
 
 def prepare(repo: str, target: Path, source: Path) -> dict:

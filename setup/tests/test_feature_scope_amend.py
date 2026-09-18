@@ -304,10 +304,8 @@ class FeatureScopeAmend(unittest.TestCase):
         with self.assertRaisesRegex(fc.FeatureChainError, "handoffs"):
             fc.scope_amend_command(self.host, self.args, self.row)
 
-    def test_path_must_be_safe_tracked_current_repo_file_and_not_symlink(self):
-        untracked = Path(self.state()["worktrees"]["api"]["worktree"]) / "untracked.txt"
-        untracked.write_text("x\n", encoding="utf-8")
-        for path, message in (("../goodword-mcp/src/tool.ts", "relative"), ("untracked.txt", "tracked"), ("src/missing.ts", "unavailable")):
+    def test_path_must_be_safe_current_repo_file_and_not_symlink(self):
+        for path, message in (("../goodword-mcp/src/tool.ts", "relative"), ("src/missing.ts", "unavailable")):
             self.args.add_file = path
             with self.assertRaisesRegex(fc.FeatureChainError, message):
                 fc.scope_amend_command(self.host, self.args, self.row)
@@ -318,6 +316,30 @@ class FeatureScopeAmend(unittest.TestCase):
         self.args.add_file = "apps/enrichment-service/link.yaml"
         with self.assertRaisesRegex(fc.FeatureChainError, "non-symlink"):
             fc.scope_amend_command(self.host, self.args, self.row)
+
+    def test_untracked_worktree_file_is_admitted(self):
+        wt = Path(self.state()["worktrees"]["api"]["worktree"])
+        rel = "src/new-double.spec.ts"
+        (wt / rel).write_text("export const n = 1;\n", encoding="utf-8")
+        self.args.add_file = rel
+        with mock.patch("builtins.print"):
+            result = fc.scope_amend_command(self.host, self.args, self.row)
+        self.assertEqual(rel, result["add_file"])
+        self.assertIn(rel, self.state()["stages"]["api"]["plan"]["files_allowlist"])
+        self.assertIn(rel, json.loads((self.artifacts / "files-allowlist.json").read_text(encoding="utf-8")))
+
+    def test_strays_file_is_restored_then_allowlisted(self):
+        wt = Path(self.state()["worktrees"]["api"]["worktree"])
+        rel = "src/created-module.ts"
+        stray = self.artifacts / "strays" / rel
+        stray.parent.mkdir(parents=True)
+        stray.write_text("export const m = 1;\n", encoding="utf-8")
+        self.args.add_file = rel
+        with mock.patch("builtins.print"):
+            fc.scope_amend_command(self.host, self.args, self.row)
+        self.assertTrue((wt / rel).is_file())
+        self.assertFalse(stray.exists())
+        self.assertIn(rel, self.state()["stages"]["api"]["plan"]["files_allowlist"])
 
     def test_incomplete_scope_amendment_blocks_dispatch(self):
         state = self.state()

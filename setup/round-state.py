@@ -698,6 +698,10 @@ def cmd_pre(rnd, _args):
     reconcile_pending_commit(rnd)
     review, reason = decide_review(rnd, k)
     if review == "reuse":
+        # C2: ROUND_REUSE attempt 2 kept attempt 1's fixer.ok, so the
+        # reuse-uncommitted branch (gated on fok is None) was skipped and a
+        # stale attestation raised FIXER_TREE_DRIFT on a clean tree.
+        unlink(rnd.rd / "fixer.ok")
         emit_pre(rnd, review, reason, k)
         return 0
     previous = read_json(rnd.rd / "review-input.json")

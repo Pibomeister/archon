@@ -86,6 +86,43 @@ class ReviewGateKeepsTheMarkedEnvelope(unittest.TestCase):
         self.assertIn("GATE_3_verdict_in_enum=PASS verdict=[Ready with fixes] source=envelope",
                       p.stdout, p.stdout + p.stderr)
 
+    def test_web_substantive_narration_does_not_overwrite_the_envelope_on_disk(self):
+        self.assertGreaterEqual(len(self.NARRATION), 100)
+        p = run_gate("full-sdlc-web", review_output=self.NARRATION)
+        self.assertIn("GATE_3_verdict_in_enum=PASS verdict=[Ready with fixes] source=envelope",
+                      p.stdout, p.stdout + p.stderr)
+
+    def test_bugfix_substantive_narration_does_not_overwrite_the_envelope_on_disk(self):
+        self.assertGreaterEqual(len(self.NARRATION), 100)
+        p = run_gate("bugfix", review_output=self.NARRATION)
+        self.assertIn("GATE_3_verdict_in_enum=PASS verdict=[Ready with fixes] source=envelope",
+                      p.stdout, p.stdout + p.stderr)
+
+
+class DocreviewGateKeepsTheMarkedEnvelope(unittest.TestCase):
+    """Same fill-if-missing rule as review-gate: session narration must not
+    replace a docreview envelope already on disk."""
+
+    NARRATION = ReviewGateKeepsTheMarkedEnvelope.NARRATION
+
+    def test_api_docreview_gate_does_not_clobber_a_marked_envelope(self):
+        self.assertGreaterEqual(len(self.NARRATION), 100)
+        art = Path(tempfile.mkdtemp(prefix="drg-"))
+        try:
+            marked = "Review complete\nThis envelope was marked on disk.\n"
+            (art / "docreview-envelope.txt").write_text(marked, encoding="utf-8")
+            (art / "plan.md").write_text("# plan\n", encoding="utf-8")
+            (art / "plan.post-critic.md").write_text("# plan\n", encoding="utf-8")
+            body = runnable_body("full-sdlc-api", "docreview-gate",
+                                 outputs={"docreview": self.NARRATION})
+            env = dict(os.environ, ARTIFACTS_DIR=str(art))
+            p = subprocess.run(["bash", "-c", body], capture_output=True, text=True, env=env)
+            self.assertEqual((art / "docreview-envelope.txt").read_text(encoding="utf-8"), marked)
+            self.assertIn("DOCREVIEW_GATE=PASS", p.stdout, p.stdout + p.stderr)
+            self.assertEqual(p.returncode, 0, p.stderr)
+        finally:
+            shutil.rmtree(art, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

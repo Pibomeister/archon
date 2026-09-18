@@ -40,6 +40,7 @@ drift-declared install's uncommitted rewrite, and otherwise a breach. That rule
 overrides --exclude for the profile's own lockfile names."""
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -157,6 +158,46 @@ def adoptable(path):
     return any(os.path.dirname(a) == d and stem(a) == st for a in allowed)
 
 
+def print_amend_recovery(path, dest=None):
+    """Last line of a scope stop is the command that unblocks it."""
+    artifacts = os.path.dirname(os.path.abspath(allowlist_path))
+    run_id = feature_env("ARCHON_FEATURE_RUN_ID", artifacts=artifacts) or "<run-id>"
+    chain_id = feature_env("ARCHON_FEATURE_CHAIN_ID", artifacts=artifacts) or "<chain-id>"
+    restore = (
+        f"mv {shlex.quote(dest)} {shlex.quote(os.path.join(worktree, path))} && "
+        if dest else ""
+    )
+    print(
+        f"RECOVERY={restore}python3 .archon/setup/archon-run.py feature-scope-amend "
+        f"{shlex.quote(run_id)} --chain {shlex.quote(chain_id)} "
+        f"--add-file {shlex.quote(path)} --reason \"scope recovery\""
+    )
+
+
+if repository_list_scope():
+    # files-allowlist.json is a projection of the signed joint plan. A human
+    # edit of the json is not an approval: feature-scope-amend is the writer.
+    artifacts = os.path.dirname(os.path.abspath(allowlist_path))
+    plan_path = os.path.join(artifacts, "joint-plan.json")
+    try:
+        plan = json.load(open(plan_path, encoding="utf-8"))
+        stages = plan.get("stages") if isinstance(plan, dict) else None
+        plan_stage = stages.get(repo) if isinstance(stages, dict) and repo else None
+        signed = plan_stage.get("files_allowlist") if isinstance(plan_stage, dict) else None
+    except Exception as exc:
+        print(f"COMMIT_SCOPE=FAIL unreadable joint-plan.json [{plan_path}]: {exc}")
+        sys.exit(1)
+    if not isinstance(signed, list):
+        print("COMMIT_SCOPE=FAIL joint-plan.json has no files_allowlist for this stage")
+        sys.exit(1)
+    if set(allowed) != set(signed):
+        print("ALLOWLIST_DRIFT=FAIL files-allowlist.json does not match the signed joint-plan allowlist")
+        print("COMMIT_SCOPE=FAIL nothing staged (feature-scope-amend is the allowlist writer)")
+        extra = sorted(set(allowed) - set(signed))
+        print_amend_recovery(extra[0] if extra else (signed[0] if signed else "path"))
+        sys.exit(1)
+
+
 if breaches and stage and quarantine:
     adopted, moved, blocked = [], [], []
     for b in breaches:
@@ -169,8 +210,9 @@ if breaches and stage and quarantine:
     if blocked:
         for b in blocked:
             print(f"COMMIT_SCOPE=STRAY file={b} (modified, not new: outside the allowlist){why(b)}")
-        print("COMMIT_SCOPE=FAIL nothing staged (a human expands files-allowlist.json — "
-              "the edit is the approval — or reverts the file, then resume)")
+        print("COMMIT_SCOPE=FAIL nothing staged (feature-scope-amend --add-file, "
+              "or revert the file, then resume)")
+        print_amend_recovery(blocked[0])
         sys.exit(1)
     if adopted and repository_list_scope():
         for b in adopted:
@@ -178,13 +220,8 @@ if breaches and stage and quarantine:
                   "(new sibling outside the approved repository-stage allowlist)")
         print("COMMIT_SCOPE=FAIL nothing staged (repository-list stages require the "
               "approved joint-plan allowlist; no auto-expansion applied)")
+        print_amend_recovery(adopted[0])
         sys.exit(1)
-    for b in moved:
-        dest = os.path.join(quarantine, "strays", b)
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        shutil.move(os.path.join(worktree, b), dest)
-        print(f"COMMIT_SCOPE=QUARANTINED file={b} -> {dest} "
-              "(new file, unrelated to any allowlisted file: kept, not committed)")
     if adopted:
         allowed |= set(adopted)
         with open(allowlist_path, "w", encoding="utf-8") as fh:
@@ -204,14 +241,30 @@ if breaches and stage and quarantine:
         for b in adopted:
             print(f"COMMIT_SCOPE=ADOPTED file={b} "
                   "(new sibling of an allowlisted file in the same directory)")
+    if moved:
+        # Keep the file (never delete) so an operator can retrieve it, then
+        # stop. Moving and printing OK is how chain 42b42a13 shipped a branch
+        # that did not compile: the fixer created a module, this gate hid it
+        # under strays/, and the next round imported a missing file.
+        for b in moved:
+            dest = os.path.join(quarantine, "strays", b)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            shutil.move(os.path.join(worktree, b), dest)
+            print(f"COMMIT_SCOPE=QUARANTINED file={b} -> {dest} "
+                  "(new file, unrelated to any allowlisted file: kept, not committed)")
+        print("COMMIT_SCOPE=FAIL nothing staged (restore the quarantined file, "
+              "then feature-scope-amend --add-file, then resume)")
+        print_amend_recovery(moved[0], dest=os.path.join(quarantine, "strays", moved[0]))
+        sys.exit(1)
     breaches = []
 
 if breaches:
     if stage:
         for p in breaches:
             print(f"COMMIT_SCOPE=STRAY file={p}{why(p)}")
-        print("COMMIT_SCOPE=FAIL nothing staged (delete the stray, or a human expands "
-              "files-allowlist.json — the edit is the approval — then resume)")
+        print("COMMIT_SCOPE=FAIL nothing staged (delete the stray, or "
+              "feature-scope-amend --add-file, then resume)")
+        print_amend_recovery(breaches[0])
     else:
         tag = f"SCOPE_BREACH round={round_no}" if round_no else "SCOPE_BREACH"
         for p in breaches:
