@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 import json
 import os
 import shutil
@@ -129,6 +130,28 @@ sys.exit(2)
         self.assertEqual("interface/contract.json", row["path"])
         self.assertTrue((self.artifacts / row["path"]).is_file())
         self.assertEqual("worktree", row["source_kind"])
+
+    def set_verify_only(self, previous_head):
+        params = json.loads((self.artifacts / "params.json").read_text(encoding="utf-8"))
+        params["feature_verify_only"] = "yes"
+        params["feature_previous_head"] = previous_head
+        write_json(self.artifacts / "params.json", params)
+
+    def test_verify_only_reopen_stops_when_the_hand_fix_never_landed(self):
+        self.set_verify_only(self.head)
+        result = self.run_helper()
+        self.assertEqual(1, result.returncode)
+        self.assertIn(f"REOPEN=NOOP head={self.head}", result.stdout)
+        self.assertNotIn("LOCAL_CANDIDATE=PASS", result.stdout)
+
+    def test_verify_only_reopen_proceeds_once_the_hand_fix_is_committed(self):
+        (self.repo / "src/api.ts").write_text("export const x = 2;\n", encoding="utf-8")
+        run(["git", "-C", str(self.repo), "commit", "-qam", "fix: hand patch"])
+        self.set_verify_only(self.head)
+        result = self.run_helper()
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertNotIn("REOPEN=NOOP", result.stdout)
+        self.assertIn("LOCAL_CANDIDATE=PASS", result.stdout)
 
     def test_exported_interface_artifact_is_copied_from_declared_output_dir(self):
         write_json(self.artifacts / "joint-plan.json", {

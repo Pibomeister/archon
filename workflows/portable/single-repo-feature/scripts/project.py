@@ -191,7 +191,10 @@ def validate_profile(profile: dict) -> None:
     if v2 and profile["sourceRecipe"] not in source_recipes.RECIPES:
         raise ValueError("Unknown source recipe")
     object_fields(profile["scope"], ("allowedPaths", "forbiddenPaths"), "scope")
-    object_fields(profile["knowledge"], ("paths", "maxBytes"), "knowledge")
+    knowledge_fields = ("paths", "maxBytes")
+    if isinstance(profile.get("knowledge"), dict) and "required" in profile["knowledge"]:
+        knowledge_fields = ("required", "paths", "maxBytes")
+    object_fields(profile["knowledge"], knowledge_fields, "knowledge")
     object_fields(profile["recovery"], ("maxRounds",), "recovery")
     object_fields(profile["delivery"], ("draftOnly", "autoMerge", "autoDeploy") + (("baseBranch",) if v2 else ()), "delivery")
     if "noChangeClosure" in profile:
@@ -257,7 +260,11 @@ def validate_profile(profile: dict) -> None:
             raise ValueError("Invalid guidance fields")
     if "capabilities" in profile:
         capabilities = profile["capabilities"]
-        allowed = {"gitnexusRepo", "smoke", "generatedApiSync", "browserUat", "impactUnavailable", "requiredTools"}
+        allowed = {
+            "gitnexusRepo", "smoke", "generatedApiSync", "browserUat",
+            "impactUnavailable", "requiredTools",
+            "layout", "defaultRepo", "allowedRepos",
+        }
         if not isinstance(capabilities, dict) or set(capabilities) - allowed:
             raise ValueError("Invalid capabilities fields")
 

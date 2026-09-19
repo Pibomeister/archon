@@ -7,6 +7,7 @@ Nothing caught that class before: adding setup/round-reclaim.sh wired four
 lanes to a script that package.sh would not have installed. The manifest and
 the call sites are edited in different files by different changes, so the drift
 is silent until a run dies. Pin them to each other."""
+from __future__ import annotations
 import re
 import unittest
 from pathlib import Path

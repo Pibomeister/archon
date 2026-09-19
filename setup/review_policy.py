@@ -83,7 +83,7 @@ def _require_commit(value: Any, label: str) -> str:
 
 
 def _unique_texts(values: Any, label: str) -> list[str]:
-    if not isinstance(values, list | tuple):
+    if not isinstance(values, (list, tuple)):
         raise ReviewPolicyError(f"{label} must be a list")
     seen: set[str] = set()
     out: list[str] = []

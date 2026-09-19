@@ -698,12 +698,14 @@ def run_existing_converge_gates(artifacts: Path, worktree: Path) -> None:
         capture_output=True,
         text=True,
     )
-    data = read_json(fixer_result)
-    cross_repo = data.get("cross_repo") or []
-    if cross_repo:
-        atomic_write_json(artifacts / "cross-repo-findings.json", cross_repo)
-        repos = ",".join(sorted({str(item.get("producer_repo", "?")) for item in cross_repo if isinstance(item, dict)}))
-        raise policy.ReviewPolicyError(f"CROSS_REPO_FINDING count={len(cross_repo)} repos={repos}")
+    crossed = subprocess.run(
+        ["python3", str(Path(__file__).resolve().parent / "cross-repo-keys.py"), str(artifacts), "--gate", str(fixer_result)],
+        capture_output=True,
+        text=True,
+    )
+    if crossed.returncode:
+        detail = (crossed.stdout.strip() or crossed.stderr.strip() or "helper produced no output").splitlines()[-1]
+        raise policy.ReviewPolicyError(f"CROSS_REPO_FINDING {detail}")
     allowlist = artifacts / "files-allowlist.json"
     bootstrap = artifacts / "bootstrap-head.txt"
     if not allowlist.exists():

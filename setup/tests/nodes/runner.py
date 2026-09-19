@@ -37,6 +37,7 @@ N comes from the NODE_STRESS env var (default 3, so the committed suite stays
 fast). `NODE_STRESS=100 python3 -m unittest discover -s setup/tests -p
 'test_node_stress.py'` is the SLA sweep.
 """
+from __future__ import annotations
 import hashlib
 import os
 import re
@@ -69,6 +70,16 @@ PASS_TOKENS = {
     "PLAN_CONVERGED", "RCA_PLAN_CONVERGED",
     "PLAN_ROUND_PROGRESSED", "RCA_PLAN_ROUND_PROGRESSED",
     "CONVERGED", "ROUND_PROGRESSED",
+    "PIN_OK",                        # pin guard, clean: bare token, no =VALUE
+    # The two JSON-only nodes of the v2 review loop. Their stdout is a bare JSON
+    # object the sibling's `when:` parses, which is not a typed line, so these
+    # stderr lines ARE their success discriminators -- there is nothing else to
+    # classify. Measured before adding them: both read as untyped exits, because
+    # `ROUND=N head=<sha>` (still matched below for the v1 lanes) is no longer
+    # what round-pre prints. Each is emitted on EVERY successful path, including
+    # the terminal replay, so neither can go missing while the node succeeds.
+    "ROUND_REUSE",                   # round-pre  (round-state.py pre)
+    "FIX_PLAN",                      # fix-plan   (round-state.py fix-plan)
     "CRITIQUE",                      # parse-critique.py success line
     "PRE_OK",                        # wrap-review:pre success (PRE_OK head=…)
     "GREEN_CHECK",                   # green-check ALWAYS exits 0 by design:
@@ -77,12 +88,45 @@ PASS_TOKENS = {
                                      # typed, successful exit for this node.
 }
 FAIL_TOKENS = {
-    "PLAN_ROUND_CAP", "RCA_PLAN_ROUND_CAP", "ROUND_CAP_REACHED", "DESLOP_ROUND_CAP",
+    "PLAN_ROUND_CAP", "RCA_PLAN_ROUND_CAP", "ROUND_CAP_REACHED", "ROUND_CAP_EXCEEDED", "DESLOP_ROUND_CAP",
     "PLAN_REJECTED", "RCA_PLAN_REJECTED",
     "PLAN_NO_PROGRESS", "RCA_PLAN_NO_PROGRESS", "NO_PROGRESS",
     "PLAN_SCOPE_DISPUTE", "RCA_PLAN_SCOPE_DISPUTE",
     "FIXER_BLOCKED", "SCOPE_BREACH", "CROSS_REPO_FINDING",
+    # Two-hour convergence work (RUNBOOK 3). Bare-token failures, so they need
+    # enumerating; the KEY carries the meaning and the tail is detail.
+    # `REOPEN=` and `CHAIN_BUDGET=` do have a value, but NOOP and EXCEEDED are
+    # not general enough to belong in FAIL_VALUES — a future `X=NOOP` is not
+    # automatically a failure — so they are keyed instead. A happy-path
+    # `REOPEN=OK` still classifies PASS through its value, and a line that is
+    # both reads as typed either way.
+    "REVIEW_TREE_DRIFT", "REOPEN", "CHAIN_BUDGET",
+    # Durable round checkpoints and closure convergence (RUNBOOK 3c). Every one
+    # of these is a bare-token stop: the KEY carries the meaning and the tail is
+    # detail, so they need enumerating the same way the rows above do. They are
+    # in FAIL_TOKENS rather than PASS because each one EXITS the node non-zero --
+    # a round that prints any of them did not complete.
+    "REVIEW_UNAUTHORIZED", "REVIEW_WROTE_TREE",
+    "FIXER_ABSENT", "FIXER_INCOMPLETE", "FIXER_TREE_DRIFT",
+    "NOT_READY_WITHOUT_BLOCKER", "PIN_CONFLICT",
+    "PIN_BREACH", "PIN_UNRESOLVED",
 }
+# Informational, deliberately in NEITHER set: REVIEW_MODE, REVIEW_AUTOFIX_ONLY,
+# REVIEW_RERAISE, DESLOP_COMPLEXITY_DOWNGRADED, CHAIN_TIMING, and the v2
+# additions CLOSURE, PIN_CHANGED, BASELINE_BEHIND, REVIEW_OK, COMMITTED,
+# ROUND_OPENED, ROUND_TERMINAL_REPLAY, ROUND_BLOCKED, ROUND_DECISION_UNBOUND,
+# ROUND_RECLAIM_CONSULTED, FIXER_RECONCILED and REVIEW_INPUT (the non-FAIL one).
+# Every one of those is printed ALONGSIDE its node's real discriminator --
+# `REVIEW_OK` next to `REVIEW_GATE=PASS`, `COMMITTED=` next to
+# `COMMIT_FIXER=OK`, the `ROUND_*` diagnostics next to `ROUND_REUSE` -- so
+# classifying them would let a node whose discriminator went missing still read
+# as typed. Each is printed
+# alongside its node's own discriminator (`ROUND=`, `CONVERGED`,
+# `DESLOP=CLEAN`, ...), so classifying them would let a node whose real
+# discriminator went missing still read as typed. `REVIEW_SCOPE=FAIL`,
+# `PLAN_SHAPE=FAIL`, `GATE_5_input_matches=FAIL` and `REVIEW_BASE=FAIL` need no
+# entry: FAIL_VALUES already classifies them by their value. The `PIN_` lines
+# carry no `=VALUE` at all, so they are enumerated in the two sets instead.
 
 # Whole-line PASS forms, for a key that is NOT on its own a PASS token.
 # `round-pre` announces success as `ROUND=N head=<sha>` — but `converge` opens
@@ -127,6 +171,7 @@ def _isolation_env(tmp):
         "GIT_CONFIG_NOSYSTEM": "1",
         "XDG_CONFIG_HOME": str(home / ".config"),
         "ARCHON_FEATURE_SCOPE": "fullstack",
+        "PYTHONDONTWRITEBYTECODE": "1",
     }
 
 

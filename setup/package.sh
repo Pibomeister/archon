@@ -76,6 +76,7 @@ MANIFEST=(
   workflows/portable/single-repo-feature/scripts/repo_policy.py
   workflows/portable/single-repo-feature/scripts/review_envelope.py
   config.yaml
+  .env
   RUNBOOK.md
   workflows/babysit.yaml
   workflows/bugfix.yaml
@@ -90,6 +91,8 @@ MANIFEST=(
   setup/run-tests.py
   setup/joint-api-mcp-e2e.sh
   setup/run-joint-integration.py
+  setup/candidate_env.py
+  setup/jest-count.py
   setup/trusted-local-candidate.sh
   setup/write-local-candidate.py
   setup/export-candidate.py
@@ -100,15 +103,20 @@ MANIFEST=(
   setup/check-feature-handoff-integrity.py
   setup/check-lite-prbody.py
   setup/check-scope.py
+  setup/lockfile_scope.py
   setup/check-slop.py
   setup/detach.py
   setup/gist-README.md
   setup/install.sh
   setup/negcontrol.sh
   setup/no-change-closure.py
+  setup/reopen-gate.py
+  setup/verify-only-base.py
   setup/package.sh
   setup/params-env.sh
   setup/repo-profile.sh
+  setup/feature-env.sh
+  setup/feature_env.py
   setup/parse-critique.py
   setup/impact_gate.py
   setup/side_effect_contract.py
@@ -120,6 +128,9 @@ MANIFEST=(
   setup/graph_render.py
   setup/parse-review-envelope.py
   setup/plan-shape.sh
+  setup/browser-exemption.py
+  setup/check-unit-patterns.py
+  setup/node-no-output.py
   setup/validate-joint-plan.py
   setup/rca-shape.sh
   setup/probe-shape.py
@@ -140,6 +151,7 @@ MANIFEST=(
   setup/port-alloc.sh
   setup/e2e-mutex.sh
   setup/resume.sh
+  setup/archon-lock-retry.sh
   setup/chain-env.py
   setup/gate-approve.sh
   setup/run-artifacts.sh
@@ -150,6 +162,8 @@ MANIFEST=(
   setup/strip-premise-answers.py
   setup/thread-lane.py
   setup/update-waivers.py
+  setup/finding_key.py
+  setup/cross-repo-keys.py
   setup/write-review-summary.py
   # Lite lanes: the two YAMLs above are GENERATED from these by derive-lite.py.
   # package.sh regenerates and diffs them (LITE_DRIFT) before the secret gate.
@@ -195,6 +209,38 @@ MANIFEST=(
   setup/review_qualification.py
   workflows/risk-delta-v1.md
   setup/review-yield.py
+  # Two-hour convergence: review-mode.py is listed because round-pre calls it;
+  # the packaging test pins every referenced script to this list. ledger.py is
+  # called by review-gate, commit-fixer and converge, and review-contract.md is
+  # read by every review session -- its sha256 is the identity's contract digest,
+  # so an install that ships the prompts without it cannot compute a review id.
+  setup/review-mode.py
+  # Durable round checkpoints. round-state.py owns every state transition of the
+  # review loop -- five of the loop's seven nodes are now a single call to it,
+  # including both lanes' round-pre -- so an install without it dies at the first
+  # round on the operator's machine.
+  setup/round-state.py
+  # Pin guard: commit-impl and commit-fixer both call it on the staged index,
+  # so an install without it fails at the first commit of the first stage.
+  setup/pin-guard.py
+  # The closure ledger and the review contract whose digest is part of the review
+  # identity. NOTE: the reverse check below cannot find these -- it scans workflow
+  # YAMLs for setup/ references, and round-state.py shells into ledger.py,
+  # pin-guard.py, check-fixer-result.py, review-mode.py and round-reclaim.sh from
+  # Python. Anything reached only that way has to be listed by hand.
+  setup/ledger.py
+  setup/review-contract.md
+  # The live-acceptance checker, moved into the repo from the Goodword root.
+  setup/chain-acceptance.py
+  # Review prompt bodies (item 2/3/7), embedded by the lane nodes at derive time.
+  # Prompt bodies, and the step that splices them into the lane. The review
+  # MODE is named in embed-prompts.py and nowhere else; `--check` is what stops
+  # an edited prompt from looking landed while the lane runs the old text.
+  setup/embed-prompts.py
+  setup/prompts/review-trio.md
+  setup/prompts/review-capped.md
+  setup/prompts/review-verify.md
+  setup/prompts/review-ce.md
   setup/mcp-smoke.sh
   setup/codex-usage.py
   setup/codex-watchdog.sh

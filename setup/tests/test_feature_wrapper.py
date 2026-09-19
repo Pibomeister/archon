@@ -88,6 +88,8 @@ class FeatureWrapper(unittest.TestCase):
         self.assertIn(json.dumps(str(self.artifacts / "prior-planning-evidence.json")) + '= "read"', result.stdout)
         self.assertIn(json.dumps(str(self.artifacts / "AGENTS.md")) + '= "read"', result.stdout)
         self.assertIn(json.dumps(str(self.artifacts / "budget-forecast.json")) + '= "read"', result.stdout)
+        # The cross-repo acknowledgement is an operator act; no worker may write it.
+        self.assertIn(json.dumps(str(self.artifacts / "cross-repo-filed.json")) + '= "read"', result.stdout)
 
     def test_executor_uses_private_worktree_even_if_params_drift(self):
         self.state["current_run"]["phase"] = "implement"

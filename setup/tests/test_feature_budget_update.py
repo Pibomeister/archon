@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import contextlib
+import io
 import signal
 import sqlite3
 import subprocess
@@ -537,6 +538,88 @@ feature_chain.budget_update_command(host, args, row)
             con.execute("UPDATE remote_agent_workflow_runs SET status = 'running' WHERE id = ?", (RUN,))
         with self.assertRaisesRegex(fc.FeatureChainError, "requires a stopped run"):
             fc.account_provider_usage_command(self.host, args, self.row)
+
+
+class ClaudeChainBudgetUpdate(unittest.TestCase):
+    """feature-budget-update --chain through ar.main(): Claude launches have no control token."""
+
+    def setUp(self):
+        self.fx = FeatureBudgetUpdate("test_update_rejects_live_control_process_and_dispatch_reservation")
+        self.fx.setUp()
+        self.addCleanup(self.fx.doCleanups)
+        self.control_file = ar.control_state_path(self.fx.row, self.fx.control)
+        self.control_file.unlink()
+        self.set_run("full-sdlc-api", "failed")
+        self.set_provider("claude")
+
+    def set_run(self, workflow, status):
+        with sqlite3.connect(self.fx.db) as con:
+            con.execute("UPDATE remote_agent_workflow_runs SET workflow_name=?, status=? WHERE id=?", (workflow, status, RUN))
+
+    def set_provider(self, provider):
+        state = fc.read_state(self.fx.control, CHAIN)
+        state["provider"] = provider
+        fc.write_state(self.fx.control, state)
+
+    def main(self, *extra):
+        argv = ["archon-run.py", "--db", str(self.fx.db), "--control-dir", str(self.fx.control),
+                "--codex-home", str(self.fx.codex_home), "feature-budget-update", RUN,
+                "--total-tokens", "30000000", "--total-active-minutes", "480", "--reason", "Authorized retry", *extra]
+        out = io.StringIO()
+        with mock.patch("sys.argv", argv), mock.patch.object(ar, "validate_control_location"), \
+             contextlib.redirect_stdout(out):
+            ar.main()
+        return out.getvalue()
+
+    def assert_refused(self, *extra, message):
+        before = fc.read_state(self.fx.control, CHAIN)
+        with mock.patch.object(ar, "fail", side_effect=SystemExit) as failed, contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                self.main(*extra)
+        self.assertIn(message, failed.call_args.args[0])
+        after = fc.read_state(self.fx.control, CHAIN)
+        self.assertEqual(before["budget"], after["budget"])
+        self.assertNotIn("budget_amendments", after)
+        self.assertEqual(14_400, self.fx.ledger_usage()["wall_seconds"])
+
+    def test_claude_chain_update_raises_ledger_and_chain_without_a_control_record(self):
+        out = self.main("--chain", CHAIN)
+        state = fc.read_state(self.fx.control, CHAIN)
+        usage = self.fx.ledger_usage()
+
+        self.assertIn("ARCHON_FEATURE_BUDGET_UPDATE=APPLIED", out)
+        self.assertEqual(480, state["budget"]["wall_minutes"])
+        self.assertEqual(28_800, usage["wall_seconds"])
+        self.assertEqual(1, len(state["budget_amendments"]))
+        self.assertNotIn("budget_shepherd_version", state)
+        self.assertFalse(self.control_file.exists())
+        self.main("--chain", CHAIN)
+        self.assertEqual(1, len(fc.read_state(self.fx.control, CHAIN)["budget_amendments"]))
+
+    def test_codex_chain_and_codex_only_options_are_refused(self):
+        self.assert_refused("--chain", CHAIN, "--enable-shepherd", message="--enable-shepherd is codex-only")
+        self.set_provider("codex")
+        self.assert_refused("--chain", CHAIN, message="codex chains require --token")
+        self.set_run("full-sdlc-api-codex", "failed")
+        self.fx.write_control()
+        self.assert_refused(message="requires --token")
+
+    def test_claude_lane_run_requires_the_chain_flag(self):
+        self.assert_refused(message="not a guarded Codex lane")
+
+    def test_live_run_and_live_claims_are_refused(self):
+        self.set_run("full-sdlc-api", "running")
+        self.assert_refused("--chain", CHAIN, message="requires a stopped run")
+        self.set_run("full-sdlc-api", "failed")
+        state = fc.read_state(self.fx.control, CHAIN)
+        state["pending_control"] = {"owner_pid": fc.os.getpid(), "owner_fingerprint": fc.process_fingerprint()}
+        fc.write_state(self.fx.control, state)
+        self.assert_refused("--chain", CHAIN, message="control already in progress")
+        state = fc.read_state(self.fx.control, CHAIN)
+        state["pending_control"] = None
+        state["dispatch_reservation"] = {"phase": "planning"}
+        fc.write_state(self.fx.control, state)
+        self.assert_refused("--chain", CHAIN, message="dispatch already in progress")
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ bash: |
   # reviewer, so re-run the mechanical gate on the tree as the fixer left it.
   # exit-gate (next) re-runs the plan's unit patterns and the scope check;
   # this node owns typecheck and lint, which exit-gate does not run.
-  eval "$(bash "$ARCHON_LAYER/setup/params-env.sh" "$ARTIFACTS_DIR/params.json")"
+  eval "$(bash $ARCHON_LAYER/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
   cd "$WT"
   rm -rf .omc
   if [ -f "$ARTIFACTS_DIR/lite-fixes-unreviewed.txt" ]; then

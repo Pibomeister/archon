@@ -4,3 +4,4 @@ dist/
 .gist-id
 workflows/.bak/
 __pycache__/
+setup/tests/measure/runs/

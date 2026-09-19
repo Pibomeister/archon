@@ -11,6 +11,12 @@ not exist at all on a first round with no advisory.
 The second thing pinned here is the subject of the numbers: `applied`, `maxsev`
 and `reraised` are the CURRENT round's, so a fixture whose previous round has a
 different count and a worse severity must still report the current round's.
+
+`reraised_advisory` has the opposite hazard. The lanes run update-waivers.py
+immediately before this script, so the current round's advisory is already in
+the ledger when it is read; counting it would report every first-time waiver as
+a re-raise of itself, and the number would never be anything but the advisory
+count.
 """
 import json
 import shutil
@@ -66,18 +72,18 @@ class ReviewYield(unittest.TestCase):
         self.ad = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.ad, ignore_errors=True)
 
-    def write_round(self, n, applied, incomplete=(), key="applied"):
+    def write_round(self, n, applied, incomplete=(), key="applied", advisory=()):
         d = self.ad / f"round-{n}"
         d.mkdir(parents=True, exist_ok=True)
         (d / "fixer-result.json").write_text(
-            json.dumps({key: applied, "failed": [], "advisory": [],
+            json.dumps({key: applied, "failed": [], "advisory": list(advisory),
                         "incomplete": list(incomplete)}), encoding="utf-8")
 
-    def write_ledger(self, findings):
+    def write_ledger(self, findings, round_no=1):
         (self.ad / "waivers.json").write_text(
             json.dumps({"schema": "archon.waiver-ledger.v1",
                         "entries": [{"key": "", "finding": x, "rationale": "no",
-                                     "round": 1} for x in findings]}),
+                                     "round": round_no} for x in findings]}),
             encoding="utf-8")
 
     def ask(self, n):
@@ -97,7 +103,7 @@ class ReviewYield(unittest.TestCase):
                 self.ad.mkdir(parents=True, exist_ok=True)
                 self.write_round(1, prev, prev_inc)
                 self.write_round(2, cur, cur_inc)
-                self.assertEqual(self.ask(2), f"REVIEW_YIELD=OK {expected} reraised=0")
+                self.assertEqual(self.ask(2), f"REVIEW_YIELD=OK {expected} reraised=0 reraised_advisory=0")
 
     def test_round_1_can_never_converge(self):
         self.write_round(1, [f("a")])
@@ -106,7 +112,7 @@ class ReviewYield(unittest.TestCase):
     def test_absent_previous_round_does_not_buy_a_convergence(self):
         self.write_round(2, [f("b")])
         self.assertEqual(self.ask(2),
-                         "REVIEW_YIELD=OK verdict=CONTINUE applied=1 maxsev=P2 reraised=0")
+                         "REVIEW_YIELD=OK verdict=CONTINUE applied=1 maxsev=P2 reraised=0 reraised_advisory=0")
 
     def test_empty_previous_result_does_not_buy_a_convergence(self):
         (self.ad / "round-1").mkdir(parents=True)
@@ -124,7 +130,7 @@ class ReviewYield(unittest.TestCase):
         (self.ad / "round-2").mkdir(parents=True)
         (self.ad / "round-2" / "fixer-result.json").write_text("{not json", encoding="utf-8")
         self.assertEqual(self.ask(2),
-                         "REVIEW_YIELD=OK verdict=CONTINUE applied=0 maxsev=P0 reraised=0")
+                         "REVIEW_YIELD=OK verdict=CONTINUE applied=0 maxsev=P0 reraised=0 reraised_advisory=0")
 
     def test_absent_current_result_reports_continue_and_exits_zero(self):
         self.write_round(1, [f("a")])
@@ -134,13 +140,13 @@ class ReviewYield(unittest.TestCase):
         self.write_round(1, [f("a")])
         self.write_round(2, [f("b")])
         self.assertFalse((self.ad / "waivers.json").exists())
-        self.assertIn("reraised=0", self.ask(2))
+        self.assertIn("reraised=0 reraised_advisory=0", self.ask(2))
 
     def test_unreadable_ledger_is_an_empty_ledger(self):
         self.write_round(1, [f("a")])
         self.write_round(2, [f("b")])
         (self.ad / "waivers.json").write_text("{not json", encoding="utf-8")
-        self.assertIn("reraised=0", self.ask(2))
+        self.assertIn("reraised=0 reraised_advisory=0", self.ask(2))
 
     def test_reraised_counts_a_waived_finding_across_normalization(self):
         self.write_round(1, [f("a")])
@@ -158,14 +164,39 @@ class ReviewYield(unittest.TestCase):
         self.write_round(1, [f("a")])
         self.write_round(2, [f("something else entirely")])
         self.write_ledger(["fix the thing"])
-        self.assertIn("reraised=0", self.ask(2))
+        self.assertIn("reraised=0 reraised_advisory=0", self.ask(2))
 
     def test_reraised_is_reported_on_a_converging_pair(self):
         self.write_round(1, [f("fix the thing")])
         self.write_round(2, [f("Fix the thing")])
         self.write_ledger(["fix the thing"])
         self.assertEqual(self.ask(2),
-                         "REVIEW_YIELD=OK verdict=DIMINISHING applied=1 maxsev=P2 reraised=1")
+                         "REVIEW_YIELD=OK verdict=DIMINISHING applied=1 maxsev=P2 reraised=1 reraised_advisory=0")
+
+    def test_an_advisory_waived_in_an_earlier_round_is_reraised(self):
+        self.write_round(1, [f("a")])
+        self.write_round(2, [f("b")], advisory=[f("Fix  the Thing.")])
+        self.write_ledger(["fix the thing"], round_no=1)
+        self.assertIn("reraised_advisory=1", self.ask(2))
+
+    def test_this_rounds_own_waiver_is_not_a_reraise_of_itself(self):
+        self.write_round(1, [f("a")])
+        self.write_round(2, [f("b")], advisory=[f("fix the thing")])
+        self.write_ledger(["fix the thing"], round_no=2)
+        self.assertIn("reraised_advisory=0", self.ask(2))
+
+    def test_a_first_time_advisory_is_not_reraised(self):
+        self.write_round(1, [f("a")])
+        self.write_round(2, [f("b")], advisory=[f("something else entirely")])
+        self.write_ledger(["fix the thing"], round_no=1)
+        self.assertIn("reraised_advisory=0", self.ask(2))
+
+    def test_reraised_advisory_counts_entries_not_distinct_keys(self):
+        self.write_round(1, [f("a")])
+        self.write_round(2, [f("b")],
+                         advisory=[f("Fix the thing"), f("FIX THE THING!")])
+        self.write_ledger(["fix the thing"], round_no=1)
+        self.assertIn("reraised_advisory=2", self.ask(2))
 
     def test_a_non_integer_round_reports_continue_and_exits_zero(self):
         self.assertIn("verdict=CONTINUE", self.ask("N"))
@@ -192,6 +223,31 @@ class KeyParityWithWaiverLedger(unittest.TestCase):
             out = subprocess.run([sys.executable, str(SCRIPT), str(ad), "2"],
                                  capture_output=True, encoding="utf-8", check=True).stdout
         self.assertIn("reraised=1", out)
+
+    def test_the_real_lane_order_counts_a_restated_waiver_once(self):
+        """End to end in the order the lanes actually run it: update-waivers.py
+        writes round 2's ledger, THEN review-yield.py reads it. Round 1 waived
+        the finding; round 2's reviewer restated it with this round's provenance
+        and file:line and the fixer waived it again. That is one re-raise, and
+        the fresh round-2 waiver beside it is not a second one."""
+        waived = "Service method name diverges from convention (group.service.ts:979)"
+        restated = ("Service method name diverges from convention (group.service.ts:972)"
+                    " -- re-raised by maintainability this round")
+        fresh = "Scan runs on every read (repo.ts:304)"
+        with tempfile.TemporaryDirectory() as td:
+            ad = Path(td)
+            for n, advisory in ((1, [waived]), (2, [restated, fresh])):
+                (ad / f"round-{n}").mkdir()
+                (ad / f"round-{n}" / "fixer-result.json").write_text(json.dumps(
+                    {"applied": [], "failed": [], "incomplete": [],
+                     "advisory": [{"finding": x, "action": "Waived: out of scope."}
+                                  for x in advisory]}), encoding="utf-8")
+                subprocess.run([sys.executable, str(SETUP / "update-waivers.py"),
+                                str(ad / f"round-{n}" / "fixer-result.json"),
+                                str(ad / "waivers.md")], check=True, capture_output=True)
+            out = subprocess.run([sys.executable, str(SCRIPT), str(ad), "2"],
+                                 capture_output=True, encoding="utf-8", check=True).stdout
+        self.assertIn("reraised_advisory=1", out)
 
 
 

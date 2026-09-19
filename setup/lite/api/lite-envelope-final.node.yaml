@@ -9,5 +9,5 @@ bash: |
   # sanctioned human act at either). Re-evaluate on the allowlist as it stands
   # and overwrite envelope-post.txt, which prbody renders. Fail-closed: a widening
   # past a cap stops here; relaunch on full-sdlc-api.
-  bash "$ARCHON_LAYER/setup/lite-envelope.sh" \
+  bash $ARCHON_LAYER/setup/lite-envelope.sh \
     "$PROJECT_ROOT" "$ARTIFACTS_DIR" api post

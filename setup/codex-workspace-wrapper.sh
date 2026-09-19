@@ -26,6 +26,33 @@ if len(paths) > 1:
     raise SystemExit(2)
 print(paths[0] if paths else "")
 ' "$ARTIFACTS_BASE")"
+  # A plain `archon workflow resume` drops the launcher's ARCHON_FEATURE_* env,
+  # and every guarded-chain branch below reads it. params.json is the durable
+  # copy. archon-run.py installs this wrapper as a standalone private copy
+  # outside the workspace, so it cannot source setup/feature-env.sh; the key map
+  # is inlined and test_feature_env_fallback.py pins it to feature_env.KEYS.
+  if [ -z "${ARCHON_FEATURE_SCOPE:-}" ] && [ -n "$ARTIFACTS_DIR" ] && [ -f "$ARTIFACTS_DIR/params.json" ]; then
+    eval "$(python3 - "$ARTIFACTS_DIR/params.json" <<'PY_FEATURE_ENV'
+import json, shlex, sys
+PARAMS_KEYS = {
+    "ARCHON_FEATURE_SCOPE": "feature_scope",
+    "ARCHON_FEATURE_PHASE": "feature_phase",
+    "ARCHON_FEATURE_CHAIN_ID": "logical_chain_id",
+    "ARCHON_FEATURE_RUN_ID": "run_id",
+}
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        params = json.load(handle)
+except (OSError, ValueError):
+    raise SystemExit(0)
+if isinstance(params, dict):
+    for name, key in PARAMS_KEYS.items():
+        value = params.get(key)
+        if isinstance(value, str) and value:
+            print("export " + name + "=" + shlex.quote(value))
+PY_FEATURE_ENV
+)"
+  fi
   args=()
   WORKTREE="$PWD"
   SKIP_GIT_CHECK=0
@@ -137,7 +164,7 @@ print(paths[0] if paths else "")
           ;;
       esac
     done
-    args=("${normalized_args[@]}")
+    args=(${normalized_args[@]+"${normalized_args[@]}"})
   fi
   PINNED_MODEL="${ARCHON_CODEX_PINNED_MODEL:-}"
   PINNED_REASONING_EFFORT="${ARCHON_CODEX_PINNED_REASONING_EFFORT:-}"
@@ -209,7 +236,7 @@ PY_PIN_CONFIG
       esac
     }
     value_for=""
-    for token in "${args[@]}"; do
+    for token in ${args[@]+"${args[@]}"}; do
       if [ -n "$value_for" ]; then
         case "$value_for" in
           --model|-m) check_model_pin "$token" ;;
@@ -327,12 +354,14 @@ rules = ",".join(json.dumps(str(path.resolve())) + '= "deny"' for path in denied
 if os.environ.get("ARCHON_FEATURE_SCOPE") == "repositories":
     artifacts = Path(sys.argv[1]).resolve()
     frozen = ["params.json", "worktrees.json", "bootstrap-head.txt", "feature-chain-request.json",
-              "prior-planning-evidence.json", "budget-forecast.json", "AGENTS.md"]
+              "prior-planning-evidence.json", "budget-forecast.json", "AGENTS.md",
+              "cross-repo-filed.json"]
     if os.environ.get("ARCHON_FEATURE_PHASE") != "planning":
         frozen += ["joint-plan.json", "plan.md", "files-allowlist.json", "verify.json",
                    "candidate-inputs.json", "candidate-revisions.json", "premises.json",
                    "reader-audit.json", "web-premises.json", "web-reader-audit.json",
-                   "browser-evidence.json", "browser-evidence.sha256", "smoke-probe.json"]
+                   "browser-evidence.json", "browser-evidence.sha256", "smoke-probe.json",
+                   "reopen-context.json", "contract-symbols.json"]
         if os.environ.get("ARCHON_FEATURE_SCOPE") == "repositories":
             frozen += ["review-authority.json", "review-state.json", "current-review.json", "review-checkpoints"]
     rules += "," + ",".join(json.dumps(str(artifacts / name)) + '= "read"' for name in frozen)
@@ -416,9 +445,9 @@ except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
         child.wait()
     print("CODEX_WRAPPER=FAIL " + str(exc), file=sys.stderr)
     raise SystemExit(2)
-' "$ARCHON_FEATURE_BUDGET_SCRIPT" "$(basename "$ARTIFACTS_DIR")" "$REAL" "${forced[@]}" "${args[@]}" <<< "$PROMPT"
+' "$ARCHON_FEATURE_BUDGET_SCRIPT" "$(basename "$ARTIFACTS_DIR")" "$REAL" ${forced[@]+"${forced[@]}"} ${args[@]+"${args[@]}"} <<< "$PROMPT"
   fi
-  exec "$REAL" "${forced[@]}" "${args[@]}" <<< "$PROMPT"
+  exec "$REAL" ${forced[@]+"${forced[@]}"} ${args[@]+"${args[@]}"} <<< "$PROMPT"
 fi
 
 exec "$REAL" "$@"

@@ -230,6 +230,34 @@ class FeatureLauncherIntegrationTest(unittest.TestCase):
         self.assertEqual(["api", "goodword-mcp"], params["repositories"])
         self.assertTrue((self.root / "artifacts" / "planning" / fc.PLANNING_REQUEST_ARTIFACT).is_file())
 
+    def test_single_repo_mcp_chain_gets_the_smoke_port_its_profile_requires(self):
+        # Chain 0712fb0d: a goodword-mcp-only chain got no api_port because the
+        # port was keyed on the repo NAME "api", while the lane preflight keys
+        # the requirement on the profile's HAS_SMOKE.
+        args = Namespace(**dict(vars(self.args), provider="claude", db=self.root / "archon.db"))
+        with sqlite3.connect(args.db) as con:
+            con.execute("CREATE TABLE remote_agent_workflow_run_node_sessions "
+                        "(workflow_run_id TEXT, provider TEXT, node_id TEXT, provider_session_id TEXT)")
+            con.execute("CREATE TABLE remote_agent_workflow_events "
+                        "(workflow_run_id TEXT, created_at TEXT, event_type TEXT, node_name TEXT, payload TEXT)")
+        state = fc.write_state(self.control, fc.make_initial_state(self.host, args, ["goodword-mcp"]))
+        fc.budget_init(args, state)
+
+        def dispatch_feature_phase(host_args, lane, message, env):
+            row = self.row("c" * 32, self.root / "artifacts" / "mcp-planning", lane=lane)
+            fc.before_dispatch_bind(self.host, host_args, row)
+            return row
+
+        self.host.dispatch_feature_phase = dispatch_feature_phase
+        fc.dispatch_planning(self.host, args, state)
+        params_path = self.root / "artifacts" / "mcp-planning" / "params.json"
+        params = read_json(params_path)
+        self.assertEqual("goodword-mcp", params["repo"])
+        self.assertIn("api_port", params)
+        expanded = self.eval_params(params_path)
+        self.assertEqual("1", expanded["HAS_SMOKE"])
+        self.assertEqual(str(params["api_port"]), expanded["APIPORT"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -66,17 +66,23 @@ def runnable_body(workflow, node_id, outputs=None, root=None):
     assigns them verbatim."""
     body = node_body(workflow, node_id)
     goodword_root = str(Path(root) if root else ARCHON_ROOT.parent)
-    # The archon root is THIS CHECKOUT, not "<goodword>/.archon". Deriving it as
-    # goodword_root + "/.archon" silently sent every worktree back to the real
-    # .archon: the body's YAML came from the worktree while the setup/ scripts it
-    # shelled into came from the main checkout. A run in that state is a hybrid of
-    # two trees, and it fails or passes on code that is not under test. Measured
-    # 2026-09-08: four node_stress tests "failed" in a worktree at a commit whose
-    # own suite was green, because the main checkout held another session's
-    # in-progress browser-evidence digest check.
-    archon_root = str(Path(root) / ".archon") if root else str(ARCHON_ROOT)
+    # Helpers live in this pack unless the test already built a setup/ mirror
+    # at root/.archon (stub injection for yield/fixer/mcp-smoke). Deriving
+    # ARCHON_LAYER as <project>/.archon when that directory is missing sent
+    # worktree tests at a sibling checkout's scripts.
+    mirrored = (Path(root) / ".archon" / "setup") if root else None
+    if mirrored is not None and mirrored.is_dir():
+        archon_root = str(Path(root) / ".archon")
+    else:
+        archon_root = str(ARCHON_ROOT)
     body = body.replace(HARDCODED_ROOTS[0], archon_root)
     body = body.replace(HARDCODED_ROOTS[1], goodword_root)
+    # Same leak through one level of indirection: bugfix bodies set
+    # ROOT="<goodword>" and call "$ROOT/.archon/setup/...". A checkout that is not
+    # literally <goodword>/.archon then ran the MAIN checkout's scripts (observed:
+    # drill_deslop exercising main's check-slop.py against this tree's YAML).
+    # Every ROOT= in the workflows is the goodword root, so the rewrite is exact.
+    body = body.replace("$ROOT/.archon", archon_root)
     preamble = (
         f"export ARCHON_LAYER={shlex.quote(archon_root)}\n"
         f"export PROJECT_ROOT={shlex.quote(goodword_root)}\n"

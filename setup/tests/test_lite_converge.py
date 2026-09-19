@@ -45,9 +45,28 @@ class LiteConverge(unittest.TestCase):
         (self.ad / "files-allowlist.json").write_text(json.dumps(["a.ts", "b.ts"]))
         (self.ad / "params.json").write_text(json.dumps({"spec": "/x.md", "slug": "x", "branch": "archon/x", "worktree": str(self.wt)}))
         (self.ad / "round-1" / "pre-head.txt").write_text(self.base + "\n")
+        # The two authorization markers the overlay now requires. converge carries
+        # trigger_rule: all_done so it can replay a terminal decision, and all_done
+        # runs a node after a FAILED upstream as well as a skipped one -- v1 was
+        # protected here only by the skip chain. review-summary.json is written
+        # BEFORE review-gate's final checks and stays readable with a Ready
+        # verdict, so without these the overlay would converge a round whose
+        # review was never gated. `self.unauthorize()` removes them, and the two
+        # tests at the bottom of this file are the negative controls.
+        self.authorize()
         self.fixer({"applied": [{"finding": "f1"}], "failed": [], "advisory": [], "incomplete": []})
         self.script = self.tmp / "converge.sh"
         self.script.write_text(OVERLAY.read_text(encoding="utf-8"), encoding="utf-8")
+
+    def authorize(self):
+        (self.ad / "round-1" / "review.ok").write_text(
+            json.dumps({"gen": 1, "id": "x" * 64, "guard": "PASS"}))
+        (self.ad / "round-1" / "fixer.ok").write_text(
+            json.dumps({"attempt": 1, "review_gen": 1, "committed": False}))
+
+    def unauthorize(self, *names):
+        for n in names:
+            (self.ad / "round-1" / n).unlink(missing_ok=True)
 
     def fixer(self, obj):
         (self.ad / "round-1" / "fixer-result.json").write_text(json.dumps(obj))
@@ -125,6 +144,43 @@ class LiteConverge(unittest.TestCase):
         r = self.go()
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertNotIn("REVIEW_CONVERGED", r.stdout)
+
+    def test_an_ungated_review_cannot_converge_this_lane(self):
+        # The hole `trigger_rule: all_done` opened. A failed review-gate no longer
+        # skips converge, and review-summary.json is written before that gate's
+        # final checks -- so a Ready verdict is readable on disk for a review that
+        # was never authorized. Without the review.ok check this converges and
+        # emits the promise, which is the whole lane shipping on an ungated review.
+        self.verdict("Ready to merge")
+        self.unauthorize("review.ok")
+        r = self.go()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("REVIEW_UNAUTHORIZED round=1", r.stdout)
+        self.assertNotIn("REVIEW_CONVERGED", r.stdout)
+
+    def test_a_missing_fixer_attestation_cannot_converge_this_lane(self):
+        # commit-fixer leaves no fixer.ok when the pin guard or the commit failed,
+        # and it too carries all_done, so its failure reaches converge instead of
+        # skipping it.
+        self.verdict("Ready to merge")
+        self.unauthorize("fixer.ok")
+        r = self.go()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("FIXER_ABSENT round=1", r.stdout)
+        self.assertNotIn("REVIEW_CONVERGED", r.stdout)
+
+    def test_negative_control_without_the_guard_an_ungated_review_converges(self):
+        # Revert exactly the guard. If this ever stops converging at the shipped
+        # body, the two tests above have stopped being evidence.
+        self.verdict("Ready to merge")
+        self.unauthorize("review.ok", "fixer.ok")
+        body = self.script.read_text()
+        cut = [ln for ln in body.splitlines()
+               if 'REVIEW_UNAUTHORIZED' not in ln and 'FIXER_ABSENT' not in ln]
+        self.script.write_text("\n".join(cut) + "\n")
+        r = self.go()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("REVIEW_CONVERGED", r.stdout)
 
 
 if __name__ == "__main__":

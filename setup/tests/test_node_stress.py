@@ -16,6 +16,7 @@ External tools are stubbed through a PATH-prepended shim dir (see SHIMS):
 No covered node calls gh, aws, or archon.
 """
 import atexit
+import hashlib
 import json
 import os
 import shutil
@@ -249,18 +250,35 @@ def review_gate_output(verdict, path):
 class ReviewGateStress(unittest.TestCase):
     """S1: 3 enum verdicts x 3 entry paths x 3 lanes, N runs each."""
 
+    # full-sdlc-api's review-gate hands off to round-state.py after GATE_3, and
+    # that identity gate needs a review-input.json whose id is minted by the
+    # helper from a real candidate. A synthetic fixture cannot produce one
+    # without transcribing the sha256 formula, which would then silently stop
+    # matching the day the formula changed. What this class exists to prove --
+    # that the envelope parse and the ce-code-review run-dir scan are
+    # deterministic across N concurrent runs and that the exit is typed -- is
+    # still proven on that lane, by asserting the GATE_ lines and letting
+    # run_node's own determinism and typed-exit contracts do the rest. GATE_5
+    # itself is exercised for real, seventeen times, by
+    # setup/tests/injection/review-loop-replay.sh.
+    V2 = ("full-sdlc-api",)
+
     def _one(self, workflow, verdict, path):
         r = run_node(
             workflow, "review-gate",
             review_gate_fixture(verdict, path),
             outputs={"review": review_gate_output(verdict, path)},
         )
-        self.assertEqual(r["rc"], 0, r["output"])
-        self.assertIn(f"REVIEW_GATE=PASS round=1", r["output"])
         src = "metadata" if path == "metadata" else "envelope"
         self.assertIn(
             f"GATE_3_verdict_in_enum=PASS verdict=[{verdict}] source={src}", r["output"]
         )
+        if workflow in self.V2:
+            self.assertIn("GATE_1_review_complete_present=PASS", r["output"])
+            self.assertIn("GATE_2_degraded_absent=PASS", r["output"])
+            return r
+        self.assertEqual(r["rc"], 0, r["output"])
+        self.assertIn(f"REVIEW_GATE=PASS round=1", r["output"])
         return r
 
 
@@ -578,6 +596,17 @@ def rca_artifacts(art):
     proof = json.loads((art / "proof-assessment.json").read_text(encoding="utf-8"))
     proof["selected_hypothesis_id"] = "h1"
     jdump(art / "proof-assessment.json", proof)
+    # Isolated fixtures have no sibling api/ checkout for repo-policy.py to
+    # snapshot; seed the selected repo so rca-gate's validate-plan is the
+    # contract under test rather than layout discovery.
+    repo = json.loads((art / "repo.json").read_text(encoding="utf-8"))["repo"]
+    jdump(art / "repo-policy.json", {
+        "schema_version": 1,
+        "baseline": {repo: "test"},
+        "repositories": {
+            repo: {"root": str(art), "policy_documents": [], "rules": []},
+        },
+    })
 
 
 def rca_gate_fixture(tmp):
@@ -765,6 +794,49 @@ class GateTestsStress(unittest.TestCase):
         self.assertEqual(r["rc"], 0, r["output"])
         self.assertIn("SCOPE_OK files=1", r["output"])
         self.assertIn("GATE_TESTS=PASS", r["output"])
+
+    # A feature-reopen'd stage (reopen-context.json bound by params.json) must
+    # change its previous candidate. Chain 42b42a13 run aab1f254 re-implemented a
+    # plan already in the worktree, changed nothing, and passed as NO_CHANGE.
+    @staticmethod
+    def with_reopen(fixture, dirty=True):
+        def build(tmp):
+            fixture(tmp)
+            art, wt = tmp / "artifacts", tmp / "wt"
+            if not dirty:
+                git(wt, "checkout", "--", ".")
+            body = b'{"reason": "GET /briefing?window=bogus returned 500"}\n'
+            (art / "reopen-context.json").write_bytes(body)
+            doc = json.loads((art / "params.json").read_text(encoding="utf-8"))
+            doc["feature_reopen_context_sha256"] = hashlib.sha256(body).hexdigest()
+            jdump(art / "params.json", doc)
+        return build
+
+    def test_reopen_with_no_change_fails_typed(self):
+        for lane, fixture in (("full-sdlc-api", gate_tests_api_fixture), ("full-sdlc-web", gate_tests_web_fixture)):
+            with self.subTest(lane=lane):
+                r = run_node(lane, "gate-tests", self.with_reopen(fixture, dirty=False))
+                self.assertEqual(r["rc"], 1, r["output"])
+                self.assertIn("IMPLEMENT=FAIL reopen produced no change", r["output"])
+                self.assertNotIn("GATE_TESTS=PASS", r["output"])
+
+    def test_reopen_with_a_change_passes(self):
+        for lane, fixture in (("full-sdlc-api", gate_tests_api_fixture), ("full-sdlc-web", gate_tests_web_fixture)):
+            with self.subTest(lane=lane):
+                r = run_node(lane, "gate-tests", self.with_reopen(fixture))
+                self.assertEqual(r["rc"], 0, r["output"])
+                self.assertIn("REOPEN_GATE=PASS", r["output"])
+                self.assertIn("GATE_TESTS=PASS", r["output"])
+
+    def test_no_change_without_reopen_context_still_passes(self):
+        # Negative control for the reopen failure: the same clean tree with no
+        # reopen context is an ordinary NO_CHANGE outcome.
+        def build(tmp):
+            gate_tests_api_fixture(tmp)
+            git(tmp / "wt", "checkout", "--", ".")
+        r = run_node("full-sdlc-api", "gate-tests", build)
+        self.assertEqual(r["rc"], 0, r["output"])
+        self.assertIn("GATE_TESTS=PASS outcome=NO_CHANGE", r["output"])
 
 
 # ==========================================================================
@@ -980,6 +1052,38 @@ class DeslopStress(unittest.TestCase):
                     self.assertEqual(r["rc"], 1, r["output"])
                     self.assertIn(f"DESLOP_RECHECK=FAIL deslop-round.txt is not an integer: [{bad}]", r["output"])
 
+    def test_deslop_recheck_api_treats_an_approved_contract_export_as_referenced(self):
+        def build(tmp, contract):
+            deslop_common(tmp, "api")
+            foo = tmp / "wt" / "src" / "foo.ts"
+            foo.write_text(foo.read_text(encoding="utf-8") + "export class ReservedDto {}\n", encoding="utf-8")
+            if contract:
+                jdump(tmp / "artifacts" / "contract-symbols.json",
+                      {"contracts": [{"artifact": "src/foo.ts", "symbols": ["ReservedDto"]}]})
+        r = run_node("full-sdlc-api", "deslop-recheck", lambda tmp: build(tmp, True))
+        self.assertEqual(r["rc"], 0, r["output"])
+        self.assertIn("reason=approved-contract", r["output"])
+        # Negative control: without the stage's contract file the export is yagni.
+        r = run_node("full-sdlc-api", "deslop-recheck", lambda tmp: build(tmp, False))
+        self.assertEqual(r["rc"], 1, r["output"])
+        self.assertIn("DESLOP_GATE=FAIL slop round=1", r["output"])
+
+    def test_deslop_recheck_api_refuses_a_contract_file_altered_after_dispatch(self):
+        def build(tmp, digest):
+            deslop_common(tmp, "api")
+            art = tmp / "artifacts"
+            jdump(art / "contract-symbols.json", {"contracts": []})
+            doc = json.loads((art / "params.json").read_text(encoding="utf-8"))
+            doc["feature_contract_symbols_sha256"] = digest(art / "contract-symbols.json")
+            jdump(art / "params.json", doc)
+        r = run_node("full-sdlc-api", "deslop-recheck", lambda tmp: build(tmp, lambda p: "0" * 64))
+        self.assertEqual(r["rc"], 1, r["output"])
+        self.assertIn("DESLOP_GATE=FAIL contract-symbols.json altered round=1", r["output"])
+        # Negative control: the digest of the real bytes passes.
+        r = run_node("full-sdlc-api", "deslop-recheck",
+                     lambda tmp: build(tmp, lambda p: hashlib.sha256(p.read_bytes()).hexdigest()))
+        self.assertEqual(r["rc"], 0, r["output"])
+
     def test_deslop_recheck_api_lint_failure_is_typed(self):
         r = run_node("full-sdlc-api", "deslop-recheck", deslop_recheck_fixture("api"),
                      env={"SHIM_RC_BUN_LINT": "1"})
@@ -1009,14 +1113,16 @@ class DeslopStress(unittest.TestCase):
     def test_deslop_review_gate_api_dirty(self):
         r = run_node("full-sdlc-api", "deslop-review-gate",
                      deslop_review_gate_fixture("api", deslop_review("DIRTY", blocking=1)))
-        self.assertEqual(r["rc"], 1)
+        self.assertEqual(r["rc"], 0, r["output"])
         self.assertIn("DESLOP=DIRTY round=1 blocking=1", r["output"])
+        self.assertIn("DESLOP_RETRY=PASS round=1 dirty_rounds=1", r["output"])
 
     def test_deslop_review_gate_bugfix_dirty(self):
         r = run_node("bugfix", "deslop-review-gate",
                      deslop_review_gate_fixture("bugfix", deslop_review("DIRTY", blocking=1)))
-        self.assertEqual(r["rc"], 1)
+        self.assertEqual(r["rc"], 0, r["output"])
         self.assertIn("DESLOP=DIRTY round=1 blocking=1", r["output"])
+        self.assertIn("DESLOP_RETRY=PASS round=1 dirty_rounds=1", r["output"])
 
     def test_deslop_review_gate_junk_counter_fails_closed(self):
         # The READER half of the same guard: deslop-review-gate builds
@@ -1157,7 +1263,13 @@ def converge_fixture(lane, verdict, fixer=None, dirty=False, cap=None, accept=Fa
 
 
 class ConvergeStress(unittest.TestCase):
-    LANES = ("full-sdlc-api", "bugfix")
+    # bugfix only. full-sdlc-api's converge is one call into round-state.py, and
+    # every assertion below is a v1 contract that lane no longer has: the cap
+    # moved to round-pre, NO_PROGRESS and the bare Ready-converges rule were
+    # replaced by the closure table (RUNBOOK 3c), and convergence now additionally
+    # requires every P0/P1 that entered the ledger to be verified closed. Those
+    # rows are tested against the helper in test_round_state.py.
+    LANES = ("bugfix",)
 
     def test_converged(self):
         for lane in self.LANES:
@@ -1271,7 +1383,16 @@ class ExitGateCounter(unittest.TestCase):
 ROUND_PRE_GUARD = '2>/dev/null | LC_ALL=C sort > "$RD/prerun-dirs.txt"'
 ROUND_PRE_UNGUARDED = '2>/dev/null | sort > "$RD/prerun-dirs.txt"'
 WEB_WT_SUB = []
-ROUND_PRE_LANES = ("full-sdlc-api", "full-sdlc-web", "bugfix")
+# Lanes whose round-pre body still owns the counter and the ce-code-review
+# baseline listing. full-sdlc-api hands both to round-state.py: the counter now
+# advances only on a progressed decision, stdout is the bare JSON decision
+# rather than `ROUND=N head=<sha>`, and the `LC_ALL=C sort` the negative control
+# reverts lives in Python. What that lane still has to guarantee is asserted in
+# RoundPreV2 below -- the baseline file, because review-gate's set-difference is
+# worthless without it, and the JSON line, because an unparseable one silently
+# skips the reviewer.
+ROUND_PRE_LANES = ("full-sdlc-web", "bugfix")
+ROUND_PRE_V2_LANES = ("full-sdlc-api",)
 
 
 def seeded_listing(names):
@@ -1291,8 +1412,14 @@ def round_pre_fixture(seeds=C_ORDER, counter=None):
     def build(tmp):
         art = tmp / "artifacts"
         wt = tmp / "wt"
-        init_worktree(wt)
+        base = init_worktree(wt)
         jdump(art / "params.json", params(tmp, wt))
+        # round-state.py refuses to open a round without an allowlist (an absent
+        # one used to read as "allow nothing", which empties the candidate), and
+        # needs the base and the plan for the review identity's digests.
+        jdump(art / "files-allowlist.json", ["src/foo.ts"])
+        (art / "bootstrap-head.txt").write_text(base + "\n", encoding="utf-8")
+        (art / "plan.md").write_text("# plan\n", encoding="utf-8")
         if counter is not None:
             (art / "round.txt").write_text(f"{counter}\n", encoding="utf-8")
             # round-pre now enforces the durable cap BEFORE spending a round
@@ -1377,11 +1504,50 @@ class RoundPreStress(unittest.TestCase):
         If this ever starts producing C order the fixture stopped reproducing
         and the guard test above is proving nothing."""
         require_locale(self, UTF8_LOCALE)
-        r = self._run("full-sdlc-api", round_pre_fixture(),
+        # bugfix, not full-sdlc-api: the `LC_ALL=C sort` this reverts moved into
+        # round-state.py when that lane's round-pre became one call to the
+        # helper, so the substitution has nothing to target there. Any lane with
+        # the guard in its body proves the guard still bites.
+        r = self._run("bugfix", round_pre_fixture(),
                       env={"LC_ALL": UTF8_LOCALE},
                       subs=[(ROUND_PRE_GUARD, ROUND_PRE_UNGUARDED)])
         self.assertEqual(r["files"]["round-1/prerun-dirs.txt"],
                          seeded_listing(tuple(reversed(C_ORDER))))
+
+
+class RoundPreV2(unittest.TestCase):
+    """full-sdlc-api's round-pre: what it still owes review-gate, N runs each."""
+
+    def test_the_baseline_listing_is_written_and_c_ordered(self):
+        # review-gate takes the set difference of this against a post-review
+        # listing to find THIS round's ce-code-review run directory. A missing
+        # or differently-collated baseline makes a pre-existing directory look
+        # new, and the gate then reads a foreign run's verdict.
+        for lane in ROUND_PRE_V2_LANES:
+            with self.subTest(lane=lane):
+                r = run_node(lane, "round-pre", round_pre_fixture())
+                self.assertEqual(r["rc"], 0, r["output"])
+                self.assertEqual(r["files"]["round-1/prerun-dirs.txt"],
+                                 seeded_listing(C_ORDER))
+
+    def test_an_empty_ce_review_root_yields_an_empty_file_not_a_missing_one(self):
+        # Empty and absent mean different things to the gate: empty is "nothing
+        # existed before the review", absent is "no baseline was taken", and the
+        # gate skips its scan entirely on the second rather than treating every
+        # directory on the host as new.
+        for lane in ROUND_PRE_V2_LANES:
+            with self.subTest(lane=lane):
+                r = run_node(lane, "round-pre", round_pre_fixture(seeds=()))
+                self.assertEqual(r["rc"], 0, r["output"])
+                self.assertEqual(r["files"]["round-1/prerun-dirs.txt"], "")
+
+    def test_stdout_is_one_parseable_json_decision(self):
+        import json as _json
+        for lane in ROUND_PRE_V2_LANES:
+            with self.subTest(lane=lane):
+                r = run_node(lane, "round-pre", round_pre_fixture())
+                decision = _json.loads(r["output"].strip().splitlines()[0])
+                self.assertIn(decision["review"], ("run", "reuse"))
 
 
 # ==========================================================================
@@ -1507,12 +1673,16 @@ class ReviewGateSharedRoot(unittest.TestCase):
         r = run_node("full-sdlc-api", "review-gate", build,
                      outputs={"review": envelope_with("Ready to merge")},
                      env={"CE_REVIEW_ROOT": str(shared)})
-        self.assertEqual(r["rc"], 0, r["output"])
+        # What this proves is `rundir=[]`: N concurrent repetitions sharing one
+        # root all declined the foreign run, and did so identically. The node
+        # goes on to fail GATE_5, because a synthetic fixture has no
+        # review-input.json and this class is not where that is tested -- but
+        # the scan's verdict is already decided by then, and run_node has
+        # already enforced that the exit is typed and every run identical.
         self.assertEqual(r["identical"], r["n"])
         self.assertIn(
             "GATE_3_verdict_in_enum=PASS verdict=[Ready to merge] "
             "source=envelope rundir=[]", r["output"])
-        self.assertIn("REVIEW_GATE=PASS round=1", r["output"])
 
 
 # ==========================================================================

@@ -8,7 +8,8 @@
 # plan-snapshot, verbatim). When the spec pins an interface
 # (`## Interface (pinned)`) and a joint-plan.json exists, every
 # contracts[].artifact must appear verbatim in that section or be named by a
-# `deviation: <artifact>` line in plan.md.
+# `deviation: <artifact>` line in plan.md, and joint-plan.json must carry a
+# non-empty pinned_decisions list of {symbol, file, rule}.
 # Usage: plan-shape.sh <artifacts-dir> <worktree> <spec-path>
 set -euo pipefail
 AD="${1:?usage: plan-shape.sh <artifacts-dir> <worktree> <spec-path>}"
@@ -28,7 +29,6 @@ except Exception:
 " "$AD/params.json")
 PS_PROFILE=$(bash "$HERE_PS/repo-profile.sh" "$PS_REPO") || { echo "PLAN_SHAPE=FAIL repo-profile.sh failed for repo $PS_REPO"; exit 1; }
 eval "$PS_PROFILE"
-PS_HAS_BROWSER="$HAS_BROWSER"
 
 test -s "$AD/plan.md" || { echo "PLAN_SHAPE=FAIL no plan.md"; exit 1; }
 for h in "## Goal" "## Files" "## Approach" "## Test scenarios" "## Verification"; do
@@ -36,17 +36,23 @@ for h in "## Goal" "## Files" "## Approach" "## Test scenarios" "## Verification
 done
 if [ -f "$AD/params.json" ]; then
   python3 "$HERE_PS/validate-joint-plan.py" "$AD"
+# No params.json fallback is possible here: this branch is reached only when
+# params.json is absent, which is the very file the fallback would read. A
+# repository-list run that resumes with the chain env dropped AND no params.json
+# passes this check silently; params.json is written before any plan node runs,
+# so that combination means the controller never got as far as writing it.
 elif [ "${ARCHON_FEATURE_SCOPE-}" = repositories ]; then
   echo "PLAN_SHAPE=FAIL repository feature run missing params.json"; exit 1
 fi
 python3 -c "import json,sys; p=json.load(open(sys.argv[1]))['test_patterns']; assert isinstance(p,list) and p and all(isinstance(x,str) and x.strip() for x in p)" "$AD/verify.json" || { echo "PLAN_SHAPE=FAIL verify.json missing or empty"; exit 1; }
+PS_UNIT=$(python3 "$HERE_PS/check-unit-patterns.py" "$AD") || { echo "PLAN_SHAPE=FAIL $PS_UNIT"; exit 1; }
 python3 -c "import json,sys; a=json.load(open(sys.argv[1])); assert isinstance(a,list) and a and all(isinstance(x,str) and x.strip() for x in a)" "$AD/files-allowlist.json" || { echo "PLAN_SHAPE=FAIL files-allowlist.json missing or empty"; exit 1; }
 python3 -c "import json,sys; a=json.load(open(sys.argv[1])); assert isinstance(a,list) and all(isinstance(x,str) and x.strip() for x in a)" "$AD/web-files-allowlist.json" || { echo "PLAN_SHAPE=FAIL web-files-allowlist.json missing or malformed"; exit 1; }
 python3 -c "import json,sys; c=json.load(open(sys.argv[1]))['columns']; assert isinstance(c,list)" "$AD/reader-audit.json" || { echo "PLAN_SHAPE=FAIL reader-audit.json missing or malformed"; exit 1; }
 python3 -c "import json,sys; c=json.load(open(sys.argv[1]))['columns']; assert isinstance(c,list)" "$AD/web-reader-audit.json" 2>/dev/null || { echo "PLAN_SHAPE=FAIL web-reader-audit.json missing or malformed"; exit 1; }
-python3 - "$AD/browser-evidence.json" "$AD/browser-evidence.sha256" "$PS_HAS_BROWSER" <<'PY' 2>/dev/null || { echo "PLAN_SHAPE=FAIL browser-evidence.json/.sha256 missing or malformed (or a not_applicable disposition from a repo that HAS a browser surface)"; exit 1; }
+python3 - "$AD/browser-evidence.json" "$AD/browser-evidence.sha256" <<'PY' 2>/dev/null || { echo "PLAN_SHAPE=FAIL browser-evidence.json/.sha256 missing or malformed"; exit 1; }
 import hashlib, json, re, sys
-policy_path, digest_path, has_browser = sys.argv[1], sys.argv[2], sys.argv[3]
+policy_path, digest_path = sys.argv[1], sys.argv[2]
 policy = json.load(open(policy_path, encoding="utf-8"))
 required = policy.get("required")
 # A repository whose changes are not reachable through a browser cannot write an
@@ -57,10 +63,8 @@ required = policy.get("required")
 # quietly widen. Anything else with an empty list still fails.
 not_applicable = policy.get("not_applicable")
 if isinstance(not_applicable, str) and not_applicable.strip():
-    # Gated on the REPO, not on the file's own say-so. Without this the api and
-    # web-app gates could be switched off by adding one string to the artifact.
-    assert not has_browser, (
-        "not_applicable is only valid for a repo with no browser surface")
+    # Whether the disposition is ALLOWED is decided below by browser-exemption.py
+    # from the repo profile and the hashed allowlists -- never by this string.
     assert required == [], "not_applicable browser policy must carry required: []"
     required = []
 else:
@@ -84,11 +88,26 @@ approved = open(digest_path, encoding="utf-8").read().strip().split()[0].lower()
 actual = hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 assert re.fullmatch(r"[0-9a-f]{64}", approved) and approved == actual
 PY
+# Gated on the REPO PROFILE and the allowlists, not on the file's own say-so.
+# Without this the api and web-app gates could be switched off by adding one
+# string to the artifact (P11). A browser repo may carry not_applicable only
+# when every allowlisted path matches its profile's browser_exempt globs.
+# Silent on success: callers compare stdout to the literal PLAN_SHAPE=OK.
+PS_EXEMPT=$(python3 "$HERE_PS/browser-exemption.py" plan "$AD") \
+  || { echo "PLAN_SHAPE=FAIL not_applicable browser disposition for a browser-surface change: $PS_EXEMPT"; exit 1; }
 
 if grep -q '^## Premises to verify' "$SPEC"; then
-  python3 - "$AD/premises.json" "$WT" <<'PY' || { echo "PLAN_SHAPE=FAIL premises.json missing, empty, or uncited"; exit 1; }
+  python3 - "$AD/premises.json" "$WT" "$AD/params.json" <<'PY' || { echo "PLAN_SHAPE=FAIL premises.json missing, empty, or uncited"; exit 1; }
 import json, os, re, subprocess, sys
 prem = json.load(open(sys.argv[1]))
+# A joint planning run is anchored on one repo's worktree, but a premise may be
+# answered from another selected repo's code. Search the anchor first, then every
+# worktree the controller pinned for this chain (params.json worktrees_by_repo).
+try:
+    roots = [sys.argv[2]] + [w for w in (json.load(open(sys.argv[3])).get("worktrees_by_repo") or {}).values()
+                             if w != sys.argv[2]]
+except Exception:
+    roots = [sys.argv[2]]
 assert isinstance(prem, list) and prem, "empty premises list though spec declares premises"
 def cited(q, path):
     if subprocess.run(["grep", "-qF", q, path]).returncode == 0:
@@ -107,8 +126,8 @@ for p in prem:
     ok = False
     for e in ev:
         # a "path:N" / "path:N-M" suffix is a formatting habit, not a different file
-        f = os.path.join(sys.argv[2], re.sub(r":[0-9]+(?:-[0-9]+)?$", "", e["file"]))
-        if os.path.isfile(f) and cited(e["quote"], f):
+        rel = re.sub(r":[0-9]+(?:-[0-9]+)?$", "", e["file"])
+        if any(os.path.isfile(os.path.join(r, rel)) and cited(e["quote"], os.path.join(r, rel)) for r in roots):
             ok = True
             break
     assert ok, f"premise {p.get('id')}: no evidence quote found verbatim in the worktree"
@@ -119,7 +138,19 @@ if [ -f "$AD/joint-plan.json" ] && grep -q '^## Interface (pinned)' "$SPEC"; the
   python3 - "$AD/joint-plan.json" "$SPEC" "$AD/plan.md" <<'PY'
 import json, re, sys
 joint_path, spec_path, plan_path = sys.argv[1:4]
-contracts = json.load(open(joint_path, encoding="utf-8")).get("contracts") or []
+joint = json.load(open(joint_path, encoding="utf-8"))
+# A pinned interface is only pinned if the plan says what it pinned it to. The
+# planner emits pinned_decisions: [{symbol, file, rule}], one per decision the
+# consumer repo is now allowed to depend on; without it the section is a
+# sentence in a spec that no later gate can check anything against.
+decisions = joint.get("pinned_decisions")
+if not isinstance(decisions, list) or not decisions or not all(
+        isinstance(d, dict) and all(isinstance(d.get(f), str) and d.get(f).strip()
+                                    for f in ("symbol", "file", "rule"))
+        for d in decisions):
+    print("PLAN_SHAPE=FAIL pinned_decisions missing")
+    sys.exit(1)
+contracts = joint.get("contracts") or []
 spec_text = open(spec_path, encoding="utf-8").read()
 m = re.search(r"^## Interface \(pinned\)\n(.*?)(?=^## |\Z)", spec_text, re.M | re.S)
 section = m.group(1) if m else ""

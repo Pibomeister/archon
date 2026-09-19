@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""converge: the cross-repo stop (all lanes) and the removed yield-stop shortcut.
+"""converge: the cross-repo stop on the lanes that still own their converge body.
 
 The three parent bodies come from the YAML via nodes.extract; the lite overlay
 runs as a bare script, in the style of test_lite_converge.py. Both are pointed at
@@ -26,7 +26,15 @@ from nodes.extract import runnable_body
 
 SETUP = Path(__file__).resolve().parent.parent
 OVERLAY = SETUP / "lite" / "api" / "review-loop.converge.bash.sh"
-LANES = ("full-sdlc-api", "bugfix", "full-sdlc-web")
+ROOT_LITERAL = "/Users/eduardopicazo/Documents/Workspace/Goodword"
+# full-sdlc-api is NOT here. Its converge body is a single call into
+# setup/round-state.py, and the yield-stop branch this file was built around is
+# retired on that lane -- closure convergence (RUNBOOK 3c, table row 10) decides
+# it now and REVIEW_RERAISE is informational. What survives is the cross-repo
+# stop, which the two v1 lanes and the lite overlay still own in their own
+# bodies; the same stop on full-sdlc-api is table row 1b and belongs in
+# test_round_state.py, against the helper that implements it.
+LANES = ("bugfix", "full-sdlc-web")
 
 YIELD_STUB = """#!/usr/bin/env python3
 import sys
@@ -102,91 +110,40 @@ class ConvergeYield(unittest.TestCase):
                 {"applied": [{"finding": "f0", "action": "a", "severity": "P2"}],
                  "failed": [], "advisory": [], "incomplete": []}))
         if moved:
-            sh("echo b > b.ts && git add . && git commit -qm fix", wt)
+            # The subject is load-bearing since the autofix guard landed:
+            # converge derives head movement from the commit SUBJECTS in the
+            # round window, and only `apply fixer feedback` counts as progress.
+            # A placeholder subject now reads as tree drift, which is the point.
+            sh("echo b > b.ts && git add . && git commit -qm 'fix(review): apply fixer feedback'", wt)
         m = self.mirror(tmp, broken_fixer_check)
         if lane == "lite":
             body = OVERLAY.read_text(encoding="utf-8")
-            self._lite_layer = str(m.parent)
+            body = body.replace(ROOT_LITERAL + "/.archon/setup", str(m))
+            body = body.replace("$ARCHON_LAYER/setup", str(m))
         else:
             body = runnable_body(lane, "converge", root=str(tmp))
-            self._lite_layer = None
         return tmp, ad, body
 
-    def run_converge(self, lane, scope="repositories", **kw):
+    def run_converge(self, lane, scope="repositories", ack=None, **kw):
         tmp, ad, body = self.build(lane, **kw)
+        # The lite overlay now refuses to converge without a gated review and a
+        # fixer attestation (its converge carries trigger_rule: all_done, so a
+        # FAILED review-gate reaches it instead of skipping it). Seed both so the
+        # cross-repo stop below is what this test is actually measuring.
+        rd = ad / "round-1"
+        rd.mkdir(parents=True, exist_ok=True)
+        (rd / "review.ok").write_text(json.dumps({"gen": 1, "id": "x" * 64, "guard": "PASS"}))
+        (rd / "fixer.ok").write_text(json.dumps({"attempt": 1, "review_gen": 1, "committed": False}))
+        if ack is not None:
+            (ad / "cross-repo-filed.json").write_text(json.dumps(ack))
         env = dict(os.environ, ARTIFACTS_DIR=str(ad), ARCHON_FEATURE_SCOPE=scope)
-        if getattr(self, "_lite_layer", None):
-            env["ARCHON_LAYER"] = self._lite_layer
-            env["PROJECT_ROOT"] = str(tmp)
+        env.setdefault("ARCHON_LAYER", str(tmp / ".archon"))
+        env.setdefault("PROJECT_ROOT", str(tmp))
         p = subprocess.run(["bash", "-c", body], capture_output=True,
                            encoding="utf-8", env=env, cwd=str(tmp))
         return p, ad
 
     # ---------------------------------------------------------- yield branch
-    def test_yield_stop_cannot_converge_unreviewed_fixes(self):
-        p, ad = self.run_converge("full-sdlc-api")
-        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        self.assertIn("ROUND_PROGRESSED round=2", p.stdout)
-        self.assertNotIn("REVIEW_CONVERGED", p.stdout)
-        self.assertNotIn("LITE_FIXES_UNREVIEWED", p.stdout)
-        self.assertFalse((ad / "lite-fixes-unreviewed.txt").exists())
-        self.assertNotIn("yield-stop.txt", Path(
-            __file__).resolve().parents[2].joinpath("workflows/full-sdlc-api.yaml").read_text())
-
-    def test_without_the_opt_in_file_the_round_only_progresses(self):
-        p, ad = self.run_converge("full-sdlc-api", yield_stop=False)
-        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        self.assertIn("ROUND_PROGRESSED round=2", p.stdout)
-        self.assertNotIn("REVIEW_CONVERGED", p.stdout)
-        self.assertFalse((ad / "lite-fixes-unreviewed.txt").exists())
-
-    def test_the_cap_keeps_the_last_word(self):
-        p, _ = self.run_converge("full-sdlc-api", n=2, cap=2)
-        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
-        self.assertIn("ROUND_CAP_REACHED round=2", p.stdout)
-        self.assertNotIn("REVIEW_CONVERGED", p.stdout)
-
-    def test_a_continuing_yield_does_not_converge(self):
-        p, _ = self.run_converge(
-            "full-sdlc-api", yield_line=CONTINUE,
-            applied=[{"finding": "f1", "action": "a", "severity": "P1"},
-                     {"finding": "f2", "action": "a"}])
-        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        self.assertIn("ROUND_PROGRESSED round=2", p.stdout)
-        self.assertNotIn("REVIEW_CONVERGED", p.stdout)
-
-    def test_round_one_is_too_early(self):
-        p, _ = self.run_converge("full-sdlc-api", n=1)
-        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        self.assertIn("ROUND_PROGRESSED round=1", p.stdout)
-
-    def test_legacy_scope_does_not_converge(self):
-        p, _ = self.run_converge("full-sdlc-api", scope="legacy")
-        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        self.assertIn("ROUND_PROGRESSED round=2", p.stdout)
-        self.assertNotIn("REVIEW_CONVERGED", p.stdout)
-
-    def test_bugfix_lane_has_no_yield_branch(self):
-        p, _ = self.run_converge("bugfix", n=2, cap=2)
-        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
-        self.assertIn("ROUND_CAP_REACHED round=2", p.stdout)
-        self.assertNotIn("REVIEW_CONVERGED", p.stdout)
-
-    def test_bugfix_lane_has_no_yield_branch_under_a_raised_cap(self):
-        # round-cap.txt is operator-editable, so the lane exclusion — not the
-        # N < CAP guard — is what keeps the human gate at bugfix's own cap.
-        p, _ = self.run_converge("bugfix", n=2, cap=3)
-        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        self.assertIn("ROUND_PROGRESSED round=2", p.stdout)
-        self.assertNotIn("REVIEW_CONVERGED", p.stdout)
-
-    def test_web_lane_has_no_yield_branch(self):
-        p, _ = self.run_converge("full-sdlc-web")
-        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        self.assertIn("ROUND_PROGRESSED round=2", p.stdout)
-        self.assertNotIn("REVIEW_CONVERGED", p.stdout)
-
-    # ------------------------------------------------------- cross-repo stop
     def test_cross_repo_stops_every_lane_before_the_waiver_ledger(self):
         for lane in LANES + ("lite",):
             with self.subTest(lane=lane):
@@ -202,14 +159,65 @@ class ConvergeYield(unittest.TestCase):
                 self.assertFalse((ad / "waivers.md").exists(),
                                  "a cross-repo finding must never reach update-waivers.py")
 
+    # ------------------------------------------- operator acknowledgement
+    # A cross_repo entry resolves only by a human recording where it was filed,
+    # keyed to that exact finding. The key comes from the operator helper, the
+    # same way the operator gets it; the literal pins the digest recipe.
+    FINDING = {"finding": "mcp returns 500", "action": "route",
+               "producer_repo": "goodword-mcp", "severity": "P1"}
+    KEY = "583b294310459c02"
+
+    def converge_with_ack(self, lane, ack):
+        # moved=False + Ready to merge: the only possible stop left is cross-repo.
+        return self.run_converge(lane, n=1, cross_repo=[self.FINDING], ack=ack,
+                                 verdict="Ready to merge", moved=False, yield_stop=False)
+
+    def test_an_acknowledged_cross_repo_finding_converges_every_lane(self):
+        for lane in LANES + ("lite",):
+            with self.subTest(lane=lane):
+                p, ad = self.converge_with_ack(lane, [
+                    {"key": self.KEY, "filed": "https://github.com/o/goodword-mcp/issues/7", "by": "operator"}])
+                self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+                self.assertIn(f"CROSS_REPO_ACKED key={self.KEY} repo=goodword-mcp "
+                              "filed=https://github.com/o/goodword-mcp/issues/7", p.stdout)
+                self.assertNotIn("CROSS_REPO_FINDING", p.stdout)
+                self.assertIn("CONVERGED round=1", p.stdout)
+
+    def test_an_invalid_acknowledgement_still_stops_every_lane(self):
+        cases = {
+            "wrong key": [{"key": "0000000000000000", "filed": "https://x.test/1", "by": "op"}],
+            "missing url": [{"key": self.KEY, "filed": "", "by": "op"}],
+            "not a url": [{"key": self.KEY, "filed": "filed it in slack", "by": "op"}],
+            "missing by": [{"key": self.KEY, "filed": "https://x.test/1", "by": " "}],
+            "not a list": {"key": self.KEY, "filed": "https://x.test/1", "by": "op"},
+        }
+        for lane in LANES + ("lite",):
+            for name, ack in cases.items():
+                with self.subTest(lane=lane, case=name):
+                    p, ad = self.converge_with_ack(lane, ack)
+                    self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+                    self.assertIn("CROSS_REPO_FINDING round=1 count=1 repos=goodword-mcp", p.stdout)
+                    self.assertNotIn("REVIEW_CONVERGED", p.stdout)
+                    self.assertEqual(json.loads((ad / "cross-repo-findings.json").read_text())[0]["key"],
+                                     self.KEY)
+
+    def test_the_operator_helper_prints_the_key_the_gate_matches(self):
+        p, ad = self.converge_with_ack("full-sdlc-api", None)
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        out = subprocess.run(["python3", str(SETUP / "cross-repo-keys.py"), str(ad)],
+                             capture_output=True, encoding="utf-8")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn(f"key={self.KEY} severity=P1 repo=goodword-mcp OPEN: mcp returns 500", out.stdout)
+        self.assertIn(f'"key": "{self.KEY}"', out.stdout)
+
     def test_an_empty_cross_repo_partition_is_not_a_stop(self):
-        p, ad = self.run_converge("full-sdlc-api", n=1, cross_repo=[])
+        p, ad = self.run_converge("bugfix", n=1, cross_repo=[])
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertNotIn("CROSS_REPO_FINDING", p.stdout)
         self.assertFalse((ad / "cross-repo-findings.json").exists())
 
     def test_the_validators_message_reaches_converge_txt(self):
-        p, ad = self.run_converge("full-sdlc-api", n=1, broken_fixer_check=True)
+        p, ad = self.run_converge("bugfix", n=1, broken_fixer_check=True)
         self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
         self.assertIn("producer_repo", (ad / "round-1" / "converge.txt").read_text())
 

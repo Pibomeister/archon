@@ -1,1 +1,1 @@
-{"contracts": [{"artifact": "src/api/foo.ts"}]}
+{"contracts": [{"artifact": "src/api/foo.ts"}], "pinned_decisions": [{"symbol": "shareGroup", "file": "src/api/foo.ts", "rule": "returns the existing link on a repeat call"}]}

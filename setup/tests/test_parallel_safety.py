@@ -289,7 +289,7 @@ class EveryPortConsumerResolvesParamsFirst(unittest.TestCase):
             hurt = Path(td) / "bugfix.yaml"
             text = (WORKFLOWS / "bugfix.yaml").read_text(encoding="utf-8")
             mutated = text.replace(
-                '      eval "$(bash "$ARCHON_LAYER/setup/params-env.sh" "$AD/params.json")"\n'
+                '      eval "$(bash $ARCHON_LAYER/setup/params-env.sh "$AD/params.json")"\n'
                 '      WEB_DIR=$(cat "$AD/smoke-stack/web-dir.txt")',
                 '      WEB_DIR=$(cat "$AD/smoke-stack/web-dir.txt")',
                 1,
@@ -320,7 +320,12 @@ class EveryTypedGateLeavesItsReasonOnDisk(unittest.TestCase):
             body = node.get("bash")
             if not body or not self.TYPED.search(body):
                 continue
-            if "exec > >(tee" not in body:
+            # Either direction satisfies the rule: what matters is that the
+            # node's typed lines land in node-<id>.out, not which stream they
+            # travelled on. review-loop's round-pre and fix-plan CANNOT tee
+            # stdout -- a sibling's `when:` parses it as a bare JSON object --
+            # so they put every human line on stderr and tee that instead.
+            if "exec > >(tee" not in body and "exec 2> >(tee" not in body:
                 bad.append(nid)
         return bad
 
@@ -489,7 +494,7 @@ class E2eMutexSerializesTheSharedStack(unittest.TestCase):
     def test_negative_control_dropping_the_acquire_is_caught(self):
         bodies = dict(lane_bodies(WORKFLOWS / "bugfix.yaml"))
         stripped = bodies["smoke-stack"].replace(
-            'bash "$ARCHON_LAYER/setup/e2e-mutex.sh" acquire "$AD"', "true")
+            'bash $ARCHON_LAYER/setup/e2e-mutex.sh acquire "$AD"', "true")
         self.assertNotEqual(bodies["smoke-stack"], stripped, "mutation anchor no longer matches")
         self.assertNotRegex(stripped, r'e2e-mutex\.sh"?\s+acquire')
 
@@ -501,7 +506,7 @@ class ParamsCarryTheRunsPorts(unittest.TestCase):
             root = td / "root"
             (root / ".archon" / "setup").mkdir(parents=True)
             for s in ("port-alloc.sh", "resolve-params.sh", "params-env.sh",
-                      "repo-profile.sh"):
+                      "repo-profile.sh", "feature-env.sh", "feature_env.py"):
                 shutil.copy(SETUP / s, root / ".archon" / "setup" / s)
             spec = td / "ENG-9999-a-report.md"
             spec.write_text("# report\n", encoding="utf-8")
@@ -528,7 +533,7 @@ class ParamsCarryTheRunsPorts(unittest.TestCase):
             root = td / "root"
             (root / ".archon" / "setup").mkdir(parents=True)
             for s in ("port-alloc.sh", "resolve-params.sh", "params-env.sh",
-                      "repo-profile.sh"):
+                      "repo-profile.sh", "feature-env.sh", "feature_env.py"):
                 shutil.copy(SETUP / s, root / ".archon" / "setup" / s)
             spec = td / "x.md"
             spec.write_text("x\n", encoding="utf-8")

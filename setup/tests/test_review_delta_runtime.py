@@ -239,6 +239,27 @@ class RiskDeltaRuntimeTests(unittest.TestCase):
         self.write_required_converge_gates()
         self.assertEqual("converged", runtime.converge(self.artifacts, self.repo, self.state_path)["status"])
 
+    def test_cross_repo_finding_blocks_convergence_until_a_human_records_it_filed(self):
+        self.commit("fix one\n", "fix one")
+        self.write_state()
+        runtime.prepare_review(self.artifacts, self.repo, self.state_path, None)
+        self.response_for(1, "reviewer-correctness")
+        self.response_for(2, "reviewer-tests")
+        runtime.complete_reviews(self.artifacts, self.state_path)
+        self.successful_receipt()
+        self.write_required_converge_gates()
+        current = json.loads((self.artifacts / "current-review.json").read_text(encoding="utf-8"))
+        write_json(Path(current["round_dir"]) / "fixer-result.json", {
+            "applied": [], "failed": [], "advisory": [], "incomplete": [],
+            "cross_repo": [{"finding": "mcp drops errorMessage", "action": "route",
+                            "producer_repo": "goodword-mcp", "severity": "P2"}],
+        })
+        with self.assertRaisesRegex(policy.ReviewPolicyError, "CROSS_REPO_FINDING count=1 repos=goodword-mcp"):
+            runtime.converge(self.artifacts, self.repo, self.state_path)
+        write_json(self.artifacts / "cross-repo-filed.json",
+                   [{"key": "65609a9208165071", "filed": "https://github.com/o/goodword-mcp/issues/12", "by": "edy"}])
+        self.assertEqual("converged", runtime.converge(self.artifacts, self.repo, self.state_path)["status"])
+
     def test_interrupted_checkpoint_reuses_completed_slot_and_attempts_remain_separate(self):
         self.commit("fix risky\n", "fix risky")
         self.write_state(risk_areas=["authorization"])

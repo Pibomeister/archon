@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Write the final feature-result.json for a locally verified repository stage."""
+from __future__ import annotations
+
 import hashlib
 import json
 import os

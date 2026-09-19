@@ -4,9 +4,9 @@ set -euo pipefail
 # second inline copy of the cited() helper would be two contracts drifting
 # apart, and the drift would show up as a plan that passes here and fails
 # after the critic loop, or worse, the reverse.
-eval "$(bash "$ARCHON_LAYER/setup/params-env.sh" "$ARTIFACTS_DIR/params.json")"
+eval "$(bash $ARCHON_LAYER/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
 SHAPE=0
-OUT=$(bash "$ARCHON_LAYER/setup/plan-shape.sh" \
+OUT=$(bash $ARCHON_LAYER/setup/plan-shape.sh \
   "$ARTIFACTS_DIR" "$WT" "$SPEC" 2>&1) || SHAPE=$?
 if [ "$SHAPE" != 0 ]; then
   # This node keeps its own typed token: SNAPSHOT=FAIL <reason> is what the

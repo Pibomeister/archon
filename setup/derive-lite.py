@@ -33,6 +33,7 @@ parent builds from round directories / shell variables). A consumer without a
 producer is a hard failure. A grep over the node bodies for
 `$ARTIFACTS_DIR/<name>` is run as a WARNING only — it cannot see indirection.
 """
+from __future__ import annotations
 import argparse
 import copy
 import io

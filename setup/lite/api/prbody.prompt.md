@@ -33,4 +33,8 @@ If there is no runtime impact beyond the new endpoint, the monitoring section
 must say exactly: "No additional operational monitoring required."
 Mention verification evidence: unit gate, typecheck, lint, and the live
 smoke result exactly as recorded in smoke-result.txt in that directory.
+After those sections, run: python3 $ARCHON_LAYER/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --prbody
+When it prints anything, append that output VERBATIM as the last section of
+pr-body.md (the "## Cross-repo findings filed" section: defects in other
+repositories a human filed instead of fixing here).
 No co-author or attribution lines. End with the single line: PRBODY_WRITTEN

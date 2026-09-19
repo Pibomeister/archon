@@ -38,7 +38,7 @@ port_pids() { # $1 = port
 # this lane start while the first is still up.
 port_pids 4123 >/dev/null || { echo "PREFLIGHT=FAIL no port-inspection tool (need lsof, ss, or fuser)"; exit 1; }
 # 4123 is the parent lane base; derive-lite substitutes this overlay to 4125.
-bash "$ARCHON_LAYER/setup/profile-preflight.sh" 4123 full-sdlc-api-lite.yaml
+bash $ARCHON_LAYER/setup/profile-preflight.sh 4123 full-sdlc-api-lite.yaml
 echo "PREFLIGHT=PASS"
 # LITE lane: one review round. converge reads this durable cap; the lite
 # converge overlay treats a landed fix on round 1 as converged (fixes are

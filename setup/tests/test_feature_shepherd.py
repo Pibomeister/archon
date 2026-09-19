@@ -89,6 +89,7 @@ class FeatureShepherd(unittest.TestCase):
         stub = self.root / "forecast.py"
         stub.write_text('import sys\nprint("BUDGET_SHEPHERD=STOP")\nsys.exit(1)\n')
         script = script.replace('"$ARCHON_LAYER/setup/archon-run.py"', str(stub))
+        script = script.replace('$ARCHON_LAYER/setup/archon-run.py', str(stub))
         (self.root / "plan-round.txt").write_text("2\n")
         result = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
                                 env=dict(os.environ, ARTIFACTS_DIR=str(self.root),

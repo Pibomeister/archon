@@ -5,9 +5,9 @@ if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-preflig
 test -f "$ARCHON_LAYER/setup/resolve-params.sh" || { echo "PREFLIGHT=FAIL ARCHON_LAYER missing helpers"; exit 1; }
 ROOT="$PROJECT_ROOT"
 if [ -n "${ARCHON_BUGFIX_CONTINUATION_SEED:-}" ]; then
-  python3 "$ARCHON_LAYER/setup/archon-run.py" import-continuation --artifacts "$ARTIFACTS_DIR"
+  python3 $ARCHON_LAYER/setup/archon-run.py import-continuation --artifacts "$ARTIFACTS_DIR"
 fi
-python3 "$ARCHON_LAYER/setup/repo-policy.py" snapshot --root "$ROOT" --artifacts "$ARTIFACTS_DIR" \
+python3 $ARCHON_LAYER/setup/repo-policy.py snapshot --root "$ROOT" --artifacts "$ARTIFACTS_DIR" \
   || { echo "PREFLIGHT=FAIL repository policy snapshot"; exit 1; }
 SK="$ROOT/.claude/skills"
 test -f "$SK/ce-code-review/SKILL.md" || { echo "PREFLIGHT=FAIL staged ce-code-review missing"; exit 1; }
@@ -42,10 +42,10 @@ port_pids() { # $1 = port
 # lets a second run of this lane start while the first is still up.
 port_pids 4124 >/dev/null || { echo "PREFLIGHT=FAIL no port-inspection tool (need lsof, ss, or fuser)"; exit 1; }
 # 4124/3124 are parent bases; derive-lite substitutes them to 4126/3126.
-bash "$ARCHON_LAYER/setup/profile-preflight.sh" 4124 bugfix-lite.yaml 3124 --checkouts
-eval "$(bash "$ARCHON_LAYER/setup/params-env.sh" "$ARTIFACTS_DIR/params.json")"
+bash $ARCHON_LAYER/setup/profile-preflight.sh 4124 bugfix-lite.yaml 3124 --checkouts
+eval "$(bash $ARCHON_LAYER/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
 cp "$SPEC" "$ARTIFACTS_DIR/bug-report.md"
 mkdir -p "$ARTIFACTS_DIR/evidence"
-python3 "$ARCHON_LAYER/setup/archon-run.py" capabilities --artifacts "$ARTIFACTS_DIR"
+python3 $ARCHON_LAYER/setup/archon-run.py capabilities --artifacts "$ARTIFACTS_DIR"
 command -v docker-compose >/dev/null 2>&1 || echo "PREFLIGHT_WARN legacy docker-compose missing - integration-kind repro unavailable"
 echo "PREFLIGHT=PASS"
