@@ -1,0 +1,7 @@
+{
+  "branch": "archon/eng-1234",
+  "repo": "api",
+  "slug": "eng-1234",
+  "spec": "issues/eng-1234.md",
+  "worktree": "wt/eng-1234"
+}

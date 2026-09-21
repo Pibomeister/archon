@@ -1,0 +1,18 @@
+{
+  "advisory": [],
+  "applied": [
+    {
+      "action": "cursor also honoured on last page",
+      "finding": "Export handler ignores pagination cursor",
+      "severity": "P2"
+    },
+    {
+      "action": "regenerated",
+      "finding": "Snapshot test needs fixture regeneration",
+      "severity": "P2"
+    }
+  ],
+  "cross_repo": [],
+  "failed": [],
+  "incomplete": []
+}

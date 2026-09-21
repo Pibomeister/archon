@@ -80,6 +80,7 @@ class GenericGraphAdmissionTest(unittest.TestCase):
             "full-sdlc-web.yaml",
             "full-sdlc-web-codex.yaml",
             "full-sdlc-web-grok.yaml",
+            "skill-evolve.yaml",
         ):
             found.extend(hits(ARCHON / "workflows" / name))
         self.assertEqual(found, [])

@@ -1,0 +1,15 @@
+{
+  "baseline": "b0a5e11ne",
+  "basis": "trusted local candidate after final repository verification",
+  "candidate_head": "c4nd1d4te",
+  "head": "c4nd1d4te",
+  "outcome": "CHANGED",
+  "pr_url": null,
+  "publication": "held",
+  "repo": "api",
+  "schema": "archon.repository-stage-result.v1",
+  "verification": {
+    "status": "passed",
+    "tests_passed": 12
+  }
+}

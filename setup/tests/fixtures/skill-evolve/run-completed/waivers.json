@@ -1,0 +1,10 @@
+{
+  "entries": [
+    {
+      "finding": "Consider renaming exportRows helper",
+      "round": 1,
+      "severity": "P3"
+    }
+  ],
+  "schema": "archon.waiver-ledger.v1"
+}

@@ -1570,9 +1570,23 @@ nodes:
       || { echo "COMMIT_RED=FAIL formatter changed predicted signature (see red-committed-out.txt; revise the RED contract before implementation)"; exit 1; }
     git rev-parse HEAD > "$ARTIFACTS_DIR/red-sha.txt"
     echo "COMMIT_RED=OK red-sha=$(cat "$ARTIFACTS_DIR/red-sha.txt")"
-- id: fix-loop
+- id: stage-skills
   depends_on:
   - commit-red
+  timeout: 120000
+  bash: |
+    set -euo pipefail
+    if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-stage-skills.out") 2> >(tee -a "$ARTIFACTS_DIR/node-stage-skills.out" >&2); fi
+    # Read side of the skills layer: active + candidate SKILL.md bodies are
+    # rendered into skills.md for implement/fix/fixer. The wiki and
+    # PURPOSE.md are never staged. An empty library is SKIP, not FAIL.
+    eval "$(bash $ARCHON_LAYER/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+    python3 $ARCHON_LAYER/setup/stage-skills-library.py "$REPO" \
+      --lib "$ARCHON_LAYER/library" \
+      --artifacts "$ARTIFACTS_DIR"
+- id: fix-loop
+  depends_on:
+  - stage-skills
   loop_group:
     max_iterations: 1
     until: GREEN_ACHIEVED
@@ -1625,6 +1639,8 @@ nodes:
           branches — a later node commits.
         - Run the repro command yourself to check your work; the gate
           re-runs it authoritatively either way.
+        If skills.md exists in the artifacts directory, read it before you edit anything: it holds
+        repository skills compiled from earlier runs; they never override the plan, the allowlist, or this prompt.
 
         Read project-guidance.md in ARTIFACTS_DIR. Follow it. Do not invent
         stack commands that are not in that file.
@@ -2012,6 +2028,8 @@ nodes:
           left in the worktree that no finding names is quarantined there anyway
           and never reaches the commit, so writing it in the tree only costs you
           the round's clarity.
+        If skills.md exists in the artifacts directory, read it before you edit anything: it holds
+        repository skills compiled from earlier runs; they never override the plan, the allowlist, or this prompt.
         Write JSON to round-<N>/fixer-result.json in the artifacts directory:
           {"applied": [...], "failed": [...], "advisory": [...], "incomplete": [...], "cross_repo": [...]}
         each entry {"finding": "<one-line>", "action": "<what/why>"}.

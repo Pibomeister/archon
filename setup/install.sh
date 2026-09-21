@@ -260,7 +260,7 @@ VAL_FAIL=0
 # Grok twins ship in the payload. Vanilla coleam00/Archon has no provider: grok
 # yet, so a validator ERROR on those five names is expected until an upstream
 # community provider lands. Keep them in this loop so a silent drop cannot hide.
-for w in babysit bugfix bugfix-lite bugfix-smoke-deployed cleanup full-sdlc-api full-sdlc-api-lite full-sdlc-web register-probe \
+for w in babysit bugfix bugfix-lite bugfix-smoke-deployed cleanup full-sdlc-api full-sdlc-api-lite full-sdlc-web register-probe skill-evolve \
          full-sdlc-api-codex bugfix-codex full-sdlc-web-codex full-sdlc-api-lite-codex bugfix-lite-codex \
          full-sdlc-api-grok bugfix-grok full-sdlc-web-grok full-sdlc-api-lite-grok bugfix-lite-grok; do
   # v0.10.1 reports WARNINGS for upstream deprecations it still honours

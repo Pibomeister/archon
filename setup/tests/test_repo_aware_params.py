@@ -608,7 +608,7 @@ class Acceptance(unittest.TestCase):
         self.assertEqual(nodes["bootstrap"]["when"], "$feature-phase.bootstrap == 'yes'")
         self.assertEqual(nodes["ralplan"]["depends_on"], ["bootstrap", "kb-recon-gate"])
         self.assertEqual(nodes["ralplan"]["trigger_rule"], "none_failed_min_one_success")
-        self.assertEqual(nodes["implement"]["depends_on"], ["plan-gate", "implementation-ready"])
+        self.assertEqual(nodes["implement"]["depends_on"], ["plan-gate", "implementation-ready", "stage-skills"])
         self.assertEqual(nodes["implement"]["trigger_rule"], "none_failed_min_one_success")
         self.assertEqual(nodes["implement"]["when"], "$feature-phase.implement == 'yes'")
         self.assertEqual(nodes["joint-integration"]["when"], "$feature-phase.integration == 'yes'")

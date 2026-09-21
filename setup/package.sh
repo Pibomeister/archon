@@ -81,6 +81,7 @@ MANIFEST=(
   workflows/babysit.yaml
   workflows/bugfix.yaml
   workflows/bugfix-smoke-deployed.yaml
+  workflows/skill-evolve.yaml
   workflows/cleanup.yaml
   workflows/full-sdlc-api.yaml
   workflows/full-sdlc-web.yaml
@@ -159,6 +160,17 @@ MANIFEST=(
   setup/smoke-matrix.py
   setup/selective-genapi-patch.py
   setup/stage-skills.sh
+  # Repository skills library (WikiSkill-style): read side staged into
+  # implement/fix/fixer, write side driven by workflows/skill-evolve.yaml.
+  # Only library/README.md ships; per-repo trees are created on install by
+  # skill_library.ensure_skeleton so a re-install never clobbers a registry.
+  setup/skill_library.py
+  setup/stage-skills-library.py
+  setup/trace-digest.py
+  setup/skill-score.py
+  setup/wiki-apply.py
+  setup/skill-admit.py
+  library/README.md
   setup/strip-premise-answers.py
   setup/thread-lane.py
   setup/update-waivers.py

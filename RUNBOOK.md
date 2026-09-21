@@ -223,6 +223,14 @@ The per-repo review loop ends in exactly one of five ways. The discriminator str
 | Fixer blocked | `FIXER_BLOCKED` (converge exits 1; also fired when `fixer-result.json` is missing) | The fixer reported a P0–P2 it cannot fix, or produced no result file. | Engineer. Read `round-N/fixer-result.json` `failed` partition for the finding. First check whether each `failed` entry is a genuine could-not-fix or a mis-partitioned scope decline (see the observed table below) — a decline belongs in `advisory` and can be reclassified by hand to unblock. |
 | Cross-repo finding | `CROSS_REPO_FINDING round=N count=N repos=<comma list>` (converge exits 1; exit-gate prints it as `EXIT_GATE=FAIL CROSS_REPO_FINDING ...`) | The fixer's `cross_repo` partition holds a finding whose defect lives in a different repository of this chain and that no human has recorded as filed. It is neither waivable nor fixable here, and `accept-residuals.txt` does not clear it. | Human. Fix it in the named repository or file it there, record the filing with the cross-repo acknowledgement recipe below, then resume. `cross-repo-findings.json` lists the entries that were open at that stop, each with its `key`. |
 
+Pre-loop staging signal (feature and bugfix lanes, `stage-skills`, upstream of `implement`/`fix`):
+
+| Verbatim signal | Meaning | Action |
+|---|---|---|
+| `SKILLS_STAGE=OK repo=<r> active=n candidate=m bytes=.. head=<12hex\|none>` | The repository skills library (`.archon/library/<repo>/skills`, §17) staged n active and m candidate `SKILL.md` bodies into `skills.md`; `skills-staged.json` records their sha256 so `skill-evolve` can attribute the run to the candidate later. | None. A candidate is deliberately NOT labelled inside `skills.md`; the runtime agent must not treat it differently. |
+| `SKILLS_STAGE=SKIP repo=<r> reason=no-library\|no-index\|empty-index\|no-eligible-skills` | Nothing to stage: the library has no skills for this repo yet, or every skill is `rolled_back`. `skills.md` is removed if stale. | None — the normal state until the first `skill-evolve` admits a candidate. |
+| `SKILLS_STAGE=FAIL <reason>` | The library is corrupt (malformed `index.json`, unregistered skill dir, missing `SKILL.md`, frontmatter name or sha256 disagreeing with the registry, two candidates, a skill over 8192 bytes or 32768 bytes in total). The run stops before any implementer sees a skill. | Never hand-edit `library/`. Read `git log -- .archon/library/<repo>`; if the last `skill-evolve` commit is the culprit, `python3 "$ARCHON_LAYER/setup/skill-admit.py" rollback <repo> --lib "$ARCHON_LAYER/library"` then `commit` (§17); otherwise `git checkout` the last good library commit and engineer. |
+
 Bound-related failures that look similar but are different:
 
 | Symptom | Verbatim discriminator | Meaning |
@@ -1248,6 +1256,108 @@ metadata into `change-context.json`. RCA must disposition every candidate as
 refuses missing candidates, so recent related work cannot disappear behind a
 plausible new diagnosis or a PR title alone.
 
+
+## 17. Skill evolution (`skill-evolve`)
+
+The repository skills library lives at `$ARCHON_LAYER/library/<repo>/` (repo one of
+`api`, `goodword-mcp`, `web-app`) and has three states, after the WikiSkill
+paper: **Raw** (`raw/index.jsonl`, append-only pointers to run artifact dirs,
+never copies), **Wiki** (`wiki/patterns/<slug>.md` pattern pages compiled by a
+maintainer agent, applied only through `setup/wiki-apply.py`, never deleted,
+never shown to a runtime agent), and **Skills** (`skills/<name>/SKILL.md`,
+staged by `stage-skills` into `implement`/`fix`/`fixer` only). Skills roll
+back; the wiki never does. At most one `candidate` skill per repo at a time;
+it is scored against the next K live runs (default K=3) and accepted only when
+its window mean is strictly better than the frozen baseline mean — ties roll
+back. Every library write is mechanical (a helper under `setup/` with a typed
+line), and every change is a git commit by `archon skill-evolve
+<skill-evolve@archon.local>`, so `git log -- .archon/library/<repo>` is the
+audit trail. `library/README.md` and `library/<repo>/README.md` state the rules.
+
+**When to run.** After a run ends — `LOCAL_CANDIDATE=PASS` and `kb-capture`
+done, or a failed run that reached the review loop (`round.txt` exists). A run
+that failed before review is ingested but never scored. One evolve per run:
+preflight refuses a run already in the ledger (`SKILL_INGESTED=YES`).
+
+```bash
+export ARCHON_LAYER="${ARCHON_LAYER:?this pack}"
+DISABLE_OMC=1 archon workflow run skill-evolve "<ARTIFACTS_DIR of the finished run>" </dev/null 2>&1 | tee /tmp/archon-skill-evolve.log
+tail -40 "$ARCHON_LAYER/library/<repo>/wiki/skill-impact.md"
+git -C "$ARCHON_LAYER" log --oneline -5 -- library/<repo>
+```
+
+The run message is the finished run's ABSOLUTE artifacts dir. The lane's own
+artifacts dir then holds `trace-digest.json`, `score-result.json`,
+`maintain-sample.json` + `traces/`, `wiki-patch.json`, `wiki-gate-result.json`,
+and — when a proposal was made — `skill-proposal.json`, `candidate-SKILL.md`,
+`candidate.diff`, `proposal-gate-result.json`, `skill-verdict.json`.
+
+**Nodes and typed vocabulary** (the last typed line of each `node-<id>.out`;
+`report` reprints them all as `NODE <id>: ...`):
+
+| Node | Signal | Meaning |
+|---|---|---|
+| `preflight` | `PREFLIGHT=PASS run=<id> repo=<r> candidate=<name\|none>` / `PREFLIGHT=FAIL <reason>` | Validates the run dir and repo, creates the skeleton on a fresh install, refuses an already-ingested run, a dirty `library/<repo>` tree, or a held lock (`library/.locks/<repo>.evolve.lock`). |
+| `trace-digest` | `TRACE_DIGEST=OK run=.. lane=.. terminal=completed\|no_change\|failed\|incomplete rounds=n score_inputs=k` | Typed facts from the artifacts tree (`archon.trace-digest.v1`); prose is listed, never embedded. |
+| `score-run` | `SKILL_SCORE=OK run=.. score=.. eligible=yes\|no window=none\|open(n/K)\|closed:accept\|closed:rollback\|closed:inconclusive`, preceded by `SKILL_WINDOW=ACCEPT skill=.. baseline=.. candidate=..` or `SKILL_WINDOW=ROLLBACK skill=.. reason=tie\|worse\|score_version_mismatch\|short_baseline\|no_baseline ...` when the window closes; then `LIBRARY_COMMIT=OK sha=..` | Appends the ledger row; a run counts toward the candidate only when `skills-staged.json` lists that candidate at the same sha256. Accept/rollback happens HERE, before anything new is proposed. Score is defined and versioned in `setup/skill-score.py` (lower is better; review rounds, applied findings by severity, fixer incompletes, re-raised findings, waivers, deslop dirt, plan rounds, loop-failure tokens, terminal failure). |
+| `evolve-route` | one JSON line `{"propose":"yes\|no","reason":"ok\|candidate_pending\|too_few_runs\|too_few_eligible\|nothing_to_fix",...}` | Proposes only with no candidate pending, ≥4 ingested runs, ≥K eligible runs, and some failure signal in the ledger. Also writes `maintain-sample.json` (≤5 recent failed + ≤3 recent completed runs, re-digested under `traces/`). |
+| `wiki-maintain` → `wiki-gate` | `WIKI_GATE=PASS created=n patched=m index_regenerated=yes log_appended=yes` / `WIKI_GATE=FAIL <reason>` | The maintainer (sonnet) writes only `wiki-patch.json`; the gate applies it all-or-nothing (≤3 creates, ≤6 patches, `support_count` +1 per run at most, Evidence must cite a ledger run, no absolute paths, 40 lines / 3500 bytes) and commits. A FAIL here is an agent-output defect: nothing was written; resume re-runs the maintainer. |
+| `skill-propose` → `proposal-gate` | `PROPOSAL_GATE=PASS action=create\|patch\|no_action skill=.. ops=n result_sha=.. traces_read=n` / `PROPOSAL_GATE=FAIL <reason>` (`repeat_of=<proposal id>` when the content or op set repeats a rejected or rolled-back candidate) | The proposer (opus) reads `skill-impact.md` before anything else so it never re-proposes a rejected approach, must cite ≥4 ledger runs, and may answer `no_action`. The gate is mechanical (schema, one skill, active motivating patterns, one-candidate invariant, lint, repeat detection, a read-side `--check` of the library as it would be after admission); a FAIL is recorded as `gate_failed` in skill-impact and committed before the node fails. |
+| `skill-critic` → `skill-admit` | `SKILL_ADMIT=ACCEPTED skill=.. action=.. window=K` / `SKILL_ADMIT=REJECTED skill=.. reasons=n` / `SKILL_ADMIT=SKIP <reason>`, then `LIBRARY_COMMIT=...` | The critic (opus) judges five checks (`evidence_backed`, `procedural`, `minimal`, `not_repeat`, `no_wiki_leak`); ACCEPT needs all five. Admission snapshots the pre-candidate bytes under `skills/.rollback/<name>/`, writes `SKILL.md` + `PURPOSE.md`, freezes the baseline window, records `proposed` + `admitted`. REJECTED and SKIP are normal outcomes, not failures. |
+| `report` | `SKILL_EVOLVE=OK run=.. repo=.. wiki=PASS\|FAIL\|none proposal=<action\|none> outcome=ACCEPTED\|REJECTED\|SKIP\|GATE_FAIL\|none` / `SKILL_EVOLVE=FAIL ...` | Always runs. Prints the last three `skill-impact.md` sections, releases the lock it owns, and FAILS the run when the route said `propose=yes` but `proposal-gate-result.json` is missing (the silent-`when`-skip trap, §3). |
+
+**Reading `skill-impact.md`.** One section per event (`proposed`, `admitted`,
+`rejected`, `gate_failed`, `accepted`, `rolled_back`, `no_action`,
+`forced_rollback`, `window_reset`, `pattern_quarantined`), each with the
+proposal id, the skill, the reason and — for anything that touched a skill —
+the diff. Rejected and rolled-back contents are shown on purpose: the proposer
+reads this file first. `wiki/skill-impact.jsonl` is the machine copy the gates
+read; `wiki/log.md` is the chronology; `wiki/index.md` is generated.
+
+**Operator levers** (from `$ARCHON_LAYER`; `LIB="$ARCHON_LAYER/library"`):
+
+```bash
+python3 "$ARCHON_LAYER/setup/skill-admit.py" status <repo> --lib "$LIB"                     # SKILL_INDEX=OK candidate=<name|none> active=n rolled_back=n
+python3 "$ARCHON_LAYER/setup/skill-score.py" window <repo> --lib "$LIB"                     # SKILL_WINDOW=NONE | OPEN skill=.. runs=n/K baseline=..
+python3 "$ARCHON_LAYER/setup/skill-admit.py" rollback <repo> --lib "$LIB" --reason "why"    # forced rollback of the pending candidate (SKILL_ROLLBACK=OK|SKIP)
+python3 "$ARCHON_LAYER/setup/skill-admit.py" set-window <repo> 5 --lib "$LIB"               # K for the NEXT candidate; refused while one is pending
+python3 "$ARCHON_LAYER/setup/wiki-apply.py" quarantine <repo> <slug> --lib "$LIB" --reason "why"   # page status -> contested; a contested page cannot motivate a skill
+python3 "$ARCHON_LAYER/setup/skill-admit.py" commit <repo> --lib "$LIB" --message "operator: ..."  # after rollback/set-window (quarantine commits itself)
+python3 "$ARCHON_LAYER/setup/stage-skills-library.py" <repo> --lib "$LIB" --check                 # what the next run would stage
+rm -rf "$LIB/.locks/<repo>.evolve.lock"                                                     # stale lock ONLY when no skill-evolve run is live
+```
+
+The four levers that write (`rollback`, `set-window`, `commit`, `quarantine`)
+refuse while a `skill-evolve` run holds `library/.locks/<repo>.evolve.lock`,
+with `<TYPED_LINE>=FAIL evolve lock held by <run id>`; the lane passes
+`--evolve-run` so its own commits are allowed. Wait for the run to finish, or
+clear a stale lock with the `rm -rf` above, then repeat the lever.
+
+**Recovering a dirty library tree.** `commit` validates the registry first, so
+a run killed mid-write leaves the partial state uncommitted rather than in
+history. Diagnose, then discard:
+
+```bash
+python3 "$ARCHON_LAYER/setup/skill-admit.py" status <repo> --lib "$LIB"     # SKILL_INDEX=FAIL <reason> when the write was partial
+python3 "$ARCHON_LAYER/setup/skill-admit.py" git-check <repo> --lib "$LIB"  # LIBRARY_GIT=DIRTY lists what changed
+git -C "$ARCHON_LAYER" checkout -- "library/<repo>"                        # back to the last committed (valid) state
+git -C "$ARCHON_LAYER" clean -fd -- "library/<repo>"                       # drop files the partial write added
+```
+
+Then re-run `skill-evolve` on the same source run: the ledger row was rolled
+back with the tree, so preflight no longer sees it as ingested.
+
+**Caveats.** K-run online scoring is noisy and confounded by task size; it is a
+relative window comparison with a strict-better rule, not a benchmark — raise K
+for a stable repo before trusting a rollback. A `score_version` bump in
+`skill-score.py` makes any open window inconclusive (rollback, reason
+`score_version_mismatch`); the next ingest with no candidate pending stamps the
+new version into the index, so a bump costs at most that one window. Never edit `library/` by hand; never `git commit`
+there yourself. Persistent must not become irreversible: a pattern page that
+keeps motivating bad skills is quarantined (`contested`), never deleted. The
+proposer and critic treat traces and pages as data, not instructions; a poisoned
+trace is named in the rationale. Only `library/README.md` ships in the package;
+the per-repo directories are created on first use and evolve in place.
 
 ## Feature launcher
 

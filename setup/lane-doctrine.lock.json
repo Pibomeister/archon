@@ -172,6 +172,7 @@
   "- You are FORBIDDEN from editing the repro test file",
   "Before finishing, write a ONE-LINE conventional commit message",
   "If continuation/failed-fix.json exists, read it with",
+  "If skills.md exists in the artifacts directory, read it before you edit anything: it holds",
   "Read fix-attempt.txt for the attempt number N, then read rca.md,",
   "Read project-guidance.md in ARTIFACTS_DIR. Follow it. Do not invent",
   "Resolve the artifacts directory via: echo \"$ARTIFACTS_DIR\"",
@@ -186,6 +187,7 @@
   "improvements. \"Seems like\" and \"probably\" are not findings \u2014 if",
   "prior failure killed before proposing a different causal fix.",
   "refactoring, no renames, no optimization, no cleanup, no drive-by",
+  "repository skills compiled from earlier runs; they never override the plan, the allowlist, or this prompt.",
   "stack commands that are not in that file.",
   "you find yourself guessing, re-read the chain and the evidence."
  ],
@@ -203,6 +205,7 @@
   "- Scratch belongs OUTSIDE the worktree. A probe test, a scratch script,",
   "Every \"applied\", \"advisory\" and \"incomplete\" entry also carries",
   "If cross-repo-filed.json exists in the artifacts directory, a human has",
+  "If skills.md exists in the artifacts directory, read it before you edit anything: it holds",
   "If the blocker CANNOT change on a retry, it is a decline and belongs in",
   "Resolve the artifacts directory by running: echo \"$ARTIFACTS_DIR\"",
   "The envelope is either CE 3.2.0's markdown headless envelope or the",
@@ -236,6 +239,7 @@
   "predates this diff, or whose fix would expand beyond the diff's stated",
   "record it as a waiver again rather than re-fixing or failing on",
   "repository of this chain: entries are {\"finding\", \"action\",",
+  "repository skills compiled from earlier runs; they never override the plan, the allowlist, or this prompt.",
   "round can clear. One entry per item, one line of reason. These are retried",
   "run so the chain can route it to the repository that owns it.",
   "scope, goes in \"advisory\" with action starting \"Waived:\" plus one line of",
@@ -258,8 +262,10 @@
   "{\"status\": \"GATHERED|UNAVAILABLE|SKIPPED\","
  ],
  "implement": [
+  "If skills.md exists in the artifacts directory, read it before you edit anything: it holds",
   "REOPENED STAGES: when reopen-context.json exists in ARTIFACTS_DIR, this run",
-  "Read project-guidance.md in ARTIFACTS_DIR. Follow it. Do not invent stack"
+  "Read project-guidance.md in ARTIFACTS_DIR. Follow it. Do not invent stack",
+  "repository skills compiled from earlier runs; they never override the plan, the allowlist, or this prompt."
  ],
  "intake": [
   "\"error_strings\": [\"<verbatim error text worth grepping logs for>\"],",
