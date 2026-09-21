@@ -35,12 +35,23 @@ OTP_END = 'echo "PREFLIGHT=PASS"'
 FAKE_TOKEN = "sk-ant-oat-FAKE-DO-NOT-PRINT-abcdef0123456789"
 
 
+def _preamble(body):
+    """Keep extract.py's ARCHON_LAYER/PROJECT_ROOT exports when slicing a block."""
+    lines = []
+    for line in body.splitlines():
+        if line.startswith("export ARCHON_LAYER=") or line.startswith("export PROJECT_ROOT="):
+            lines.append(line)
+        elif lines:
+            break
+    return ("\n".join(lines) + "\n") if lines else ""
+
+
 def _slice(body, start, end, what):
     i = body.index(start)
     j = body.index(end, i)
     block = body[i:j]
     assert block.strip(), f"{what} block is empty"
-    return "set -euo pipefail\n" + block
+    return "set -euo pipefail\n" + _preamble(body) + block
 
 
 def session_block(root, subs=()):

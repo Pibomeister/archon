@@ -1,0 +1,14 @@
+{
+  "findings": [
+    {
+      "confidence": 100,
+      "evidence": [],
+      "kind": "gap",
+      "recommendation": "Invalidate per tenant.",
+      "section": "Fix plan",
+      "severity": "P0"
+    }
+  ],
+  "summary": "Fix plan misses the invalidation path.",
+  "verdict": "REVISE"
+}

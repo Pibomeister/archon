@@ -40,6 +40,7 @@ from params.json beside the allowlist, the profile's lockfile is in scope and
 staged when an allowlisted package.json changed, tolerated unstaged only as a
 drift-declared install's uncommitted rewrite, and otherwise a breach. That rule
 overrides --exclude for the profile's own lockfile names."""
+from __future__ import annotations
 import json
 import os
 import shlex

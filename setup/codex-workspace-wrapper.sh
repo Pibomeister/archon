@@ -165,7 +165,7 @@ PY_FEATURE_ENV
           ;;
       esac
     done
-    args=("${normalized_args[@]}")
+    args=(${normalized_args[@]+"${normalized_args[@]}"})
   fi
   PINNED_MODEL="${ARCHON_CODEX_PINNED_MODEL:-}"
   PINNED_REASONING_EFFORT="${ARCHON_CODEX_PINNED_REASONING_EFFORT:-}"
@@ -237,7 +237,7 @@ PY_PIN_CONFIG
       esac
     }
     value_for=""
-    for token in "${args[@]}"; do
+    for token in ${args[@]+"${args[@]}"}; do
       if [ -n "$value_for" ]; then
         case "$value_for" in
           --model|-m) check_model_pin "$token" ;;
@@ -446,9 +446,9 @@ except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
         child.wait()
     print("CODEX_WRAPPER=FAIL " + str(exc), file=sys.stderr)
     raise SystemExit(2)
-' "$ARCHON_FEATURE_BUDGET_SCRIPT" "$(basename "$ARTIFACTS_DIR")" "$REAL" "${forced[@]}" "${args[@]}" <<< "$PROMPT"
+' "$ARCHON_FEATURE_BUDGET_SCRIPT" "$(basename "$ARTIFACTS_DIR")" "$REAL" ${forced[@]+"${forced[@]}"} ${args[@]+"${args[@]}"} <<< "$PROMPT"
   fi
-  exec "$REAL" "${forced[@]}" "${args[@]}" <<< "$PROMPT"
+  exec "$REAL" ${forced[@]+"${forced[@]}"} ${args[@]+"${args[@]}"} <<< "$PROMPT"
 fi
 
 exec "$REAL" "$@"

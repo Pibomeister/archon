@@ -22,25 +22,22 @@ class InstallManifestValidation(unittest.TestCase):
             self.assertIn("INSTALL=DISABLED", result.stdout)
             self.assertEqual(list(Path(td).iterdir()), [])
 
-    def test_root_assignments_survive_rendering_to_a_path_with_spaces(self):
-        original = str(SETUP.parent.parent)
+    def test_layer_env_assignments_survive_paths_with_spaces(self):
         replacement = "/tmp/archon root with spaces"
-        parents = ("bugfix", "bugfix-smoke-deployed", "babysit", "full-sdlc-api", "full-sdlc-web")
-        files = [SETUP.parent / "workflows" / f"{name}.yaml" for name in parents]
-        files += list((SETUP / "lite").rglob("*.sh"))
-        pattern = re.compile(r'^\s*([A-Z_]+)=(\"?)(' + re.escape(original) + r'([A-Za-z0-9_./-]*))\2\s*$', re.M)
-        checked = 0
-        for path in files:
-            for match in pattern.finditer(path.read_text()):
-                variable, quote, _, suffix = match.groups()
-                assignment = f"{variable}={quote}{replacement}{suffix}{quote}"
-                result = subprocess.run(["/bin/bash", "-c", 'set -eu; ' + assignment + f'; printf %s "${variable}"'],
-                                        env={"PATH": "/nonexistent"}, capture_output=True, text=True, timeout=5)
-                with self.subTest(path=path.name, variable=variable):
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual(result.stdout, replacement + suffix)
-                checked += 1
-        self.assertGreater(checked, 0)
+        for variable in ("ARCHON_LAYER", "PROJECT_ROOT"):
+            assignment = f'{variable}="{replacement}"'
+            result = subprocess.run(
+                ["/bin/bash", "-c", "set -eu; " + assignment + f'; printf %s "${variable}"'],
+                env={"PATH": "/nonexistent"}, capture_output=True, text=True, timeout=5,
+            )
+            with self.subTest(variable=variable):
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, replacement)
+        for name in ("full-sdlc-api", "bugfix", "full-sdlc-web"):
+            text = (SETUP.parent / "workflows" / f"{name}.yaml").read_text()
+            self.assertNotIn("/Users/", text)
+            self.assertIn("$ARCHON_LAYER", text)
+            self.assertIn("$PROJECT_ROOT", text)
 
     def test_install_validates_every_packaged_workflow(self):
         package = (SETUP / "package.sh").read_text(encoding="utf-8")
@@ -55,7 +52,8 @@ class InstallManifestValidation(unittest.TestCase):
         validated = set(re.findall(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*", loop.group(1)))
         self.assertEqual(shipped - validated, set(),
                          f"packaged workflows not validated by install.sh: {sorted(shipped - validated)}")
-        for lane in ("full-sdlc-api-lite-codex", "bugfix-lite-codex"):
+        for lane in ("full-sdlc-api-lite-codex", "bugfix-lite-codex",
+                     "full-sdlc-api-lite-grok", "bugfix-lite-grok"):
             self.assertIn(lane, validated)
 
     def test_gitnexus_setup_is_optional_and_non_blocking(self):

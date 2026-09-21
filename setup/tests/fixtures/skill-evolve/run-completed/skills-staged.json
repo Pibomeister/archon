@@ -1,0 +1,21 @@
+{
+  "index_sha256": "fixture-index-sha",
+  "library_dirty": null,
+  "library_head": null,
+  "reason": "",
+  "repo": "api",
+  "result": "OK",
+  "schema": "archon.skills-staged.v1",
+  "skills": [
+    {
+      "bytes": 120,
+      "name": "c-skill",
+      "path": "skills/c-skill/SKILL.md",
+      "sha256": "fixture-sha-c-skill",
+      "status": "candidate"
+    }
+  ],
+  "skills_md_bytes": 300,
+  "skills_md_sha256": "fixture-md-sha",
+  "skipped": []
+}

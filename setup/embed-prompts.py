@@ -26,9 +26,10 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ARCHON = HERE.parent
-# The absolute setup root the lanes address, and what {{SETUP}} renders to.
-# package.sh reverse-templates this literal on the way into the payload.
-SETUP_LITERAL = "/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup"
+# The setup root the lanes address, and what {{SETUP}} renders to.
+# Production graphs stay host-path-free; package.sh reverse-templates any
+# leftover machine root on the way into the payload.
+SETUP_LITERAL = "$ARCHON_LAYER/setup"
 
 # ---- the one line that flips trio <-> capped -----------------------------
 REVIEW_MODE = "ce"

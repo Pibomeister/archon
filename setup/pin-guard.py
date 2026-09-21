@@ -25,6 +25,7 @@ checked it.
 
 Usage: pin-guard.py <artifacts-dir> <baseline-sha>
 """
+from __future__ import annotations
 import json
 import re
 import subprocess

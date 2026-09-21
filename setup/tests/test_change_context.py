@@ -48,7 +48,8 @@ class ChangeContextTest(unittest.TestCase):
 
     def test_workflows_require_cli_fallback_and_change_assessment_without_new_nodes(self):
         import yaml
-        for name in ("bugfix", "bugfix-codex", "bugfix-lite", "bugfix-lite-codex"):
+        for name in ("bugfix", "bugfix-codex", "bugfix-lite", "bugfix-lite-codex",
+                     "bugfix-grok", "bugfix-lite-grok"):
             doc = yaml.safe_load((ARCHON / "workflows" / f"{name}.yaml").read_text())
             nodes = {node["id"]: node for node in doc["nodes"]}
             self.assertNotIn("change-context", nodes)

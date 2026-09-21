@@ -20,7 +20,7 @@ class BugfixGraphOrderTest(unittest.TestCase):
   self.assertEqual(nodes['evidence-seal']['depends_on'],['rca-gate'])
   self.assertIn('probe-shape.py', nodes['probe-run']['bash'])
   self.assertEqual(nodes['chain-verify']['depends_on'],['evidence-seal'])
-  self.assertIn('evidence-provenance.py" verify', nodes['proof-manifest-gate']['bash'])
+  self.assertRegex(nodes['proof-manifest-gate']['bash'], r'evidence-provenance\.py"?\s+verify')
   self.assertEqual(nodes['experiment-run']['depends_on'],['experiment-design'])
   self.assertEqual(nodes['experiment-gate']['depends_on'],['experiment-run'])
   self.assertEqual(nodes['proof-reconcile']['depends_on'],['experiment-gate'])

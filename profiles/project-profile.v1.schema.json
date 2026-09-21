@@ -97,6 +97,14 @@
     "knowledge": {
       "type": "object",
       "properties": {
+        "root": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Sibling directory under PROJECT_ROOT that holds the KB. Omit when the project itself is the knowledge root."
+        },
+        "required": {
+          "type": "boolean"
+        },
         "paths": {
           "type": "array",
           "items": {
@@ -149,6 +157,86 @@
         "autoMerge",
         "autoDeploy"
       ],
+      "additionalProperties": false
+    },
+    "guidance": {
+      "type": "object",
+      "properties": {
+        "root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "conventions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "playbook": {
+          "type": "string",
+          "minLength": 1
+        },
+        "envelopePath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "debug": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "cli": { "type": "string", "minLength": 1 },
+              "note": { "type": "string", "minLength": 1 }
+            },
+            "required": ["id", "cli", "note"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": ["root"],
+      "additionalProperties": false
+    },
+    "capabilities": {
+      "type": "object",
+      "properties": {
+        "gitnexusRepo": { "type": "string", "minLength": 1 },
+        "smoke": {
+          "type": "object",
+          "properties": {
+            "apiPortBase": { "type": "integer", "minimum": 1 },
+            "webPortBase": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": false
+        },
+        "generatedApiSync": { "type": "boolean" },
+        "browserUat": { "type": "boolean" },
+        "impactUnavailable": { "enum": ["allow", "route-full"] },
+        "layout": { "enum": ["siblings", "single"] },
+        "defaultRepo": { "type": "string", "minLength": 1 },
+        "allowedRepos": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "webRepo": { "type": "string", "minLength": 1 },
+        "requiredCheckouts": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "requiredTools": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "fail": { "type": "boolean" }
+            },
+            "required": ["id", "fail"],
+            "additionalProperties": false
+          }
+        }
+      },
       "additionalProperties": false
     }
   },

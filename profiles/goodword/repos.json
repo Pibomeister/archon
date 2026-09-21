@@ -1,0 +1,35 @@
+{
+  "schema": "archon.repo-profiles.v1",
+  "profiles": {
+    "api": {
+      "install": ["bun", "install", "--frozen-lockfile"],
+      "typecheck": ["bun", "run", "typecheck"],
+      "lint": ["bun", "run", "lint"],
+      "test": ["bun", "run", "test", "--"],
+      "env_src": ".env",
+      "smoke": "1",
+      "browser": "1",
+      "impact": "mono"
+    },
+    "goodword-mcp": {
+      "install": ["mise", "x", "node@20", "--", "pnpm", "install", "--frozen-lockfile"],
+      "typecheck": ["mise", "x", "node@20", "--", "pnpm", "exec", "tsc", "--noEmit"],
+      "lint": [],
+      "test": ["mise", "x", "node@20", "--", "env", "NODE_OPTIONS=--experimental-vm-modules", "pnpm", "exec", "jest", "--testPathIgnorePatterns", "\\.(e2e|smoke)\\.test\\.ts$", "--testPathPatterns"],
+      "env_src": "",
+      "smoke": "1",
+      "browser": "",
+      "impact": ""
+    },
+    "web-app": {
+      "install": ["mise", "x", "node@20", "--", "pnpm", "install", "--no-frozen-lockfile"],
+      "typecheck": ["mise", "x", "node@20", "--", "pnpm", "typecheck"],
+      "lint": ["mise", "x", "node@20", "--", "pnpm", "lint"],
+      "test": ["mise", "x", "node@20", "--", "pnpm", "test", "--run"],
+      "env_src": "",
+      "smoke": "1",
+      "browser": "1",
+      "impact": ""
+    }
+  }
+}

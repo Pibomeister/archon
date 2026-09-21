@@ -54,6 +54,16 @@ MANIFEST=(
   profiles/goodword-archon.v2.json
   profiles/machine-binding.v1.schema.json
   profiles/machine-binding.example.json
+  profiles/goodword/project.v1.json
+  profiles/goodword/envelope.json
+  profiles/goodword/guidance.md
+  profiles/goodword/conventions/api.md
+  profiles/goodword/conventions/web-app.md
+  profiles/goodword/conventions/mcp.md
+  profiles/fluxkeep/guidance.md
+  profiles/fluxkeep/envelope.json
+  profiles/fluxkeep/repos.json
+  profiles/goodword/repos.json
   workflows/portable/single-repo-feature/commands/capture-knowledge.md
   workflows/portable/single-repo-feature/commands/critique.md
   workflows/portable/single-repo-feature/commands/implement.md
@@ -72,6 +82,7 @@ MANIFEST=(
   workflows/babysit.yaml
   workflows/bugfix.yaml
   workflows/bugfix-smoke-deployed.yaml
+  workflows/skill-evolve.yaml
   workflows/cleanup.yaml
   workflows/full-sdlc-api.yaml
   workflows/full-sdlc-web.yaml
@@ -109,6 +120,14 @@ MANIFEST=(
   setup/feature-env.sh
   setup/feature_env.py
   setup/parse-critique.py
+  setup/impact_gate.py
+  setup/side_effect_contract.py
+  setup/layer_root.py
+  setup/materialize_guidance.py
+  setup/profile_bind.py
+  setup/profile-preflight.sh
+  setup/graph_export.py
+  setup/graph_render.py
   setup/parse-review-envelope.py
   setup/plan-shape.sh
   setup/browser-exemption.py
@@ -142,6 +161,17 @@ MANIFEST=(
   setup/smoke-matrix.py
   setup/selective-genapi-patch.py
   setup/stage-skills.sh
+  # Repository skills library (WikiSkill-style): read side staged into
+  # implement/fix/fixer, write side driven by workflows/skill-evolve.yaml.
+  # Only library/README.md ships; per-repo trees are created on install by
+  # skill_library.ensure_skeleton so a re-install never clobbers a registry.
+  setup/skill_library.py
+  setup/stage-skills-library.py
+  setup/trace-digest.py
+  setup/skill-score.py
+  setup/wiki-apply.py
+  setup/skill-admit.py
+  library/README.md
   setup/strip-premise-answers.py
   setup/thread-lane.py
   setup/update-waivers.py
@@ -162,6 +192,16 @@ MANIFEST=(
   workflows/full-sdlc-api-lite-codex.yaml
   workflows/bugfix-lite-codex.yaml
   setup/derive-codex.py
+  # Grok twins: GENERATED from the same five parents by derive-grok.py
+  # (provider: grok, xAI OIDC billing guard, /skill-name slash tokens; no Codex
+  # watchdog clone). Vanilla Archon has no grok provider yet; these are
+  # generate+drift. package.sh diffs them (GROK_DRIFT) after CODEX_DRIFT.
+  workflows/full-sdlc-api-grok.yaml
+  workflows/bugfix-grok.yaml
+  workflows/full-sdlc-web-grok.yaml
+  workflows/full-sdlc-api-lite-grok.yaml
+  workflows/bugfix-lite-grok.yaml
+  setup/derive-grok.py
   # Cross-lane prompt doctrine. The lite overlays replace a parent prompt
   # wholesale, so a fix can land in four lanes and miss the fifth; the lock
   # records what the lanes share today and packaging diffs it (LANE_DOCTRINE).
@@ -414,8 +454,16 @@ done
 echo "--- codex drift check ---"
 python3 "$ARCHON/setup/derive-codex.py" --all --check || { echo "PACKAGE=FAIL codex drift: regenerate with python3 .archon/setup/derive-codex.py --all"; exit 1; }
 
+# --- Grok drift check (fail-closed) -------------------------------------------
+# The -grok twins are generated from the same (already drift-checked) parents.
+# Mechanical sibling of CODEX_DRIFT: a hand edit or unregenerated parent edit
+# fails packaging here. Vanilla coleam00/Archon has no grok provider yet, so
+# these YAMLs are generate+drift, not a live run path.
+echo "--- grok drift check ---"
+python3 "$ARCHON/setup/derive-grok.py" --all --check || { echo "PACKAGE=FAIL grok drift: regenerate with python3 .archon/setup/derive-grok.py --all"; exit 1; }
+
 # --- Cross-lane prompt doctrine (fail-closed) ---------------------------------
-# Generation covers the claude<->codex axis; nothing covers full<->lite, where a
+# Generation covers the claude<->codex and claude<->grok axes; nothing covers full<->lite, where a
 # lite overlay replaces a parent prompt wholesale. This fails packaging when a
 # line the lanes used to share survives in some of them and not others.
 echo "--- lane doctrine check ---"

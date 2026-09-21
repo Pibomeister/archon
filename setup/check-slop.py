@@ -32,6 +32,7 @@ Usage: check-slop.py <worktree> <base-sha> [--max-complexity N] [--exclude <path
 Prints one line per finding: `SLOP=FAIL <guard> file=<f> line=<n> ...` (blocking)
 or `SLOP=REPORT <guard> ...` (non-blocking), then a final summary line:
 `SLOP=OK files=N` (exit 0) or `SLOP=FAIL count=N` (exit 1)."""
+from __future__ import annotations
 import difflib
 import fnmatch
 import json

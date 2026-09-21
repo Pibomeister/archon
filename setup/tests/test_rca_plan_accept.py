@@ -64,9 +64,18 @@ class AcceptByHand(unittest.TestCase):
         (self.rd / "critique.json").write_text(json.dumps({"verdict": "REVISE", "findings": findings}))
 
     def run_converge(self, workflow):
-        script = converge_bash(workflow).replace("/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup", str(SETUP))
-        return subprocess.run(["bash", "-c", script], capture_output=True, encoding="utf-8",
-                              env={**os.environ, "ARTIFACTS_DIR": str(self.ad)})
+        script = converge_bash(workflow)
+        return subprocess.run(
+            ["bash", "-c", script],
+            capture_output=True,
+            encoding="utf-8",
+            env={
+                **os.environ,
+                "ARTIFACTS_DIR": str(self.ad),
+                "ARCHON_LAYER": str(SETUP.parent),
+                "PROJECT_ROOT": str(self.tmp),
+            },
+        )
 
     def test_cap_without_accept_stops(self):
         self.critique([{"severity": "P1", "kind": "gap", "confidence": 100}])

@@ -66,15 +66,13 @@ pick it:
 Say to run each command exactly as rendered: it already manages whether
 backgrounding is required for this provider. A failed continuation still
 leaves the approval recorded, so the rendered resume command picks it up.
-Say that reject
-records the reason typed after it and sends the plan back for one
-revision pass: the run reworks it against that reason and pauses here
-again. Say the third rejection cancels the run
-instead of reworking, and that abandon ends the run outright with no
-rework. Say that after approval the envelope is checked AGAIN against the
-plan as it stands then, so a plan that grew at this gate stops before any
-code is written. Files already written stay on disk either way. Close by
-saying the rendered control commands are the supported interface for this run.
+Say that reject records the reason and ends this run without rewriting
+plan.md; a different plan needs a fresh run. Abandon ends the run
+outright with no rework. Say that after approval the envelope is checked
+AGAIN against the plan as it stands then, so a plan that grew at this
+gate stops before any code is written. Files already written stay on
+disk either way. Close by saying the rendered control commands are the
+supported interface for this run.
 
 Writing rules for every section: plain sentences with varied length; no
 em dashes; no vocabulary like "crucial", "leverage", "robust", "seamless",

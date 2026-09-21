@@ -1,12 +1,12 @@
 set -euo pipefail
-ROOT="/Users/eduardopicazo/Documents/Workspace/Goodword"
-python3 "$ROOT/.archon/setup/bugfix-contract.py" write-lite-approval-manifest --artifacts "$ARTIFACTS_DIR"
+ROOT="$PROJECT_ROOT"
+python3 $ARCHON_LAYER/setup/bugfix-contract.py write-lite-approval-manifest --artifacts "$ARTIFACTS_DIR"
 RID="$(basename "$ARTIFACTS_DIR")"
 test -n "${ARCHON_BUGFIX_CHAIN_STATE-}" || { echo "LITE_ATTESTATION=FAIL no chain state"; exit 1; }
 test -n "${ARCHON_ATTESTATION_DIR-}" || { echo "LITE_ATTESTATION=FAIL no attestation dir"; exit 1; }
 SEAL="$ARCHON_ATTESTATION_DIR/$RID-lite-approval.json"
-python3 "$ROOT/.archon/setup/controller-attest.py" lite-approval --artifacts "$ARTIFACTS_DIR" --chain-state "$ARCHON_BUGFIX_CHAIN_STATE" --out "$SEAL"
-python3 "$ROOT/.archon/setup/controller-attest.py" lite-approval --verify --artifacts "$ARTIFACTS_DIR" --chain-state "$ARCHON_BUGFIX_CHAIN_STATE" --out "$SEAL"
+python3 $ARCHON_LAYER/setup/controller-attest.py lite-approval --artifacts "$ARTIFACTS_DIR" --chain-state "$ARCHON_BUGFIX_CHAIN_STATE" --out "$SEAL"
+python3 $ARCHON_LAYER/setup/controller-attest.py lite-approval --verify --artifacts "$ARTIFACTS_DIR" --chain-state "$ARCHON_BUGFIX_CHAIN_STATE" --out "$SEAL"
 H="$ARTIFACTS_DIR/rca-review.html"
 test -s "$H" || { echo "RENDER_GATE=FAIL no rca-review.html"; exit 1; }
 for m in GIST SYMPTOM EVIDENCE CHAIN EXPERIMENT RESIDUALS CRITIC FIX TEST DECIDE; do

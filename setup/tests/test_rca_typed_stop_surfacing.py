@@ -342,7 +342,8 @@ class WorkflowRouting(unittest.TestCase):
             self.assertIn("report:<verbatim clause from the sealed report>", text, str(path))
 
     def test_generated_twins_carry_the_fix(self):
-        for name in ("bugfix-codex.yaml", "bugfix-lite-codex.yaml"):
+        for name in ("bugfix-codex.yaml", "bugfix-lite-codex.yaml",
+                     "bugfix-grok.yaml", "bugfix-lite-grok.yaml"):
             twin = (SETUP.parent / "workflows" / name).read_text(encoding="utf-8")
             self.assertIn("*RCA_INVESTIGATION_REQUIRED*)", twin, f"{name} is stale: regenerate")
 

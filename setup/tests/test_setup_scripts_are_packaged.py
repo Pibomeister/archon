@@ -7,6 +7,7 @@ Nothing caught that class before: adding setup/round-reclaim.sh wired four
 lanes to a script that package.sh would not have installed. The manifest and
 the call sites are edited in different files by different changes, so the drift
 is silent until a run dies. Pin them to each other."""
+from __future__ import annotations
 import re
 import unittest
 from pathlib import Path
@@ -14,7 +15,7 @@ from pathlib import Path
 ARCHON = Path(__file__).resolve().parents[2]
 MANIFEST = ARCHON / "setup/package.sh"
 # Absolute or $ROOT/$SETUP-relative references to a shipped setup script.
-REF = re.compile(r'(?:\.archon/setup|\$SETUP)/([A-Za-z0-9_.-]+\.(?:sh|py))')
+REF = re.compile(r'(?:\.archon/setup|\$SETUP|\$ARCHON_LAYER/setup|\$LAYER/setup)/([A-Za-z0-9_.-]+\.(?:sh|py))')
 
 
 def manifest_entries():
@@ -73,6 +74,36 @@ class SetupScriptsArePackagedTest(unittest.TestCase):
         self.assertIn("feature-budget.py", manifest_entries())
         self.assertIn("feature_estimate.py", manifest_entries())
         self.assertIn("feature_chain.py", manifest_entries())
+
+    def test_generic_graph_helpers_are_shipped(self):
+        entries = manifest_entries()
+        self.assertIn("layer_root.py", entries)
+        self.assertIn("materialize_guidance.py", entries)
+        self.assertIn("graph_export.py", entries)
+        self.assertIn("graph_render.py", entries)
+        self.assertIn("profile_bind.py", entries)
+        self.assertIn("profile-preflight.sh", entries)
+        self.assertIn("derive-grok.py", entries)
+        self.assertIn("derive-codex.py", entries)
+
+    def test_stage_skills_library_is_shipped(self):
+        self.assertIn("stage-skills-library.py", manifest_entries())
+
+    def test_skill_evolve_helpers_are_shipped(self):
+        # skill_library.py is imported, not called, so the reference regex
+        # cannot see it; pin it by name with the four CLIs that import it.
+        entries = manifest_entries()
+        for name in ("skill_library.py", "trace-digest.py", "skill-score.py",
+                     "wiki-apply.py", "skill-admit.py"):
+            self.assertIn(name, entries, name)
+
+    def test_skill_evolve_workflow_is_packaged(self):
+        package = MANIFEST.read_text(encoding="utf-8")
+        self.assertIn("  workflows/skill-evolve.yaml\n", package)
+        self.assertIn("  library/README.md\n", package)
+        # Per-repo library trees must never ship: install.sh copies the payload
+        # over the target and would clobber an evolved registry.
+        self.assertNotRegex(package, r"^\s*library/(api|goodword-mcp|web-app)/", "per-repo library packaged")
 
     def test_canonical_test_runner_is_shipped_and_used_by_package(self):
         package = MANIFEST.read_text(encoding="utf-8")

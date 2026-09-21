@@ -152,7 +152,13 @@ class StageBootstrap(Fixture):
         match = re.search(r'^( *)if \[ "\$\{ARCHON_FEATURE_SCOPE-\}" = repositories \]; then\n(?:.*\n)*?\1fi\n', body, re.M)
         blocks = [m for m in [match] if m and "candidate_env.py" in m.group(0)]
         self.assertEqual(1, len(blocks), "stage runtime-env block not found in bootstrap")
-        return "set -euo pipefail\n" + blocks[0].group(0)
+        preamble = []
+        for line in body.splitlines():
+            if line.startswith("export ARCHON_LAYER=") or line.startswith("export PROJECT_ROOT="):
+                preamble.append(line)
+            elif preamble:
+                break
+        return "set -euo pipefail\n" + ("\n".join(preamble) + "\n" if preamble else "") + blocks[0].group(0)
 
     def run_block(self, scope):
         env = dict(os.environ, REPO="api", WT=str(self.source))

@@ -15,18 +15,16 @@ nodes:
   timeout: 300000
   bash: |
     set -euo pipefail
-    SK="/Users/eduardopicazo/Documents/Workspace/Goodword/.claude/skills"
+    : "${ARCHON_LAYER:?PREFLIGHT=FAIL ARCHON_LAYER unset}"
+    : "${PROJECT_ROOT:?PREFLIGHT=FAIL PROJECT_ROOT unset}"
+    test -f "$ARCHON_LAYER/setup/resolve-params.sh" || { echo "PREFLIGHT=FAIL ARCHON_LAYER missing helpers"; exit 1; }
+    SK="$PROJECT_ROOT/.claude/skills"
     test -f "$SK/ce-code-review/SKILL.md" || { echo "PREFLIGHT=FAIL staged ce-code-review missing"; exit 1; }
     test -f "$SK/ce-doc-review/SKILL.md"  || { echo "PREFLIGHT=FAIL staged ce-doc-review missing"; exit 1; }
     # Dual contract: CE 3.2.0 carries the markers in SKILL.md; newer CE moved
     # mode:headless (now an alias for mode:agent) into references/modes-and-output.md
     # and the verdict field into references/finish-review.md. Either satisfies.
     { grep -q 'mode:headless' "$SK/ce-code-review/SKILL.md" && grep -q '"verdict"' "$SK/ce-code-review/SKILL.md"; }         || { grep -q 'mode:headless' "$SK/ce-code-review/references/modes-and-output.md" 2>/dev/null && grep -q '"verdict"' "$SK/ce-code-review/references/finish-review.md" 2>/dev/null; }         || { echo "PREFLIGHT=FAIL ce-code-review carries neither review contract (headless envelope nor agent JSON)"; exit 1; }
-    command -v bun >/dev/null || { echo "PREFLIGHT=FAIL bun missing"; exit 1; }
-    command -v gh >/dev/null || { echo "PREFLIGHT=FAIL gh missing"; exit 1; }
-    gh auth status >/dev/null 2>&1 || { echo "PREFLIGHT=FAIL gh unauthenticated"; exit 1; }
-    command -v aws >/dev/null 2>&1 && aws sts get-caller-identity >/dev/null 2>&1 \
-      || echo "PREFLIGHT_WARN aws unavailable or expired - AWS evidence/runtime integrations may degrade; workflow control continues"
     # Billing guard: runs MUST bill the Claude subscription (OAuth /login), never the API.
     # Any of these outranks the subscription login in Claude Code's auth precedence.
     for v in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_PROFILE; do
@@ -55,15 +53,8 @@ nodes:
     # port-alloc.sh walks past an occupied slot, which is what lets a second run of
     # this lane start while the first is still up.
     port_pids 4125 >/dev/null || { echo "PREFLIGHT=FAIL no port-inspection tool (need lsof, ss, or fuser)"; exit 1; }
-    test -d /Users/eduardopicazo/Documents/Workspace/Goodword/api/.git || { echo "PREFLIGHT=FAIL api repo missing"; exit 1; }
-    # Run identity: message = absolute spec path (empty = hard fail). Single derivation point.
-    bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/resolve-params.sh \
-      /Users/eduardopicazo/Documents/Workspace/Goodword "${ARGUMENTS-}" "$ARTIFACTS_DIR" 4125
-    eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
-    test -n "$APIPORT" || { echo "PREFLIGHT=FAIL params.json carries no smoke port"; exit 1; }
-    echo "PREFLIGHT_PORTS api=$APIPORT (per-run, allocated from this lane's base)"
-    test -d /Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb/wiki || { echo "PREFLIGHT=FAIL knowledge base missing"; exit 1; }
-    git -C /Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb status --porcelain | sort > "$ARTIFACTS_DIR/kb-pre-porcelain.txt"
+    # 4125 is the parent lane base; derive-lite substitutes this overlay to 4125.
+    bash $ARCHON_LAYER/setup/profile-preflight.sh 4125 full-sdlc-api-lite.yaml
     echo "PREFLIGHT=PASS"
     # LITE lane: one review round. converge reads this durable cap; the lite
     # converge overlay treats a landed fix on round 1 as converged (fixes are
@@ -82,12 +73,14 @@ nodes:
     You are the knowledge-base scout. Your job is the context a code explorer
     cannot see: why things are the way they are. Ask no questions.
 
-    The knowledge base is at /Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb.
+    Read profile-runtime.json in the directory named by ARTIFACTS_DIR
+    (resolve via: echo "$ARTIFACTS_DIR"). If kbRequired is false or kbRootRel
+    is empty, write kb-context.md with every marker section saying
+    "Nothing found in the KB", a SOURCES section that is empty, and stop.
+    Otherwise the knowledge base is "$PROJECT_ROOT"/<kbRootRel>.
     Read ONLY — never edit anything there:
-      glossary.md for domain terms; wiki/decisions/ (start at index.md) for
-      prior decisions; the routing table in its CLAUDE.md, then the relevant
-      wiki/concepts, wiki/patterns, wiki/systems pages for this feature's
-      domain; wiki/change-history/ for recent lessons nearby.
+      the paths listed in the profile (glossary, wiki/decisions, wiki/concepts,
+      wiki/patterns, wiki/systems, wiki/change-history) that exist.
     The feature spec: read params.json in the directory named by the
     ARTIFACTS_DIR environment variable (resolve via: echo "$ARTIFACTS_DIR");
     its "spec" field is the absolute path of the spec file. Read that file.
@@ -129,7 +122,13 @@ nodes:
     done
     test "$OK" = 1 || { echo "KB_GATE=FAIL no verifiable source path"; exit 1; }
     # The scout is read-only: the KB tree must be exactly as preflight saw it.
-    git -C /Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb status --porcelain | sort > "$ARTIFACTS_DIR/kb-now.txt"
+    # shellcheck disable=SC1091
+    source "$ARTIFACTS_DIR/profile-runtime.sh"
+    if [ "$KB_REQUIRED" != 1 ]; then
+      echo "KB_RECON_GATE=PASS kb=optional"
+      exit 0
+    fi
+    git -C "$PROJECT_ROOT/$KB_ROOT_REL" status --porcelain | sort > "$ARTIFACTS_DIR/kb-now.txt"
     # The knowledge base is HOST-GLOBAL: a concurrent lane's kb-capture drops
     # an untracked file into wiki/change-history/ and a raw cmp would blame
     # this run's read-only scout for it. Everything else is compared strictly.
@@ -145,8 +144,14 @@ nodes:
     set -euo pipefail
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-bootstrap.out") 2> >(tee -a "$ARTIFACTS_DIR/node-bootstrap.out" >&2); fi
     # REPO_DIR must come AFTER params-env: $REPO does not exist before it.
-    eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
-    REPO_DIR="/Users/eduardopicazo/Documents/Workspace/Goodword/$REPO"
+    eval "$(bash $ARCHON_LAYER/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+    # shellcheck disable=SC1091
+    source "$ARTIFACTS_DIR/profile-runtime.sh"
+    if [ "$PROFILE_LAYOUT" = single ]; then
+      REPO_DIR="$PROJECT_ROOT"
+    else
+      REPO_DIR="$PROJECT_ROOT/$REPO"
+    fi
     if [ "${ARCHON_FEATURE_SCOPE-}" = repositories ] && [ "${ARCHON_FEATURE_PHASE-}" = implement ]; then
       git -C "$WT" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "BOOTSTRAP=FAIL controller-pinned worktree missing"; exit 1; }
       test "$(git -C "$WT" branch --show-current)" = "$BR" || { echo "BOOTSTRAP=FAIL controller worktree on wrong branch"; exit 1; }
@@ -171,17 +176,31 @@ nodes:
     # runtime files the same way joint-integration candidates get them (api:
     # .env.e2e, which ENV_SRC never seeded).
     if [ "${ARCHON_FEATURE_SCOPE-}" = repositories ]; then
-      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/candidate_env.py "$REPO" "$WT" "$WT" \
+      python3 $ARCHON_LAYER/setup/candidate_env.py "$REPO" "$WT" "$WT" \
         || { echo "BOOTSTRAP=FAIL stage runtime environment unresolved (CANDIDATE_ENV line above)"; exit 1; }
     fi
     git -C "$WT" rev-parse HEAD > "$ARTIFACTS_DIR/bootstrap-head.txt"
     # A verify-only reopen verifies previous-candidate..HEAD, not an empty diff.
-    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/verify-only-base.py "$ARTIFACTS_DIR" "$WT"
+    python3 $ARCHON_LAYER/setup/verify-only-base.py "$ARTIFACTS_DIR" "$WT"
     # api_worktree is the key archon-run.py:2054 and resolve-web-params.sh:75
     # read; it keeps its name. "repo" is additive so the artifact stops
     # implying every run targets api.
     printf '{"api_worktree":"%s","branch":"%s","repo":"%s"}\n' "$WT" "$BR" "$REPO" > "$ARTIFACTS_DIR/worktrees.json"
     echo "WORKTREE=$WT BRANCH=$BR HEAD=$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")"
+- id: stage-skills
+  depends_on:
+  - bootstrap
+  timeout: 120000
+  bash: |
+    set -euo pipefail
+    if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-stage-skills.out") 2> >(tee -a "$ARTIFACTS_DIR/node-stage-skills.out" >&2); fi
+    # Read side of the skills layer: active + candidate SKILL.md bodies are
+    # rendered into skills.md for implement/fix/fixer. The wiki and
+    # PURPOSE.md are never staged. An empty library is SKIP, not FAIL.
+    eval "$(bash $ARCHON_LAYER/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+    python3 $ARCHON_LAYER/setup/stage-skills-library.py "$REPO" \
+      --lib "$ARCHON_LAYER/library" \
+      --artifacts "$ARTIFACTS_DIR"
 - id: ralplan
   depends_on:
   - bootstrap
@@ -215,12 +234,10 @@ nodes:
       ## Approach
       ## Test scenarios
       ## Verification
-    Under Verification list exactly three commands (they are the shell gate):
-      bun run typecheck
-      bun run lint
-      bun run test -- "<pattern>"
-    where <pattern> is the jest name pattern that selects every spec file this
-    unit touches or creates (existing specs for edited files included).
+    Read project-guidance.md in that same ARTIFACTS_DIR. Follow it. Do not
+    invent stack commands that are not in that file. Under Verification list
+    the gate commands from that file for this repository (they are the shell
+    gate). <pattern> selects every spec file this unit touches or creates.
     Also write verify.json to that directory — the machine-readable mirror the
     shell gate executes: {"test_patterns": ["<pattern>", ...]} with at least
     one pattern, each matching the Verification commands exactly.
@@ -284,9 +301,9 @@ nodes:
     # second inline copy of the cited() helper would be two contracts drifting
     # apart, and the drift would show up as a plan that passes here and fails
     # after the critic loop, or worse, the reverse.
-    eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+    eval "$(bash $ARCHON_LAYER/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
     SHAPE=0
-    OUT=$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/plan-shape.sh \
+    OUT=$(bash $ARCHON_LAYER/setup/plan-shape.sh \
       "$ARTIFACTS_DIR" "$WT" "$SPEC" 2>&1) || SHAPE=$?
     if [ "$SHAPE" != 0 ]; then
       # This node keeps its own typed token: SNAPSHOT=FAIL <reason> is what the
@@ -323,14 +340,14 @@ nodes:
     yourself explicitly and visibly:
     1. If the plan modifies no existing symbol, write impact.json with
        "status": "SKIPPED" and an empty "symbols" array.
-    2. If the gitnexus MCP tools (mcp__gitnexus__impact and friends) are not
-       available, the indexed repo "api" is absent/stale, OR ANY impact call
-       errors or reports that the repo/target is unavailable, write impact.json with
-       "status": "UNAVAILABLE" and an empty "symbols" array. On the lite
-       lane this routes the ticket to the full lane; that is correct.
+    2. Read profile-runtime.json. gitnexusRepo is the indexed repo name. If it
+       is empty, the gitnexus MCP tools are not available, that index is
+       absent/stale, OR ANY impact call errors, write impact.json with
+       "status": "UNAVAILABLE" and an empty "symbols" array. Whether that
+       routes FULL is a profile policy (impactUnavailable), not this prompt.
     3. Otherwise call mcp__gitnexus__impact with
        {target: "<symbol>", direction: "upstream"} for each symbol, against
-       the indexed repo "api" (it covers api/ only). Use "status": "GATHERED"
+       the indexed repo named by gitnexusRepo. Use "status": "GATHERED"
        ONLY when every call succeeded against that repo.
 
     impact.json is ALWAYS valid JSON and carries NO token prepended to it;
@@ -341,7 +358,7 @@ nodes:
                     "d1_callers": ["<caller symbol or path:line>", ...],
                     "risk": "LOW|MEDIUM|HIGH|CRITICAL",
                     "query_status": "GATHERED",
-                    "query_repo": "api",
+                    "query_repo": "<gitnexusRepo from profile-runtime.json>",
                     "query_target": "<exact target passed to the tool>"}]}
     Every d1_caller comes from successful tool output. Never invent one. A
     SUCCESSFUL query that returns no callers gets an empty list and risk "LOW";
@@ -364,8 +381,8 @@ nodes:
     # The operator relaunches the SAME spec on full-sdlc-api; never edit the
     # envelope or the artifacts to pass. Output is persisted to
     # envelope-plan.txt for the packet / PR body and for resume.
-    bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/lite-envelope.sh \
-      /Users/eduardopicazo/Documents/Workspace/Goodword "$ARTIFACTS_DIR" api plan
+    bash $ARCHON_LAYER/setup/lite-envelope.sh \
+      "$PROJECT_ROOT" "$ARTIFACTS_DIR" api plan
 - id: plan-render
   depends_on:
   - lite-envelope
@@ -441,15 +458,13 @@ nodes:
     Say to run each command exactly as rendered: it already manages whether
     backgrounding is required for this provider. A failed continuation still
     leaves the approval recorded, so the rendered resume command picks it up.
-    Say that reject
-    records the reason typed after it and sends the plan back for one
-    revision pass: the run reworks it against that reason and pauses here
-    again. Say the third rejection cancels the run
-    instead of reworking, and that abandon ends the run outright with no
-    rework. Say that after approval the envelope is checked AGAIN against the
-    plan as it stands then, so a plan that grew at this gate stops before any
-    code is written. Files already written stay on disk either way. Close by
-    saying the rendered control commands are the supported interface for this run.
+    Say that reject records the reason and ends this run without rewriting
+    plan.md; a different plan needs a fresh run. Abandon ends the run
+    outright with no rework. Say that after approval the envelope is checked
+    AGAIN against the plan as it stands then, so a plan that grew at this
+    gate stops before any code is written. Files already written stay on
+    disk either way. Close by saying the rendered control commands are the
+    supported interface for this run.
 
     Writing rules for every section: plain sentences with varied length; no
     em dashes; no vocabulary like "crucial", "leverage", "robust", "seamless",
@@ -489,51 +504,23 @@ nodes:
   depends_on:
   - plan-render-gate
   approval:
-    message: 'Plan review packet ready: open <this run''s ARTIFACTS_DIR>/plan-review.html. The run is paused because this stage finished and is waiting on a person; nothing degrades while it waits. The DECIDE box contains provider-appropriate commands. Approve continues to implementation. Reject records the reason, runs one revision pass, and pauses here again; the third rejection cancels instead of reworking. Abandon ends the run without rework. The routing envelope is rechecked after approval before code is written.'
+    message: 'Plan review packet ready: open <this run''s ARTIFACTS_DIR>/plan-review.html. The run is paused because this stage finished and is waiting on a person; nothing degrades while it waits. The DECIDE box contains provider-appropriate commands. Approve continues to implementation. Reject records the reason and ends this run without rewriting plan.md; a different plan needs a fresh run so the envelope can be rechecked. Abandon ends the run without rework. The routing envelope is rechecked after approval before code is written.'
     on_reject:
-      max_attempts: 3
+      max_attempts: 1
       prompt: |
         The human rejected this plan at the gate. Their reason, verbatim:
 
         $REJECTION_REASON
 
-        Revise the plan so it answers that. You are the ONLY node that runs
-        before the gate pauses again. No upstream node re-runs, so anything
-        you do not update yourself stays stale, and no gate re-checks your
-        output until after approval.
-
-        Work in $ARTIFACTS_DIR.
-        1. Read plan.md, files-allowlist.json, reader-audit.json,
-           envelope-plan.txt, and plan-review.html.
-        2. Rewrite plan.md to address the rejection and nothing else. Change
-           only what the feedback requires. If the feedback asks a question
-           rather than giving an instruction, answer it inside the plan.
-        3. Keep the contracts consistent with the revised plan: every path
-           the plan now touches must appear in files-allowlist.json, and
-           reader-audit.json must list any column whose interpretation or
-           presentation semantics the revision changes. Remember this is the
-           lite lane: if the revision now touches more files than the envelope
-           allows, a migration, an entity, auth, billing, search, infra or a
-           lambda, or declares a reader-audit column, the post-approval
-           envelope check will stop the run with ROUTE=FULL. Say so plainly in
-           the plan rather than trimming the allowlist to sneak past it.
-        4. Re-render plan-review.html yourself: same sections, same order,
-           each still wrapped in its HTML comment marker
-           (<!-- GIST --> <!-- KB --> <!-- MAP --> <!-- PLAN --> <!-- REVIEW -->
-           <!-- CRITIC --> <!-- DECIDE -->). Carry the DECIDE box over unchanged,
-           including this run's id and all three commands. The render gate does
-           not run again, so a marker you drop is a marker nobody restores.
-        5. Open REVIEW with a "Revision" block: the rejection reason verbatim
-           and what you changed in response, then the existing "Not run on the
-           lite lane" sentence.
-        6. In CRITIC, keep the Envelope block VERBATIM as it was and put the
-           heading "Envelope (pre-revision; the authoritative check runs after
-           approval)" above it. Append one line: "Revision N: human-directed;
-           not re-critiqued", where N is one more than the number of lines
-           already starting with "Revision" in that section.
-
-        Do not touch the worktree or any repository file. Plans only.
-        End your reply with the single line: PLAN_REVISED
+        Resolve the artifacts directory first with: echo "$ARTIFACTS_DIR".
+        Do not revise plan.md, files-allowlist.json, reader-audit.json, or
+        plan-review.html in this run. The lite envelope check after approval
+        cannot make an in-run rewrite independently verified. Write
+        plan-rejection-receipt.json ONLY inside that exact artifacts directory,
+        containing the verbatim reason, current run id, and
+        {"required_transition":"FRESH_RUN"}. Explain that the operator must
+        abandon this run and start a fresh guarded run. End with:
+        PLAN_REJECTION_RECORDED
 - id: lite-impact-post
   depends_on:
   - plan-gate
@@ -558,14 +545,14 @@ nodes:
     yourself explicitly and visibly:
     1. If the plan modifies no existing symbol, write impact.json with
        "status": "SKIPPED" and an empty "symbols" array.
-    2. If the gitnexus MCP tools (mcp__gitnexus__impact and friends) are not
-       available, the indexed repo "api" is absent/stale, OR ANY impact call
-       errors or reports that the repo/target is unavailable, write impact.json with
-       "status": "UNAVAILABLE" and an empty "symbols" array. On the lite
-       lane this routes the ticket to the full lane; that is correct.
+    2. Read profile-runtime.json. gitnexusRepo is the indexed repo name. If it
+       is empty, the gitnexus MCP tools are not available, that index is
+       absent/stale, OR ANY impact call errors, write impact.json with
+       "status": "UNAVAILABLE" and an empty "symbols" array. Whether that
+       routes FULL is a profile policy (impactUnavailable), not this prompt.
     3. Otherwise call mcp__gitnexus__impact with
        {target: "<symbol>", direction: "upstream"} for each symbol, against
-       the indexed repo "api" (it covers api/ only). Use "status": "GATHERED"
+       the indexed repo named by gitnexusRepo. Use "status": "GATHERED"
        ONLY when every call succeeded against that repo.
 
     impact.json is ALWAYS valid JSON and carries NO token prepended to it;
@@ -576,7 +563,7 @@ nodes:
                     "d1_callers": ["<caller symbol or path:line>", ...],
                     "risk": "LOW|MEDIUM|HIGH|CRITICAL",
                     "query_status": "GATHERED",
-                    "query_repo": "api",
+                    "query_repo": "<gitnexusRepo from profile-runtime.json>",
                     "query_target": "<exact target passed to the tool>"}]}
     Every d1_caller comes from successful tool output. Never invent one. A
     SUCCESSFUL query that returns no callers gets an empty list and risk "LOW";
@@ -620,11 +607,12 @@ nodes:
     # The operator relaunches the SAME spec on full-sdlc-api; never edit the
     # envelope or the artifacts to pass. Output is persisted to
     # envelope-post.txt for the packet / PR body and for resume.
-    bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/lite-envelope.sh \
-      /Users/eduardopicazo/Documents/Workspace/Goodword "$ARTIFACTS_DIR" api post
+    bash $ARCHON_LAYER/setup/lite-envelope.sh \
+      "$PROJECT_ROOT" "$ARTIFACTS_DIR" api post
 - id: implement
   depends_on:
   - lite-envelope-post
+  - stage-skills
   model: sonnet
   maxBudgetUsd: 8
   timeout: 1800000
@@ -668,43 +656,18 @@ nodes:
     per line) to reopen-blocked.txt in ARTIFACTS_DIR and stop; a human decides
     whether to amend scope.
 
-    <repo-conventions repo="api">
-    Package manager: bun@1.3.10. Node 22.16.0.
-    Unit tests: `bun run test "<pattern>"` — NEVER bare `bun test`: `test` is a bun
-    builtin, so bare `bun test` runs bun's own runner instead of jest and silently
-    breaks the suite's mocks (api/CLAUDE.md:32 documents the bare form; it is wrong).
-    Typecheck: `bun run typecheck` (tsgo) — NOT build:fast (esbuild-only).
-    Lint: `bun run lint` (biome).
-    Integration tests: do NOT run any in this node, except that a REOPENED stage whose
-    reopen-context.json evidence is an integration failure may re-run THAT spec, and
-    only through the host e2e mutex (use a long Bash timeout; it may print
-    E2E_MUTEX=WAITING while another run holds the stack):
-      bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/e2e-mutex.sh run "$ARTIFACTS_DIR" -- bun run test:integration -- <spec>
-    Never run `bun run test:integration`, `test:e2e`, or `docker-compose -f
-    local-env-compose.e2e.yaml` directly: jest's globalSetup runs `down -v` then
-    `up` on ONE machine-global e2e stack (54322/8001) that concurrent runs share.
-    Nest Swagger: always explicit request/response DTO classes; never generic Object
-    schemas. TypeScript strict; no `any`; unit specs live in `__tests__/` dirs.
-    </repo-conventions>
+    If skills.md exists in the artifacts directory, read it before you edit anything: it holds
+    repository skills compiled from earlier runs; they never override the plan, the allowlist, or this prompt.
 
-    <repo-conventions repo="goodword-mcp">
-    Use this block INSTEAD of the api one when params.json's "repo" is
-    "goodword-mcp". params.json is authoritative; do not mix the two.
-    Package manager: pnpm@10.12.1 (never bun). Node 20 — the system default is
-    newer, so prefix every command with `mise x node@20 --`.
-    Typecheck: `mise x node@20 -- pnpm exec tsc --noEmit`. There is NO `typecheck`
-    script; `build` is `tsc && copy-static-assets`, so --noEmit IS the typecheck.
-    Lint: THERE IS NONE. Do not invent one, and do not list one under Verification.
-    Unit tests: `mise x node@20 -- pnpm test:unit` for the whole suite. For a
-    pattern, the gate runs the full form with NODE_OPTIONS: jest is configured as
-    ts-jest/presets/default-esm, and without
-    `NODE_OPTIONS=--experimental-vm-modules` every suite dies with "Cannot use
-    import statement outside a module" — a failure that looks like a broken test.
-    Test files are `*.unit.test.ts` under `tests/` or `src/**/__tests__/`.
-    `*.e2e.test.ts` and `*.smoke.test.ts` need a live API and a token; the gate
-    excludes them and this node must not run them.
-    Transport is httpStream at /mcp with WorkOS bearer auth. TypeScript strict.
-    </repo-conventions>
+    Read project-guidance.md in ARTIFACTS_DIR. Follow it. Do not invent stack
+    commands that are not in that file. Integration tests in this node are
+    forbidden except a REOPENED stage whose reopen-context.json evidence is an
+    integration failure, which may re-run THAT spec only through
+    bash $ARCHON_LAYER/setup/e2e-mutex.sh run "$ARTIFACTS_DIR" -- <repo test command>.
+    Never invoke the machine-global e2e compose stack directly.
+
+    When params.json's "repo" is not the default, still follow
+    project-guidance.md for that repository. Do not mix command shapes.
 
     Before finishing, write a ONE-LINE conventional commit message for this
     change (feat|fix(scope): description — no body, no attribution) to
@@ -725,7 +688,7 @@ nodes:
   bash: |
     set -euo pipefail
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-gate-tests.out") 2> >(tee -a "$ARTIFACTS_DIR/node-gate-tests.out" >&2); fi
-    eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+    eval "$(bash $ARCHON_LAYER/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
     cd "$WT"
     rm -rf .omc   # runtime-state leakage guard: any .omc here is session contamination, never work product
     "${CMD_TYPECHECK[@]}" || { echo "GATE_TESTS=FAIL typecheck"; exit 1; }
@@ -758,24 +721,24 @@ nodes:
     CONTENT_STATUS=$(git status --porcelain --untracked-files=all | grep -vE '^\?\? \.env$' || true)
     # A feature-reopen'd stage must change its previous candidate (reopen-gate.py).
     if [ -z "$CONTENT_STATUS" ] && git diff --quiet "$BASE" -- .; then
-      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/reopen-gate.py "$ARTIFACTS_DIR" NO_CHANGE
+      python3 $ARCHON_LAYER/setup/reopen-gate.py "$ARTIFACTS_DIR" NO_CHANGE
       printf '{"outcome":"NO_CHANGE","repo":"%s","basis":"baseline-to-candidate content","baseline":"%s","head":"%s","pr_url":null}\n' "$REPO" "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
       echo "GATE_TESTS=PASS outcome=NO_CHANGE"
       exit 0
     fi
     printf '{"outcome":"CHANGED","repo":"%s","basis":"baseline-to-candidate content","baseline":"%s","head":"%s"}\n' "$REPO" "$BASE" "$(git rev-parse HEAD)" > "$ARTIFACTS_DIR/feature-result.json"
     test -s "$ARTIFACTS_DIR/commit-msg.txt" || {
-      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/node-no-output.py "$ARTIFACTS_DIR" implement commit-msg.txt
+      python3 $ARCHON_LAYER/setup/node-no-output.py "$ARTIFACTS_DIR" implement commit-msg.txt
       echo "GATE_TESTS=FAIL no commit-msg.txt from implement"; exit 1; }
     # Before scope: a declared reopen-blocked.txt is the actionable stop, not a breach.
-    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/reopen-gate.py "$ARTIFACTS_DIR" CHANGED
+    python3 $ARCHON_LAYER/setup/reopen-gate.py "$ARTIFACTS_DIR" CHANGED
     # Scope guard: catch implement-node creep before the first review round.
-    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py \
+    python3 $ARCHON_LAYER/setup/check-scope.py \
       "$ARTIFACTS_DIR/files-allowlist.json" "$WT" "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" \
       || { echo "GATE_TESTS=FAIL scope breach"; exit 1; }
     # A not_applicable browser policy was derived at plan time from the
     # allowlist; what ships is the diff, so re-derive it from the diff.
-    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/browser-exemption.py diff \
+    python3 $ARCHON_LAYER/setup/browser-exemption.py diff \
       "$ARTIFACTS_DIR" "$WT" "$BASE" || { echo "GATE_TESTS=FAIL browser exemption void"; exit 1; }
     echo "GATE_TESTS=PASS"
 - id: commit-impl
@@ -785,7 +748,7 @@ nodes:
   bash: |
     set -euo pipefail
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-commit-impl.out") 2> >(tee -a "$ARTIFACTS_DIR/node-commit-impl.out" >&2); fi
-    eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+    eval "$(bash $ARCHON_LAYER/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
     cd "$WT"
     MSG=$(head -1 "$ARTIFACTS_DIR/commit-msg.txt" 2>/dev/null || true)
     test -n "$MSG" || MSG="feat(api): $SLUG"
@@ -798,7 +761,7 @@ nodes:
       echo "COMMIT_IMPL=SKIP outcome=NO_CHANGE"
       exit 0
     fi
-    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
+    python3 $ARCHON_LAYER/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
     git diff --cached --name-only
     # Pin guard, AFTER git add and BEFORE git commit, so it reads the STAGED
     # blob -- what will actually be committed, not what happens to be sitting
@@ -807,7 +770,7 @@ nodes:
     # recipes in RUNBOOK 3c expect. A symbol the guard cannot find is
     # PIN_UNRESOLVED and also a stop: a silently missed span is the worse
     # failure of the two.
-    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/pin-guard.py "$ARTIFACTS_DIR" "$BASE" || exit 1
+    python3 $ARCHON_LAYER/setup/pin-guard.py "$ARTIFACTS_DIR" "$BASE" || exit 1
     if git diff --cached --quiet; then echo "COMMIT_IMPL=SKIP already committed"; else git commit -m "$MSG"; fi
     test -z "$(git status --porcelain | grep -v '^?? \.env')" || { echo "COMMIT_IMPL=FAIL dirty"; exit 1; }
     echo "COMMIT_IMPL=OK sha=$(git rev-parse HEAD)"
@@ -854,7 +817,7 @@ nodes:
         case "$CAP" in ''|*[!0-9]*) CAP=1 ;; esac
         if [ "$N" -gt "$CAP" ]; then echo "ROUND_CAP_EXCEEDED round=$N cap=$CAP (acceptance covers the cap round only; raise round-cap.txt to spend more)" >&2; exit 1; fi
         if [ "$N" -ge "$CAP" ] && [ ! -f "$ARTIFACTS_DIR/accept-residuals.txt" ]; then echo "ROUND_CAP_REACHED round=$N cap=$CAP (pre-round: a resume does not buy another review; write accept-residuals.txt or raise round-cap.txt)" >&2; exit 1; fi
-        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py pre "$ARTIFACTS_DIR"
+        python3 $ARCHON_LAYER/setup/round-state.py pre "$ARTIFACTS_DIR"
     - id: review
       depends_on:
       - round-pre
@@ -867,10 +830,10 @@ nodes:
       - ce-code-review
       prompt: |
         YOUR FIRST ACTION, before reading anything else, is to run exactly:
-          python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py mark "$ARTIFACTS_DIR" review-start
+          python3 $ARCHON_LAYER/setup/round-state.py mark "$ARTIFACTS_DIR" review-start
         YOUR LAST ACTION, after your output is complete, is to save the envelope and run
         exactly:
-          python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py mark "$ARTIFACTS_DIR" review-done <path to the envelope you wrote>
+          python3 $ARCHON_LAYER/setup/round-state.py mark "$ARTIFACTS_DIR" review-done <path to the envelope you wrote>
         The envelope on disk is what every downstream gate reads; a review that ends
         without that second call is an interrupted review and the next round re-runs it,
         so the whole invocation is wasted.
@@ -883,7 +846,7 @@ nodes:
         SCOPE OF THIS ROUND. Read round.txt in the artifacts directory for the current
         round number N, then read round-N/review-scope.txt. If it reads `verify`, this
         round does not rediscover the candidate: read
-        /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/prompts/review-verify.md and follow it instead of everything
+        $ARCHON_LAYER/setup/prompts/review-verify.md and follow it instead of everything
         below, which is the `full` scope. Absent or `full`, continue here.
 
         You are the review session for one round of the Archon review loop, running
@@ -893,16 +856,16 @@ nodes:
         is the round's execution contract (the marks, the read-only rule, the envelope
         identity lines) so the loop can reuse the review instead of re-running it.
 
-        Read `/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/review-contract.md` now. It is the contract; everything below is
+        Read `$ARCHON_LAYER/setup/review-contract.md` now. It is the contract; everything below is
         how this mode implements it. Where the two disagree, the contract wins.
 
         YOUR FIRST ACTION, before reading anything else, is exactly:
 
-            python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py mark "$ARTIFACTS_DIR" review-start
+            python3 $ARCHON_LAYER/setup/round-state.py mark "$ARTIFACTS_DIR" review-start
 
         YOUR LAST ACTION, after the envelope file is written, is exactly:
 
-            python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py mark "$ARTIFACTS_DIR" review-done "$ARTIFACTS_DIR/round-$N/review-envelope.txt"
+            python3 $ARCHON_LAYER/setup/round-state.py mark "$ARTIFACTS_DIR" review-done "$ARTIFACTS_DIR/round-$N/review-envelope.txt"
 
         You are read-only in the candidate worktree (contract section 1). `review-gate`
         compares the tree before and after this session; an edit fails the round. The
@@ -1031,7 +994,7 @@ nodes:
         OUT=$(cat "$RD/review-envelope.txt")
         # Dual-contract parse: CE 3.2.0's markdown headless envelope OR the
         # newer skills' single raw JSON object (status/verdict fields).
-        eval "$(python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/parse-review-envelope.py "$RD/review-envelope.txt" | sed 's/^/ENV_/')"
+        eval "$(python3 $ARCHON_LAYER/setup/parse-review-envelope.py "$RD/review-envelope.txt" | sed 's/^/ENV_/')"
         G1="$ENV_G1"; G2="$ENV_G2"
         echo "GATE_1_review_complete_present=$G1 (contract=$ENV_VSRC)"
         echo "GATE_2_degraded_absent=$G2"
@@ -1078,7 +1041,7 @@ nodes:
         case "$VERDICT" in "Ready to merge"|"Ready with fixes"|"Not ready") G3=PASS ;; esac
         echo "GATE_3_verdict_in_enum=$G3 verdict=[$VERDICT] source=$VSRC rundir=[$RUNDIR]"
         DEGRADED=true; test "$G2" = PASS && DEGRADED=false
-        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/write-review-summary.py \
+        python3 $ARCHON_LAYER/setup/write-review-summary.py \
           "$RD/review-summary.json" "$VERDICT" "$DEGRADED"
         # The resolved verdict, so every later reader takes the SAME value
         # this gate typed rather than re-deriving it from a ce-code-review run
@@ -1093,7 +1056,7 @@ nodes:
         # recorded THROUGH the helper (`gate --fail`), which writes gate.txt
         # and deletes review.ok, rather than by exiting here.
         if ! { test "$G1" = PASS && test "$G2" = PASS && test "$G3" = PASS; }; then
-          python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py gate "$ARTIFACTS_DIR" --fail "envelope g1=$G1 g2=$G2 g3=$G3"
+          python3 $ARCHON_LAYER/setup/round-state.py gate "$ARTIFACTS_DIR" --fail "envelope g1=$G1 g2=$G2 g3=$G3"
           exit 1
         fi
         # Everything that is state rather than parsing: GATE_5 (the envelope's
@@ -1104,7 +1067,7 @@ nodes:
         # ledger merge, and review.ok -- the ONLY artifact downstream nodes
         # accept as authorization. review-summary.json stays readable either
         # way, which is exactly why a readable Ready summary is not enough.
-        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py gate "$ARTIFACTS_DIR" || exit 1
+        python3 $ARCHON_LAYER/setup/round-state.py gate "$ARTIFACTS_DIR" || exit 1
         echo "REVIEW_GATE=PASS round=$N"
     - id: fix-plan
       depends_on:
@@ -1121,7 +1084,7 @@ nodes:
         # before a rejection or a failed gate -- is never reused even when the
         # review identity is unchanged, and an unaccounted edit to the tree is
         # FIXER_TREE_DRIFT rather than a silent re-run over someone's work.
-        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py fix-plan "$ARTIFACTS_DIR"
+        python3 $ARCHON_LAYER/setup/round-state.py fix-plan "$ARTIFACTS_DIR"
     - id: fixer
       depends_on:
       - fix-plan
@@ -1133,13 +1096,13 @@ nodes:
         You are the fixer node in an unattended review-fix pipeline. Ask no questions.
         Resolve the artifacts directory by running: echo "$ARTIFACTS_DIR"
         YOUR FIRST ACTION, before reading or editing anything, is to run exactly:
-          python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py mark "$ARTIFACTS_DIR" repair-start
+          python3 $ARCHON_LAYER/setup/round-state.py mark "$ARTIFACTS_DIR" repair-start
         From that call onwards the worktree is yours: partial edits are your
         provenance, which is what lets an interrupted repair RESUME over its
         own half-finished tree instead of being read as an unreviewed change.
         Skipping it means your first edit fails the round.
         YOUR LAST ACTION, after the result file is written, is to run exactly:
-          python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py mark "$ARTIFACTS_DIR" repair-done
+          python3 $ARCHON_LAYER/setup/round-state.py mark "$ARTIFACTS_DIR" repair-done
         That records the durable completion of this repair. Without it the
         commit step reports FIXER_INCOMPLETE and your work is re-attempted.
         Read the current round number from round.txt in that directory, then read
@@ -1224,6 +1187,8 @@ nodes:
           left in the worktree that no finding names is quarantined there anyway
           and never reaches the commit, so writing it in the tree only costs you
           the round's clarity.
+        If skills.md exists in the artifacts directory, read it before you edit anything: it holds
+        repository skills compiled from earlier runs; they never override the plan, the allowlist, or this prompt.
         Write JSON to round-<N>/fixer-result.json in the artifacts directory:
           {"applied": [...], "failed": [...], "advisory": [...], "incomplete": [...], "cross_repo": [...]}
         plus, on this lane, a sixth key "pin_conflict": [...] alongside them.
@@ -1276,14 +1241,14 @@ nodes:
         # be committed, not what happens to be in the worktree), then either
         # attest a no-change result without an empty commit or commit and
         # attest the new HEAD.
-        eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+        eval "$(bash $ARCHON_LAYER/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
         cd "$WT"
         # Staging comes FIRST and stays in the node: check-scope.py is what
         # decides which paths may be staged at all, and the pin guard inside
         # the helper reads the staged index. A pin guard run before staging
         # would be reading the wrong tree.
-        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
-        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py commit-fixer "$ARTIFACTS_DIR"
+        python3 $ARCHON_LAYER/setup/check-scope.py "$ARTIFACTS_DIR/files-allowlist.json" "$PWD" HEAD --stage --quarantine "$ARTIFACTS_DIR" --exclude pnpm-lock.yaml || exit 1
+        python3 $ARCHON_LAYER/setup/round-state.py commit-fixer "$ARTIFACTS_DIR"
     - id: converge
       depends_on:
       - commit-fixer
@@ -1305,18 +1270,18 @@ nodes:
         # check it here or not at all.
         test -f "$RD/review.ok" || { echo "REVIEW_UNAUTHORIZED round=$N (no gated review envelope)"; exit 1; }
         test -f "$RD/fixer.ok" || { echo "FIXER_ABSENT round=$N (commit-fixer left no attestation)"; exit 1; }
-        eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+        eval "$(bash $ARCHON_LAYER/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
         cd "$WT"
         V=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['verdict'])" "$RD/review-summary.json" 2>/dev/null || echo UNKNOWN)
         FIXOK=NO
-        FIXMSG=$(python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-fixer-result.py "$RD/fixer-result.json" 2>&1 | tr '\n' ' ') && FIXOK=YES
+        FIXMSG=$(python3 $ARCHON_LAYER/setup/check-fixer-result.py "$RD/fixer-result.json" 2>&1 | tr '\n' ' ') && FIXOK=YES
         CLEAN=NO; test -z "$(git status --porcelain | grep -v '^?? \.env')" && CLEAN=YES
         MOVED=YES; test "$(git rev-parse HEAD)" = "$(cat "$RD/pre-head.txt")" && MOVED=NO
         INC=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1])).get('incomplete',[])))" "$RD/fixer-result.json" 2>/dev/null || echo 0)
         echo "ROUND=$N verdict=[$V] fixer_ok=$FIXOK clean=$CLEAN head_moved=$MOVED incomplete=$INC"
         # Scope guard: any change outside the plan's allowlist is a human stop.
         # Legitimate scope growth = a human edits files-allowlist.json and resumes.
-        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py \
+        python3 $ARCHON_LAYER/setup/check-scope.py \
           "$ARTIFACTS_DIR/files-allowlist.json" "$WT" \
           "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" --round "$N" || exit 1
         if [ "$FIXOK" = NO ]; then echo "FIXER_BLOCKED round=$N $FIXMSG"; exit 1; fi
@@ -1324,7 +1289,7 @@ nodes:
         # not waivable here, so it must never reach update-waivers.py unresolved. The
         # only resolution is a human recording where it was filed in
         # cross-repo-filed.json (cross-repo-keys.py prints the keys).
-        if ! CROSS=$(python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --gate "$RD/fixer-result.json"); then
+        if ! CROSS=$(python3 $ARCHON_LAYER/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --gate "$RD/fixer-result.json"); then
           printf '%s\n' "$CROSS" | sed '$d'
           echo "CROSS_REPO_FINDING round=$N $(printf '%s\n' "$CROSS" | tail -n 1)"
           exit 1
@@ -1332,7 +1297,7 @@ nodes:
         [ -z "$CROSS" ] || printf '%s\n' "$CROSS"
         # Waiver ledger: record this round's advisory declines so later rounds
         # do not re-litigate them without new evidence.
-        python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/update-waivers.py \
+        python3 $ARCHON_LAYER/setup/update-waivers.py \
           "$RD/fixer-result.json" "$ARTIFACTS_DIR/waivers.md"
         # Durable round cap: counted against round.txt (survives resumes), not
         # loop iterations. accept-residuals.txt is a HUMAN act, never an agent's.
@@ -1389,7 +1354,7 @@ nodes:
     # reviewer, so re-run the mechanical gate on the tree as the fixer left it.
     # exit-gate (next) re-runs the plan's unit patterns and the scope check;
     # this node owns typecheck and lint, which exit-gate does not run.
-    eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+    eval "$(bash $ARCHON_LAYER/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
     cd "$WT"
     rm -rf .omc
     if [ -f "$ARTIFACTS_DIR/lite-fixes-unreviewed.txt" ]; then
@@ -1397,8 +1362,12 @@ nodes:
     else
       echo "POST_FIX_GATE no fixer changes landed; re-gating anyway"
     fi
-    bun run typecheck || { echo "GATE_TESTS=FAIL typecheck (post-fix)"; exit 1; }
-    bun run lint || { echo "GATE_TESTS=FAIL lint (post-fix)"; exit 1; }
+    "${CMD_TYPECHECK[@]}" || { echo "GATE_TESTS=FAIL typecheck (post-fix)"; exit 1; }
+    if [ "${#CMD_LINT[@]}" -gt 0 ]; then
+      "${CMD_LINT[@]}" || { echo "GATE_TESTS=FAIL lint (post-fix)"; exit 1; }
+    else
+      echo "POST_FIX_GATE_LINT=NOT_APPLICABLE ($REPO declares no lint command)"
+    fi
     echo "POST_FIX_GATE=PASS"
 - id: exit-gate
   depends_on:
@@ -1407,14 +1376,14 @@ nodes:
   bash: |
     set -euo pipefail
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-exit-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-exit-gate.out" >&2); fi
-    eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+    eval "$(bash $ARCHON_LAYER/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
     cd "$WT"
     N=$(cat "$ARTIFACTS_DIR/round.txt"); RD="$ARTIFACTS_DIR/round-$N"
     case "$N" in ''|*[!0-9]*) echo "EXIT_GATE=FAIL round.txt is not an integer: [$N]"; exit 1 ;; esac
     # Cross-repo belt: converge's stop is bypassable by a resume, and the
     # accept-residuals branch below skips the fixer re-check entirely.
     # Only a human acknowledgement in cross-repo-filed.json resolves an entry.
-    CROSS=$(python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --gate "$RD/fixer-result.json") \
+    CROSS=$(python3 $ARCHON_LAYER/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --gate "$RD/fixer-result.json") \
       || { printf '%s\n' "$CROSS" | sed '$d'; echo "EXIT_GATE=FAIL CROSS_REPO_FINDING round=$N $(printf '%s\n' "$CROSS" | tail -n 1)"; exit 1; }
     [ -z "$CROSS" ] || printf '%s\n' "$CROSS"
     # AUTHORIZATION, and it comes before everything the operator can waive.
@@ -1424,7 +1393,7 @@ nodes:
     # ever passed. review.ok for the current identity and fixer.ok at HEAD are
     # the only things that say otherwise, and accept-residuals waives the
     # VERDICT, never this.
-    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/round-state.py exit-check "$ARTIFACTS_DIR" || exit 1
+    python3 $ARCHON_LAYER/setup/round-state.py exit-check "$ARTIFACTS_DIR" || exit 1
     # A human accepting residuals waives the verdict and fixer checks — never
     # the clean-tree, scope, or unit-test checks (accepted findings, not a broken tree).
     if [ -f "$ARTIFACTS_DIR/accept-residuals.txt" ]; then
@@ -1432,16 +1401,16 @@ nodes:
     else
       V=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['verdict'])" "$RD/review-summary.json")
       case "$V" in "Ready to merge"|"Ready with fixes") echo "VERDICT_OK=$V rounds=$N" ;; *) echo "EXIT_GATE=FAIL verdict=$V"; exit 1 ;; esac
-      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-fixer-result.py "$RD/fixer-result.json" || { echo "EXIT_GATE=FAIL FIXER_BLOCKED"; exit 1; }
+      python3 $ARCHON_LAYER/setup/check-fixer-result.py "$RD/fixer-result.json" || { echo "EXIT_GATE=FAIL FIXER_BLOCKED"; exit 1; }
     fi
     test -z "$(git status --porcelain | grep -v '^?? \.env')" || { echo "EXIT_GATE=FAIL dirty tree"; exit 1; }
     # Scope guard belt (resume ordering can bypass converge's check).
-    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py \
+    python3 $ARCHON_LAYER/setup/check-scope.py \
       "$ARTIFACTS_DIR/files-allowlist.json" "$WT" "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" \
       || { echo "EXIT_GATE=FAIL scope breach"; exit 1; }
     # Browser exemption belt: the fixer and a widened allowlist can both move
     # the diff onto a browser surface after gate-tests derived the exemption.
-    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/browser-exemption.py diff \
+    python3 $ARCHON_LAYER/setup/browser-exemption.py diff \
       "$ARTIFACTS_DIR" "$WT" "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" \
       || { echo "EXIT_GATE=FAIL browser exemption void"; exit 1; }
     # Reader-audit belt: declared columns must have a passing result on disk.
@@ -1478,8 +1447,8 @@ nodes:
     # sanctioned human act at either). Re-evaluate on the allowlist as it stands
     # and overwrite envelope-post.txt, which prbody renders. Fail-closed: a widening
     # past a cap stops here; relaunch on full-sdlc-api.
-    bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/lite-envelope.sh \
-      /Users/eduardopicazo/Documents/Workspace/Goodword "$ARTIFACTS_DIR" api post
+    bash $ARCHON_LAYER/setup/lite-envelope.sh \
+      "$PROJECT_ROOT" "$ARTIFACTS_DIR" api post
 - id: smoke
   depends_on:
   - lite-envelope-final
@@ -1487,8 +1456,8 @@ nodes:
   bash: |
     set -uo pipefail
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-smoke.out") 2> >(tee -a "$ARTIFACTS_DIR/node-smoke.out" >&2); fi
-    eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
-    case "$REPO" in goodword-mcp) exec bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/mcp-smoke.sh "$WT" "$ARTIFACTS_DIR" "$APIPORT" ;; esac
+    eval "$(bash $ARCHON_LAYER/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+    case "$REPO" in goodword-mcp) exec bash $ARCHON_LAYER/setup/mcp-smoke.sh "$WT" "$ARTIFACTS_DIR" "$APIPORT" ;; esac
     # Gated on the repo's DECLARED capability, never on an empty $APIPORT: a
     # port that failed to allocate for a smoke-bearing repo must stay a hard
     # failure at preflight, not become a silent skip here. prbody reads this
@@ -1610,7 +1579,7 @@ nodes:
     must say exactly: "No additional operational monitoring required."
     Mention verification evidence: unit gate, typecheck, lint, and the live
     smoke result exactly as recorded in smoke-result.txt in that directory.
-    After those sections, run: python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --prbody
+    After those sections, run: python3 $ARCHON_LAYER/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --prbody
     When it prints anything, append that output VERBATIM as the last section of
     pr-body.md (the "## Cross-repo findings filed" section: defects in other
     repositories a human filed instead of fixing here).
@@ -1621,7 +1590,7 @@ nodes:
   timeout: 120000
   bash: |
     set -euo pipefail
-    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-lite-prbody.py \
+    python3 $ARCHON_LAYER/setup/check-lite-prbody.py \
       api "$ARTIFACTS_DIR"
 - id: ship
   depends_on:
@@ -1688,7 +1657,7 @@ nodes:
     each round-<N>/review-summary.json and round-<N>/fixer-result.json.
 
     Write EXACTLY ONE new markdown file into
-    /Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb/wiki/change-history/
+    $PROJECT_ROOT/goodword-kb/wiki/change-history/
     named <YYYY-MM-DD>-archon-api-<feature-slug>.md (get the date with the
     date command; derive the slug from the PR title or branch).
     That one new file is your ENTIRE write surface: never edit or delete any
@@ -1713,7 +1682,7 @@ nodes:
   bash: |
     set -euo pipefail
     if [ -n "${ARTIFACTS_DIR-}" ]; then exec > >(tee -a "$ARTIFACTS_DIR/node-kb-capture-gate.out") 2> >(tee -a "$ARTIFACTS_DIR/node-kb-capture-gate.out" >&2); fi
-    KB="/Users/eduardopicazo/Documents/Workspace/Goodword/goodword-kb"
+    KB="$PROJECT_ROOT/goodword-kb"
     git -C "$KB" status --porcelain | sort > "$ARTIFACTS_DIR/kb-post-capture.txt"
     NEW=$(comm -13 "$ARTIFACTS_DIR/kb-pre-porcelain.txt" "$ARTIFACTS_DIR/kb-post-capture.txt" || true)
     OTHER=$(printf '%s\n' "$NEW" | grep -v "^?? wiki/change-history/" | grep -c . || true)

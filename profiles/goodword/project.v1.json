@@ -1,0 +1,74 @@
+{
+  "profileVersion": "archon.project-profile.v1",
+  "projectId": "project:goodword",
+  "repository": {
+    "remote": "https://github.com/GoodwordTeam/api.git",
+    "defaultBranch": "main",
+    "stack": "goodword-folder",
+    "packageManager": "bun@1.3.10"
+  },
+  "verification": [
+    {
+      "id": "api-unit",
+      "argv": ["bun", "run", "test"],
+      "timeoutSeconds": 1200
+    }
+  ],
+  "scope": {
+    "allowedPaths": ["**"],
+    "forbiddenPaths": [".env", ".env.*", "**/.env*"]
+  },
+  "knowledge": {
+    "root": "goodword-kb",
+    "required": true,
+    "paths": ["wiki", "README.md"],
+    "maxBytes": 2097152
+  },
+  "recovery": {
+    "maxRounds": 2
+  },
+  "delivery": {
+    "draftOnly": true,
+    "autoMerge": false,
+    "autoDeploy": false
+  },
+  "guidance": {
+    "root": "profiles/goodword",
+    "conventions": [
+      "conventions/api.md",
+      "conventions/web-app.md",
+      "conventions/mcp.md"
+    ],
+    "playbook": "guidance.md",
+    "envelopePath": "envelope.json",
+    "debug": [
+      {
+        "id": "cloud-logs",
+        "cli": "aws",
+        "note": "use aws cli to diagnose RDS/logs; expired SSO degrades evidence, does not fail the run"
+      }
+    ]
+  },
+  "capabilities": {
+    "gitnexusRepo": "api",
+    "layout": "siblings",
+    "defaultRepo": "api",
+    "allowedRepos": ["api", "goodword-mcp", "web-app"],
+    "webRepo": "web-app",
+    "requiredCheckouts": ["api", "web-app"],
+    "smoke": {
+      "apiPortBase": 4123,
+      "webPortBase": 3123
+    },
+    "generatedApiSync": true,
+    "browserUat": true,
+    "impactUnavailable": "route-full",
+    "requiredTools": [
+      {"id": "bun", "fail": true},
+      {"id": "pnpm", "fail": true},
+      {"id": "gh", "fail": true},
+      {"id": "aws", "fail": false},
+      {"id": "agent-browser", "fail": true}
+    ]
+  }
+}

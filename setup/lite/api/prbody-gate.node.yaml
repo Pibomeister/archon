@@ -4,5 +4,5 @@ depends_on:
 timeout: 120000
 bash: |
   set -euo pipefail
-  python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-lite-prbody.py \
+  python3 $ARCHON_LAYER/setup/check-lite-prbody.py \
     api "$ARTIFACTS_DIR"

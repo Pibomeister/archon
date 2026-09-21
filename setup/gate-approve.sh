@@ -29,4 +29,4 @@ echo "GATE_APPROVE=ENV vars=${#CHAIN_ENV[@]} run=$(basename "$AD" | cut -c1-8)"
 # Retries SQLITE_BUSY while the run is untouched; an approval that was recorded
 # but whose resume hit the lock continues through resume.sh (archon-lock-retry.sh).
 exec bash "$HERE/archon-lock-retry.sh" GATE_APPROVE "$RUN_ID" -- \
-  env "${CHAIN_ENV[@]}" DISABLE_OMC=1 archon workflow approve "$RUN_ID" "$@" </dev/null
+  env ${CHAIN_ENV[@]+"${CHAIN_ENV[@]}"} DISABLE_OMC=1 archon workflow approve "$RUN_ID" "$@" </dev/null

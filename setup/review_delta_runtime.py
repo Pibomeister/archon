@@ -704,7 +704,8 @@ def run_existing_converge_gates(artifacts: Path, worktree: Path) -> None:
         text=True,
     )
     if crossed.returncode:
-        raise policy.ReviewPolicyError(f"CROSS_REPO_FINDING {(crossed.stdout.strip() or crossed.stderr.strip() or "helper produced no output").splitlines()[-1]}")
+        detail = (crossed.stdout.strip() or crossed.stderr.strip() or "helper produced no output").splitlines()[-1]
+        raise policy.ReviewPolicyError(f"CROSS_REPO_FINDING {detail}")
     allowlist = artifacts / "files-allowlist.json"
     bootstrap = artifacts / "bootstrap-head.txt"
     if not allowlist.exists():

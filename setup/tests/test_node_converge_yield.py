@@ -117,8 +117,9 @@ class ConvergeYield(unittest.TestCase):
             sh("echo b > b.ts && git add . && git commit -qm 'fix(review): apply fixer feedback'", wt)
         m = self.mirror(tmp, broken_fixer_check)
         if lane == "lite":
-            body = OVERLAY.read_text(encoding="utf-8").replace(
-                ROOT_LITERAL + "/.archon/setup", str(m))
+            body = OVERLAY.read_text(encoding="utf-8")
+            body = body.replace(ROOT_LITERAL + "/.archon/setup", str(m))
+            body = body.replace("$ARCHON_LAYER/setup", str(m))
         else:
             body = runnable_body(lane, "converge", root=str(tmp))
         return tmp, ad, body
@@ -136,6 +137,8 @@ class ConvergeYield(unittest.TestCase):
         if ack is not None:
             (ad / "cross-repo-filed.json").write_text(json.dumps(ack))
         env = dict(os.environ, ARTIFACTS_DIR=str(ad), ARCHON_FEATURE_SCOPE=scope)
+        env.setdefault("ARCHON_LAYER", str(tmp / ".archon"))
+        env.setdefault("PROJECT_ROOT", str(tmp))
         p = subprocess.run(["bash", "-c", body], capture_output=True,
                            encoding="utf-8", env=env, cwd=str(tmp))
         return p, ad

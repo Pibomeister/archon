@@ -13,18 +13,18 @@ exec > >(tee "$RD/converge.txt") 2>&1
 # check it here or not at all.
 test -f "$RD/review.ok" || { echo "REVIEW_UNAUTHORIZED round=$N (no gated review envelope)"; exit 1; }
 test -f "$RD/fixer.ok" || { echo "FIXER_ABSENT round=$N (commit-fixer left no attestation)"; exit 1; }
-eval "$(bash /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
+eval "$(bash $ARCHON_LAYER/setup/params-env.sh "$ARTIFACTS_DIR/params.json")"
 cd "$WT"
 V=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['verdict'])" "$RD/review-summary.json" 2>/dev/null || echo UNKNOWN)
 FIXOK=NO
-FIXMSG=$(python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-fixer-result.py "$RD/fixer-result.json" 2>&1 | tr '\n' ' ') && FIXOK=YES
+FIXMSG=$(python3 $ARCHON_LAYER/setup/check-fixer-result.py "$RD/fixer-result.json" 2>&1 | tr '\n' ' ') && FIXOK=YES
 CLEAN=NO; test -z "$(git status --porcelain | grep -v '^?? \.env')" && CLEAN=YES
 MOVED=YES; test "$(git rev-parse HEAD)" = "$(cat "$RD/pre-head.txt")" && MOVED=NO
 INC=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1])).get('incomplete',[])))" "$RD/fixer-result.json" 2>/dev/null || echo 0)
 echo "ROUND=$N verdict=[$V] fixer_ok=$FIXOK clean=$CLEAN head_moved=$MOVED incomplete=$INC"
 # Scope guard: any change outside the plan's allowlist is a human stop.
 # Legitimate scope growth = a human edits files-allowlist.json and resumes.
-python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-scope.py \
+python3 $ARCHON_LAYER/setup/check-scope.py \
   "$ARTIFACTS_DIR/files-allowlist.json" "$WT" \
   "$(cat "$ARTIFACTS_DIR/bootstrap-head.txt")" --round "$N" || exit 1
 if [ "$FIXOK" = NO ]; then echo "FIXER_BLOCKED round=$N $FIXMSG"; exit 1; fi
@@ -32,7 +32,7 @@ if [ "$FIXOK" = NO ]; then echo "FIXER_BLOCKED round=$N $FIXMSG"; exit 1; fi
 # not waivable here, so it must never reach update-waivers.py unresolved. The
 # only resolution is a human recording where it was filed in
 # cross-repo-filed.json (cross-repo-keys.py prints the keys).
-if ! CROSS=$(python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --gate "$RD/fixer-result.json"); then
+if ! CROSS=$(python3 $ARCHON_LAYER/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --gate "$RD/fixer-result.json"); then
   printf '%s\n' "$CROSS" | sed '$d'
   echo "CROSS_REPO_FINDING round=$N $(printf '%s\n' "$CROSS" | tail -n 1)"
   exit 1
@@ -40,7 +40,7 @@ fi
 [ -z "$CROSS" ] || printf '%s\n' "$CROSS"
 # Waiver ledger: record this round's advisory declines so later rounds
 # do not re-litigate them without new evidence.
-python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/update-waivers.py \
+python3 $ARCHON_LAYER/setup/update-waivers.py \
   "$RD/fixer-result.json" "$ARTIFACTS_DIR/waivers.md"
 # Durable round cap: counted against round.txt (survives resumes), not
 # loop iterations. accept-residuals.txt is a HUMAN act, never an agent's.

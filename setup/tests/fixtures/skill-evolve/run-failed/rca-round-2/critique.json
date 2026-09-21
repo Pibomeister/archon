@@ -1,0 +1,5 @@
+{
+  "findings": [],
+  "summary": "Invalidation path covered.",
+  "verdict": "ACCEPT"
+}

@@ -37,6 +37,16 @@ LANE_BASES = {
     "full-sdlc-web.yaml": {"4127", "3127"},
 }
 CODEX_TWINS = {n.replace(".yaml", "-codex.yaml") for n in LANE_BASES}
+GROK_TWINS = {n.replace(".yaml", "-grok.yaml") for n in LANE_BASES}
+SHIPPED_LANES = list(LANE_BASES) + sorted(CODEX_TWINS | GROK_TWINS)
+
+
+def twin_parent(name):
+    if name.endswith("-codex.yaml"):
+        return LANE_BASES[name.replace("-codex.yaml", ".yaml")]
+    if name.endswith("-grok.yaml"):
+        return LANE_BASES[name.replace("-grok.yaml", ".yaml")]
+    raise KeyError(name)
 
 # Anything in these ranges is a smoke port; 4128+/3128+ are the per-run
 # allocations and must never appear as a literal at all.
@@ -74,6 +84,7 @@ def offending_port_lines(path, allowed):
                 continue
             sanctioned = (
                 ("resolve-params.sh" in line or "resolve-web-params.sh" in line
+                 or "profile-preflight.sh" in line
                  or re.search(r'"\$ARTIFACTS_DIR"\s+\d', line))
                 or re.match(r"\s*port_pids \d+ >/dev/null", line)
                 or line.lstrip().startswith('echo "PREFLIGHT_PORTS')
@@ -92,12 +103,12 @@ class NoLaneHardcodesASmokePort(unittest.TestCase):
             with self.subTest(lane=name):
                 self.assertEqual([], offending_port_lines(WORKFLOWS / name, allowed))
 
-    def test_codex_twins_are_clean(self):
-        for name in CODEX_TWINS:
+    def test_provider_twins_are_clean(self):
+        for name in sorted(CODEX_TWINS | GROK_TWINS):
             path = WORKFLOWS / name
             if not path.exists():
                 continue
-            parent = LANE_BASES[name.replace("-codex.yaml", ".yaml")]
+            parent = twin_parent(name)
             with self.subTest(lane=name):
                 self.assertEqual([], offending_port_lines(path, parent))
 
@@ -135,7 +146,7 @@ class NoLaneSweepsAPortItDoesNotOwn(unittest.TestCase):
         return bad
 
     def test_shipped_lanes_sweep_only_their_own_allocation(self):
-        for name in list(LANE_BASES) + sorted(CODEX_TWINS):
+        for name in SHIPPED_LANES:
             path = WORKFLOWS / name
             if not path.exists():
                 continue
@@ -178,7 +189,7 @@ class NoLaneNamesAConstantSmokeWorktree(unittest.TestCase):
         return bad
 
     def test_shipped_lanes_scope_the_smoke_worktree_to_the_run(self):
-        for name in list(LANE_BASES) + sorted(CODEX_TWINS):
+        for name in SHIPPED_LANES:
             path = WORKFLOWS / name
             if not path.exists():
                 continue
@@ -212,7 +223,7 @@ class NoLaneGatesOnAHostGlobalFileCount(unittest.TestCase):
         return bad
 
     def test_shipped_lanes_identify_their_own_capture(self):
-        for name in list(LANE_BASES) + sorted(CODEX_TWINS):
+        for name in SHIPPED_LANES:
             path = WORKFLOWS / name
             if not path.exists():
                 continue
@@ -266,7 +277,7 @@ class EveryPortConsumerResolvesParamsFirst(unittest.TestCase):
         return bad
 
     def test_shipped_lanes(self):
-        for name in list(LANE_BASES) + sorted(CODEX_TWINS):
+        for name in SHIPPED_LANES:
             path = WORKFLOWS / name
             if not path.exists():
                 continue
@@ -278,7 +289,7 @@ class EveryPortConsumerResolvesParamsFirst(unittest.TestCase):
             hurt = Path(td) / "bugfix.yaml"
             text = (WORKFLOWS / "bugfix.yaml").read_text(encoding="utf-8")
             mutated = text.replace(
-                '      eval "$(bash "$ROOT/.archon/setup/params-env.sh" "$AD/params.json")"\n'
+                '      eval "$(bash $ARCHON_LAYER/setup/params-env.sh "$AD/params.json")"\n'
                 '      WEB_DIR=$(cat "$AD/smoke-stack/web-dir.txt")',
                 '      WEB_DIR=$(cat "$AD/smoke-stack/web-dir.txt")',
                 1,
@@ -483,7 +494,7 @@ class E2eMutexSerializesTheSharedStack(unittest.TestCase):
     def test_negative_control_dropping_the_acquire_is_caught(self):
         bodies = dict(lane_bodies(WORKFLOWS / "bugfix.yaml"))
         stripped = bodies["smoke-stack"].replace(
-            'bash "$ROOT/.archon/setup/e2e-mutex.sh" acquire "$AD"', "true")
+            'bash $ARCHON_LAYER/setup/e2e-mutex.sh acquire "$AD"', "true")
         self.assertNotEqual(bodies["smoke-stack"], stripped, "mutation anchor no longer matches")
         self.assertNotRegex(stripped, r'e2e-mutex\.sh"?\s+acquire')
 

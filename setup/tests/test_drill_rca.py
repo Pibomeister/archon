@@ -32,7 +32,12 @@ IMMUTABLE = ["rca.md", "causal-chain.json", "hypotheses.json", "residuals.json",
 
 
 def run_node(node_id, art, workflow="bugfix", outputs=None):
-    body = runnable_body(workflow, node_id, outputs=outputs or {})
+    project = art / "project"
+    api = project / "api"
+    if not api.exists():
+        api.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q"], cwd=api, check=False, capture_output=True)
+    body = runnable_body(workflow, node_id, outputs=outputs or {}, root=str(project))
     env = dict(os.environ, ARTIFACTS_DIR=str(art))
     return subprocess.run(["bash", "-c", body], capture_output=True, text=True, env=env)
 

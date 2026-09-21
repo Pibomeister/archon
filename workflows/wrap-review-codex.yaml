@@ -69,7 +69,7 @@ nodes:
     echo "GATE_3_verdict_in_enum=$G3 verdict=[$VERDICT] rundir=[$RUNDIR]"
 
     DEGRADED=true; test "$G2" = PASS && DEGRADED=false
-    python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/write-review-summary.py \
+    python3 $ARCHON_LAYER/setup/write-review-summary.py \
       "$ARTIFACTS_DIR/review-summary.json" "$VERDICT" "$DEGRADED"
     test "$G1" = PASS && test "$G2" = PASS && test "$G3" = PASS || { echo "W6_GATE=FAIL"; exit 1; }
     echo "W6_GATE=PASS"

@@ -80,10 +80,18 @@ class RoundPreCap(unittest.TestCase):
             (self.ad / "accept-residuals.txt").write_text("human\n")
         elif (self.ad / "accept-residuals.txt").exists():
             os.remove(self.ad / "accept-residuals.txt")
-        script = round_pre(workflow).replace("/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup", str(Path(__file__).resolve().parent.parent))
-        # the web lane is toy-pinned: its round-pre cds into a hardcoded worktree
-        script = script.replace("/Users/eduardopicazo/Documents/Workspace/Goodword/web-app/.worktrees/archon-toy", str(self.tmp / "wt"))
-        return subprocess.run(["bash", "-c", script], capture_output=True, encoding="utf-8", env={**os.environ, "ARTIFACTS_DIR": str(self.ad)})
+        script = round_pre(workflow)
+        return subprocess.run(
+            ["bash", "-c", script],
+            capture_output=True,
+            encoding="utf-8",
+            env={
+                **os.environ,
+                "ARTIFACTS_DIR": str(self.ad),
+                "ARCHON_LAYER": str(ARCHON),
+                "PROJECT_ROOT": str(self.tmp),
+            },
+        )
 
     def test_under_cap_proceeds(self):
         for wf, default in LANES.items():

@@ -1,0 +1,2 @@
+ROUND=1 verdict=[Not ready] fixer_ok=YES clean=YES head_moved=NO incomplete=0
+NO_PROGRESS round=1 (Not ready and nothing changed)

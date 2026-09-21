@@ -92,7 +92,7 @@ def check(workflows_dir):
             "LANE_DOCTRINE=FAIL shared prompt doctrine diverged across lanes\n"
             + "\n".join(drift)
             + "\n  Fix every lane (lite lanes take the edit in setup/lite/<lane>/*.prompt.md,"
-            "\n  then derive-lite.py + derive-codex.py), or if the removal is deliberate"
+            "\n  then derive-lite.py + derive-codex.py + derive-grok.py), or if the removal is deliberate"
             "\n  everywhere, re-lock with: python3 .archon/setup/lane-doctrine.py update"
         )
     return True, f"LANE_DOCTRINE=OK nodes={len(locked)} lines={sum(len(v) for v in locked.values())}"

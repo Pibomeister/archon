@@ -88,10 +88,12 @@ class FeatureShepherd(unittest.TestCase):
         script = next(node["bash"] for node in loop["loop_group"]["nodes"] if node["id"] == "plan-round-pre")
         stub = self.root / "forecast.py"
         stub.write_text('import sys\nprint("BUDGET_SHEPHERD=STOP")\nsys.exit(1)\n')
-        script = script.replace("/Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/archon-run.py", str(stub))
+        script = script.replace('"$ARCHON_LAYER/setup/archon-run.py"', str(stub))
+        script = script.replace('$ARCHON_LAYER/setup/archon-run.py', str(stub))
         (self.root / "plan-round.txt").write_text("2\n")
         result = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
                                 env=dict(os.environ, ARTIFACTS_DIR=str(self.root),
+                                         ARCHON_LAYER=str(Path(__file__).resolve().parents[2]),
                                          ARCHON_FEATURE_SCOPE="repositories", ARCHON_FEATURE_CHAIN_ID="a" * 32))
         self.assertNotEqual(0, result.returncode)
         self.assertIn("BUDGET_SHEPHERD=STOP", result.stdout)
@@ -101,6 +103,7 @@ class FeatureShepherd(unittest.TestCase):
         (self.root / "plan.md").write_text("# Existing plan\n")
         result = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
                                 env=dict(os.environ, ARTIFACTS_DIR=str(self.root),
+                                         ARCHON_LAYER=str(Path(__file__).resolve().parents[2]),
                                          ARCHON_FEATURE_SCOPE="repositories", ARCHON_FEATURE_CHAIN_ID="a" * 32))
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn("BUDGET_SHEPHERD=WARN", result.stdout)

@@ -55,7 +55,7 @@ class ReviewPromptContract(unittest.TestCase):
         for name, text in sources:
             with self.subTest(source=name):
                 self.assertIsNotNone(text, f"{name} declares no prbody prompt")
-                self.assertIn('/.archon/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --prbody', text)
+                self.assertIn('$ARCHON_LAYER/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --prbody', text)
                 self.assertIn("## Cross-repo findings filed", text)
 
     def test_every_fixer_prompt_forbids_writing_the_acknowledgement(self):

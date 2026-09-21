@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "max_files": 4,
+  "max_test_files": 3,
+  "max_d1_callers": 10,
+  "max_chain_links": 7,
+  "hot_paths": [],
+  "repro_command_allow": [
+    "pnpm exec jest ",
+    "pnpm test "
+  ]
+}

@@ -13,17 +13,15 @@ oracle itself rejects two things a weaker check would rubber-stamp: a
 traceback printed to stdout instead of stderr, and a well-prefixed but
 structurally garbage terminal line.
 
-impact.json and recheck.json are NOT covered here: impact.json is read only
-by AI-node prompts (never `json.load`'d by any bash gate — see impact-probe
-in full-sdlc-api.yaml / bugfix.yaml, an AI node, not a bash node), and
-recheck.json is generated entirely by deslop-recheck itself from integer
-subprocess exit codes (never AI-authored, never read back by any other
-node) — see test_gate_fuzz.py's module docstring companion note in the
-mission report for the full reasoning.
+impact.json is covered by test_impact_gate.py (bash impact-gate json.loads the
+envelope before the critic prompt). recheck.json is generated entirely by
+deslop-recheck itself from integer subprocess exit codes (never AI-authored,
+never read back by any other node).
 
 Default corpus size is 20 variants per (file, gate, lane) group; set
 NODE_STRESS=100 for the full 100.
 """
+from __future__ import annotations
 import json
 import os
 import re

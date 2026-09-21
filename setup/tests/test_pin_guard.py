@@ -7,6 +7,7 @@ Reading the index rather than the worktree is the load-bearing part: an agent
 that edits a file after staging, or stages a change it then reverts on disk,
 must not be able to move a pinned symbol past the gate either way.
 """
+from __future__ import annotations
 import json
 import subprocess
 import sys

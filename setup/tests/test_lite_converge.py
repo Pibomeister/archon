@@ -21,7 +21,6 @@ from pathlib import Path
 
 SETUP = Path(__file__).resolve().parent.parent
 OVERLAY = SETUP / "lite" / "api" / "review-loop.converge.bash.sh"
-ROOT_LITERAL = "/Users/eduardopicazo/Documents/Workspace/Goodword"
 
 
 def sh(cmd, cwd):
@@ -56,11 +55,8 @@ class LiteConverge(unittest.TestCase):
         # tests at the bottom of this file are the negative controls.
         self.authorize()
         self.fixer({"applied": [{"finding": "f1"}], "failed": [], "advisory": [], "incomplete": []})
-        # the overlay hardcodes the Goodword root for its helper scripts; point
-        # those at the real setup dir by rewriting the literal to a temp mirror
-        script = OVERLAY.read_text(encoding="utf-8").replace(ROOT_LITERAL + "/.archon/setup", str(SETUP))
         self.script = self.tmp / "converge.sh"
-        self.script.write_text(script, encoding="utf-8")
+        self.script.write_text(OVERLAY.read_text(encoding="utf-8"), encoding="utf-8")
 
     def authorize(self):
         (self.ad / "round-1" / "review.ok").write_text(
@@ -83,7 +79,9 @@ class LiteConverge(unittest.TestCase):
 
     def go(self):
         return subprocess.run(["bash", str(self.script)], capture_output=True, encoding="utf-8",
-                              env={**os.environ, "ARTIFACTS_DIR": str(self.ad)})
+                              env={**os.environ, "ARTIFACTS_DIR": str(self.ad),
+                                   "ARCHON_LAYER": str(SETUP.parent),
+                                   "PROJECT_ROOT": str(self.tmp)})
 
     def test_ready_with_fixes_converges_and_records_unreviewed(self):
         self.verdict("Ready with fixes")

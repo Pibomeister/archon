@@ -78,6 +78,7 @@
     ]
   },
   "knowledge": {
+    "required": false,
     "paths": [
       "README.md",
       "glossary.md",
@@ -93,5 +94,24 @@
     "draftOnly": true,
     "autoMerge": false,
     "autoDeploy": false
+  },
+  "guidance": {
+    "root": "profiles/fluxkeep",
+    "conventions": [],
+    "playbook": "guidance.md",
+    "envelopePath": "envelope.json",
+    "debug": []
+  },
+  "capabilities": {
+    "layout": "single",
+    "defaultRepo": "fluxkeep",
+    "allowedRepos": ["fluxkeep"],
+    "generatedApiSync": false,
+    "browserUat": false,
+    "impactUnavailable": "allow",
+    "requiredTools": [
+      {"id": "pnpm", "fail": true},
+      {"id": "gh", "fail": false}
+    ]
   }
 }

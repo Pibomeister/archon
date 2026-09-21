@@ -51,7 +51,9 @@ def profile(repo, setup_dir=SETUP):
         f'OUT=$(bash "{setup_dir}/repo-profile.sh" "{repo}")\n'
         'eval "$OUT"\n'
         'for n in CMD_INSTALL CMD_TYPECHECK CMD_LINT CMD_TEST; do\n'
+        '  set +u\n'
         '  eval "arr=(\\"\\${$n[@]}\\")"\n'
+        '  set -u\n'
         '  printf "%s\\n" "$n"\n'
         '  if [ "${#arr[@]}" -gt 0 ]; then printf "  %s\\n" "${arr[@]}"; fi\n'
         '  printf "END\\n"\n'
@@ -160,6 +162,8 @@ def run_node(body, fake, env=None, timeout=None):
     e = dict(os.environ)
     e.pop("ARCHON_REPO", None)
     e["ARTIFACTS_DIR"] = str(fake.ad)
+    e.setdefault("ARCHON_LAYER", str(ARCHON))
+    e.setdefault("PROJECT_ROOT", str(fake.root))
     e.update(env or {})
     try:
         return subprocess.run(["bash", "-c", body], capture_output=True,
@@ -419,15 +423,18 @@ class Acceptance(unittest.TestCase):
             self.assertEqual("goodword-mcp", p["repo"])
             self.assertTrue(p["worktree"].endswith("/goodword-mcp/.worktrees/eng-0000-fixture"))
 
-    def test_a10_the_lane_declares_an_allow_list_and_the_lite_lane_does_not(self):
-        """The lite lane's overlay carries its own preflight; leaving it without an
-        --allow is what keeps it api-only rather than silently running bun against
-        an mcp worktree."""
+    def test_a10_allow_list_comes_from_the_project_pack(self):
+        """YAML must not hardcode Goodword repos. The pack's allowedRepos is what
+        profile-preflight.sh passes to resolve-params.sh for both full and lite."""
         lane = (WORKFLOWS / "full-sdlc-api.yaml").read_text(encoding="utf-8")
-        self.assertIn("--allow api,goodword-mcp", lane)
+        self.assertNotIn("--allow api,goodword-mcp", lane)
+        helper = (SETUP / "profile-preflight.sh").read_text(encoding="utf-8")
+        self.assertIn("ALLOWED_REPOS", helper)
+        self.assertIn("--allow", helper)
+        pack = json.loads((ARCHON / "profiles/goodword/project.v1.json").read_text(encoding="utf-8"))
+        self.assertEqual(pack["capabilities"]["allowedRepos"], ["api", "goodword-mcp", "web-app"])
         lite = (SETUP / "lite/api/preflight.bash.sh").read_text(encoding="utf-8")
-        self.assertIn("resolve-params.sh", lite)
-        self.assertNotIn("--allow", lite)
+        self.assertIn("profile-preflight.sh", lite)
 
     # The smoke node boots a server and its exit trap kills whatever owns the
     # port it was given. Running it in a test with a real port base could
@@ -721,7 +728,7 @@ class Acceptance(unittest.TestCase):
         self.assertEqual(nodes["bootstrap"]["when"], "$feature-phase.bootstrap == 'yes'")
         self.assertEqual(nodes["ralplan"]["depends_on"], ["bootstrap", "kb-recon-gate"])
         self.assertEqual(nodes["ralplan"]["trigger_rule"], "none_failed_min_one_success")
-        self.assertEqual(nodes["implement"]["depends_on"], ["plan-gate", "implementation-ready"])
+        self.assertEqual(nodes["implement"]["depends_on"], ["plan-gate", "implementation-ready", "stage-skills"])
         self.assertEqual(nodes["implement"]["trigger_rule"], "none_failed_min_one_success")
         self.assertEqual(nodes["implement"]["when"], "$feature-phase.implement == 'yes'")
         self.assertEqual(nodes["joint-integration"]["when"], "$feature-phase.integration == 'yes'")

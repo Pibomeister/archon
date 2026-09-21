@@ -274,7 +274,7 @@ fi
 # "database is locked" and this run's row is untouched (SQLite read->write
 # upgrade under concurrent runs; see that file), printing RESUME_DB_LOCKED lines.
 bash "$(dirname "$0")/archon-lock-retry.sh" RESUME "$RUN_ID" -- \
-  env "${CHAIN_ENV[@]}" DISABLE_OMC=1 CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 archon workflow resume "$RUN_ID" "$@" </dev/null
+  env ${CHAIN_ENV[@]+"${CHAIN_ENV[@]}"} DISABLE_OMC=1 CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 archon workflow resume "$RUN_ID" "$@" </dev/null
 ARCHON_RC=$?
 set -e
 

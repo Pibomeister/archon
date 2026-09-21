@@ -182,12 +182,19 @@ def validate_profile(profile: dict) -> None:
         expected_fields += ("sourceRecipe",)
     if "noChangeClosure" in profile:
         expected_fields += ("noChangeClosure",)
+    if "guidance" in profile:
+        expected_fields += ("guidance",)
+    if "capabilities" in profile:
+        expected_fields += ("capabilities",)
     object_fields(profile, expected_fields, "project profile")
     object_fields(profile["repository"], ("remote", "defaultBranch", "stack") + (() if v2 else ("packageManager",)), "repository")
     if v2 and profile["sourceRecipe"] not in source_recipes.RECIPES:
         raise ValueError("Unknown source recipe")
     object_fields(profile["scope"], ("allowedPaths", "forbiddenPaths"), "scope")
-    object_fields(profile["knowledge"], ("paths", "maxBytes"), "knowledge")
+    knowledge_fields = ("paths", "maxBytes")
+    if isinstance(profile.get("knowledge"), dict) and "required" in profile["knowledge"]:
+        knowledge_fields = ("required", "paths", "maxBytes")
+    object_fields(profile["knowledge"], knowledge_fields, "knowledge")
     object_fields(profile["recovery"], ("maxRounds",), "recovery")
     object_fields(profile["delivery"], ("draftOnly", "autoMerge", "autoDeploy") + (("baseBranch",) if v2 else ()), "delivery")
     if "noChangeClosure" in profile:
@@ -244,6 +251,22 @@ def validate_profile(profile: dict) -> None:
         raise ValueError("Recovery is limited to at most two rounds")
     if profile["delivery"]["draftOnly"] is not True or profile["delivery"]["autoMerge"] is not False or profile["delivery"]["autoDeploy"] is not False:
         raise ValueError("Portable delivery must be draft-only with merge/deploy disabled")
+    if "guidance" in profile:
+        guidance = profile["guidance"]
+        allowed = {"root", "conventions", "playbook", "envelopePath", "debug"}
+        if not isinstance(guidance, dict) or "root" not in guidance or set(guidance) - allowed:
+            raise ValueError("Invalid guidance fields")
+        if not isinstance(guidance["root"], str) or not guidance["root"] or guidance["root"].startswith("/") or ".." in guidance["root"]:
+            raise ValueError("Invalid guidance fields")
+    if "capabilities" in profile:
+        capabilities = profile["capabilities"]
+        allowed = {
+            "gitnexusRepo", "smoke", "generatedApiSync", "browserUat",
+            "impactUnavailable", "requiredTools",
+            "layout", "defaultRepo", "allowedRepos",
+        }
+        if not isinstance(capabilities, dict) or set(capabilities) - allowed:
+            raise ValueError("Invalid capabilities fields")
 
 
 def binding_and_profile(path: Path):

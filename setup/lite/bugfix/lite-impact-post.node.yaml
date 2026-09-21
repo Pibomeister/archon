@@ -13,8 +13,8 @@ prompt: |
   Read fix-plan.json (fix_site, files, approach) and causal-chain.json (the
   final link's fix_site) there, and collect every existing symbol (function,
   class, method) the fix proposes to MODIFY. Read the code in the main
-  checkout at /Users/eduardopicazo/Documents/Workspace/Goodword/api or
-  /web-app (repo.json says which) to name them; there may be no worktree
+  checkout named by repo.json under "$PROJECT_ROOT" (or "$PROJECT_ROOT"
+  itself on a single-repo layout) to name them; there may be no worktree
   yet. Symbols the fix creates from scratch have no callers and do not
   belong in the list.
 
@@ -22,16 +22,15 @@ prompt: |
   yourself explicitly and visibly:
   1. If the fix modifies no existing symbol, write impact.json with
      "status": "SKIPPED" and an empty "symbols" array.
-  2. If repo.json says web-app, the gitnexus MCP tools are not available, the
-     indexed repo "api" is absent/stale, OR ANY impact call errors or reports
-     that the repo/target is unavailable,
+  2. Read profile-runtime.json. gitnexusRepo is the indexed repo name. If it
+     is empty, repo.json names a different repository, the gitnexus MCP tools
+     are not available, that index is absent/stale, OR ANY impact call errors,
      write impact.json with "status": "UNAVAILABLE" and an empty "symbols"
-     array. On the lite lane this routes the ticket to the full lane; that
-     is correct (the index covers api/ only).
+     array. Whether that routes FULL is a profile policy (impactUnavailable).
   3. Otherwise call mcp__gitnexus__impact with
      {target: "<symbol>", direction: "upstream"} for each symbol, against
-     the indexed repo "api". Use "status": "GATHERED" ONLY when every call
-     succeeded against that repo.
+     the indexed repo named by gitnexusRepo. Use "status": "GATHERED" ONLY
+     when every call succeeded against that repo.
 
   impact.json is ALWAYS valid JSON and carries NO token prepended to it;
   the typed status line is this node's stdout only, never part of the file:
@@ -41,7 +40,7 @@ prompt: |
                   "d1_callers": ["<caller symbol or path:line>", ...],
                   "risk": "LOW|MEDIUM|HIGH|CRITICAL",
                   "query_status": "GATHERED",
-                  "query_repo": "api",
+                  "query_repo": "<gitnexusRepo from profile-runtime.json>",
                   "query_target": "<exact target passed to the tool>"}]}
   Every d1_caller comes from successful tool output. Never invent one. A
   SUCCESSFUL query that returns no callers gets an empty list and risk "LOW";

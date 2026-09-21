@@ -95,7 +95,10 @@ class CandidateExportTest(unittest.TestCase):
         """
         import yaml
         names = ("full-sdlc-api", "full-sdlc-api-lite", "full-sdlc-api-codex", "full-sdlc-api-lite-codex",
-                 "full-sdlc-web", "full-sdlc-web-codex", "bugfix", "bugfix-lite", "bugfix-codex", "bugfix-lite-codex")
+                 "full-sdlc-api-grok", "full-sdlc-api-lite-grok",
+                 "full-sdlc-web", "full-sdlc-web-codex", "full-sdlc-web-grok",
+                 "bugfix", "bugfix-lite", "bugfix-codex", "bugfix-lite-codex",
+                 "bugfix-grok", "bugfix-lite-grok")
         for name in names:
             with self.subTest(workflow=name):
                 doc = yaml.safe_load((ARCHON / "workflows" / (name + ".yaml")).read_text())

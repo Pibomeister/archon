@@ -87,7 +87,11 @@ class BrowserExemptionIsWiredTest(unittest.TestCase):
         for name in ("full-sdlc-api.yaml", "full-sdlc-api-codex.yaml"):
             nodes = {n["id"]: n for n in yaml.safe_load((WORKFLOWS / name).read_text(encoding="utf-8"))["nodes"]}
             for node in ("gate-tests", "exit-gate"):
-                self.assertIn("browser-exemption.py diff", nodes[node]["bash"], f"{name}:{node}")
+                self.assertRegex(
+                    nodes[node]["bash"],
+                    r'browser-exemption\.py"?\s+diff',
+                    f"{name}:{node}",
+                )
 
 
 if __name__ == "__main__":

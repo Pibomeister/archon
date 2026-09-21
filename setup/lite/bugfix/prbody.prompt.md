@@ -60,7 +60,7 @@ Post-Deploy Monitoring names the concrete signal that should go quiet
 after deploy: the log line, Sentry issue, or error string from the
 evidence — with its identifier. If the bug produced no production
 signal, say exactly: "No additional operational monitoring required."
-After those sections, run: python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --prbody
+After those sections, run: python3 $ARCHON_LAYER/setup/cross-repo-keys.py "$ARTIFACTS_DIR" --prbody
 When it prints anything, append that output VERBATIM as the last section of
 pr-body.md (the "## Cross-repo findings filed" section: defects in other
 repositories a human filed instead of fixing here).

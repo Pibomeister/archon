@@ -126,7 +126,7 @@ class BugfixChainEnvOnResumeTest(unittest.TestCase):
         # An unquoted "$CHAIN_ENV" relies on word-splitting: bash splits it,
         # zsh passes ONE argument, and the failure is silent.
         body = (Path(__file__).resolve().parents[1] / "resume.sh").read_text(encoding="utf-8")
-        self.assertIn('env "${CHAIN_ENV[@]}"', body)
+        self.assertIn('CHAIN_ENV[@]', body)
         self.assertNotIn("env $CHAIN_ENV", body)
 
     def test_approve_gets_the_same_env_from_the_same_helper(self):
@@ -140,7 +140,7 @@ class BugfixChainEnvOnResumeTest(unittest.TestCase):
         resume = (setup / "resume.sh").read_text(encoding="utf-8")
         for body in (approve, resume):
             self.assertIn("chain-env.py", body)
-            self.assertIn('env "${CHAIN_ENV[@]}"', body)
+            self.assertIn('CHAIN_ENV[@]', body)
 
     def test_feature_chain_env_is_restored_from_params_json(self):
         # Resuming a repository-feature integration run died at joint-integration

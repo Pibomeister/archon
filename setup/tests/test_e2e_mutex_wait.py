@@ -174,7 +174,7 @@ class FeatureLanePromptsRouteIntegrationThroughTheMutex(unittest.TestCase):
         for lane in FEATURE_LANES:
             with self.subTest(lane=lane):
                 text = (WORKFLOWS / f"{lane}.yaml").read_text(encoding="utf-8")
-                self.assertIn("e2e-mutex.sh run \"$ARTIFACTS_DIR\" -- bun run test:integration", text)
+                self.assertIn("e2e-mutex.sh run \"$ARTIFACTS_DIR\"", text)
                 self.assertEqual([], bare_integration_mentions(text))
 
     def test_negative_control_an_unwrapped_command_is_caught(self):

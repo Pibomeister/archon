@@ -293,7 +293,7 @@ class ApprovalSnapshotTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "artifacts"
             self.write_artifact(root, "target.txt", "ok")
-            (root / "hard.txt").hardlink_to(root / "target.txt")
+            os.link(root / "target.txt", root / "hard.txt")
             with self.assertRaisesRegex(control_contract.ControlContractError, "hardlink"):
                 self.capture(root, Path(td) / "private" / "snapshot.json", ["hard.txt"])
 

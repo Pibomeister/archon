@@ -1,0 +1,13 @@
+{
+  "index_sha256": null,
+  "library_dirty": null,
+  "library_head": null,
+  "reason": "empty-index",
+  "repo": "api",
+  "result": "SKIP",
+  "schema": "archon.skills-staged.v1",
+  "skills": [],
+  "skills_md_bytes": 0,
+  "skills_md_sha256": null,
+  "skipped": []
+}

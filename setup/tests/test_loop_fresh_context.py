@@ -52,8 +52,9 @@ class JudgesRunFresh(unittest.TestCase):
             judged += sum(1 for g in doc.get("nodes") or []
                           for n in (g.get("loop_group") or {}).get("nodes") or []
                           if n["id"] in JUDGES)
-        # parents: api 4, bugfix 4, web 1, api-lite 1, bugfix-lite 1; codex twins mirror them.
-        self.assertEqual(judged, 22)
+        # parents: api 4, bugfix 4, web 1, api-lite 1, bugfix-lite 1;
+        # Codex and Grok twins each mirror them (11 × 3 = 33).
+        self.assertEqual(judged, 33)
 
     def test_twins_keep_the_parent_fresh_set(self):
         def fresh(stem):
@@ -65,6 +66,7 @@ class JudgesRunFresh(unittest.TestCase):
             with self.subTest(parent=parent):
                 self.assertTrue(fresh(parent))
                 self.assertEqual(fresh(f"{parent}-codex"), fresh(parent))
+                self.assertEqual(fresh(f"{parent}-grok"), fresh(parent))
 
     def test_negative_control_a_shared_reviewer_is_caught(self):
         doc = yaml.safe_load((WORKFLOWS / "full-sdlc-api.yaml").read_text(encoding="utf-8"))

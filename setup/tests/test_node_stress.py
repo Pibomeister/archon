@@ -596,6 +596,17 @@ def rca_artifacts(art):
     proof = json.loads((art / "proof-assessment.json").read_text(encoding="utf-8"))
     proof["selected_hypothesis_id"] = "h1"
     jdump(art / "proof-assessment.json", proof)
+    # Isolated fixtures have no sibling api/ checkout for repo-policy.py to
+    # snapshot; seed the selected repo so rca-gate's validate-plan is the
+    # contract under test rather than layout discovery.
+    repo = json.loads((art / "repo.json").read_text(encoding="utf-8"))["repo"]
+    jdump(art / "repo-policy.json", {
+        "schema_version": 1,
+        "baseline": {repo: "test"},
+        "repositories": {
+            repo: {"root": str(art), "policy_documents": [], "rules": []},
+        },
+    })
 
 
 def rca_gate_fixture(tmp):

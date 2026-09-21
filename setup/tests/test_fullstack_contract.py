@@ -212,9 +212,11 @@ class FullstackContractTest(unittest.TestCase):
         self.assertNotIn("plan-freeze", nodes)
         self.assertNotIn("plan-approval-verify", nodes)
         self.assertEqual(nodes["plan-gate"]["depends_on"], ["plan-render-gate"])
-        self.assertEqual(nodes["plan-gate"]["approval"]["on_reject"]["max_attempts"], 3)
-        self.assertIn("PLAN_REVISED", nodes["plan-gate"]["approval"]["on_reject"]["prompt"])
-        self.assertEqual(nodes["implement"]["depends_on"], ["plan-gate", "implementation-ready"])
+        self.assertEqual(nodes["plan-gate"]["approval"]["on_reject"]["max_attempts"], 1)
+        self.assertIn("PLAN_REJECTION_RECORDED", nodes["plan-gate"]["approval"]["on_reject"]["prompt"])
+        self.assertNotIn("PLAN_REVISED", nodes["plan-gate"]["approval"]["on_reject"]["prompt"])
+        self.assertIn("Do not revise", nodes["plan-gate"]["approval"]["on_reject"]["prompt"])
+        self.assertEqual(nodes["implement"]["depends_on"], ["plan-gate", "implementation-ready", "stage-skills"])
         self.assertEqual(nodes["implement"].get("trigger_rule"), "none_failed_min_one_success")
 
     def test_bugfix_rca_gate_runs_between_render_gate_and_post_approval_integrity(self):
@@ -231,27 +233,32 @@ class FullstackContractTest(unittest.TestCase):
         self.assertEqual(nodes["post-approval-integrity"]["depends_on"], ["rca-approval"])
         self.assertIn("controller-attest.py", nodes["post-approval-integrity"]["bash"])
 
-    def test_api_render_packets_describe_the_revision_pass_they_actually_run(self):
-        """Inverse of the assertion 229090a introduced. The gate does three
-        rejection attempts with a revision pass again, so the rendered packet
-        must say so rather than promising a controller freeze that no longer
-        exists. A packet describing the wrong rejection behaviour is the failure
-        this test exists to catch, in either direction."""
+    def test_api_render_packets_describe_terminal_reject_not_in_run_revision(self):
+        """Reject must not rewrite plan.md in-run: critic and blind premise-verify
+        cannot re-fire on on_reject. Packets must tell the operator to start a
+        fresh run so those verifiers run against the new bytes."""
         paths = [ARCHON / "workflows" / f"{name}.yaml" for name in (
-            "full-sdlc-api", "full-sdlc-api-lite", "full-sdlc-api-codex", "full-sdlc-api-lite-codex"
-        )] + [ARCHON / "setup/lite/api/plan-render.prompt.md"]
+            "full-sdlc-api", "full-sdlc-api-lite", "full-sdlc-api-codex", "full-sdlc-api-lite-codex",
+            "full-sdlc-api-grok", "full-sdlc-api-lite-grok"
+        )] + [
+            ARCHON / "setup/lite/api/plan-render.prompt.md",
+            ARCHON / "setup/lite/api/plan-gate.approval.md",
+            ARCHON / "setup/lite/api/plan-gate.on_reject.md",
+        ]
         for path in paths:
             with self.subTest(path=path.name):
                 text = path.read_text(encoding="utf-8")
-                self.assertIn("third rejection", text)
-                self.assertNotIn("fresh guarded run", text)
+                self.assertNotIn("third rejection", text)
                 self.assertNotIn("controller_action", text)
+                self.assertNotIn("sends the plan back for one revision pass", text)
+                self.assertRegex(text, r"fresh (guarded )?run|PLAN_REJECTION_RECORDED|rejecting ends the run")
 
     def test_generated_variants_carry_no_controller_planning_gate_chain(self):
         """Inverse of the assertion 229090a introduced. The generated twins are
         the place a stale controller node survives unnoticed, because nobody
-        hand-edits them: derive-lite/derive-codex must carry the removal through."""
-        api_lanes = ("full-sdlc-api-lite", "full-sdlc-api-codex", "full-sdlc-api-lite-codex")
+        hand-edits them: derive-lite/derive-codex/derive-grok must carry the removal through."""
+        api_lanes = ("full-sdlc-api-lite", "full-sdlc-api-codex", "full-sdlc-api-lite-codex",
+                     "full-sdlc-api-grok", "full-sdlc-api-lite-grok")
         for workflow in api_lanes:
             with self.subTest(workflow=workflow):
                 nodes = {node["id"]: node for node in self.load_workflow(workflow)["nodes"]}
@@ -260,7 +267,8 @@ class FullstackContractTest(unittest.TestCase):
                 self.assertEqual(nodes["plan-gate"]["depends_on"], ["plan-render-gate"])
                 self.assertNotIn("controller_action", nodes["plan-gate"])
 
-        bugfix_lanes = ("bugfix-lite", "bugfix-codex", "bugfix-lite-codex")
+        bugfix_lanes = ("bugfix-lite", "bugfix-codex", "bugfix-lite-codex",
+                        "bugfix-grok", "bugfix-lite-grok")
         for workflow in bugfix_lanes:
             with self.subTest(workflow=workflow):
                 nodes = {node["id"]: node for node in self.load_workflow(workflow)["nodes"]}
@@ -269,9 +277,10 @@ class FullstackContractTest(unittest.TestCase):
                 self.assertEqual(nodes["rca-approval"]["depends_on"], ["rca-render-gate"])
                 self.assertEqual(nodes["post-approval-integrity"]["depends_on"], ["rca-approval"])
 
-        nodes = {node["id"]: node for node in self.load_workflow("full-sdlc-web-codex")["nodes"]}
-        self.assertNotIn("web-plan-controller-freeze", nodes)
-        self.assertNotIn("web-plan-approval-verify", nodes)
+        for web_lane in ("full-sdlc-web-codex", "full-sdlc-web-grok"):
+            nodes = {node["id"]: node for node in self.load_workflow(web_lane)["nodes"]}
+            self.assertNotIn("web-plan-controller-freeze", nodes)
+            self.assertNotIn("web-plan-approval-verify", nodes)
         self.assertEqual(nodes["web-plan-approval"]["depends_on"], ["web-plan-render"])
         self.assertEqual(nodes["web-plan-freeze"]["depends_on"], ["web-plan-approval"])
 
@@ -445,7 +454,9 @@ class FullstackContractTest(unittest.TestCase):
 
     def test_repository_chain_web_graph_skips_legacy_plan_and_handoff_gate(self):
         nodes = {node["id"]: node for node in self.load_workflow("full-sdlc-web")["nodes"]}
-        self.assertIn('${ARCHON_FEATURE_SCOPE-}" != "repositories"', nodes["preflight"]["bash"])
+        helper = (ARCHON / "setup" / "profile-preflight.sh").read_text(encoding="utf-8")
+        self.assertIn("profile-preflight.sh", nodes["preflight"]["bash"])
+        self.assertIn('ARCHON_FEATURE_SCOPE-}" != "repositories"', helper)
         self.assertIn("fullstack|web|repositories", nodes["web-scope"]["bash"])
         for node_id in ("web-plan", "web-plan-oracle", "web-plan-render", "web-plan-approval", "web-plan-freeze", "web-plan-lock-gate"):
             self.assertEqual(nodes[node_id]["when"], "$web-scope.scope == 'web'")

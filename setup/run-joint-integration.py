@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Run an approved joint-plan integration matrix against local candidate commits."""
+from __future__ import annotations
+
 import argparse
 import hashlib
 import json

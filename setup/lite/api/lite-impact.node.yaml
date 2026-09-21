@@ -22,14 +22,14 @@ prompt: |
   yourself explicitly and visibly:
   1. If the plan modifies no existing symbol, write impact.json with
      "status": "SKIPPED" and an empty "symbols" array.
-  2. If the gitnexus MCP tools (mcp__gitnexus__impact and friends) are not
-     available, the indexed repo "api" is absent/stale, OR ANY impact call
-     errors or reports that the repo/target is unavailable, write impact.json with
-     "status": "UNAVAILABLE" and an empty "symbols" array. On the lite
-     lane this routes the ticket to the full lane; that is correct.
+  2. Read profile-runtime.json. gitnexusRepo is the indexed repo name. If it
+     is empty, the gitnexus MCP tools are not available, that index is
+     absent/stale, OR ANY impact call errors, write impact.json with
+     "status": "UNAVAILABLE" and an empty "symbols" array. Whether that
+     routes FULL is a profile policy (impactUnavailable), not this prompt.
   3. Otherwise call mcp__gitnexus__impact with
      {target: "<symbol>", direction: "upstream"} for each symbol, against
-     the indexed repo "api" (it covers api/ only). Use "status": "GATHERED"
+     the indexed repo named by gitnexusRepo. Use "status": "GATHERED"
      ONLY when every call succeeded against that repo.
 
   impact.json is ALWAYS valid JSON and carries NO token prepended to it;
@@ -40,7 +40,7 @@ prompt: |
                   "d1_callers": ["<caller symbol or path:line>", ...],
                   "risk": "LOW|MEDIUM|HIGH|CRITICAL",
                   "query_status": "GATHERED",
-                  "query_repo": "api",
+                  "query_repo": "<gitnexusRepo from profile-runtime.json>",
                   "query_target": "<exact target passed to the tool>"}]}
   Every d1_caller comes from successful tool output. Never invent one. A
   SUCCESSFUL query that returns no callers gets an empty list and risk "LOW";

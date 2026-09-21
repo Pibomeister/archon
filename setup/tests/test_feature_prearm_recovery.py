@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Optional
 from unittest import mock
 
 
@@ -27,7 +28,7 @@ class FakeFeatureChainError(ValueError):
 class FakeRepositoryController:
     FeatureChainError = FakeFeatureChainError
 
-    def __init__(self, *, fail_before_control: bool = False, amended_tokens: int | None = None):
+    def __init__(self, *, fail_before_control: bool = False, amended_tokens: Optional[int] = None):
         self.fail_before_control = fail_before_control
         self.amended_tokens = amended_tokens
         self.calls = []

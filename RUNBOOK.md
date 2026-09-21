@@ -36,7 +36,7 @@ Cloneable sources after the checkpoint pushes:
 | Part | Source branch | Purpose |
 |------|---------------|---------|
 | Workflow layer | `git@github.com:GoodwordTeam/archon.git` branch `checkpoint/archon-hardening-20260909` | `.archon` workflows, guards, runbook, and tests |
-| Runtime | `git@github.com:Pibomeister/archon-engine.git` branch `hardening/controller-boundary` | controller-boundary Archon runtime fork |
+| Runtime | `git@github.com:Pibomeister/archon-engine.git` branch `dev` (vanilla, identical to coleam00/Archon) or `factory/dev` (factory overlay) | vanilla default; factory hooks on `factory/dev` only — see that repo’s `docs/factory-fork.md` |
 | API counterpart | `git@github.com:GoodwordTeam/api.git` branch `checkpoint/archon-backfill-ledger-20260909` | backfill ledger/entity/test counterpart |
 
 Minimal arbitrary-path checkout shape:
@@ -58,13 +58,14 @@ bun install --frozen-lockfile
 bun run type-check
 bun run test
 
-# Workflow layer
+# Workflow layer (`$ARCHON_LAYER` in this checkpoint layout)
 cd ../.archon
 python3 setup/run-tests.py --start-directory setup/tests
 for f in setup/package.sh setup/install.sh setup/codex-watchdog.sh setup/codex-workspace-wrapper.sh; do bash -n "$f"; done
 python3 setup/derive-lite.py api --check
 python3 setup/derive-lite.py bugfix --check
 python3 setup/derive-codex.py --all --check
+python3 setup/derive-grok.py --all --check
 python3 setup/lane-doctrine.py check
 
 # API counterpart
@@ -81,21 +82,34 @@ Not synced by Git: credentials, private controller state, `.omx` evidence, scree
 
 Still incomplete by design: `setup/install.sh`, `setup/package.sh --publish`, legacy backfill apply, proposal-v2 production apply, and package publication are disabled/fail-closed; strict subscription token-cap proof and full API/SPA/production wiring remain incomplete. Do not bypass guards or claim this checkpoint is fully hardened.
 
-Operator guide for the Goodword two-lane Archon pipeline (`full-sdlc-api` → `full-sdlc-web` → `babysit` → `cleanup`). Every entry here is an **observed** failure or behavior from the M0–M3 build, not a hypothetical. Format: symptom → verbatim discriminator → action.
+Operator guide for the Archon SDLC pipeline (`full-sdlc-api` → `full-sdlc-web` → `babysit` → `cleanup`). Observed failures below come from the Goodword M0–M3 build. Format: symptom → verbatim discriminator → action.
+
+Two roots, never one baked-in home path:
+
+| Variable | Meaning |
+|---|---|
+| `$ARCHON_LAYER` | This pack (workflows, `setup/`, `profiles/`, this runbook, operator skills). Preflight fails with `ARCHON_LAYER unset` if missing. `archon-run.py` sets it. After a gist install it is `$PROJECT_ROOT/.archon`; from this checkout it is this repo. |
+| `$PROJECT_ROOT` | The project folder the run targets. For Goodword that is the directory holding `api/`, `web-app/`, and `goodword-kb/`. |
+
+The five production graphs (`full-sdlc-api`, `full-sdlc-api-lite`, `bugfix`, `bugfix-lite`, `full-sdlc-web`) and their Codex and Grok twins contain **no** machine home paths. Raw `archon workflow run` without those env vars fails at preflight. Prefer `archon-run.py`, which exports both. Helpers are always `$ARCHON_LAYER/setup/...`. Project-specific how-to lives in `$ARCHON_LAYER/profiles/<project>/` (Goodword: `profiles/goodword/`; Fluxkeep: `profiles/fluxkeep/` plus `profiles/fluxkeep-next.v1.json`). The graphs still encode Goodword topology in prompts and preflight; a Fluxkeep pack exists so operators do not invent stack commands, not because those lanes are Fluxkeep-ready.
 
 Platform note: macOS or desktop Linux. The workflows surface human packets through a browser opener (`xdg-open`, else `open`) and always print the `file://` path, so a host without an opener degrades to "read the path" rather than failing. §6 has the Linux-specific traps.
 
-Driving this from Claude Code or Codex: three operator skills ship with the layer and are staged into both `<root>/.claude/skills/` and `<root>/.agents/skills/` by the installer — `archon-install` (set up or repair the stack), `archon-sdlc` (start, supervise, and escalate a run), and `archon-linear` (immutable Linear intake and supported routing). They are not exposed in the dedicated workflow-node Codex home. These are decision procedures; this runbook stays the reference they cite. Repository-list stop recipes (one allowlist, quarantine, first-failure reopen, infrastructure smoke/e2e, active-time budget, `--base`): [operator recovery](docs/operator-recovery.md).
+Driving this from Claude Code or Codex: three operator skills ship with the layer and are staged into both `$PROJECT_ROOT/.claude/skills/` and `$PROJECT_ROOT/.agents/skills/` by the installer — `archon-install` (set up or repair the stack), `archon-sdlc` (start, supervise, and escalate a run), and `archon-linear` (immutable Linear intake and supported routing). They are not exposed in the dedicated workflow-node Codex home. These are decision procedures; this runbook stays the reference they cite. Repository-list stop recipes (one allowlist, quarantine, first-failure reopen, infrastructure smoke/e2e, active-time budget, `--base`): [operator recovery](docs/operator-recovery.md).
 
 ---
 
 ## 1. Starting a run
 
-From the Goodword root (the folder Archon is registered against):
+From `$PROJECT_ROOT` (the folder Archon is registered against). Prefer
+`python3 "$ARCHON_LAYER/setup/archon-run.py"`, which exports both roots. A raw
+CLI launch must export them itself:
 
 ```bash
-cd /Users/eduardopicazo/Documents/Workspace/Goodword
-DISABLE_OMC=1 archon workflow run full-sdlc-api "/Users/eduardopicazo/Documents/Workspace/Goodword/.omc/research/toy-feature-spec.md" </dev/null 2>&1 | tee /tmp/archon-run.log
+export ARCHON_LAYER="${ARCHON_LAYER:?this pack}"
+export PROJECT_ROOT="${PROJECT_ROOT:?the project folder}"
+cd "$PROJECT_ROOT"
+DISABLE_OMC=1 archon workflow run full-sdlc-api "$PROJECT_ROOT/.omc/research/toy-feature-spec.md" </dev/null 2>&1 | tee /tmp/archon-run.log
 ```
 
 The run message is the **absolute path to the feature spec** — required; an empty message fails preflight with `PARAMS=FAIL`. Branch and worktree derive from the spec filename: `my-feature.md` → branch `archon/my-feature`, worktree `api/.worktrees/my-feature` (durable in the run's `params.json`). The web lane is still toy-pinned — real tickets are api-lane-only until it is parameterized.
@@ -170,30 +184,28 @@ After doc-review, the run pauses (`status: paused`) and `plan-render-gate` print
 
 This is the pipeline's highest-leverage human moment — one wrong plan line becomes a thousand wrong code lines. Do not rubber-stamp.
 
-**The CRITIC section, added VERSION 2026.08.28-2; first observed live on run d3aa3b55 (2026-08-28), where `plan-loop` converged in round 1 (`PLAN_CONVERGED round=$N` with N=1).** It sits between REVIEW and DECIDE and reports on the `plan-loop` (`plan-round-pre` → `impact-probe` → `plan-critic` → `plan-critic-gate` → `plan-revise` → `plan-converge`, capped at 3 rounds), a separate-session critic that ran BEFORE doc-review ever saw the plan. It opens with one table, a row per round: the round number, the critic's verdict (`ACCEPT`/`REVISE`/`REJECT`), and the count of still-open P0/P1 findings broken out by kind (scope, regression, gap, verifiability). It then quotes the FINAL round's declined findings in full — the critic's evidence quote and the reviser's justification quote, both verbatim — so you are judging the actual disagreement, not a summary of it; a blank list means nothing was declined. It closes with an impact table built from the final round's `impact.json`: each existing symbol the plan modifies, its d1 callers (from `mcp__gitnexus__impact`), and where the plan covers each caller (a `## Files` entry, a test scenario, or an explicit "unaffected because…" line). When `impact.json`'s `status` is `UNAVAILABLE` (gitnexus unreachable) or `SKIPPED` (the plan modifies no existing symbol), the table is skipped and the packet says so in one sentence — read that as *unprobed*, not as *no callers*. If the plan gate re-renders after a human rejection (the `reject` recipe above), the CRITIC loop does **not** re-run: the reject handler appends exactly one line to the existing section, `Revision N — human-directed; not re-critiqued`, and leaves the rest of it as the critic wrote it against the pre-rejection plan.
+**The CRITIC section, added VERSION 2026.08.28-2; first observed live on run d3aa3b55 (2026-08-28), where `plan-loop` converged in round 1 (`PLAN_CONVERGED round=$N` with N=1).** It sits between REVIEW and DECIDE and reports on the `plan-loop` (`plan-round-pre` → `impact-probe` → `impact-gate` → `plan-critic` → `plan-critic-gate` → `plan-revise` → `plan-converge`, capped at 3 rounds), a separate-session critic that ran BEFORE doc-review ever saw the plan. It opens with one table, a row per round: the round number, the critic's verdict (`ACCEPT`/`REVISE`/`REJECT`), and the count of still-open P0/P1 findings broken out by kind (scope, regression, gap, verifiability). It then quotes the FINAL round's declined findings in full — the critic's evidence quote and the reviser's justification quote, both verbatim — so you are judging the actual disagreement, not a summary of it; a blank list means nothing was declined. It closes with an impact table built from the final round's `impact.json`: each existing symbol the plan modifies, its d1 callers (from `mcp__gitnexus__impact`), and where the plan covers each caller (a `## Files` entry, a test scenario, or an explicit "unaffected because…" line). When `impact.json`'s `status` is `UNAVAILABLE` (gitnexus unreachable) or `SKIPPED` (the plan modifies no existing symbol), the table is skipped and the packet says so in one sentence — read that as *unprobed*, not as *no callers*. Reject at this gate does **not** rewrite the plan: critic and blind premise-verify cannot re-fire on `on_reject`, so a different plan is a fresh run.
 
 ```bash
 archon workflow approve <run-id> </dev/null >/tmp/archon-approve.log 2>&1 &   # background it — see below
-archon workflow reject <run-id> "reason" </dev/null >/tmp/archon-reject.log 2>&1 &   # revises at 2 gates, ends the run at the other 3 — see below
+archon workflow reject <run-id> "reason" </dev/null >/tmp/archon-reject.log 2>&1 &   # records a receipt and ends the run — see below
 archon workflow abandon <run-id>            # ends the run, no reason recorded, no rework
 ```
 
 - **A paused run is a healthy run.** `status: paused` is the designed end of the stage, not a failure and not a stall. The workflow did its job and is waiting on you; nothing degrades while it waits. Every lane's gate packet now says this in its DECIDE box, because the first question a new operator asks is "what broke?".
 - **`approve` resumes the workflow INSIDE the approving CLI process** and blocks until the run ends or fails. Background it (as above) or expect your terminal to be occupied for the rest of the run. If the resume fails, the approval is still recorded — just `archon workflow resume <run-id>`.
-- **`reject` means different things at different gates.** Archon reworks on rejection only when the approval node declares an `on_reject` block (`on_reject.prompt` required, `on_reject.max_attempts` optional, default 3); with no block the reject path falls through to cancel and the run ends with `cancelled: true`. Two gates declare one, three deliberately do not:
+- **`reject` records a rejection receipt and ends the run.** These gates use `on_reject` to write that receipt, not to mutate the approved artifact. Critic, blind premise-verify, and RCA proof cannot re-fire on `on_reject`.
 
   | Gate | reject does | why |
   |---|---|---|
-  | `full-sdlc-api` plan-gate | revises `plan.md` + contracts, re-renders the packet, pauses here again | the artifact is a document; feedback is cheap to apply |
-  | `bugfix` rca-approval | revises `rca.md` / `fix-plan.json` (including swapping in a depth alternative), re-renders, pauses again | same |
+  | `full-sdlc-api` plan-gate | writes `plan-rejection-receipt.json`, ends with `PLAN_REJECTION_RECORDED` | critic and blind premise-verify would otherwise be skipped |
+  | `bugfix` rca-approval | records a rejection receipt; does not mutate attested RCA or plan | blind proof and criticism must rerun on a guarded successor |
   | `bugfix` smoke-approval | ends the run | a smoke matrix that fails needs a human in the app, not a rewrite |
   | `bugfix-smoke-deployed` deployed-approval | ends the run | same |
-  | `backfill` apply-approval | ends the run | the upstream proofs (arm's kill-switch negative control, the render gate's `cmp` of `armed-command.txt` and its sha256) do NOT re-run on a revision, so reworking past this gate would hand the human an unverified packet releasing prod writes |
+  | `backfill` apply-approval | not a live gate | `workflows/backfill.yaml` is DISABLED |
 
-- **Reject blocks the terminal at the two revising gates**, exactly like approve: the CLI records the rejection and then resumes the run in the same process ("Resuming with on_reject prompt..."). Background it. At the three terminal gates it prints "Rejected and cancelled" and returns immediately.
-- **The revision pass is the only node that runs before the gate pauses again.** Upstream nodes do not re-fire, so `premise-verify`'s blind re-derivation, `doc-review`, and every render gate are skipped on a revision. The `on_reject` prompt therefore has to re-render the packet itself and keep the marker sections intact, and it is told to say in the packet that the revised premises were not independently re-derived. `on_reject` takes no `model` or `maxBudgetUsd` — the revision node runs on the tier default with no per-node cost cap.
-- `max_attempts: 3` buys **two** rework passes, not three: the counter is checked before the rework, so rejections 1 and 2 revise and rejection 3 cancels the run with `workflow_cancelled` / reason `max_attempts (3) exhausted`. Verified 2026-08-25 with a throwaway probe workflow at `max_attempts: 2`, where the second rejection printed "Rejected and cancelled (max attempts reached)" and left the run `cancelled`.
-- For a toy or install-validation run — one whose only job was to reach this gate and prove the stack works — say the run already succeeded before ending it. `abandon` is the clean verb there; rejecting spends a revision pass rewriting something disposable.
+- **Reject at plan-gate and rca-approval still holds the terminal** while the receipt node runs, then the run is finished. Background it like approve. Smoke gates print "Rejected and cancelled" and return immediately.
+- For a toy or install-validation run — one whose only job was to reach this gate and prove the stack works — say the run already succeeded before ending it. `abandon` is the clean verb there.
 - `approve` / `reject` / `abandon` are real verbs but **absent from `--help`**. They exist; use them. Tell anyone you hand a command to that they are missing from `--help`, or they will check, not find them, and assume the command is wrong.
 - Find the run id with `archon workflow runs` or `archon workflow status`. It is also the basename of the run's artifacts dir, which is how the gate renderers put a ready-to-paste command in the packet; `archon workflow runs` prints the first 8 characters, the packet prints all 32, and both work.
 
@@ -211,6 +223,14 @@ The per-repo review loop ends in exactly one of five ways. The discriminator str
 | Fixer blocked | `FIXER_BLOCKED` (converge exits 1; also fired when `fixer-result.json` is missing) | The fixer reported a P0–P2 it cannot fix, or produced no result file. | Engineer. Read `round-N/fixer-result.json` `failed` partition for the finding. First check whether each `failed` entry is a genuine could-not-fix or a mis-partitioned scope decline (see the observed table below) — a decline belongs in `advisory` and can be reclassified by hand to unblock. |
 | Cross-repo finding | `CROSS_REPO_FINDING round=N count=N repos=<comma list>` (converge exits 1; exit-gate prints it as `EXIT_GATE=FAIL CROSS_REPO_FINDING ...`) | The fixer's `cross_repo` partition holds a finding whose defect lives in a different repository of this chain and that no human has recorded as filed. It is neither waivable nor fixable here, and `accept-residuals.txt` does not clear it. | Human. Fix it in the named repository or file it there, record the filing with the cross-repo acknowledgement recipe below, then resume. `cross-repo-findings.json` lists the entries that were open at that stop, each with its `key`. |
 
+Pre-loop staging signal (feature and bugfix lanes, `stage-skills`, upstream of `implement`/`fix`):
+
+| Verbatim signal | Meaning | Action |
+|---|---|---|
+| `SKILLS_STAGE=OK repo=<r> active=n candidate=m bytes=.. head=<12hex\|none>` | The repository skills library (`.archon/library/<repo>/skills`, §17) staged n active and m candidate `SKILL.md` bodies into `skills.md`; `skills-staged.json` records their sha256 so `skill-evolve` can attribute the run to the candidate later. | None. A candidate is deliberately NOT labelled inside `skills.md`; the runtime agent must not treat it differently. |
+| `SKILLS_STAGE=SKIP repo=<r> reason=no-library\|no-index\|empty-index\|no-eligible-skills` | Nothing to stage: the library has no skills for this repo yet, or every skill is `rolled_back`. `skills.md` is removed if stale. | None — the normal state until the first `skill-evolve` admits a candidate. |
+| `SKILLS_STAGE=FAIL <reason>` | The library is corrupt (malformed `index.json`, unregistered skill dir, missing `SKILL.md`, frontmatter name or sha256 disagreeing with the registry, two candidates, a skill over 8192 bytes or 32768 bytes in total). The run stops before any implementer sees a skill. | Never hand-edit `library/`. Read `git log -- .archon/library/<repo>`; if the last `skill-evolve` commit is the culprit, `python3 "$ARCHON_LAYER/setup/skill-admit.py" rollback <repo> --lib "$ARCHON_LAYER/library"` then `commit` (§17); otherwise `git checkout` the last good library commit and engineer. |
+
 Bound-related failures that look similar but are different:
 
 | Symptom | Verbatim discriminator | Meaning |
@@ -219,7 +239,7 @@ Bound-related failures that look similar but are different:
 | Loop body dies on cost | `dag.node_budget_cap_exceeded` | Per-body-node cap inside the review `loop_group`. |
 | Node dies mid-work | `dag_node_failed` with `isTimeout:true` | Wall-clock timeout — a stall, not a cost event. Bash nodes default to **120s** unless the YAML sets `timeout`. |
 | Loop exhausts | `loop_node.failed` + `exceeded max iterations` (bare loops) / `loop_group_node.body_node_failed` (a body node failed the group at that iteration) | Iteration bound hit. |
-| Node never starts | `dag_node_pre_execution_failed` | Almost always: `worktree.baseBranch: main` missing from `.archon/config.yaml` while a node references `$BASE_BRANCH`. The installer ships that config — check it wasn't edited. |
+| Node never starts | `dag_node_pre_execution_failed` | Almost always: `worktree.baseBranch: main` missing from `$ARCHON_LAYER/config.yaml` while a node references `$BASE_BRANCH`. The installer ships that config — check it wasn't edited. |
 | Quota window exhausted | `claude.rate_limit_event` with `status != "allowed"` (`rateLimitType: five_hour`) | Subscription window hit; the org rejects overage, so the run **hard-stops**. See §7. |
 
 Observed in the M4 trial (2026-08-13), all resolved by plain `archon workflow resume`:
@@ -279,13 +299,13 @@ The PR body then opens Known Residuals with that line verbatim plus the final ro
 Cross-repo acknowledgement recipe (clears `CROSS_REPO_FINDING` for findings filed against their own repository):
 
 ```bash
-python3 "$ROOT/.archon/setup/cross-repo-keys.py" <artifacts>   # key, severity, repo, summary per finding + a JSON skeleton
+python3 "$ARCHON_LAYER/setup/cross-repo-keys.py" <artifacts>   # key, severity, repo, summary per finding + a JSON skeleton
 # file each OPEN finding against its repository (issue or PR), then write, by hand:
 cat > <artifacts>/cross-repo-filed.json <<'JSON'
 [{"key": "<key printed above>", "filed": "https://github.com/<org>/<repo>/issues/<n>", "by": "<name>"}]
 JSON
-python3 "$ROOT/.archon/setup/cross-repo-keys.py" <artifacts>   # every finding now reads "acknowledged"
-bash "$ROOT/.archon/setup/resume.sh" <run-id>
+python3 "$ARCHON_LAYER/setup/cross-repo-keys.py" <artifacts>   # every finding now reads "acknowledged"
+bash "$ARCHON_LAYER/setup/resume.sh" <run-id>
 ```
 
 converge, exit-gate and the risk-delta review runtime treat an entry as resolved only when its `key` (a digest of `producer_repo` plus the whitespace-collapsed finding text) appears with a non-empty `by` and an `http(s)` `filed` URL. A wrong key, a missing or non-URL `filed`, an empty `by`, or an unreadable file resolves nothing, and the run stops again. Acknowledged findings print `CROSS_REPO_ACKED key=... filed=...` and are listed in the PR body under "Cross-repo findings filed". **Writing `cross-repo-filed.json` is a human act; agents never write that file** (Codex workers get it read-only). Two limits: the resume re-enters the review loop and spends a new round, and if that round's fixer words the finding differently it mints a new key and stops again (the fixer is told to copy acknowledged findings verbatim); re-run the helper and add the new key. A run started before this recipe existed executes its captured workflow source on resume, which has no acknowledgement check; the recipe cannot unblock it (see the note in §4).
@@ -357,9 +377,9 @@ v1 measured 187 minutes of review across two stages, and five of its thirteen re
 | `LEDGER=FAIL round=N <detail>` (review-gate or commit-fixer, exits 1) | The closure ledger refused a merge. The round is not gated and nothing downstream is authorized. | Read the detail; `round-N/ledger.json` and the envelope or `fixer-result.json` it was merging are the inputs. A CLI-shape error here means `round-state.py` and `ledger.py` disagree on an interface and is an engineering stop, not an operator one. |
 | `REVIEW_MODE=verify base=<sha> findings=<n>` | This round runs the validator role alone against the previous round's ledger instead of a full discovery. Chosen when the last round applied at least one finding, none of them P0, and none flagged `design_expanded`. Informational. | None. To force a full round, delete `round-N/decision.json`'s `next_mode` or hand-write `full` before resuming. |
 | `CLOSURE round=N closed=<a> open=<b> regressed=<c> new=<d>` | The ledger's state after this round. Convergence requires every P0/P1 that ever entered the ledger to be `closed` — verified at the current HEAD. `applied` is not closure, and neither is `deferred`, `filed` or `pinned`. | None. A Ready verdict that does not converge is explained by this line. |
-| `NOT_READY_WITHOUT_BLOCKER round=N` (converge exits 1) | The reviewer returned `Not ready` while no P0/P1 is `open`, `applied` or `regressed` — the verdict contradicts the findings. A reviewer contract violation, not a code problem. | Reject the review and re-run it: `python3 .archon/setup/round-state.py <artifacts> reject-review --reason "<one line>"`, then resume. `round-pre` re-runs with `reason=rejected`. |
+| `NOT_READY_WITHOUT_BLOCKER round=N` (converge exits 1) | The reviewer returned `Not ready` while no P0/P1 is `open`, `applied` or `regressed` — the verdict contradicts the findings. A reviewer contract violation, not a code problem. | Reject the review and re-run it: `python3 "$ARCHON_LAYER/setup/round-state.py" <artifacts> reject-review --reason "<one line>"`, then resume. `round-pre` re-runs with `reason=rejected`. |
 | `PIN_OK pins=<n> changed=<n> new=<n> unenforceable=<n> other_repo=<n>` / `PIN_CHANGED symbol=<s> allowed=<text>` / `PIN_NEW symbol=<s> file=<f> reason=<r>` / `PIN_UNENFORCEABLE symbol=<s> file=<f> reason=<r>` / `PIN_BREACH symbol=<s> file=<f>` / `PIN_UNRESOLVED symbol=<s> file=<f> reason=<r>`, wrapped by `PIN_GUARD=FAIL round=N` when `commit-fixer` is the caller | The pin guard, run on the **staged index** in `commit-impl` (against the stage baseline) and `commit-fixer` (against the round's `pre-head`, the head the review saw) — what will actually be committed, not what happens to be in the worktree. Symbols resolve as bare identifiers, `Class.member`, class/interface/enum declarations, NestJS routes (`GET /group/:id/share-link` → the handler under the matching decorator) and whole files. `PIN_CHANGED` is informational (the plan allowed that change); so are `PIN_NEW` (the symbol is absent from the comparator and present in the staged blob: this change introduced it) and `PIN_UNENFORCEABLE` (a file-level pin on a file the plan itself changes, or a symbol that exists only as a quoted name such as an MCP tool id). A pin whose file sits in another stage's allowlist is counted as `other_repo` and not checked here. `PIN_BREACH` and `PIN_UNRESOLVED` fail the node with the edit left staged. A symbol the guard cannot find is a stop, never a pass: a silently missed span is the worse failure. | `PIN_BREACH`: revert the staged hunk and resume, or `feature-pin-amend` (below), or reject and re-plan. `PIN_UNRESOLVED`: read `round-N/pin-spans.json`; the extractor is a line-anchored heuristic and tree-sitter is the documented upgrade. |
-| `PIN_CONFLICT round=N symbol=<s>` (converge exits 1, row 1 of the table) | A P0/P1 whose only repair would change a symbol the approved plan pinned with `allowed_change: none`. Neither waivable nor fixable here. | Human decision: `python3 .archon/setup/archon-run.py feature-pin-amend <run> --token <t> --symbol <s> --allowed-change "<text>" --reason "<r>"` and resume (refused on a verified candidate handoff and on a locally-verified chain) (which invalidates the round's review and re-runs it — intended), or reject and re-plan. |
+| `PIN_CONFLICT round=N symbol=<s>` (converge exits 1, row 1 of the table) | A P0/P1 whose only repair would change a symbol the approved plan pinned with `allowed_change: none`. Neither waivable nor fixable here. | Human decision: `python3 "$ARCHON_LAYER/setup/archon-run.py" feature-pin-amend <run> --token <t> --symbol <s> --allowed-change "<text>" --reason "<r>"` and resume (refused on a verified candidate handoff and on a locally-verified chain) (which invalidates the round's review and re-runs it — intended), or reject and re-plan. |
 | `JOINT_PLAN=FAIL pin coverage symbol=<s>` | The spec pinned a symbol in `## Interface (pinned)` or `## Pinned decisions` and the planner's `pinned_decisions` array has no entry whose `rule` is that bullet's complete text. Coverage, not substring. | Re-run planning, or add the entry by hand to `joint-plan.json` (`{"symbol","file","rule","spec_line","allowed_change"}`) and resume. |
 | `REVIEW_BASE=FAIL base=<sha> reason=missing\|not-ancestor` (round-pre exits 1) | The review base does not exist in the worktree, or is not an ancestor of HEAD. v1 fell back to `origin/main` here, which silently reviewed the wrong diff. There is no fallback now. | Engineer. `missing` usually means a stale `bootstrap-head.txt` or a rebased branch; `not-ancestor` means the candidate was rebuilt from a different base. |
 | `BASELINE_BEHIND upstream=<n>` (bootstrap, informational) | The candidate's base is `n` commits behind upstream. Goes into the reviewer's evidence packet as "upstream commits not in this candidate". | None. |
@@ -391,13 +411,13 @@ The pre-round cap in `round-pre` is what bounds rows 2 and 4–7 and 10; at the 
 **Rejecting a review by hand** (the recipe row 3 points at):
 
 ```bash
-python3 .archon/setup/round-state.py reject-review "$(bash .archon/setup/run-artifacts.sh <run>)" --reason "verdict contradicts its own findings"
-bash .archon/setup/resume.sh <run>
+python3 "$ARCHON_LAYER/setup/round-state.py" reject-review "$(bash "$ARCHON_LAYER/setup/run-artifacts.sh" <run>)" --reason "verdict contradicts its own findings"
+bash "$ARCHON_LAYER/setup/resume.sh" <run>
 ```
 
 It writes `round-N/review-rejected.txt`, renames the envelope to `review-envelope.rejected-<k>.txt` for diagnosis, and deletes `review.ok` so nothing downstream is still authorized by it. The next `round-pre` prints `reason=rejected` and runs a fresh review.
 
-**Diagnosing a `GATE_5` failure**: `python3 .archon/setup/round-state.py id <artifacts>` prints the identity the round expects; diff it against the envelope's `Input:` line.
+**Diagnosing a `GATE_5` failure**: `python3 "$ARCHON_LAYER/setup/round-state.py" id <artifacts>` prints the identity the round expects; diff it against the envelope's `Input:` line.
 
 ## 3a. Planning-critic loop exits (`full-sdlc-api` `plan-loop`) — observed live 2026-08-28 (d3aa3b55: converged round 1); the failure exits below are exercised by `setup/tests` (drills + ×100 stress), not yet seen live
 
@@ -458,15 +478,15 @@ archon workflow resume <run-id>
 
 **A failed bash GATE whose cause lives in an artifact an AI node wrote is not fixed by resuming.** Only the gate re-executes (§4: completed AI nodes outside a failed `loop_group` never re-run), so it re-reads the same bytes and returns the same verdict. Hand-edit the named artifact first, then `resume.sh`. Both of 2026-09-07's `rca-gate` failures were in this class, and §12's row for one of them used to say "Resume re-runs the RCA", which is false.
 
-**Running the suite outside the main checkout used to test the WRONG TREE, silently.** Node bodies address every setup script by absolute path into `/…/Goodword/.archon` — deliberately (§6: "every repo path in the workflows is absolute … Don't 'fix' one to a relative path"). The test harness rewrites those roots to the checkout under test, but it derived the root as `goodword_root + "/.archon"`, so any checkout NOT literally named `.archon` — every worktree — was rewritten straight back to the real one. The run then executed **this tree's YAML against the main checkout's `setup/` scripts**, and reported the result as this tree's.
+**Running the suite outside the main checkout used to test the WRONG TREE, silently.** Until the graphs became env-generic, node bodies addressed every setup script by a baked host path into the Goodword layer. The test harness rewrote those roots to the checkout under test, but it derived the root as `goodword_root + "/.archon"`, so any checkout NOT literally named `.archon` — every worktree — was rewritten straight back to the real one. The run then executed **this tree's YAML against the main checkout's `setup/` scripts**, and reported the result as this tree's.
 
 Nothing errors in that state; the numbers are just about neither tree. Measured 2026-09-08: four `test_node_stress` tests "failed" in a worktree at a commit whose own suite had been green, because the main checkout happened to hold another session's in-progress `browser-evidence.sha256` check while the worktree's fixture predated it. This is the mechanism behind the older "the suite is location-sensitive" note — it was never about location, it was about which tree's scripts got executed.
 
-Fixed in `setup/tests/nodes/extract.py`: the archon root is now `ARCHON_ROOT` (the checkout that owns the test file), and `assert_self_consistent()` raises `NODE_ROOT=LEAK` naming any foreign checkout a rewritten body still addresses. A hybrid run now fails loudly on the first node instead of producing a scatter of unexplainable failures. If you see `NODE_ROOT=LEAK`, do not interpret the run — fix the leak.
+Fixed in `setup/tests/nodes/extract.py`: the layer root is now `ARCHON_ROOT` (the checkout that owns the test file), runnable bodies receive `$ARCHON_LAYER` and `$PROJECT_ROOT`, and `assert_self_consistent()` raises `NODE_ROOT=LEAK` naming any foreign checkout a rewritten body still addresses. Production graphs contain no machine home paths; a hybrid run now fails loudly on the first node instead of producing a scatter of unexplainable failures. If you see `NODE_ROOT=LEAK`, do not interpret the run — fix the leak.
 
-**Corollary that still holds: never trust a suite result taken while another session has the main checkout dirty**, for anything that shells out beyond `setup/` (the api/web-app roots are still shared by design). `git status --short` in `.archon` before believing a number.
+**Corollary that still holds: never trust a suite result taken while another session has the layer checkout dirty**, for anything that shells out beyond `setup/` (the project's api/web-app roots are still shared by design). `git status --short` in `$ARCHON_LAYER` before believing a number.
 
-**A failed bash gate's typed line is NOT recoverable from `archon.db`.** `node_failed.data` stores the node's SCRIPT, not its stdout, so `archon workflow get` echoes source and truncates. Recover the discriminator by re-running the gate's helper against a **copy** of the artifacts dir: `cp -R "$(bash .archon/setup/run-artifacts.sh <run>)" /tmp/x && bash .archon/setup/rca-shape.sh /tmp/x`. Never against the live dir — these helpers write files the gate then reads.
+**A failed bash gate's typed line is NOT recoverable from `archon.db`.** `node_failed.data` stores the node's SCRIPT, not its stdout, so `archon workflow get` echoes source and truncates. Recover the discriminator by re-running the gate's helper against a **copy** of the artifacts dir: `cp -R "$(bash "$ARCHON_LAYER/setup/run-artifacts.sh" <run>)" /tmp/x && bash "$ARCHON_LAYER/setup/rca-shape.sh" /tmp/x`. Never against the live dir — these helpers write files the gate then reads.
 
 **`archon workflow resume <run-id>` can resume a DIFFERENT run (archon 0.8.0, observed 2026-08-29).** With two
 `bugfix` runs on the same path — `ab6ea8aa` (failed at its round cap) and `607fa834` (a different bug report, failed 16 s
@@ -475,9 +495,9 @@ its DB events (`remote_agent_workflow_events`) carry the exact node durations th
 no events at all, and its artifacts were untouched. Mechanism (bundled CLI source, 0.8.0): the `resume` command resolves your id only to check it is
 failed/paused, then calls the executor with `{resume: true}` and NO id; the executor picks the run with
 `findResumableRun(workflow_name, working_path)` = `status IN ('failed','paused') OR (running AND last_activity_at older than 1 day)
-ORDER BY started_at DESC LIMIT 1` — the NEWEST resumable run of that lane on that path. Not fixed in 0.9.0. **Always resume through `bash .archon/setup/resume.sh <run-id-or-prefix> [archon args]`, never through `archon workflow resume` directly.** The CLI validates the run id you name and then discards it: it calls the executor with `{resume:true}` and no id, and the executor re-selects the run by `workflow_name` and `working_path`, taking the newest resumable one (`ORDER BY started_at DESC LIMIT 1`, where resumable means `failed`, `paused`, or `running` with no activity for a day). If a later run of the same lane failed after the one you meant to resume, that later run is what executes — on 2026-08-29 `archon workflow resume ab6ea8aa` executed `607fa834`, a different bug report in the same lane. The wrapper computes the CLI's selection itself and refuses when it differs from the run you named (`RESUME=REFUSED would_resume=<8> named=<8> reason=newer-resumable-run-of-lane`, printing the exact `archon workflow abandon <other-run>` that clears the way, or `reason=started-at-tie` when the CLI's pick would be undefined); after a permitted resume it re-reads `archon.db` and prints `RESUME=OK run=<8>` only if the run you named — and only that run — advanced (`RESUME=WRONG_RUN named=<8> moved=<8>` otherwise). It accepts an id prefix, refuses an ambiguous one, sets `DISABLE_OMC=1` and `</dev/null` for you (gates are decided with `archon workflow approve`, never stdin), and honors `ARCHON_DB`. Every exit prints exactly one `RESUME=` line, guaranteed by an EXIT trap: `RESUME=OK run=<8> archon_rc=0` when the named run resumed and the workflow finished clean; `RESUME=RAN run=<8> archon_rc=<n>` when the guard held and the named run executed but the workflow ended non-zero; `RESUME=REFUSED …` when the guard blocked and archon never ran; `RESUME=NOT_EXECUTED named=<8> archon_rc=<n>` when archon failed before touching any run; `RESUME=WRONG_RUN named=<8> moved=<8>,<8>` when a different run of the lane moved; `RESUME=ERROR stage=<resolve|select|pre|exec|post> reason=<…>` when the guard itself could not complete (`stage=exec` means archon was already running — check the run before abandoning anything) — exit 90 (91 if archon returned 90), and a post-archon error still reports `archon_rc=<n>`. Any verdict may carry `appeared=<8>,<8>`: rows that showed up in the lane during the resume; the CLI cannot create a run while resuming, so those belong to another operator and never change the verdict. Tests: `setup/tests/test_resume_guard.py` (synthetic DB + archon shim, negative-controlled per guard).
+ORDER BY started_at DESC LIMIT 1` — the NEWEST resumable run of that lane on that path. Not fixed in 0.9.0. **Always resume through `bash "$ARCHON_LAYER/setup/resume.sh" <run-id-or-prefix> [archon args]`, never through `archon workflow resume` directly.** The CLI validates the run id you name and then discards it: it calls the executor with `{resume:true}` and no id, and the executor re-selects the run by `workflow_name` and `working_path`, taking the newest resumable one (`ORDER BY started_at DESC LIMIT 1`, where resumable means `failed`, `paused`, or `running` with no activity for a day). If a later run of the same lane failed after the one you meant to resume, that later run is what executes — on 2026-08-29 `archon workflow resume ab6ea8aa` executed `607fa834`, a different bug report in the same lane. The wrapper computes the CLI's selection itself and refuses when it differs from the run you named (`RESUME=REFUSED would_resume=<8> named=<8> reason=newer-resumable-run-of-lane`, printing the exact `archon workflow abandon <other-run>` that clears the way, or `reason=started-at-tie` when the CLI's pick would be undefined); after a permitted resume it re-reads `archon.db` and prints `RESUME=OK run=<8>` only if the run you named — and only that run — advanced (`RESUME=WRONG_RUN named=<8> moved=<8>` otherwise). It accepts an id prefix, refuses an ambiguous one, sets `DISABLE_OMC=1` and `</dev/null` for you (gates are decided with `archon workflow approve`, never stdin), and honors `ARCHON_DB`. Every exit prints exactly one `RESUME=` line, guaranteed by an EXIT trap: `RESUME=OK run=<8> archon_rc=0` when the named run resumed and the workflow finished clean; `RESUME=RAN run=<8> archon_rc=<n>` when the guard held and the named run executed but the workflow ended non-zero; `RESUME=REFUSED …` when the guard blocked and archon never ran; `RESUME=NOT_EXECUTED named=<8> archon_rc=<n>` when archon failed before touching any run; `RESUME=WRONG_RUN named=<8> moved=<8>,<8>` when a different run of the lane moved; `RESUME=ERROR stage=<resolve|select|pre|exec|post> reason=<…>` when the guard itself could not complete (`stage=exec` means archon was already running — check the run before abandoning anything) — exit 90 (91 if archon returned 90), and a post-archon error still reports `archon_rc=<n>`. Any verdict may carry `appeared=<8>,<8>`: rows that showed up in the lane during the resume; the CLI cannot create a run while resuming, so those belong to another operator and never change the verdict. Tests: `setup/tests/test_resume_guard.py` (synthetic DB + archon shim, negative-controlled per guard).
 
-**`database is locked` on resume/approve/reject under concurrent runs (archon 0.10.1, observed 2026-09-16).** With three workflows running, `archon workflow reject <run> "…"` printed `Rejected but failed to resume workflow '…': Cannot resume workflow '…': failed to load prior run state — Failed to resume workflow run: database is locked`, and `resume.sh 48d8e1e3` then returned `RESUME=NOT_EXECUTED` twice with the same error. There is no knob to tune: the binary's only `PRAGMA busy_timeout = 5000` is hard-coded, and a longer timeout would not help anyway. The SQLite adapter's `withTransaction()` sends a plain deferred `BEGIN`, reads the run row, then UPDATEs it. In WAL mode that read->write upgrade fails with `SQLITE_BUSY` straight away, without calling the busy handler, whenever another process holds the write lock or has committed since the read. Running workflows insert `hook_activity` events several times a second, which is enough. Measured against the live db, the same BEGIN/SELECT/UPDATE pattern failed 23 of 60 times, each in under 1 ms, with a 5 s timeout set. `BEGIN IMMEDIATE` and a bare UPDATE both passed 40 of 40. Each attempt is an independent draw, so a few long backoffs lose and many short retries win. `setup/archon-lock-retry.sh` runs the control again only when all three of these hold: archon exited non-zero, its output contains `database is locked`, and the **named** run's whole row (status, timestamps, metadata) is unchanged. Other runs' heartbeats are ignored on purpose. By default it makes up to 60 attempts with a jittered 0.5–2 s sleep between them (`ARCHON_LOCK_RETRY_ATTEMPTS`, `ARCHON_LOCK_RETRY_MIN_MS`, `ARCHON_LOCK_RETRY_MAX_MS`), and it prints `<LABEL>_DB_LOCKED attempt=N of=M sleep_ms=S run=<8>` for each retry. `resume.sh` (`RESUME_DB_LOCKED`), `gate-approve.sh`, and `archon-run.py`'s `approve`/`reject` all go through it, and the single `RESUME=` verdict is unchanged. A decision that was recorded but whose own resume hit the lock changes the row, so it is **never re-issued**. Instead the wrapper prints `<LABEL>_DB_LOCKED recorded=yes continue=resume.sh` and continues with `resume.sh <run>`. It does this only while the run is still `paused`. archon prints the same `Approved but failed to resume` prefix when the resumed workflow itself fails hours later, and a `failed` run is never re-run behind the operator's back. Two more stops apply. A resume retry ends with `RESUME_DB_LOCKED stop=lane-selection-changed` if another run became the lane's newest resumable run during the retries. No new attempt starts after `ARCHON_LOCK_RETRY_DEADLINE_S` (600 by default). `archon-run.py` sets that deadline to 10 s, because its launcher is terminated if the run does not reach `running` within the 15 s watchdog-arm window, so a guarded Codex control gets fewer attempts than a direct `resume.sh`. A bare `archon workflow approve|reject` typed at a terminal has no wrapper, so after that error run `bash .archon/setup/resume.sh <run>` yourself and do not repeat the decision. Tests: `setup/tests/test_archon_lock_retry.py`.
+**`database is locked` on resume/approve/reject under concurrent runs (archon 0.10.1, observed 2026-09-16).** With three workflows running, `archon workflow reject <run> "…"` printed `Rejected but failed to resume workflow '…': Cannot resume workflow '…': failed to load prior run state — Failed to resume workflow run: database is locked`, and `resume.sh 48d8e1e3` then returned `RESUME=NOT_EXECUTED` twice with the same error. There is no knob to tune: the binary's only `PRAGMA busy_timeout = 5000` is hard-coded, and a longer timeout would not help anyway. The SQLite adapter's `withTransaction()` sends a plain deferred `BEGIN`, reads the run row, then UPDATEs it. In WAL mode that read->write upgrade fails with `SQLITE_BUSY` straight away, without calling the busy handler, whenever another process holds the write lock or has committed since the read. Running workflows insert `hook_activity` events several times a second, which is enough. Measured against the live db, the same BEGIN/SELECT/UPDATE pattern failed 23 of 60 times, each in under 1 ms, with a 5 s timeout set. `BEGIN IMMEDIATE` and a bare UPDATE both passed 40 of 40. Each attempt is an independent draw, so a few long backoffs lose and many short retries win. `setup/archon-lock-retry.sh` runs the control again only when all three of these hold: archon exited non-zero, its output contains `database is locked`, and the **named** run's whole row (status, timestamps, metadata) is unchanged. Other runs' heartbeats are ignored on purpose. By default it makes up to 60 attempts with a jittered 0.5–2 s sleep between them (`ARCHON_LOCK_RETRY_ATTEMPTS`, `ARCHON_LOCK_RETRY_MIN_MS`, `ARCHON_LOCK_RETRY_MAX_MS`), and it prints `<LABEL>_DB_LOCKED attempt=N of=M sleep_ms=S run=<8>` for each retry. `resume.sh` (`RESUME_DB_LOCKED`), `gate-approve.sh`, and `archon-run.py`'s `approve`/`reject` all go through it, and the single `RESUME=` verdict is unchanged. A decision that was recorded but whose own resume hit the lock changes the row, so it is **never re-issued**. Instead the wrapper prints `<LABEL>_DB_LOCKED recorded=yes continue=resume.sh` and continues with `resume.sh <run>`. It does this only while the run is still `paused`. archon prints the same `Approved but failed to resume` prefix when the resumed workflow itself fails hours later, and a `failed` run is never re-run behind the operator's back. Two more stops apply. A resume retry ends with `RESUME_DB_LOCKED stop=lane-selection-changed` if another run became the lane's newest resumable run during the retries. No new attempt starts after `ARCHON_LOCK_RETRY_DEADLINE_S` (600 by default). `archon-run.py` sets that deadline to 10 s, because its launcher is terminated if the run does not reach `running` within the 15 s watchdog-arm window, so a guarded Codex control gets fewer attempts than a direct `resume.sh`. A bare `archon workflow approve|reject` typed at a terminal has no wrapper, so after that error run `bash "$ARCHON_LAYER/setup/resume.sh" <run>` yourself and do not repeat the decision. Tests: `setup/tests/test_archon_lock_retry.py`.
 
 ## 5a. Concurrency: running N lanes at once
 
@@ -494,7 +514,8 @@ DISABLE_OMC=1 archon workflow run bugfix --branch eng-3842 --detach "/abs/path/t
 DISABLE_OMC=1 archon workflow run full-sdlc-api-lite --branch eng-3549 --detach "/abs/path/to/spec.md"
 ```
 
-Each lands on `~/.archon/workspaces/_local/Goodword/worktrees/archon/task-<branch>`,
+Each lands on `~/.archon/workspaces/_local/<Project>/worktrees/archon/task-<branch>`
+(for a Goodword project registered as `Goodword`, that name is `Goodword`),
 which is the lock key. Drop `--branch` and you are back to one shared path and the
 old `Workflow already active on this path` self-cancel.
 
@@ -504,26 +525,27 @@ three runs are genuinely in flight. Anything else is one run and two corpses.
 **The branch name is yours to pick and it must be unique per run.** Two launches
 with the same `--branch` share a worktree and therefore share the lock.
 
-### Why the Goodword root can do this at all
+### Why `$PROJECT_ROOT` can do this at all
 
-The root is a **git shell**: `.gitignore` containing `*`, one empty commit, and a
-bare `origin` under `~/.archon/shells/`. Nothing is ever tracked in it. It exists
-because `--branch` refuses on a non-repo project ("Cannot determine git remote")
-and on a folder project ("Worktree options require a git-repo project").
+For Goodword, `$PROJECT_ROOT` is a **git shell**: `.gitignore` containing `*`, one
+empty commit, and a bare `origin` under `~/.archon/shells/`. Nothing is ever
+tracked in it. It exists because `--branch` refuses on a non-repo project
+("Cannot determine git remote") and on a folder project ("Worktree options
+require a git-repo project").
 
-Node bodies use absolute hardcoded paths for every repo, so **the archon worktree
-is only a lock key and an artifacts anchor** — never the tree the work happens in.
-The api/web-app worktrees the lanes actually build in are still cut under
-`api/.worktrees/` and `web-app/.worktrees/` as before.
+Node bodies address repos through `$PROJECT_ROOT` and `params.json` worktrees, so
+**the archon worktree is only a lock key and an artifacts anchor** — never the
+tree the work happens in. The api/web-app worktrees the lanes actually build in
+are still cut under `<repo>/.worktrees/` as before.
 
 `install.sh` step 5 creates the shell and registers through
 `register-probe --branch`, asserting the run landed in a worktree. **Rollback is
-one command:** `rm -rf <root>/.git`, then re-register. If a machine registered the
-root as a folder project first, the stored `kind` is sticky and archon refuses
-`--branch`; flip it:
+one command:** `rm -rf "$PROJECT_ROOT/.git"`, then re-register. If a machine
+registered the root as a folder project first, the stored `kind` is sticky and
+archon refuses `--branch`; flip it:
 
 ```
-sqlite3 ~/.archon/archon.db "update remote_agent_codebases set kind='repo', default_branch='main' where default_cwd='<root>'"
+sqlite3 ~/.archon/archon.db "update remote_agent_codebases set kind='repo', default_branch='main' where default_cwd='$PROJECT_ROOT'"
 ```
 
 ### What is isolated per run, and what is not
@@ -660,9 +682,8 @@ but it is not "at most one candidate", and `resume.sh`'s guard is still what ref
 CLI's pick differs from the run you named. Keep using the wrapper.
 
 **Cost note:** archon copies `.archon/` and `.omc/` into each worktree (~36 MB per
-run, measured). Harmless, but it is why a launch is not instant, and why the lanes
-address every setup script by absolute path into the real root rather than through
-the copy beside them.
+run, measured). Harmless, but it is why a launch is not instant. Helpers are
+always `$ARCHON_LAYER/setup/...`, not the copy beside the worktree.
 
 ## 5. Stalls, orphans, and locks
 
@@ -680,12 +701,12 @@ the copy beside them.
 - **A branch-DELETION push still fires husky pre-push** (full jest, multi-minute, historically flaky in hook git env). Delete pushes go `--no-verify`.
 - **api boot prints an inspector-port 9229 collision warning** when your own api dev server runs (`start:api` hardcodes `--debug`). It is noise, not a boot failure.
 - **`gh pr ready` re-triggers the AI-review bots**, so babysit always terminates with a freshly-pending CodeRabbit status. It resolves green minutes later. Merge-ready = CI green + ready flag; the post-flip bot re-run is expected residue.
-- **`Error: Workflow '<name>' not found`.** The installed payload predates the lane. Run `ls <root>/.archon/workflows/` and `cat <root>/.archon/VERSION`. If the yaml is absent, pull the gist and rerun `install.sh`. If the gist itself lacks `archon__workflows__<name>.yaml`, the maintainer must add it to the `package.sh` MANIFEST and `--publish`. Never auto-retry the run.
+- **`Error: Workflow '<name>' not found`.** The installed payload predates the lane. Run `ls "$ARCHON_LAYER/workflows/"` and `cat "$ARCHON_LAYER/VERSION"`. If the yaml is absent, pull the layer and (when admission reopens) rerun `install.sh`. If the gist itself lacks `archon__workflows__<name>.yaml`, the maintainer must add it to the `package.sh` MANIFEST and `--publish`. Never auto-retry the run.
 - **Approving a bugfix run: use `archon workflow approve`, which is what the gate packet prints.** `archon-run.py approve/resume --token` is the CODEX path: the control token is printed only for `provider == codex` (`archon-run.py` ~line 2415) and is never persisted, so for a claude run there is no token to pass and the guard it protects (`codex-control-guard`) is a typed no-op anyway. The CLI path works because `post-approval-integrity` resolves `ARCHON_BUGFIX_CHAIN_STATE` and `ARCHON_ATTESTATION_DIR` itself via `setup/chain-paths.sh`; before that it failed with `POST_APPROVAL=FAIL no chain state` naming a file that was sitting there readable (observed 2026-09-04, run 127a883f).
 - **Do not free a paused run's smoke ports while it waits at the smoke gate.** (They are per-run since §5a; the gate packet and `MATRIX_RENDER_GATE` print this run's pair, and `smoke-urls.txt` in the artifacts dir carries them.) The matrix's judgment rows are walked against this run's live app, and `smoke-teardown` releases both for you after approval. Killing them during "cleanup" leaves the gate undecidable and forces an approval on unverified rows — observed 2026-09-04, same run.
 - **`CLOSURE_REACHABLE=NO` at intake-gate is a notice, not a fault.** It means the report has more than one effective symptom, so `RESOLVED` is unreachable (it needs every symptom `fixed`, and a track split to its own ticket is not) and the smoke gate will ask for `accept-residuals.txt`. Expected for a multi-track customer report. If you want an unassisted ticket-to-PR run, pick a single-track report with a reproduction.
 - **`test_runner_selfcheck.py::AmbientGitConfigIsolation` is intermittently red under the full suite** (seen twice on 2026-09-04, `SHA:1 took 2 values across runs`), and passes in isolation both times. It is the node-stress harness's own determinism check, unrelated to whatever else is in the run. Re-run the file alone before treating it as a real failure; do not treat a single full-suite sighting as a regression in your change.
-- Nodes start at the (non-git) folder root with no git context — which is why every repo path in the workflows is absolute and rendered per machine at install time. Don't "fix" one to a relative path.
+- Nodes start at the (non-git) folder root with no git context. Helper scripts are `$ARCHON_LAYER/setup/...`. Repo checkouts are `$PROJECT_ROOT/<repo>` or the worktree in `params.json`. Preflight fails with `ARCHON_LAYER unset` / `PROJECT_ROOT unset` if those env vars are missing. Do not bake a machine home path back into YAML. Project-specific how-to (bun quoting, AWS vs gcloud, GitNexus index name) lives in `$ARCHON_LAYER/profiles/<project>/guidance.md`; after preflight, read `$ARTIFACTS_DIR/project-guidance.md`.
 - **The e2e stack is one shared Postgres for the whole machine** and `docker compose ... up -d --wait` attaches to a running one rather than failing. `setup/e2e-mutex.sh` makes a second boot a typed stop instead of a silent re-seed over live rows; a run that dies before `smoke-teardown` strands the lock and the message prints the `rm -rf` that clears it. See §5a.
 - **`CE_REVIEW_ROOT` overrides where the review gate looks for ce-code-review run dirs** (default `/tmp/compound-engineering/ce-code-review`). `round-pre` and `review-gate` both honor it, so set it for the whole run or not at all. **Read side only** — the skill still writes to the default root, so this is an isolation/override knob (it is what makes `review-gate` testable), not a per-run guarantee: two lanes reviewing the *same* head sha can still each see the other's dir as new, and the `head_sha` prefix match cannot separate them.
 - **Both ce-code-review listings are `LC_ALL=C sort`ed on purpose — do not drop it.** `round-pre` writes `prerun-dirs.txt` and `review-gate` writes `post-dirs.txt` in separate node executions, and a resume can come from a differently-configured shell. Collate the two lists differently and `comm -13` reports a **pre-existing** dir as new — silently, exit 0, no warning — which is how the gate ends up reading a foreign run's verdict. Regression-tested in `setup/tests/test_node_stress.py::ReviewGateScanIsolation`, negative control included.
@@ -764,12 +785,14 @@ Sibling of the SDLC lanes: bug report in, draft PR out, through a Red -> Green r
 (VERSION 2026.08.28-2, design-only below) -> negative control -> review
 loop -> second negative control -> exit gate (+ search-eval replay when the fix touches search
 paths) -> in-app smoke matrix -> SECOND human gate (matrix) -> draft PR). Same conventions as §1:
-`DISABLE_OMC=1`, `</dev/null`, tee to a file, absolute spec path.
+`DISABLE_OMC=1`, `</dev/null`, tee to a file, absolute spec path, two-root env.
 
 ```bash
-cd /Users/eduardopicazo/Documents/Workspace/Goodword
+cd "$PROJECT_ROOT"
 DISABLE_OMC=1 archon workflow run bugfix "/abs/path/to/bug-report.md" </dev/null 2>&1 | tee /tmp/archon-bugfix.log
 ```
+
+Prefer `python3 "$ARCHON_LAYER/setup/archon-run.py" bugfix --provider <provider> "/abs/path/to/bug-report.md"`. A raw launch without `$ARCHON_LAYER` / `$PROJECT_ROOT` fails at preflight.
 
 The run message is the **absolute path to a bug-report .md** — it may be thin (a Sentry link, a Linear id,
 one paragraph); the intake node expands references. Branch and worktree derive from the filename as in §1,
@@ -901,22 +924,17 @@ ships only when a human wants to promote the capture into an external KB.
 
 ## 13. The backfill lane (`backfill`)
 
-Safe prod-data execution graph for backfills & data migrations — the work with the highest
-cost-of-error. **Execution only**: the instrument (a CLI command or a SQL statement) must
-already be MERGED; building it stays with the SDLC/bugfix lanes. The lane takes a spec that
-names the instrument plus a population claim, then measures, samples, dry-runs, arms, and —
-after the single human gate — snapshots, applies, and reconciles. It never invents commands;
-it only arms and executes what the spec names, byte-for-byte.
+**DISABLED.** `workflows/backfill.yaml` is a single always-run preflight that
+prints `BACKFILL_PRODUCTION_ADMISSION=DISABLED` and exits 1. Do not launch it,
+do not fetch write credentials, and do not treat the rest of this section as a
+live apply path. Building a backfill instrument stays on the SDLC/bugfix lanes
+until this graph is recertified.
 
-```bash
-cd /Users/eduardopicazo/Documents/Workspace/Goodword
-aws login   # HARD prerequisite here, unlike the bugfix lane - census needs prod RO
-DISABLE_OMC=1 archon workflow run backfill "/abs/path/to/backfill-spec.md" </dev/null 2>&1 | tee /tmp/archon-backfill.log
-```
+### Prior operator surface (not admitted)
 
-Node graph: preflight → intake → intake-gate → census → sample → sample-audit → sample-gate
-→ dry-run → arm (kill-switch negative control) → packet → render-gate → **apply-approval
-(the ONLY human gate)** → snapshot → apply → reconcile → run-report → kb-capture → report.
+The historical graph measured, sampled, dry-ran, and paused at apply-approval
+before snapshot/apply/reconcile. That surface is not admitted. Discriminators
+below are retained as vocabulary for the disabled lane, not as commands to run.
 
 ### 13a. The spec contract
 
@@ -955,7 +973,7 @@ any artifact or env file.
 
 ### 13b. Absolute bounds
 
-`.archon/setup/backfill-limits.json` holds the bounds that do NOT inherit from the spec:
+`$ARCHON_LAYER/setup/backfill-limits.json` holds the bounds that do NOT inherit from the spec:
 `absolute_max_rows` (100k), `absolute_max_fraction` (0.10), the divergence tolerances
 (claim 25%, dry-run 5%, snapshot 5%), chunk size, statement timeout, stall seconds. preflight
 copies it into the run's artifacts; every gate reads the per-run copy. Widening for one run is
@@ -1019,24 +1037,28 @@ Trial candidate: the #1896 follow-up 44k indexer gap — real, bounded, already 
 Two generated siblings for small tickets. They keep the human gate, one `ce-code-review` round,
 and the negative controls; they drop the planning critic (§3a), doc review, blind premise / chain
 verification, prod evidence, the deslop group (§3b), and the smoke matrix. Same conventions as §1:
-`DISABLE_OMC=1`, `</dev/null`, tee to a file, absolute spec path.
+`DISABLE_OMC=1`, `</dev/null`, tee to a file, absolute spec path, two-root env.
 
 ```bash
-cd /Users/eduardopicazo/Documents/Workspace/Goodword
-DISABLE_OMC=1 archon workflow run full-sdlc-api-lite "/abs/path/to/spec.md" </dev/null 2>&1 | tee /tmp/archon-lite.log
-DISABLE_OMC=1 archon workflow run bugfix-lite "/abs/path/to/bug-report.md" </dev/null 2>&1 | tee /tmp/archon-bugfix-lite.log
+cd "$PROJECT_ROOT"
+DISABLE_OMC=1 archon workflow run full-sdlc-api-lite --branch <unique-slug> "/abs/path/to/spec.md" </dev/null 2>&1 | tee /tmp/archon-lite.log
+DISABLE_OMC=1 archon workflow run bugfix-lite --branch <other-slug> "/abs/path/to/bug-report.md" </dev/null 2>&1 | tee /tmp/archon-bugfix-lite.log
 ```
 
+Same two-root env as §1. Prefer `archon-run.py`, which derives `--branch` from the spec slug.
+
 Ports: `full-sdlc-api-lite` owns **4125**; `bugfix-lite` owns **4126/3126**. Distinct ports keep a
-leftover server from one lane from failing another lane's preflight; they do NOT make runs concurrent.
-**Archon runs one workflow per folder project at a time**: a second `archon workflow run` on this root
-while any run (including one paused at a gate) is active exits 1 with `Workflow already active on this
-path`. Queue lite runs behind the active one, or resolve the paused one first.
+leftover server from one lane from failing another lane's preflight; they do NOT make runs concurrent
+by themselves. **Without `--branch`, Archon locks one workflow per `working_path`:** a second
+`archon workflow run` on this root while any run (including one paused at a gate) is active exits 1
+with `Workflow already active on this path`. Use `--branch` (§5a) for concurrent lite runs.
 
 ### 14a. The envelope (single source of truth)
 
-`setup/lite-envelope.json` holds every threshold; `setup/lite-envelope.sh` applies them. Read the
-file, never a copy of its numbers. Checks, by stage:
+`$ARCHON_LAYER/setup/lite-envelope.json` holds every threshold; `$ARCHON_LAYER/setup/lite-envelope.sh` applies them. Read the
+file, never a copy of its numbers. Stack commands and project hot-path flavor live in
+`$ARCHON_LAYER/profiles/<project>/`, materialized to `$ARTIFACTS_DIR/project-guidance.md` at
+preflight — do not invent them. Checks, by stage:
 
 | stage node | lane | checks | inputs |
 |---|---|---|---|
@@ -1084,7 +1106,7 @@ Writing that line is a human act, the same convention as `files-allowlist.json` 
 
 ### 14c. Generated, never hand-edited
 
-Both YAMLs are produced by `python3 .archon/setup/derive-lite.py <api|bugfix>` from the parent
+Both YAMLs are produced by `python3 "$ARCHON_LAYER/setup/derive-lite.py" <api|bugfix>` from the parent
 workflow + `setup/lite/<lane>.json` (ordered node list, `depends_on` rewrites, loop caps, port map,
 and a `produces`/`consumes` contract for EVERY selected node) + `setup/lite/<lane>/` overlays (whole-
 field replacements: `<id>.prompt.md`, `<id>.bash.sh`, `<id>.on_reject.md`, `<id>.node.yaml` for new
@@ -1113,8 +1135,8 @@ Bug reports have one provider-neutral entrypoint. Shell callers must choose a
 provider explicitly; `archon-linear` infers it from the current operator client:
 
 ```bash
-python3 .archon/setup/archon-run.py bugfix --provider claude "/abs/path/to/report.md"
-python3 .archon/setup/archon-run.py bugfix --provider codex "/abs/path/to/report.md"
+python3 "$ARCHON_LAYER/setup/archon-run.py" bugfix --provider claude "/abs/path/to/report.md"
+python3 "$ARCHON_LAYER/setup/archon-run.py" bugfix --provider codex "/abs/path/to/report.md"
 ```
 
 The launcher conservatively sends thin/ambiguous reports straight to the matching
@@ -1134,20 +1156,22 @@ The workflows carry an `always_run` guard, so raw `archon workflow run/resume/ap
 fails before Codex work on every initial invocation and resume.
 
 ```bash
-cd /Users/eduardopicazo/Documents/Workspace/Goodword
-python3 .archon/setup/archon-run.py check
-python3 .archon/setup/archon-run.py run bugfix-lite-codex "/abs/path/to/report.md"
-python3 .archon/setup/archon-run.py run bugfix-codex "/abs/path/to/report.md"
-python3 .archon/setup/archon-run.py run full-sdlc-api-lite-codex "/abs/path/to/spec.md"
+cd "$PROJECT_ROOT"
+python3 "$ARCHON_LAYER/setup/archon-run.py" check
+python3 "$ARCHON_LAYER/setup/archon-run.py" run bugfix-lite-codex "/abs/path/to/report.md"
+python3 "$ARCHON_LAYER/setup/archon-run.py" run bugfix-codex "/abs/path/to/report.md"
+python3 "$ARCHON_LAYER/setup/archon-run.py" run full-sdlc-api-lite-codex "/abs/path/to/spec.md"
 ```
+
+`archon-run.py` exports `$ARCHON_LAYER` and `$PROJECT_ROOT`. Do not launch Codex twins with raw `archon workflow run`.
 
 At a gate, use the commands rendered in the packet; their shapes are:
 
 ```bash
-python3 .archon/setup/archon-run.py approve <run-id> --token CONTROL_TOKEN_FROM_LAST_LAUNCH
-python3 .archon/setup/archon-run.py reject <run-id> "reason" --token CONTROL_TOKEN_FROM_LAST_LAUNCH
-python3 .archon/setup/archon-run.py resume <run-id> --token CONTROL_TOKEN_FROM_LAST_LAUNCH    # failed runs only
-python3 .archon/setup/archon-run.py abandon <run-id> --token CONTROL_TOKEN_FROM_LAST_LAUNCH
+python3 "$ARCHON_LAYER/setup/archon-run.py" approve <run-id> --token CONTROL_TOKEN_FROM_LAST_LAUNCH
+python3 "$ARCHON_LAYER/setup/archon-run.py" reject <run-id> "reason" --token CONTROL_TOKEN_FROM_LAST_LAUNCH
+python3 "$ARCHON_LAYER/setup/archon-run.py" resume <run-id> --token CONTROL_TOKEN_FROM_LAST_LAUNCH    # failed runs only
+python3 "$ARCHON_LAYER/setup/archon-run.py" abandon <run-id> --token CONTROL_TOKEN_FROM_LAST_LAUNCH
 ```
 
 Rules and observed behavior (S0–S4 probes, 2026-08-31; evidence in `.omc/state/codex-provider-evidence.md`):
@@ -1158,15 +1182,28 @@ Rules and observed behavior (S0–S4 probes, 2026-08-31; evidence in `.omc/state
 - **`maxBudgetUsd` is unsupported under codex.** The derive script removes the inert fields rather than shipping a false cap; any other unsupported provider field fails derivation. `archon-run.py` defaults lite invocations to 90 active minutes/8M cumulative tokens and full bugfix invocations to 240 active minutes/30M cumulative tokens. Continuations inherit the run's authenticated stored limits unless explicitly overridden.
 - **Node `timeout` does not kill a stalled codex AI node.** S3 probe: a 45s-timeout node told to sleep 300s ran 313.7s and COMPLETED. (No AI-node timeout has ever been observed firing under claude on this machine either; treat AI-node timeouts as non-lethal generally.) Surviving controls on a codex lane: loop `max_iterations`, the ChatGPT quota itself, and operator supervision.
 - **Quota wall:** on `rate_limit` the adapter retries 3× (2s base backoff), then the node fails typed and the run goes `failed` — never jammed. Resume after the window resets with `setup/resume.sh` (same recipe as RUNBOOK §4).
-- **Skills:** `setup/stage-skills.sh` links `ce-code-review`/`ce-doc-review` into `$ROOT/.agents/skills/`; generated Codex prompts invoke them with explicit `$ce-code-review` / `$ce-doc-review` tokens, and the unsupported YAML `skills:` key is removed. The S0-4 probe produced the full persona pipeline and head-SHA metadata. Fallback remains `derive-codex.py --all --pin-review-claude`.
+- **Skills:** `setup/stage-skills.sh` links `ce-code-review`/`ce-doc-review` into `$PROJECT_ROOT/.agents/skills/`; generated Codex prompts invoke them with explicit `$ce-code-review` / `$ce-doc-review` tokens, and the unsupported YAML `skills:` key is removed. The S0-4 probe produced the full persona pipeline and head-SHA metadata. Fallback remains `derive-codex.py --all --pin-review-claude`.
 - **Flag compat:** archon 0.8.0's bundled SDK spawns `codex exec --experimental-json`; works against codex-cli 0.149.1. If a future codex removes the flag, pin an older binary via `assistants.codex.codexBinaryPath`.
 - **Container mode:** the codex adapter hard-throws — codex lanes run in place only, like the folder project already does.
 - **Ports:** twins keep the parents' ports. One-run-per-root still serializes lanes on this machine; a claude lane and a codex lane on *different* roots would still contend on the same api/web ports.
 - **Run-level guardrails.** `archon-run.py` is mandatory. Archon v0.8.0 forces its Codex child to `danger-full-access`, so the launcher installs a mode-0500 wrapper under the private control directory and sets `CODEX_BIN_PATH`; that wrapper replaces the adapter flag with `--sandbox workspace-write`, narrows writable code roots to `api` and `web-app`, and parses the runtime prompt to add only its single 32-hex run artifact directory. Real adapter probes denied writes to both `.archon` control-code locations while successfully writing the exact run artifact; rollouts recorded precisely those three writable roots. The launcher then starts `codex-watchdog.sh` with one exact run id, the exact launcher PGID, and its process fingerprint (defaults: 90 running minutes, 8M total tokens). It returns `STARTED` only after the watchdog observes that run become `running`, publishes its arming handshake, and the first always-run node consumes a one-time guard file outside the workspace; every pre-arm error terminates both fingerprint-matched process groups. The `STARTED` line also prints a per-run control token. Keep the latest token in the operator terminal and supply it to the next approve/reject/resume/abandon command; it is hashed only in private mode-0600 control state, never stored in run artifacts. This prevents a workflow node from releasing its own gate with the inherited launch environment. Ambiguous prefixes and basename process matching are refused. Past either budget the watchdog kills only a still fingerprint-matched process group and prints `WATCHDOG=TRIPPED`; if the kill leaves Archon's row orphaned as `running`, it abandons the exact run to release the worktree lock. For repository-list feature chains, the launcher also installs a trusted `PreToolUse` hook in the dedicated Codex home. The hook is active only when `ARCHON_FEATURE_SCOPE=repositories`; it no-ops for scalar Codex lanes even though the manifest persists. The launcher derives the required model/effort from the trusted dedicated `CODEX_HOME/config.toml` even when the adapter omits those argv flags. Native child agents must request the chain model and effort explicitly, for example `model=gpt-5.6-sol` and `reasoning_effort=medium`, or dispatch is denied before any child thread is created. Matching explicit children are allowed and recorded for accounting. Do not use `--dangerously-bypass-hook-trust` for guarded Archon runs. Per-run accounting remains `python3 setup/codex-usage.py <unique-id>`; ambiguous ids fail.
 - **Codex triages more conservatively — expect more `ROUTE=FULL` exits on evidence-thin tickets.** Observed live: on the same bug report the claude lane sized post-triage S/ROUTE=LITE, the codex lane sized L (`ROUTE=FULL reason=triage`) because the production exception had "not been independently attributed to this runtime path" — an unknown the lite lane leaves open by design. That is the fail-closed envelope working; relaunch on the full lane per §14, don't fight the routing.
-- **GitNexus readiness is optional, not a launch prerequisite.** Codex reads `$CODEX_HOME/config.toml`; when enabled, `gitnexus` must use the protected dispatcher plus the registry's unique `api` entry pinned to `$HOME/.archon/gitnexus/api-main`, with `lastCommit` matching the run baseline and `run.cjs status` up-to-date. The index worktree remains outside writable API/web roots so a node cannot rewrite graph evidence or the MCP runner. Build it with `git -C api worktree add --detach "$HOME/.archon/gitnexus/api-main" origin/main`, then run `npx gitnexus analyze` followed by `node .gitnexus/run.cjs analyze` there so analyzer provenance matches the MCP runner. Missing MCP, missing/stale index, stale analyzer runtime, or unavailable target writes explicit `GITNEXUS=UNAVAILABLE`/`IMPACT=UNAVAILABLE`; workflows continue with repo-local investigation. A `GATHERED` artifact must carry successful per-symbol query provenance or the envelope routes FULL.
+- **GitNexus readiness is optional, not a launch prerequisite.** Codex reads `$CODEX_HOME/config.toml`; when enabled, `gitnexus` must use the protected dispatcher plus the registry's unique `api` entry pinned to `$HOME/.archon/gitnexus/api-main`, with `lastCommit` matching the run baseline and `run.cjs status` up-to-date. The index worktree remains outside writable API/web roots so a node cannot rewrite graph evidence or the MCP runner. Build it with `git -C "$PROJECT_ROOT/api" worktree add --detach "$HOME/.archon/gitnexus/api-main" origin/main`, then run `npx gitnexus analyze` followed by `node .gitnexus/run.cjs analyze` there so analyzer provenance matches the MCP runner. The `api` index name is Goodword's; read `$ARTIFACTS_DIR/project-guidance.md` for another project's index. Missing MCP, missing/stale index, stale analyzer runtime, or unavailable target writes explicit `GITNEXUS=UNAVAILABLE`/`IMPACT=UNAVAILABLE`; workflows continue with repo-local investigation. A `GATHERED` artifact must carry successful per-symbol query provenance or the envelope routes FULL.
 - **Observed cost (2026-08-31 trials, ChatGPT plan).** bugfix-lite-codex to its routing stop: 0.85–1.08M tokens (~85% cached), 5–19 min wall, 4–7 sessions; api-lite-codex to routing stop: 0.54–0.92M tokens; one CE code review through the adapter (wrap-review): ~8.5 min and 3.69M tokens across 13 sessions — the skill's persona fan-out multiplies under codex too; budget reviews accordingly. Four lane attempts plus probes moved the weekly ChatGPT window 9%→13%. Check any run with `python3 setup/codex-usage.py <run-id>`.
 - **`archon doctor` says "Codex not configured" — ignore it.** Doctor checks archon's own credential store; the spawned CLI reads `$CODEX_HOME/auth.json` and never consults it. No `archon ai login` is needed.
+
+## 15a. Grok lanes (`*-grok` twins)
+
+Mechanical sibling of the Codex twins, not a second control surface. Every shipped lane has a GENERATED grok twin — `full-sdlc-api-grok`, `bugfix-grok`, `full-sdlc-web-grok`, `full-sdlc-api-lite-grok`, `bugfix-lite-grok` (plus local `wrap-*-grok` dev smokes) — the same DAG with `provider: grok`. Bash nodes, gates, loop caps, ports, and typed-line contracts are the parent's bytes.
+
+**Vanilla coleam00/Archon does not register `provider: grok`.** Built-ins are `claude` and `codex`; bundled community providers are `pi`, `opencode`, and `copilot`. Do not launch `archon workflow run *-grok`, and do not pass `--provider grok` to `archon-run.py`. Do not use a fork. Do not route these lanes through Pi's `xai/...` backend: that is an API-key HTTP model, not the Grok Build CLI, and it does not carry Grok tools.
+
+- **Twins are generated — never hand-edit.** `setup/derive-grok.py --all` regenerates; `package.sh` fails packaging on any divergence (`GROK_DRIFT=FAIL`). Transformations vs the parent: name/description, `provider: grok`, model map (`sonnet`/`opus` → `grok-4.6`), xAI OIDC billing guard, Grok slash-command skill tokens (`/ce-code-review`), removal of inert `maxBudgetUsd`, provider-capability lint. No Codex `.agents` mirror, no one-time control guard, no `archon-run.py` watchdog rewrite. Lite twins chain from the generated lite YAMLs, so regenerate lites first.
+- **Billing guard:** the twin preflight fails closed if `XAI_API_KEY` or `GROK_CODE_XAI_API_KEY` is set, then asserts `auth_mode == "oidc"` with `refresh_token` and `key` present in `${GROK_HOME:-$HOME/.grok}/auth.json`, typed `BILLING_GUARD=FAIL` otherwise. Login is `grok login` (OAuth), never an API key.
+- **`maxBudgetUsd` is stripped.** Grok CLI has no Archon cost-cap translation until a vanilla provider maps one. `thinking` is kept because Grok CLI has `--reasoning-effort`.
+- **Skills:** Grok does not honor YAML `skills:`. Generated prompts invoke `/ce-code-review` / `/ce-doc-review` (Grok slash commands, not Codex `$skill-name`). Grok discovers SKILL.md from `.grok/skills`, `.agents/skills`, and `.claude/skills` when the CLI actually runs; Archon will not spawn that CLI until an upstream community provider exists. CE `mode:headless` persona fan-out is unproven on Grok.
+- **MCP / GitNexus:** there is no vanilla Grok adapter to translate `mcp:` or to attach GitNexus. Impact-probe will be `UNAVAILABLE`; Goodword lite routes `FULL`. Do not drop parent MCP prompts to paper over it.
+- **What it takes to run:** a community provider in coleam00/Archon (`packages/providers/src/community/grok/`, `builtIn: false`, registered from `registerCommunityProviders()`), CLI-backed like Codex (`grok --prompt-json --output-format streaming-json --model grok-4.6`, OAuth via `~/.grok/auth.json`), unmanaged — not factory-scoped. Then `archon validate` on these YAMLs, a CE-review probe, and only then an operator launch. Until that PR is in the pin, these files are the DAG + billing contract.
 
 ## 16. Bugfix evidence and recovery contract (v2)
 
@@ -1228,25 +1265,127 @@ refuses missing candidates, so recent related work cannot disappear behind a
 plausible new diagnosis or a PR title alone.
 
 
+## 17. Skill evolution (`skill-evolve`)
+
+The repository skills library lives at `$ARCHON_LAYER/library/<repo>/` (repo one of
+`api`, `goodword-mcp`, `web-app`) and has three states, after the WikiSkill
+paper: **Raw** (`raw/index.jsonl`, append-only pointers to run artifact dirs,
+never copies), **Wiki** (`wiki/patterns/<slug>.md` pattern pages compiled by a
+maintainer agent, applied only through `setup/wiki-apply.py`, never deleted,
+never shown to a runtime agent), and **Skills** (`skills/<name>/SKILL.md`,
+staged by `stage-skills` into `implement`/`fix`/`fixer` only). Skills roll
+back; the wiki never does. At most one `candidate` skill per repo at a time;
+it is scored against the next K live runs (default K=3) and accepted only when
+its window mean is strictly better than the frozen baseline mean — ties roll
+back. Every library write is mechanical (a helper under `setup/` with a typed
+line), and every change is a git commit by `archon skill-evolve
+<skill-evolve@archon.local>`, so `git log -- .archon/library/<repo>` is the
+audit trail. `library/README.md` and `library/<repo>/README.md` state the rules.
+
+**When to run.** After a run ends — `LOCAL_CANDIDATE=PASS` and `kb-capture`
+done, or a failed run that reached the review loop (`round.txt` exists). A run
+that failed before review is ingested but never scored. One evolve per run:
+preflight refuses a run already in the ledger (`SKILL_INGESTED=YES`).
+
+```bash
+export ARCHON_LAYER="${ARCHON_LAYER:?this pack}"
+DISABLE_OMC=1 archon workflow run skill-evolve "<ARTIFACTS_DIR of the finished run>" </dev/null 2>&1 | tee /tmp/archon-skill-evolve.log
+tail -40 "$ARCHON_LAYER/library/<repo>/wiki/skill-impact.md"
+git -C "$ARCHON_LAYER" log --oneline -5 -- library/<repo>
+```
+
+The run message is the finished run's ABSOLUTE artifacts dir. The lane's own
+artifacts dir then holds `trace-digest.json`, `score-result.json`,
+`maintain-sample.json` + `traces/`, `wiki-patch.json`, `wiki-gate-result.json`,
+and — when a proposal was made — `skill-proposal.json`, `candidate-SKILL.md`,
+`candidate.diff`, `proposal-gate-result.json`, `skill-verdict.json`.
+
+**Nodes and typed vocabulary** (the last typed line of each `node-<id>.out`;
+`report` reprints them all as `NODE <id>: ...`):
+
+| Node | Signal | Meaning |
+|---|---|---|
+| `preflight` | `PREFLIGHT=PASS run=<id> repo=<r> candidate=<name\|none>` / `PREFLIGHT=FAIL <reason>` | Validates the run dir and repo, creates the skeleton on a fresh install, refuses an already-ingested run, a dirty `library/<repo>` tree, or a held lock (`library/.locks/<repo>.evolve.lock`). |
+| `trace-digest` | `TRACE_DIGEST=OK run=.. lane=.. terminal=completed\|no_change\|failed\|incomplete rounds=n score_inputs=k` | Typed facts from the artifacts tree (`archon.trace-digest.v1`); prose is listed, never embedded. |
+| `score-run` | `SKILL_SCORE=OK run=.. score=.. eligible=yes\|no window=none\|open(n/K)\|closed:accept\|closed:rollback\|closed:inconclusive`, preceded by `SKILL_WINDOW=ACCEPT skill=.. baseline=.. candidate=..` or `SKILL_WINDOW=ROLLBACK skill=.. reason=tie\|worse\|score_version_mismatch\|short_baseline\|no_baseline ...` when the window closes; then `LIBRARY_COMMIT=OK sha=..` | Appends the ledger row; a run counts toward the candidate only when `skills-staged.json` lists that candidate at the same sha256. Accept/rollback happens HERE, before anything new is proposed. Score is defined and versioned in `setup/skill-score.py` (lower is better; review rounds, applied findings by severity, fixer incompletes, re-raised findings, waivers, deslop dirt, plan rounds, loop-failure tokens, terminal failure). |
+| `evolve-route` | one JSON line `{"propose":"yes\|no","reason":"ok\|candidate_pending\|too_few_runs\|too_few_eligible\|nothing_to_fix",...}` | Proposes only with no candidate pending, ≥4 ingested runs, ≥K eligible runs, and some failure signal in the ledger. Also writes `maintain-sample.json` (≤5 recent failed + ≤3 recent completed runs, re-digested under `traces/`). |
+| `wiki-maintain` → `wiki-gate` | `WIKI_GATE=PASS created=n patched=m index_regenerated=yes log_appended=yes` / `WIKI_GATE=FAIL <reason>` | The maintainer (sonnet) writes only `wiki-patch.json`; the gate applies it all-or-nothing (≤3 creates, ≤6 patches, `support_count` +1 per run at most, Evidence must cite a ledger run, no absolute paths, 40 lines / 3500 bytes) and commits. A FAIL here is an agent-output defect: nothing was written; resume re-runs the maintainer. |
+| `skill-propose` → `proposal-gate` | `PROPOSAL_GATE=PASS action=create\|patch\|no_action skill=.. ops=n result_sha=.. traces_read=n` / `PROPOSAL_GATE=FAIL <reason>` (`repeat_of=<proposal id>` when the content or op set repeats a rejected or rolled-back candidate) | The proposer (opus) reads `skill-impact.md` before anything else so it never re-proposes a rejected approach, must cite ≥4 ledger runs, and may answer `no_action`. The gate is mechanical (schema, one skill, active motivating patterns, one-candidate invariant, lint, repeat detection, a read-side `--check` of the library as it would be after admission); a FAIL is recorded as `gate_failed` in skill-impact and committed before the node fails. |
+| `skill-critic` → `skill-admit` | `SKILL_ADMIT=ACCEPTED skill=.. action=.. window=K` / `SKILL_ADMIT=REJECTED skill=.. reasons=n` / `SKILL_ADMIT=SKIP <reason>`, then `LIBRARY_COMMIT=...` | The critic (opus) judges five checks (`evidence_backed`, `procedural`, `minimal`, `not_repeat`, `no_wiki_leak`); ACCEPT needs all five. Admission snapshots the pre-candidate bytes under `skills/.rollback/<name>/`, writes `SKILL.md` + `PURPOSE.md`, freezes the baseline window, records `proposed` + `admitted`. REJECTED and SKIP are normal outcomes, not failures. |
+| `report` | `SKILL_EVOLVE=OK run=.. repo=.. wiki=PASS\|FAIL\|none proposal=<action\|none> outcome=ACCEPTED\|REJECTED\|SKIP\|GATE_FAIL\|none` / `SKILL_EVOLVE=FAIL ...` | Always runs. Prints the last three `skill-impact.md` sections, releases the lock it owns, and FAILS the run when the route said `propose=yes` but `proposal-gate-result.json` is missing (the silent-`when`-skip trap, §3). |
+
+**Reading `skill-impact.md`.** One section per event (`proposed`, `admitted`,
+`rejected`, `gate_failed`, `accepted`, `rolled_back`, `no_action`,
+`forced_rollback`, `window_reset`, `pattern_quarantined`), each with the
+proposal id, the skill, the reason and — for anything that touched a skill —
+the diff. Rejected and rolled-back contents are shown on purpose: the proposer
+reads this file first. `wiki/skill-impact.jsonl` is the machine copy the gates
+read; `wiki/log.md` is the chronology; `wiki/index.md` is generated.
+
+**Operator levers** (from `$ARCHON_LAYER`; `LIB="$ARCHON_LAYER/library"`):
+
+```bash
+python3 "$ARCHON_LAYER/setup/skill-admit.py" status <repo> --lib "$LIB"                     # SKILL_INDEX=OK candidate=<name|none> active=n rolled_back=n
+python3 "$ARCHON_LAYER/setup/skill-score.py" window <repo> --lib "$LIB"                     # SKILL_WINDOW=NONE | OPEN skill=.. runs=n/K baseline=..
+python3 "$ARCHON_LAYER/setup/skill-admit.py" rollback <repo> --lib "$LIB" --reason "why"    # forced rollback of the pending candidate (SKILL_ROLLBACK=OK|SKIP)
+python3 "$ARCHON_LAYER/setup/skill-admit.py" set-window <repo> 5 --lib "$LIB"               # K for the NEXT candidate; refused while one is pending
+python3 "$ARCHON_LAYER/setup/wiki-apply.py" quarantine <repo> <slug> --lib "$LIB" --reason "why"   # page status -> contested; a contested page cannot motivate a skill
+python3 "$ARCHON_LAYER/setup/skill-admit.py" commit <repo> --lib "$LIB" --message "operator: ..."  # after rollback/set-window (quarantine commits itself)
+python3 "$ARCHON_LAYER/setup/stage-skills-library.py" <repo> --lib "$LIB" --check                 # what the next run would stage
+rm -rf "$LIB/.locks/<repo>.evolve.lock"                                                     # stale lock ONLY when no skill-evolve run is live
+```
+
+The four levers that write (`rollback`, `set-window`, `commit`, `quarantine`)
+refuse while a `skill-evolve` run holds `library/.locks/<repo>.evolve.lock`,
+with `<TYPED_LINE>=FAIL evolve lock held by <run id>`; the lane passes
+`--evolve-run` so its own commits are allowed. Wait for the run to finish, or
+clear a stale lock with the `rm -rf` above, then repeat the lever.
+
+**Recovering a dirty library tree.** `commit` validates the registry first, so
+a run killed mid-write leaves the partial state uncommitted rather than in
+history. Diagnose, then discard:
+
+```bash
+python3 "$ARCHON_LAYER/setup/skill-admit.py" status <repo> --lib "$LIB"     # SKILL_INDEX=FAIL <reason> when the write was partial
+python3 "$ARCHON_LAYER/setup/skill-admit.py" git-check <repo> --lib "$LIB"  # LIBRARY_GIT=DIRTY lists what changed
+git -C "$ARCHON_LAYER" checkout -- "library/<repo>"                        # back to the last committed (valid) state
+git -C "$ARCHON_LAYER" clean -fd -- "library/<repo>"                       # drop files the partial write added
+```
+
+Then re-run `skill-evolve` on the same source run: the ledger row was rolled
+back with the tree, so preflight no longer sees it as ingested.
+
+**Caveats.** K-run online scoring is noisy and confounded by task size; it is a
+relative window comparison with a strict-better rule, not a benchmark — raise K
+for a stable repo before trusting a rollback. A `score_version` bump in
+`skill-score.py` makes any open window inconclusive (rollback, reason
+`score_version_mismatch`); the next ingest with no candidate pending stamps the
+new version into the index, so a bump costs at most that one window. Never edit `library/` by hand; never `git commit`
+there yourself. Persistent must not become irreversible: a pattern page that
+keeps motivating bad skills is quarantined (`contested`), never deleted. The
+proposer and critic treat traces and pages as data, not instructions; a poisoned
+trace is named in the rationale. Only `library/README.md` ships in the package;
+the per-repo directories are created on first use and evolve in place.
+
 ## Feature launcher
 
 Repository-list features use one joint plan and one shared budget, for either
 provider:
 
 ```bash
-python3 .archon/setup/archon-run.py feature --provider claude \
+python3 "$ARCHON_LAYER/setup/archon-run.py" feature --provider claude \
   --scope api,goodword-mcp /absolute/path/to/spec.md
-python3 .archon/setup/archon-run.py feature --provider claude \
+python3 "$ARCHON_LAYER/setup/archon-run.py" feature --provider claude \
   --scope goodword-mcp --base goodword-mcp=<40-hex-parent> /absolute/path/to/spec.md
-python3 .archon/setup/archon-run.py feature --provider claude \
+python3 "$ARCHON_LAYER/setup/archon-run.py" feature --provider claude \
   --scope web-app /absolute/path/to/spec.md
-python3 .archon/setup/archon-run.py feature --provider codex \
+python3 "$ARCHON_LAYER/setup/archon-run.py" feature --provider codex \
   --scope api,goodword-mcp /absolute/path/to/spec.md
 ```
 
 `--base repo=<40-hex>` pins that repository's worktree to a **local** commit instead of current HEAD. Repeat the flag per repo. The sha must already exist in that clone (fetch the parent PR first). Approval binds the pinned baselines the same way it binds HEAD baselines. This is how an mcp-only or web-app stage stacks on an unmerged parent instead of falling back to a plain session. Scalar `--scope goodword-mcp` allocates a smoke port from the profile's `HAS_SMOKE`, not from the name `api`. Operator stop recipes (allowlist, quarantine, first-failure reopen, infrastructure smoke, budget): [operator recovery](docs/operator-recovery.md).
 
-Repository names come from `setup/repo-profile.sh --list`. `web` aliases
+Repository names come from `bash "$ARCHON_LAYER/setup/repo-profile.sh" --list`. `web` aliases
 `web-app`; standalone `fullstack` expands to `api,web-app`. Comma order is
 presentation order. Execution follows the approved dependencies, with repository
 name ordering for independent stages. Empty entries, duplicates (including
@@ -1266,7 +1405,7 @@ goodword-mcp, planning, integration) and `full-sdlc-web`; the operator loop is:
 
 ```bash
 archon workflow approve <run>                                   # at every gate
-python3 .archon/setup/archon-run.py feature-advance --chain <id>  # after each run completes
+python3 "$ARCHON_LAYER/setup/archon-run.py" feature-advance --chain <id>  # after each run completes
 ```
 
 Before any integration command runs, `run-joint-integration.py` prepares every
@@ -1287,13 +1426,15 @@ the stage's integration verification there; an unresolvable entry stops it with
 exit-gate and local-candidate run in that bootstrapped worktree and need nothing
 more. Plans therefore call a repository's existing test
 command directly; a jest command gets its `ARCHON_INTEGRATION_TESTS=<n>` line
-from `python3 .archon/setup/jest-count.py <jest argv...>`, and plans must not add
+from `python3 "$ARCHON_LAYER/setup/jest-count.py" <jest argv...>`, and plans must not add
 their own bootstrap scripts (the critic files those as scope). For
 `api,goodword-mcp` end-to-end tests that need a booted api, the command is
-`bash .archon/setup/joint-api-mcp-e2e.sh '<jest pattern>' <api-port>`: it boots
-the api candidate against the local dev stack, mints a JWT through the
-whitelisted local OTP flow, runs the goodword-mcp jest pattern, and emits the
-count line. Contract `artifact` values must be repository-relative file
+`bash "$ARCHON_LAYER/setup/joint-api-mcp-e2e.sh" '<jest pattern>' <api-port>`: the
+runner's disposable worktrees carry no `node_modules`, `.env`, running api, or
+token, and its test counter only reads `ARCHON_INTEGRATION_TESTS=<n>` lines; the
+harness installs, boots the api candidate against the local dev stack, mints a
+JWT through the whitelisted local OTP flow, runs the goodword-mcp jest pattern,
+and emits that line. Contract `artifact` values must be repository-relative file
 paths (`validate-joint-plan.py` rejects prose), and `expected_tests` entries
 must correspond to real jest tests (the runner requires reported >= declared).
 Chain params carry `api_port` whenever any selected repository's profile declares
@@ -1318,7 +1459,7 @@ Publication is a separate, explicit human command; reaching `locally_verified`
 never pushes:
 
 ```bash
-python3 .archon/setup/archon-run.py feature-publish --chain <id>
+python3 "$ARCHON_LAYER/setup/archon-run.py" feature-publish --chain <id>
 ```
 
 `feature-publish` re-verifies the receipt and approval, then, per repository in
@@ -1349,8 +1490,8 @@ Before launching a large Codex repository-list chain, forecast the allowance
 without launching AI:
 
 ```bash
-python3 .archon/setup/archon-run.py feature-estimate --scope api,goodword-mcp /absolute/path/to/spec.md
-python3 .archon/setup/archon-run.py --max-total-tokens 60000000 feature-estimate --scope api,goodword-mcp /absolute/path/to/spec.md
+python3 "$ARCHON_LAYER/setup/archon-run.py" feature-estimate --scope api,goodword-mcp /absolute/path/to/spec.md
+python3 "$ARCHON_LAYER/setup/archon-run.py" --max-total-tokens 60000000 feature-estimate --scope api,goodword-mcp /absolute/path/to/spec.md
 ```
 
 For an existing Codex repository-list chain, `feature-estimate --chain <id>` and
@@ -1379,7 +1520,7 @@ To apply an explicitly authorized higher total token ceiling to a stopped Codex
 repository-list run, use the guarded launcher:
 
 ```bash
-python3 .archon/setup/archon-run.py feature-budget-update <run-id> --token <operator-token> --total-tokens 100000000 --enable-shepherd --reason "Authorized ENG-3866 retry"
+python3 "$ARCHON_LAYER/setup/archon-run.py" feature-budget-update <run-id> --token <operator-token> --total-tokens 100000000 --enable-shepherd --reason "Authorized ENG-3866 retry"
 ```
 
 The ceiling includes all prior consumption. An explicitly authorized active-time
@@ -1412,7 +1553,7 @@ one) but its shared active-time allowance is still enforced at dispatch and
 replan. Name the chain instead of the token:
 
 ```bash
-python3 .archon/setup/archon-run.py feature-budget-update <run-id> --chain <chain-id> --total-tokens <unchanged-or-higher> --total-active-minutes 480 --reason "Authorized retry"
+python3 "$ARCHON_LAYER/setup/archon-run.py" feature-budget-update <run-id> --chain <chain-id> --total-tokens <unchanged-or-higher> --total-active-minutes 480 --reason "Authorized retry"
 ```
 
 `--chain` is accepted only when the chain state's provider is `claude`; a Codex
@@ -1441,7 +1582,7 @@ of the signed joint plan; a hand edit is `ALLOWLIST_DRIFT=FAIL` on the next
 repository-list commit. Full recipes: [operator recovery](docs/operator-recovery.md).
 
 ```bash
-python3 .archon/setup/archon-run.py feature-scope-amend <run-id> --token <operator-token> --add-file <repo-relative-path> --reason "Authorized scope recovery"
+python3 "$ARCHON_LAYER/setup/archon-run.py" feature-scope-amend <run-id> --token <operator-token> --add-file <repo-relative-path> --reason "Authorized scope recovery"
 ```
 
 `feature-scope-amend` is intentionally narrower than re-approval. It authenticates
@@ -1471,8 +1612,8 @@ preserves operator authority; normal guarded resume still rotates the token.
 On a Claude repository-list chain (no control token), name the chain instead:
 
 ```bash
-python3 .archon/setup/archon-run.py feature-scope-amend <run-id> --chain <chain-id> --add-file <repo-relative-path> --reason "Authorized scope recovery"
-bash .archon/setup/resume.sh <run-id>
+python3 "$ARCHON_LAYER/setup/archon-run.py" feature-scope-amend <run-id> --chain <chain-id> --add-file <repo-relative-path> --reason "Authorized scope recovery"
+bash "$ARCHON_LAYER/setup/resume.sh" <run-id>
 ```
 
 `--chain` is accepted only when the chain state's provider is `claude`; a Codex
@@ -1501,7 +1642,7 @@ If a historical provider incident has independently verifiable usage, import it
 while the current run is stopped:
 
 ```bash
-python3 .archon/setup/archon-run.py feature-account-provider-usage <run-id> --token <operator-token> --event-id <completed-event-id> --transcript <absolute-jsonl-path>
+python3 "$ARCHON_LAYER/setup/archon-run.py" feature-account-provider-usage <run-id> --token <operator-token> --event-id <completed-event-id> --transcript <absolute-jsonl-path>
 ```
 
 The controller authenticates under the chain lock. The budget helper reconciles
@@ -1556,7 +1697,7 @@ add `--guidance-file <path>` (either provider; Claude chains use `--chain <id>`
 instead of `--token`):
 
 ```bash
-python3 .archon/setup/archon-run.py feature-replan <run-id> --chain <chain-id> \
+python3 "$ARCHON_LAYER/setup/archon-run.py" feature-replan <run-id> --chain <chain-id> \
   --guidance-file /absolute/path/to/guidance.md
 ```
 

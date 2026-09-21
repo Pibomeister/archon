@@ -183,7 +183,7 @@ class BugfixSupervision(unittest.TestCase):
             launched.append(lane)
             return first if len(launched) == 1 else second
         calls = 0
-        def supervise(_db, run_id, _timeout, _interval):
+        def supervise(_db, run_id, _timeout, _interval, **_kwargs):
             nonlocal calls
             calls += 1
             if calls == 1:
@@ -233,7 +233,7 @@ class BugfixSupervision(unittest.TestCase):
         def launch(_args, lane, _report):
             launched.append(lane)
             return rows[len(launched) - 1]
-        def supervise(_db, run_id, _timeout, _interval):
+        def supervise(_db, run_id, _timeout, _interval, **_kwargs):
             row = next(item for item in rows if item["id"] == run_id)
             ad = ar.artifact_dir(row)
             receipt = json.loads((ad / "bugfix-chain.json").read_text())

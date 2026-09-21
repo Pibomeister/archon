@@ -116,7 +116,7 @@ class CapabilityGateTest(unittest.TestCase):
 class CapabilityDiscoveryTest(unittest.TestCase):
     def test_preflight_discovers_capabilities_and_never_fails_on_aws(self):
         preflight = node("bugfix", "preflight")["bash"]
-        self.assertIn("archon-run.py\" capabilities --artifacts", preflight)
+        self.assertRegex(preflight, r'archon-run\.py"?\s+capabilities --artifacts')
         self.assertNotIn("PREFLIGHT=FAIL aws", preflight)
 
     def test_capabilities_json_names_every_evidence_source(self):

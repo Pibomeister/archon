@@ -37,6 +37,7 @@ N comes from the NODE_STRESS env var (default 3, so the committed suite stays
 fast). `NODE_STRESS=100 python3 -m unittest discover -s setup/tests -p
 'test_node_stress.py'` is the SLA sweep.
 """
+from __future__ import annotations
 import hashlib
 import os
 import re
@@ -170,6 +171,7 @@ def _isolation_env(tmp):
         "GIT_CONFIG_NOSYSTEM": "1",
         "XDG_CONFIG_HOME": str(home / ".config"),
         "ARCHON_FEATURE_SCOPE": "fullstack",
+        "PYTHONDONTWRITEBYTECODE": "1",
     }
 
 

@@ -48,7 +48,7 @@ nodes:
       set -uo pipefail
       R="$ARTIFACTS_DIR/fixer-result.json"
       test -s "$R" || { echo "W8_GATE=FAIL no fixer-result.json"; exit 1; }
-      python3 /Users/eduardopicazo/Documents/Workspace/Goodword/.archon/setup/check-fixer-result.py "$R" || { echo "W8_GATE=FAIL fixer result invalid"; exit 1; }
+      python3 $ARCHON_LAYER/setup/check-fixer-result.py "$R" || { echo "W8_GATE=FAIL fixer result invalid"; exit 1; }
       cd /private/tmp/claude-501/-Users-eduardopicazo-Documents-Workspace-Goodword/88bb31f2-0094-41b2-bd3f-8409f1264538/scratchpad/m1-fixture/repo
       grep -q ':-there' lib.sh || { echo "W8_GATE=FAIL P1 fix not applied to lib.sh"; exit 1; }
       echo "W8_GATE=PASS"
