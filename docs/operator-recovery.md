@@ -106,6 +106,8 @@ requires. If you still see `GATE_5` / `envelope_input=[]` on a run dispatched
 | `SMOKE=FAIL api-boot exited before ready` (no `class=`) | process died with the stack up | Read the boot log; this is the feature |
 | `SMOKE=FAIL api-docs-json code=<n> class=infrastructure reason=stack-down` | docker stack down | `docker start postgres-db dynamodb-local`, `resume.sh <run-id>` |
 | `SMOKE=FAIL api-docs-json code=<n>` (no `class=`) | product / unknown | Read the boot log; this is the feature unless the log says otherwise |
+| `SMOKE=FAIL web /health not 200 class=infrastructure reason=stack-down` | api already answered 200 and `postgres-db` is missing | `docker start postgres-db dynamodb-local`, `resume.sh <run-id>` |
+| `SMOKE=FAIL web /health not 200` (no `class=`) | web itself, or only `dynamodb-local` missing | The feature; a missing DynamoDB is not why `/health` failed |
 | `JOINT_E2E=FAIL class=infrastructure api candidate env` | missing/stale env | Root clone `.env` must exist; do not copy a stage-worktree `.env` by hand |
 | `JOINT_E2E=FAIL class=infrastructure second-identity-unsubscribed code=401` | fixture | Insert an active `billing_subscriptions` row for the second OTP identity, mirroring the first |
 | `JOINT_E2E=FAIL class=infrastructure api-boot exited before ready` | stack down | Same as smoke stack-down |

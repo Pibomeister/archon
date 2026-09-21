@@ -641,6 +641,32 @@ class Acceptance(unittest.TestCase):
             self.assertIn("SMOKE=FAIL api not up", out)
             self.assertNotIn("class=infrastructure", out)
 
+    def _run_web_health(self, docker_body, apiok="YES"):
+        body = node_bash("smoke", "full-sdlc-web.yaml")
+        start = body.index("RUN_ID=$(python3")
+        snippet = body[start:].split('echo "SMOKE=PASS', 1)[0]
+        with tempfile.TemporaryDirectory() as td, FakeRoot() as f:
+            bin_dir = Path(td) / "bin"
+            bin_dir.mkdir()
+            shim(bin_dir, "docker", docker_body)
+            f.write_params(repo="web-app", api_port=4123, web_port=3127, worktree=str(td), run_id="a" * 32)
+            script = f"set -euo pipefail\nAPIOK={apiok}\nWEBOK=NO\n" + snippet
+            return run_node(script, f, env={"PATH": f"{bin_dir}:/bin:/usr/bin"}, timeout=30)
+
+    def test_web_health_missing_dynamodb_after_api_up_is_product(self):
+        r = self._run_web_health("printf '%s\\n' postgres-db\n")
+        out = r.stdout + r.stderr
+        self.assertNotEqual(0, r.returncode)
+        self.assertIn("SMOKE=FAIL web /health not 200", out)
+        self.assertNotIn("class=infrastructure", out)
+
+    def test_web_health_missing_postgres_after_api_up_is_infrastructure(self):
+        r = self._run_web_health("printf '%s\\n' dynamodb-local\n")
+        out = r.stdout + r.stderr
+        self.assertNotEqual(0, r.returncode)
+        self.assertIn("class=infrastructure", out)
+        self.assertIn("reason=stack-down", out)
+
     def test_a12_result_artifacts_report_the_real_repo(self):
         lane = (WORKFLOWS / "full-sdlc-api.yaml").read_text(encoding="utf-8")
         self.assertNotIn('"repo":"api"', lane)
