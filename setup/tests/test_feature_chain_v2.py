@@ -913,10 +913,10 @@ class FeatureChainV2(unittest.TestCase):
         self.assertNotIn("CHAIN_BUDGET=EXCEEDED active=", output)
 
     def test_active_over_cap_stops_before_locally_verified_and_not_after(self):
-        timing = {"planning_s": 8000, "stages": {"api": 0}, "integration_s": None, "wall_s": 8000}
+        timing = {"planning_s": 15000, "stages": {"api": 0}, "integration_s": None, "wall_s": 15000}
         printed = []
         with mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(str(x) for x in a))):
-            with self.assertRaisesRegex(fc.FeatureChainError, "CHAIN_BUDGET=EXCEEDED active=8000 cap=7200"):
+            with self.assertRaisesRegex(fc.FeatureChainError, "CHAIN_BUDGET=EXCEEDED active=15000 cap=14400"):
                 fc.require_active_budget({
                     "status": "running",
                     "logical_chain_id": "c" * 32,
@@ -931,7 +931,14 @@ class FeatureChainV2(unittest.TestCase):
         self.assertIn("a" * 32, recovery)
         self.assertIn("--chain c" + "c" * 31, recovery)
         self.assertIn("--total-tokens 30000000", recovery)
-        self.assertIn("--total-active-minutes 240", recovery)
+        self.assertIn("--total-active-minutes 480", recovery)
+        raised = dict(
+            status="running",
+            logical_chain_id="c" * 32,
+            current_run={"run_id": "a" * 32},
+            budget={"max_total_tokens": 30_000_000, "wall_minutes": 480},
+        )
+        fc.require_active_budget(raised, timing)
 
     def test_missing_timing_is_unavailable_unless_locally_verified(self):
         printed = []
@@ -946,15 +953,16 @@ class FeatureChainV2(unittest.TestCase):
                 }, None)
         fc.require_active_budget({"status": "locally_verified", "logical_chain_id": "c" * 32}, None)
         recovery = "\n".join(printed)
-        self.assertIn("--token <operator-token>", recovery)
-        self.assertNotIn("--chain", recovery)
+        self.assertIn("resume.sh", recovery)
+        self.assertIn("a" * 32, recovery)
+        self.assertNotIn("feature-budget-update", recovery)
 
     def over_cap_timing(self, state):
         return {
-            "planning_s": 8000,
+            "planning_s": 20000,
             "stages": {repo: 0 for repo in state["repositories"]},
             "integration_s": None,
-            "wall_s": 8000,
+            "wall_s": 20000,
             "activity": {},
         }
 

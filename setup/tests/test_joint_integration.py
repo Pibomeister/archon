@@ -335,6 +335,7 @@ class JointIntegrationRunnerTest(unittest.TestCase):
             self.assertNotEqual(0, r.returncode)
             self.assertIn("class=infrastructure", r.stdout)
             self.assertIn("api-boot exited before ready", r.stdout)
+            self.assertIn("RECOVERY=docker start postgres-db dynamodb-local && bash .archon/setup/resume.sh", r.stdout)
 
     def test_joint_live_non_200_with_stack_up_is_product(self):
         script = (Path(__file__).resolve().parents[1] / "joint-api-mcp-e2e.sh").read_text(encoding="utf-8")

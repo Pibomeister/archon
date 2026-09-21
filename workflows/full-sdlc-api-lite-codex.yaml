@@ -1565,7 +1565,7 @@ nodes:
       if ! kill -0 "$SRV" 2>/dev/null; then
         if stack_down; then
           echo "SMOKE=FAIL api-boot exited before ready class=infrastructure reason=stack-down (boot log in artifacts)"
-          echo "RECOVERY=docker start postgres-db dynamodb-local, then bash .archon/setup/resume.sh $RUN_ID"
+          echo "RECOVERY=docker start postgres-db dynamodb-local && bash .archon/setup/resume.sh $RUN_ID"
         else
           echo "SMOKE=FAIL api-boot exited before ready (boot log in artifacts)"
         fi
@@ -1577,7 +1577,7 @@ nodes:
     if [ "$CODE" != "200" ]; then
       if stack_down; then
         echo "SMOKE=FAIL api-docs-json code=$CODE class=infrastructure reason=stack-down (boot log in artifacts)"
-        echo "RECOVERY=docker start postgres-db dynamodb-local, then bash .archon/setup/resume.sh $RUN_ID"
+        echo "RECOVERY=docker start postgres-db dynamodb-local && bash .archon/setup/resume.sh $RUN_ID"
         exit 1
       fi
       echo "SMOKE=FAIL api-docs-json code=$CODE (boot log in artifacts)"

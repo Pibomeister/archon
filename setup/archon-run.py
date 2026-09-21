@@ -2739,7 +2739,8 @@ def feature_advance_command(args: argparse.Namespace) -> None:
         "repo": (current or {}).get("repo"),
     }
     if result["status"] != "completed":
-        repository_feature_call("advance_unguarded", args, row, result)
+        if (current or {}).get("phase") == "implement":
+            repository_feature_call("advance_unguarded", args, row, result)
         fail(f"FEATURE_CHAIN={result['status'].upper()} run={row['id'][:8]}")
     advanced = repository_feature_call("advance_unguarded", args, row, result)
     if isinstance(advanced, dict) and advanced.get("receipt_path"):

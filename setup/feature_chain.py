@@ -2429,7 +2429,7 @@ def validate_scope_add_file(state: dict, repo: str, add_file: str) -> str:
     cursor = worktree
     for part in raw.parts:
         cursor = cursor / part
-        if cursor.exists() and cursor.is_symlink():
+        if cursor.is_symlink():
             raise FeatureChainError("scope amendment file must be an existing non-symlink file")
     candidate = worktree / raw
     if not candidate.is_file():
@@ -2439,9 +2439,14 @@ def validate_scope_add_file(state: dict, repo: str, add_file: str) -> str:
         artifacts = Path(str(artifacts_raw))
         if not artifacts.is_dir():
             raise FeatureChainError(f"scope amendment file is unavailable: {add_file}")
-        stray = artifacts / "strays" / normalized
+        strays_dir = artifacts / "strays"
+        if strays_dir.is_symlink():
+            raise FeatureChainError("scope amendment strays directory must not be a symlink")
+        stray = strays_dir / normalized
         if stray.is_symlink():
             raise FeatureChainError("scope amendment file must be an existing non-symlink file")
+        if hasattr(os, "getuid") and stray.exists() and stray.stat().st_uid != os.getuid():
+            raise FeatureChainError("scope amendment file is not owned by the current operator")
         try:
             stray_resolved = stray.resolve(strict=True)
             strays_root = (artifacts / "strays").resolve(strict=True)
@@ -4150,9 +4155,14 @@ def active_seconds(timing: dict) -> int | None:
     return sum(known) if known else None
 
 
-def active_budget_seconds() -> int:
+def active_budget_seconds(state: dict | None = None) -> int:
     raw = os.environ.get("ARCHON_CHAIN_BUDGET_S", "")
-    return int(raw) if raw.strip().isdigit() and int(raw) > 0 else CHAIN_ACTIVE_BUDGET_SECONDS
+    if raw.strip().isdigit() and int(raw) > 0:
+        return int(raw)
+    minutes = (state or {}).get("budget", {}).get("wall_minutes") if state else None
+    if type(minutes) is int and minutes > 0:
+        return minutes * 60
+    return CHAIN_ACTIVE_BUDGET_SECONDS
 
 
 def chain_timing(state: dict, db: Path) -> dict:
@@ -4205,13 +4215,23 @@ def print_budget_recovery(state: dict) -> None:
     chain = state.get("logical_chain_id") or "<chain-id>"
     budget = state.get("budget") or {}
     tokens = budget.get("max_total_tokens") or DEFAULT_MAX_TOTAL_TOKENS
-    minutes = budget.get("wall_minutes") or DEFAULT_WALL_MINUTES
+    minutes = int(budget.get("wall_minutes") or DEFAULT_WALL_MINUTES)
+    raised = minutes + 240
     auth = "--token <operator-token>" if state.get("provider") == "codex" else f"--chain {chain}"
     print(
         "RECOVERY=python3 .archon/setup/archon-run.py feature-budget-update "
-        f"{run_id} {auth} --total-tokens {tokens} --total-active-minutes {minutes} "
+        f"{run_id} {auth} --total-tokens {tokens} --total-active-minutes {raised} "
         "--reason \"authorized budget raise (raise at least one ceiling)\""
     )
+
+
+def print_timing_unavailable_recovery(state: dict) -> None:
+    run_id = (
+        ((state.get("current_run") or {}).get("run_id"))
+        or ((state.get("dispatch_reservation") or {}).get("source_run_id"))
+        or "<run-id>"
+    )
+    print(f"RECOVERY=bash .archon/setup/resume.sh {run_id}")
 
 
 def require_active_budget(state: dict, timing: dict | None) -> None:
@@ -4223,9 +4243,9 @@ def require_active_budget(state: dict, timing: dict | None) -> None:
     if state.get("status") == "locally_verified":
         return
     if not timing:
-        print_budget_recovery(state)
+        print_timing_unavailable_recovery(state)
         raise FeatureChainError("CHAIN_BUDGET=UNAVAILABLE timing missing")
-    active, cap = active_seconds(timing), active_budget_seconds()
+    active, cap = active_seconds(timing), active_budget_seconds(state)
     if isinstance(active, int) and active > cap:
         print_budget_recovery(state)
         raise FeatureChainError(f"CHAIN_BUDGET=EXCEEDED active={active} cap={cap}")
@@ -4253,7 +4273,7 @@ def record_chain_timing(args: Any, state: dict) -> dict | None:
         f"rounds={totals['rounds']} review_duplicates={totals['review_duplicates']} "
         f"fixers={totals['fixer_invocations']} fixer_duplicates={totals['fixer_duplicates']}"
     )
-    active, cap = active_seconds(timing), active_budget_seconds()
+    active, cap = active_seconds(timing), active_budget_seconds(state)
     if isinstance(active, int):
         print(f"CHAIN_ACTIVE active={active} cap={cap} wall={timing_field(timing['wall_s'])}")
         if active > cap:

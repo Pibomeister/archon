@@ -599,6 +599,8 @@ class Acceptance(unittest.TestCase):
         body = node_bash("smoke")
         self.assertNotIn("resume.sh $run-id", body)
         self.assertIn("resume.sh $RUN_ID", body)
+        self.assertIn("docker start postgres-db dynamodb-local && bash .archon/setup/resume.sh $RUN_ID", body)
+        self.assertNotIn(", then bash", body)
         self.assertIn("grep -qx postgres-db", body)
         self.assertIn("grep -qx dynamodb-local", body)
 

@@ -109,6 +109,7 @@ requires. If you still see `GATE_5` / `envelope_input=[]` on a run dispatched
 | `JOINT_E2E=FAIL class=infrastructure api candidate env` | missing/stale env | Root clone `.env` must exist; do not copy a stage-worktree `.env` by hand |
 | `JOINT_E2E=FAIL class=infrastructure second-identity-unsubscribed code=401` | fixture | Insert an active `billing_subscriptions` row for the second OTP identity, mirroring the first |
 | `JOINT_E2E=FAIL class=infrastructure api-boot exited before ready` | stack down | Same as smoke stack-down |
+| `JOINT_E2E=FAIL api-boot exited before ready` (no `class=`) | process died with the stack up | Read the boot log; this is the feature |
 | `JOINT_E2E=FAIL api boot code=<n>` (no `class=`) | live process, non-200 | Product / unknown; do not treat as stack-down |
 
 Do not stop shared local containers from a node-scoped cleanup. Joint e2e

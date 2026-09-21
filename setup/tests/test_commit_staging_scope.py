@@ -416,6 +416,36 @@ class StrayTriage(unittest.TestCase):
         self.assertNotIn("COMMIT_SCOPE=", r.stdout)
         self.assertEqual(self.staged(), [])
 
+    def test_scan_mode_allowlist_drift_is_scope_guard(self):
+        self.allow.write_text(json.dumps(self.allow_paths + ["lib/sneak.ts"]))
+        r = self.scan(feature_scope="repositories")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("ALLOWLIST_DRIFT=FAIL", r.stdout)
+        self.assertIn("SCOPE_GUARD=FAIL", r.stdout)
+        self.assertNotIn("COMMIT_SCOPE=", r.stdout)
+        self.assertIn("RECOVERY=", r.stdout)
+        self.assertEqual(self.staged(), [])
+
+    def test_scan_mode_stray_prints_amend_recovery(self):
+        (self.wt / "lib/new-module.ts").write_text("export const n = 1;\n")
+        r = self.scan(feature_scope="repositories")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("SCOPE_BREACH", r.stdout)
+        self.assertIn("RECOVERY=", r.stdout)
+        self.assertIn("feature-scope-amend", r.stdout)
+        self.assertIn("--add-file lib/new-module.ts", r.stdout)
+
+    def test_two_leftover_strays_each_print_recovery(self):
+        for rel in ("lib/new-module.ts", "lib/other-module.ts"):
+            path = self.art / "strays" / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("export const n = 1;\n")
+        r = self.stage(feature_scope="repositories")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("--add-file lib/new-module.ts", r.stdout)
+        self.assertIn("--add-file lib/other-module.ts", r.stdout)
+        self.assertEqual(r.stdout.count("RECOVERY="), 2)
+
     def test_repository_list_sibling_recovery_amends_without_restore(self):
         sibling = self.wt / "lib/commit-import.util.ts"
         sibling.write_text("export const c = 3;\n")

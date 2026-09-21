@@ -153,6 +153,19 @@ class QualificationTextContract(unittest.TestCase):
         self.assertIn("`web` aliases `web-app`", self.recovery_text)
         self.assertIn("--base", self.recovery_text)
 
+    def test_dead_process_is_not_called_infrastructure(self):
+        self.assertIn("reason=stack-down", self.skill_text)
+        self.assertIn("reason=stack-down", self.runbook_text)
+        self.assertNotIn(
+            "A dead api process or a stopped",
+            self.skill_text,
+        )
+        self.assertNotIn(
+            "a dead api process prints `api-boot exited before ready class=infrastructure`",
+            self.runbook_text,
+        )
+        self.assertIn("no `class=`", self.recovery_text)
+
 
 if __name__ == "__main__":
     unittest.main()

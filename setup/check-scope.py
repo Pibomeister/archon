@@ -168,6 +168,8 @@ def remaining_strays(quarantine_dir):
     for dirpath, _dirnames, filenames in os.walk(root):
         for name in filenames:
             full = os.path.join(dirpath, name)
+            if os.path.islink(full):
+                continue
             found.append(os.path.relpath(full, root))
     return sorted(found)
 
@@ -213,7 +215,8 @@ if repository_list_scope():
         sys.exit(1)
     if set(allowed) != set(signed):
         print("ALLOWLIST_DRIFT=FAIL files-allowlist.json does not match the signed joint-plan allowlist")
-        print("COMMIT_SCOPE=FAIL nothing staged (feature-scope-amend is the allowlist writer)")
+        tag = "COMMIT_SCOPE" if stage else "SCOPE_GUARD"
+        print(f"{tag}=FAIL nothing staged (feature-scope-amend is the allowlist writer)")
         extra = sorted(set(allowed) - set(signed))
         print_amend_recovery(extra[0] if extra else (signed[0] if signed else "path"))
         sys.exit(1)
@@ -291,16 +294,22 @@ if breaches:
         tag = f"SCOPE_BREACH round={round_no}" if round_no else "SCOPE_BREACH"
         for p in breaches:
             print(f"{tag} file={p}{why(p)}")
+        print_amend_recovery(breaches[0])
     sys.exit(1)
 
 if stage:
+    strays_root = os.path.join(quarantine, "strays") if quarantine else None
+    if strays_root and os.path.islink(strays_root):
+        print("COMMIT_SCOPE=FAIL artifacts/strays is a symlink")
+        sys.exit(1)
     leftover = remaining_strays(quarantine) if quarantine else []
     if leftover:
         print("COMMIT_SCOPE=FAIL remaining quarantined files: " + ",".join(leftover))
         print("COMMIT_SCOPE=FAIL nothing staged (feature-scope-amend --add-file "
               "the stray, or delete it, then resume)")
-        print_amend_recovery(
-            leftover[0], dest=os.path.join(quarantine, "strays", leftover[0]))
+        for b in leftover:
+            print_amend_recovery(
+                b, dest=os.path.join(quarantine, "strays", b))
         sys.exit(1)
     # Only allowlisted paths, one at a time: `git add -- <path>` stages a
     # deletion as readily as an edit, and a path the round never touched is a

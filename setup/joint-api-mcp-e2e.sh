@@ -79,7 +79,7 @@ for _ in $(seq 1 90); do
   if ! kill -0 "$SRV" 2>/dev/null; then
     if stack_down; then
       echo "JOINT_E2E=FAIL class=infrastructure api-boot exited before ready (see $OUT/api-boot.log)"
-      echo "RECOVERY=docker start postgres-db dynamodb-local and re-run joint integration"
+      echo "RECOVERY=docker start postgres-db dynamodb-local && bash .archon/setup/resume.sh $(basename "$PWD")"
     else
       echo "JOINT_E2E=FAIL api-boot exited before ready (see $OUT/api-boot.log)"
     fi
@@ -92,7 +92,7 @@ done
 if [ "$CODE" != "200" ]; then
   if stack_down; then
     echo "JOINT_E2E=FAIL class=infrastructure api boot code=$CODE (see $OUT/api-boot.log)"
-    echo "RECOVERY=docker start postgres-db dynamodb-local and re-run joint integration"
+    echo "RECOVERY=docker start postgres-db dynamodb-local && bash .archon/setup/resume.sh $(basename "$PWD")"
   else
     echo "JOINT_E2E=FAIL api boot code=$CODE (see $OUT/api-boot.log)"
   fi

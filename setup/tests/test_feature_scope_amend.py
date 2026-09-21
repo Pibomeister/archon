@@ -355,6 +355,20 @@ class FeatureScopeAmend(unittest.TestCase):
         self.assertFalse((wt / rel).exists(), "must not move a symlink into the worktree")
         self.assertTrue(stray.is_symlink())
 
+    def test_strays_directory_symlink_is_refused_before_restore(self):
+        outside = self.root / "outside-strays"
+        outside.mkdir()
+        rel = "src/created-module.ts"
+        (outside / "src").mkdir()
+        (outside / rel).write_text("export const stolen = 1;\n", encoding="utf-8")
+        strays = self.artifacts / "strays"
+        strays.symlink_to(outside)
+        self.args.add_file = rel
+        with self.assertRaisesRegex(fc.FeatureChainError, "strays directory must not be a symlink"):
+            fc.scope_amend_command(self.host, self.args, self.row)
+        self.assertFalse((Path(self.state()["worktrees"]["api"]["worktree"]) / rel).exists())
+        self.assertTrue((outside / rel).is_file())
+
     def test_missing_artifacts_dir_refuses_a_stray_restore(self):
         state = self.state()
         state["current_run"] = dict(state["current_run"], artifacts_dir="")

@@ -821,10 +821,10 @@ Full list in RUNBOOK §6. The ones that most often look like a code bug:
   time. Do not "fix" one to a relative path.
 - On Linux: the packet opener is `xdg-open`; `/usr/bin/open` there is util-linux's
   `openvt(1)`, a different program. The gate prints the `file://` path regardless.
-- **`SMOKE=FAIL … code=000` without `class=infrastructure` is the old shrug.**
-  A dead api process or a stopped `postgres-db`/`dynamodb-local` now prints
-  `class=infrastructure`. Do not treat that as the feature, and do not stop
-  those containers from a node-scoped cleanup (RUNBOOK §6).
+- **`SMOKE=FAIL … class=infrastructure reason=stack-down` is docker, not the feature.**
+  A dead api process with both `postgres-db` and `dynamodb-local` up prints
+  `SMOKE=FAIL api-boot exited before ready` with no `class=` — that is the
+  feature. Do not stop those containers from a node-scoped cleanup (RUNBOOK §6).
 - **Joint e2e 401 on the second OTP identity is a missing subscription row**,
   not product auth. Stale `api/.worktrees/*/.env` after a key rotation is the
   same class: `candidate_env.py` prefers the git clone. See
