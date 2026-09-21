@@ -102,12 +102,14 @@ requires. If you still see `GATE_5` / `envelope_input=[]` on a run dispatched
 
 | Typed line | Class | Recovery |
 |---|---|---|
-| `SMOKE=FAIL api-boot exited before ready class=infrastructure` | process died | Restart local `postgres-db` / `dynamodb-local`, `resume.sh` |
-| `SMOKE=FAIL api-docs-json code=<n> class=infrastructure reason=stack-down` | docker stack down | `docker start postgres-db dynamodb-local`, `resume.sh` |
+| `SMOKE=FAIL api-boot exited before ready class=infrastructure reason=stack-down` | docker stack down (either `postgres-db` or `dynamodb-local` missing) | `docker start postgres-db dynamodb-local`, `resume.sh <run-id>` |
+| `SMOKE=FAIL api-boot exited before ready` (no `class=`) | process died with the stack up | Read the boot log; this is the feature |
+| `SMOKE=FAIL api-docs-json code=<n> class=infrastructure reason=stack-down` | docker stack down | `docker start postgres-db dynamodb-local`, `resume.sh <run-id>` |
 | `SMOKE=FAIL api-docs-json code=<n>` (no `class=`) | product / unknown | Read the boot log; this is the feature unless the log says otherwise |
 | `JOINT_E2E=FAIL class=infrastructure api candidate env` | missing/stale env | Root clone `.env` must exist; do not copy a stage-worktree `.env` by hand |
 | `JOINT_E2E=FAIL class=infrastructure second-identity-unsubscribed code=401` | fixture | Insert an active `billing_subscriptions` row for the second OTP identity, mirroring the first |
-| `JOINT_E2E=FAIL class=infrastructure api-boot exited before ready` | process / stack | Same as smoke stack-down |
+| `JOINT_E2E=FAIL class=infrastructure api-boot exited before ready` | stack down | Same as smoke stack-down |
+| `JOINT_E2E=FAIL api boot code=<n>` (no `class=`) | live process, non-200 | Product / unknown; do not treat as stack-down |
 
 Do not stop shared local containers from a node-scoped cleanup. Joint e2e
 resolves `.env` through `candidate_env.py`: the git clone wins over a stale
@@ -123,10 +125,11 @@ still only reports.
 ```bash
 # Codex
 python3 .archon/setup/archon-run.py feature-budget-update <run-id> \
-  --token <operator-token> --total-tokens <authorized> --reason "…"
+  --token <operator-token> --total-tokens <authorized-higher> \
+  --total-active-minutes <authorized-higher> --reason "…"
 
-# Claude: same command with --chain <id> (no token). Active minutes are not
-# replenished; the total includes prior usage.
+# Claude: same command with --chain <id> (no token). At least one ceiling must
+# increase. Active minutes are not replenished; the total includes prior usage.
 ```
 
 ## Stacked and scalar scopes
@@ -148,8 +151,9 @@ python3 .archon/setup/archon-run.py feature --provider claude \
   --scope web-app /abs/spec.md
 ```
 
-`--base` may be repeated per selected repo. Unknown repo, non-commit, or a sha
-not present locally is a typed refuse. Approval binds the pinned baselines.
+`--base` may be repeated per selected repo. `web` aliases `web-app`. Unknown
+repo, non-commit, or a sha not present locally is a typed refuse. Approval
+binds the pinned baselines.
 
 ## Exit criteria
 

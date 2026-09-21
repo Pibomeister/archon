@@ -141,6 +141,53 @@ class FeatureScope(unittest.TestCase):
         self.assertEqual(args.action, "feature-advance")
         self.assertEqual(args.chain, "c" * 32)
 
+    def test_feature_advance_command_calls_advance_on_terminal_failure(self):
+        calls = []
+        row = {"id": "a" * 32, "workflow_name": "full-sdlc-api", "output_root": "/tmp"}
+        state = {
+            "provider": "claude",
+            "status": "running",
+            "current_run": {"run_id": "a" * 32, "phase": "implement", "repo": "api"},
+        }
+
+        class Controller:
+            FeatureChainError = Exception
+
+            def read_state(self, control_dir, chain):
+                return state
+
+        def fake_call(method, *args):
+            calls.append((method, args[-1] if args else None))
+            return {"state": state}
+
+        args = ar.parser().parse_args(["feature-advance", "--chain", "c" * 32])
+        args.control_dir = Path("/tmp")
+        args.db = Path("/tmp/db")
+        printed = []
+        with mock.patch.object(ar, "validate_control_location"), \
+             mock.patch.object(ar, "feature_repository_controller", return_value=Controller()), \
+             mock.patch.object(ar, "run_row_by_id", return_value=row), \
+             mock.patch.object(ar, "supervise_exact_run", return_value={"state": "terminal", "status": "failed"}), \
+             mock.patch.object(ar, "artifact_dir", return_value=Path("/tmp")), \
+             mock.patch.object(ar, "repository_feature_call", side_effect=fake_call), \
+             mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(str(x) for x in a))):
+            with self.assertRaises(SystemExit):
+                ar.feature_advance_command(args)
+        self.assertEqual(calls[0][0], "advance_unguarded")
+        result = calls[0][1]
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["feature_chain"]["logical_chain_id"], "c" * 32)
+        self.assertEqual(result["feature_chain"]["repo"], "api")
+        self.assertIn("FEATURE_CHAIN=FAILED", "\n".join(printed))
+
+    def test_feature_reopen_help_covers_first_failure_implement(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), self.assertRaises(SystemExit):
+            ar.parser().parse_args(["feature-reopen", "-h"])
+        help_text = buf.getvalue()
+        self.assertIn("failed implement stage", help_text)
+        self.assertIn("first-failure", help_text)
+
     def test_parser_accepts_feature_reopen(self):
         args = ar.parser().parse_args(["feature-reopen", "--chain", "c" * 32, "--repo", "api", "--reason", "why"])
         self.assertEqual((args.action, args.repo, args.reason), ("feature-reopen", "api", "why"))

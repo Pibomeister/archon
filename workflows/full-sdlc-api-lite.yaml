@@ -1518,25 +1518,38 @@ nodes:
     SRV=$!
     # bun start spawns children that outlive the parent: sweep the PORT on exit, not just $SRV.
     trap 'kill "$SRV" 2>/dev/null; sleep 1; P=$(port_pids "$APIPORT"); test -n "$P" && kill $P 2>/dev/null; true' EXIT
-    # Boot liveness: a dead process must fail as infrastructure, not as
-    # `api-docs-json code=000` (chain 42b42a13: another agent had stopped
-    # postgres-db/dynamodb-local). /api-docs-json 200 also proves swagger
-    # builds with the new DTOs.
+    # Boot liveness: a down docker stack is infrastructure; a dead process
+    # with the stack up is the feature (chain 42b42a13 was stack-down, not a
+    # product crash). Both postgres-db and dynamodb-local must be running.
+    RUN_ID=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('run_id') or '')" "$ARTIFACTS_DIR/params.json" 2>/dev/null || true)
+    [ -n "$RUN_ID" ] || RUN_ID=$(basename "$ARTIFACTS_DIR")
+    stack_down() {
+      command -v docker >/dev/null 2>&1 || return 1
+      local names
+      names=$(docker ps --format '{{.Names}}' 2>/dev/null || true)
+      echo "$names" | grep -qx postgres-db || return 0
+      echo "$names" | grep -qx dynamodb-local || return 0
+      return 1
+    }
     CODE=000
     for i in $(seq 1 60); do
       sleep 3
       if ! kill -0 "$SRV" 2>/dev/null; then
-        echo "SMOKE=FAIL api-boot exited before ready class=infrastructure (boot log in artifacts)"
-        echo "RECOVERY=restart the local postgres-db/dynamodb-local stack, then bash .archon/setup/resume.sh \$run-id"
+        if stack_down; then
+          echo "SMOKE=FAIL api-boot exited before ready class=infrastructure reason=stack-down (boot log in artifacts)"
+          echo "RECOVERY=docker start postgres-db dynamodb-local, then bash .archon/setup/resume.sh $RUN_ID"
+        else
+          echo "SMOKE=FAIL api-boot exited before ready (boot log in artifacts)"
+        fi
         exit 1
       fi
       CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$APIPORT/api-docs-json" || echo 000)
       test "$CODE" = "200" && break
     done
     if [ "$CODE" != "200" ]; then
-      if command -v docker >/dev/null 2>&1 && ! docker ps --format '{{.Names}}' 2>/dev/null | grep -Eq 'postgres-db|dynamodb-local'; then
+      if stack_down; then
         echo "SMOKE=FAIL api-docs-json code=$CODE class=infrastructure reason=stack-down (boot log in artifacts)"
-        echo "RECOVERY=docker start postgres-db dynamodb-local, then bash .archon/setup/resume.sh \$run-id"
+        echo "RECOVERY=docker start postgres-db dynamodb-local, then bash .archon/setup/resume.sh $RUN_ID"
         exit 1
       fi
       echo "SMOKE=FAIL api-docs-json code=$CODE (boot log in artifacts)"

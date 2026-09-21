@@ -262,6 +262,9 @@ class StrayTriage(unittest.TestCase):
         self.assertIn("COMMIT_SCOPE=QUARANTINED file=lib/__tests__/zzz-timing-check.spec.ts", r.stdout)
         self.assertIn("COMMIT_SCOPE=FAIL", r.stdout)
         self.assertIn("RECOVERY=", r.stdout)
+        self.assertIn("mv ", r.stdout)
+        self.assertIn("feature-scope-amend", r.stdout)
+        self.assertIn("--add-file lib/__tests__/zzz-timing-check.spec.ts", r.stdout)
         self.assertNotIn("COMMIT_SCOPE=OK", r.stdout)
         self.assertFalse(probe.exists(), "the stray must leave the worktree")
         kept = self.art / "strays/lib/__tests__/zzz-timing-check.spec.ts"
@@ -280,6 +283,9 @@ class StrayTriage(unittest.TestCase):
         self.assertIn("COMMIT_SCOPE=QUARANTINED file=lib/new-module.ts", r.stdout)
         self.assertIn("COMMIT_SCOPE=FAIL", r.stdout)
         self.assertIn("RECOVERY=", r.stdout)
+        self.assertIn("mv ", r.stdout)
+        self.assertIn("feature-scope-amend", r.stdout)
+        self.assertIn("--add-file lib/new-module.ts", r.stdout)
         self.assertNotIn("COMMIT_SCOPE=OK", r.stdout)
         self.assertFalse(created.exists())
         self.assertTrue((self.art / "strays/lib/new-module.ts").exists())
@@ -329,6 +335,96 @@ class StrayTriage(unittest.TestCase):
             capture_output=True, encoding="utf-8")
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("COMMIT_SCOPE=STRAY file=lib/commit-import.util.ts", r.stdout)
+
+    def scan(self, feature_scope=None):
+        env = os.environ.copy()
+        if feature_scope is not None:
+            env["ARCHON_FEATURE_SCOPE"] = feature_scope
+        return subprocess.run(
+            ["python3", str(SCRIPT), str(self.allow), str(self.wt), "HEAD",
+             "--quarantine", str(self.art)],
+            capture_output=True, encoding="utf-8", env=env)
+
+    def test_leftover_strays_refuse_commit_scope_ok(self):
+        leftover = self.art / "strays/lib/new-module.ts"
+        leftover.parent.mkdir(parents=True)
+        leftover.write_text("export const n = 1;\n")
+        r = self.stage(feature_scope="repositories")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("COMMIT_SCOPE=FAIL remaining quarantined files: lib/new-module.ts", r.stdout)
+        self.assertNotIn("COMMIT_SCOPE=OK", r.stdout)
+        self.assertEqual(self.staged(), [])
+        self.assertIn("feature-scope-amend", r.stdout)
+        self.assertIn("mv ", r.stdout)
+        self.assertIn("--add-file lib/new-module.ts", r.stdout)
+
+    def test_codex_quarantine_recovery_uses_token_not_chain(self):
+        (self.art / "params.json").write_text(json.dumps({
+            "repo": "api",
+            "feature_provider": "codex",
+            "run_id": "a" * 32,
+            "logical_chain_id": "c" * 32,
+        }))
+        (self.wt / "lib/new-module.ts").write_text("export const n = 1;\n")
+        r = self.stage(feature_scope="repositories")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("COMMIT_SCOPE=QUARANTINED file=lib/new-module.ts", r.stdout)
+        self.assertIn("mv ", r.stdout)
+        self.assertIn("feature-scope-amend", r.stdout)
+        self.assertIn("--add-file lib/new-module.ts", r.stdout)
+        self.assertIn("--token <operator-token>", r.stdout)
+        self.assertNotIn("--chain", r.stdout)
+        self.assertIn("a" * 32, r.stdout)
+
+    def test_claude_quarantine_recovery_uses_chain(self):
+        (self.art / "params.json").write_text(json.dumps({
+            "repo": "api",
+            "feature_provider": "claude",
+            "run_id": "a" * 32,
+            "logical_chain_id": "c" * 32,
+        }))
+        (self.wt / "lib/new-module.ts").write_text("export const n = 1;\n")
+        r = self.stage(feature_scope="repositories")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("--chain", r.stdout)
+        self.assertIn("c" * 32, r.stdout)
+        self.assertNotIn("--token", r.stdout)
+        self.assertIn("mv ", r.stdout)
+        self.assertIn("--add-file lib/new-module.ts", r.stdout)
+
+    def test_scan_mode_on_repository_list_does_not_git_add(self):
+        r = self.scan(feature_scope="repositories")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("SCOPE_OK", r.stdout)
+        self.assertNotIn("COMMIT_SCOPE=OK", r.stdout)
+        self.assertEqual(self.staged(), [])
+
+    def test_scan_mode_stray_is_scope_breach_not_commit_scope(self):
+        (self.wt / "lib/new-module.ts").write_text("export const n = 1;\n")
+        r = self.scan(feature_scope="repositories")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("SCOPE_BREACH", r.stdout)
+        self.assertNotIn("COMMIT_SCOPE=", r.stdout)
+        self.assertEqual(self.staged(), [])
+        self.assertTrue((self.wt / "lib/new-module.ts").exists())
+
+    def test_scan_mode_unreadable_joint_plan_is_scope_guard(self):
+        (self.art / "joint-plan.json").write_text("{not-json")
+        r = self.scan(feature_scope="repositories")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("SCOPE_GUARD=FAIL unreadable joint-plan.json", r.stdout)
+        self.assertNotIn("COMMIT_SCOPE=", r.stdout)
+        self.assertEqual(self.staged(), [])
+
+    def test_repository_list_sibling_recovery_amends_without_restore(self):
+        sibling = self.wt / "lib/commit-import.util.ts"
+        sibling.write_text("export const c = 3;\n")
+        r = self.stage(feature_scope="repositories")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("feature-scope-amend", r.stdout)
+        self.assertIn("--add-file lib/commit-import.util.ts", r.stdout)
+        self.assertNotIn("mv ", r.stdout)
+        self.assertTrue(sibling.exists())
 
 
 if __name__ == "__main__":

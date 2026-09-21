@@ -66,18 +66,38 @@ PY
 )
 trap 'kill -- -"$SRV" 2>/dev/null; sleep 1; P=$(port_pids "$PORT"); test -n "$P" && kill $P 2>/dev/null; true' EXIT
 
+stack_down() {
+  command -v docker >/dev/null 2>&1 || return 1
+  local names
+  names=$(docker ps --format '{{.Names}}' 2>/dev/null || true)
+  echo "$names" | grep -qx postgres-db || return 0
+  echo "$names" | grep -qx dynamodb-local || return 0
+  return 1
+}
 CODE=000
 for _ in $(seq 1 90); do
   if ! kill -0 "$SRV" 2>/dev/null; then
-    echo "JOINT_E2E=FAIL class=infrastructure api-boot exited before ready (see $OUT/api-boot.log)"
-    echo "RECOVERY=restart the local postgres-db/dynamodb-local stack and re-run joint integration"
+    if stack_down; then
+      echo "JOINT_E2E=FAIL class=infrastructure api-boot exited before ready (see $OUT/api-boot.log)"
+      echo "RECOVERY=docker start postgres-db dynamodb-local and re-run joint integration"
+    else
+      echo "JOINT_E2E=FAIL api-boot exited before ready (see $OUT/api-boot.log)"
+    fi
     exit 1
   fi
   CODE=$(curl -s -o /dev/null -w '%{http_code}' "$URL/api-docs-json" || echo 000)
   test "$CODE" = "200" && break
   sleep 2
 done
-test "$CODE" = "200" || { echo "JOINT_E2E=FAIL class=infrastructure api boot code=$CODE (see $OUT/api-boot.log)"; exit 1; }
+if [ "$CODE" != "200" ]; then
+  if stack_down; then
+    echo "JOINT_E2E=FAIL class=infrastructure api boot code=$CODE (see $OUT/api-boot.log)"
+    echo "RECOVERY=docker start postgres-db dynamodb-local and re-run joint integration"
+  else
+    echo "JOINT_E2E=FAIL api boot code=$CODE (see $OUT/api-boot.log)"
+  fi
+  exit 1
+fi
 
 json_field() {
   python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2]) or '')" "$1" "$2" 2>/dev/null || true
@@ -120,7 +140,7 @@ TOKEN_SECOND=$(mint_token "$OTP_EMAIL_SECOND" otp-second) \
 
 # Missing billing_subscriptions for the second identity surfaces as 401, which
 # looks like a product auth bug (C2, user 537). Probe before jest.
-SECOND_PROBE=$(curl -s -o /dev/null -w '%{http_code}' \
+SECOND_PROBE=$(curl -s --max-time 10 -o /dev/null -w '%{http_code}' \
   -H "Authorization: Bearer $TOKEN_SECOND" "$URL/connection/search?search=probe" || echo 000)
 if [ "$SECOND_PROBE" = "401" ]; then
   echo "JOINT_E2E=FAIL class=infrastructure second-identity-unsubscribed code=401"

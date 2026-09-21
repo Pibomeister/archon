@@ -281,6 +281,9 @@ class FeatureLauncherIntegrationTest(unittest.TestCase):
         self.assertEqual("web-app", params["repo"])
         self.assertIn("web_port", params)
         self.assertIn("api_port", params)
+        expanded = self.eval_params(params_path)
+        self.assertEqual(str(params["web_port"]), expanded["WEBPORT"])
+        self.assertEqual(str(params["api_port"]), expanded["APIPORT"])
 
     def test_base_pins_the_worktree_to_a_local_parent_commit(self):
         mcp = self.root / "goodword-mcp"
@@ -302,6 +305,19 @@ class FeatureLauncherIntegrationTest(unittest.TestCase):
         args = Namespace(**dict(vars(self.args), base=["goodword-mcp=" + "a" * 40]))
         with self.assertRaisesRegex(fc.FeatureChainError, "not a local commit"):
             fc.make_initial_state(self.host, args, ["goodword-mcp"])
+
+    def test_base_web_alias_pins_web_app(self):
+        self.init_repo("web-app")
+        parent = git(self.root / "web-app", "rev-parse", "HEAD")
+        (self.root / "web-app" / "later.txt").write_text("later\n", encoding="utf-8")
+        git(self.root / "web-app", "add", "later.txt")
+        git(self.root / "web-app", "commit", "-qm", "later")
+        args = Namespace(**dict(vars(self.args), base=[f"web={parent}"]))
+        state = fc.make_initial_state(self.host, args, ["web-app"])
+        worktree = Path(state["worktrees"]["web-app"]["worktree"])
+        self.assertEqual(parent, state["baselines"]["commits"]["web-app"])
+        self.assertEqual(parent, git(worktree, "rev-parse", "HEAD"))
+        self.assertFalse((worktree / "later.txt").exists())
 
 
 if __name__ == "__main__":

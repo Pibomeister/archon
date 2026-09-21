@@ -341,6 +341,41 @@ class FeatureScopeAmend(unittest.TestCase):
         self.assertFalse(stray.exists())
         self.assertIn(rel, self.state()["stages"]["api"]["plan"]["files_allowlist"])
 
+    def test_strays_symlink_is_refused_before_restore(self):
+        wt = Path(self.state()["worktrees"]["api"]["worktree"])
+        rel = "src/created-module.ts"
+        stray = self.artifacts / "strays" / rel
+        stray.parent.mkdir(parents=True)
+        target = self.root / "outside.ts"
+        target.write_text("export const stolen = 1;\n", encoding="utf-8")
+        stray.symlink_to(target)
+        self.args.add_file = rel
+        with self.assertRaisesRegex(fc.FeatureChainError, "non-symlink"):
+            fc.scope_amend_command(self.host, self.args, self.row)
+        self.assertFalse((wt / rel).exists(), "must not move a symlink into the worktree")
+        self.assertTrue(stray.is_symlink())
+
+    def test_missing_artifacts_dir_refuses_a_stray_restore(self):
+        state = self.state()
+        state["current_run"] = dict(state["current_run"], artifacts_dir="")
+        fc.write_state(self.control, state)
+        self.args.add_file = "src/missing.ts"
+        with self.assertRaisesRegex(fc.FeatureChainError, "unavailable"):
+            fc.scope_amend_command(self.host, self.args, self.row)
+        self.assertFalse((Path(self.state()["worktrees"]["api"]["worktree"]) / "src/missing.ts").exists())
+
+    def test_worktree_symlink_parent_is_refused_before_restore(self):
+        wt = Path(self.state()["worktrees"]["api"]["worktree"])
+        outside = self.root / "outside-src"
+        outside.mkdir()
+        (outside / "created-module.ts").write_text("export const x = 1;\n", encoding="utf-8")
+        linked = wt / "linked-src"
+        linked.symlink_to(outside)
+        rel = "linked-src/created-module.ts"
+        self.args.add_file = rel
+        with self.assertRaisesRegex(fc.FeatureChainError, "non-symlink"):
+            fc.scope_amend_command(self.host, self.args, self.row)
+
     def test_incomplete_scope_amendment_blocks_dispatch(self):
         state = self.state()
         state["scope_amendment"] = {"status": "in_progress", "amendment_id": "x"}

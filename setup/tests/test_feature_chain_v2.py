@@ -914,9 +914,136 @@ class FeatureChainV2(unittest.TestCase):
 
     def test_active_over_cap_stops_before_locally_verified_and_not_after(self):
         timing = {"planning_s": 8000, "stages": {"api": 0}, "integration_s": None, "wall_s": 8000}
-        with self.assertRaisesRegex(fc.FeatureChainError, "CHAIN_BUDGET=EXCEEDED active=8000 cap=7200"):
-            fc.require_active_budget({"status": "running", "logical_chain_id": "c" * 32}, timing)
+        printed = []
+        with mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(str(x) for x in a))):
+            with self.assertRaisesRegex(fc.FeatureChainError, "CHAIN_BUDGET=EXCEEDED active=8000 cap=7200"):
+                fc.require_active_budget({
+                    "status": "running",
+                    "logical_chain_id": "c" * 32,
+                    "provider": "claude",
+                    "current_run": {"run_id": "a" * 32},
+                    "budget": {"max_total_tokens": 30_000_000, "wall_minutes": 240},
+                }, timing)
         fc.require_active_budget({"status": "locally_verified", "logical_chain_id": "c" * 32}, timing)
+        recovery = "\n".join(printed)
+        self.assertIn("RECOVERY=", recovery)
+        self.assertIn("feature-budget-update", recovery)
+        self.assertIn("a" * 32, recovery)
+        self.assertIn("--chain c" + "c" * 31, recovery)
+        self.assertIn("--total-tokens 30000000", recovery)
+        self.assertIn("--total-active-minutes 240", recovery)
+
+    def test_missing_timing_is_unavailable_unless_locally_verified(self):
+        printed = []
+        with mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(str(x) for x in a))):
+            with self.assertRaisesRegex(fc.FeatureChainError, "CHAIN_BUDGET=UNAVAILABLE"):
+                fc.require_active_budget({
+                    "status": "running",
+                    "logical_chain_id": "c" * 32,
+                    "provider": "codex",
+                    "current_run": {"run_id": "a" * 32},
+                    "budget": {"max_total_tokens": 30_000_000, "wall_minutes": 240},
+                }, None)
+        fc.require_active_budget({"status": "locally_verified", "logical_chain_id": "c" * 32}, None)
+        recovery = "\n".join(printed)
+        self.assertIn("--token <operator-token>", recovery)
+        self.assertNotIn("--chain", recovery)
+
+    def over_cap_timing(self, state):
+        return {
+            "planning_s": 8000,
+            "stages": {repo: 0 for repo in state["repositories"]},
+            "integration_s": None,
+            "wall_s": 8000,
+            "activity": {},
+        }
+
+    def test_advance_over_cap_after_implement_does_not_dispatch_the_next_repo(self):
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        state = fc.approve_plan(self.control, launched["state"]["logical_chain_id"], self.plan())
+        api_row = self.row("c" * 32)
+        fc.bind_phase_run(self.control, state["logical_chain_id"], phase="implement", repo="api", row=api_row)
+        artifacts = self.result_artifacts(api_row, "api")
+        calls_before = len(self.host.calls)
+        printed = []
+        with mock.patch.object(fc, "record_chain_timing", side_effect=lambda args, st: self.over_cap_timing(st)):
+            with mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(str(x) for x in a))):
+                with self.assertRaisesRegex(fc.FeatureChainError, "CHAIN_BUDGET=EXCEEDED"):
+                    fc.advance(self.host, self.args, dict(api_row, artifacts=str(artifacts)), {
+                        "state": "terminal",
+                        "status": "completed",
+                        "artifacts": str(artifacts),
+                        "feature_chain": {"logical_chain_id": state["logical_chain_id"], "repo": "api"},
+                    })
+        latest = fc.read_state(self.control, state["logical_chain_id"])
+        self.assertEqual(latest["stages"]["api"]["status"], "running")
+        self.assertIsNone(latest.get("dispatch_reservation"))
+        self.assertEqual(latest["current_run"]["run_id"], api_row["id"])
+        self.assertEqual(len(self.host.calls), calls_before)
+        out = "\n".join(printed)
+        self.assertIn("feature-budget-update", out)
+        self.assertIn(api_row["id"], out)
+        self.assertIn("--token <operator-token>", out)
+        self.assertIn("--total-tokens", out)
+        self.assertIn("--total-active-minutes", out)
+
+    def test_advance_over_cap_after_planning_does_not_dispatch_implement(self):
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        state = fc.approve_plan(self.control, launched["state"]["logical_chain_id"], self.plan())
+        row = launched["row"]
+        calls_before = len(self.host.calls)
+        with mock.patch.object(fc, "record_chain_timing", side_effect=lambda args, st: self.over_cap_timing(st)):
+            with mock.patch("builtins.print"):
+                with self.assertRaisesRegex(fc.FeatureChainError, "CHAIN_BUDGET=EXCEEDED"):
+                    fc.advance(self.host, self.args, dict(row), {
+                        "state": "terminal",
+                        "status": "completed",
+                        "feature_chain": {"logical_chain_id": state["logical_chain_id"], "phase": "planning"},
+                    })
+        latest = fc.read_state(self.control, state["logical_chain_id"])
+        self.assertIsNone(latest.get("dispatch_reservation"))
+        self.assertEqual(latest["current_run"]["run_id"], row["id"])
+        self.assertEqual(latest["current_run"]["phase"], "planning")
+        self.assertEqual(len(self.host.calls), calls_before)
+
+    def test_reclaim_over_cap_does_not_dispatch_and_leaves_budget_update_able_state(self):
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        state = fc.approve_plan(self.control, launched["state"]["logical_chain_id"], self.plan())
+        api_row = self.row("c" * 32)
+        bound = fc.bind_phase_run(self.control, state["logical_chain_id"], phase="implement", repo="api", row=api_row)
+        artifacts = self.result_artifacts(api_row, "api")
+        bound["stages"]["api"]["status"] = "verified"
+        bound["candidate_handoffs"]["api"] = {"repo": "api", "candidate_head": git(self.root / "api", "rev-parse", "HEAD"), "artifacts": str(artifacts)}
+        bound["current_run"] = None
+        bound["dispatch_reservation"] = {
+            "phase": "implement",
+            "repo": "goodword-mcp",
+            "source_run_id": api_row["id"],
+            "status": "dispatching",
+            "owner_pid": 99999999,
+            "owner_fingerprint": "dead",
+            "reserved_at": fc.now(),
+        }
+        fc.write_state(self.control, bound)
+        calls_before = len(self.host.calls)
+        with mock.patch.object(fc, "record_chain_timing", side_effect=lambda args, st: self.over_cap_timing(st)):
+            with mock.patch("builtins.print"):
+                with self.assertRaisesRegex(fc.FeatureChainError, "CHAIN_BUDGET=EXCEEDED"):
+                    fc.advance(self.host, self.args, dict(api_row, artifacts=str(artifacts)), {
+                        "state": "terminal",
+                        "status": "completed",
+                        "artifacts": str(artifacts),
+                        "feature_chain": {"logical_chain_id": state["logical_chain_id"], "repo": "api"},
+                    })
+        latest = fc.read_state(self.control, state["logical_chain_id"])
+        self.assertIsNone(latest.get("dispatch_reservation"))
+        self.assertEqual(latest["current_run"]["run_id"], api_row["id"])
+        self.assertEqual(len(self.host.calls), calls_before)
+
+    def test_params_payload_writes_feature_provider(self):
+        launched = fc.launch(self.host, self.args, ["api", "goodword-mcp"])
+        payload = fc.params_payload(launched["state"], "planning", None, launched["row"])
+        self.assertEqual(payload["feature_provider"], "codex")
 
     def test_a_junk_active_cap_falls_back_to_the_default(self):
         for junk in ("", "0", "-1", "two hours"):

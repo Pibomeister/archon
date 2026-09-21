@@ -39,6 +39,7 @@ PARAMS_KEYS = {
     "ARCHON_FEATURE_PHASE": "feature_phase",
     "ARCHON_FEATURE_CHAIN_ID": "logical_chain_id",
     "ARCHON_FEATURE_RUN_ID": "run_id",
+    "ARCHON_FEATURE_PROVIDER": "feature_provider",
 }
 try:
     with open(sys.argv[1], encoding="utf-8") as handle:

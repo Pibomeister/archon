@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -258,6 +259,129 @@ class JointIntegrationRunnerTest(unittest.TestCase):
         self.assertEqual("PORT=4999 PATTERN=tests/a.ts EXTRA=-t debrief", run("tests/a.ts", "-t", "debrief"))
         self.assertEqual("PORT=4321 PATTERN=tests/a.ts EXTRA=-t x", run("tests/a.ts", "4321", "-t", "x"))
         self.assertEqual("PORT=4999 PATTERN=tests/a.ts EXTRA=", run("tests/a.ts"))
+
+    def test_candidate_env_failure_is_infrastructure(self):
+        script = Path(__file__).resolve().parents[1] / "joint-api-mcp-e2e.sh"
+        with tempfile.TemporaryDirectory() as td:
+            setup = Path(td) / "setup"
+            setup.mkdir()
+            shutil.copy(script, setup / "joint-api-mcp-e2e.sh")
+            (setup / "candidate_env.py").write_text("raise SystemExit(1)\n", encoding="utf-8")
+            api_wt = Path(td) / "api"
+            mcp_wt = Path(td) / "mcp"
+            api_wt.mkdir()
+            mcp_wt.mkdir()
+            env = dict(os.environ,
+                       ARCHON_REPO_API_WORKTREE=str(api_wt),
+                       ARCHON_REPO_GOODWORD_MCP_WORKTREE=str(mcp_wt),
+                       ARCHON_API_PORT="59991")
+            r = subprocess.run(["bash", str(setup / "joint-api-mcp-e2e.sh"), "tests/x.ts"],
+                               capture_output=True, text=True, env=env, cwd=td, timeout=30)
+            self.assertNotEqual(0, r.returncode)
+            self.assertIn("JOINT_E2E=FAIL class=infrastructure api candidate env", r.stdout)
+
+    def test_joint_boot_dead_process_with_stack_up_is_product(self):
+        script = (Path(__file__).resolve().parents[1] / "joint-api-mcp-e2e.sh").read_text(encoding="utf-8")
+        start = script.index("stack_down()")
+        end = script.index("json_field()")
+        boot = script[start:end]
+        with tempfile.TemporaryDirectory() as td:
+            bin_dir = Path(td) / "bin"
+            bin_dir.mkdir()
+            (bin_dir / "docker").write_text(
+                "#!/bin/bash\nprintf '%s\\n' postgres-db dynamodb-local\n", encoding="utf-8")
+            (bin_dir / "docker").chmod(0o755)
+            (bin_dir / "curl").write_text("#!/bin/bash\nprintf 000\n", encoding="utf-8")
+            (bin_dir / "curl").chmod(0o755)
+            (bin_dir / "sleep").write_text("#!/bin/bash\ntrue\n", encoding="utf-8")
+            (bin_dir / "sleep").chmod(0o755)
+            out = Path(td) / "joint-api-mcp-e2e"
+            out.mkdir()
+            body = (
+                "set -euo pipefail\n"
+                f"OUT={out}\nURL=http://localhost:1\nSRV=99999999\n"
+                + boot
+            )
+            r = subprocess.run(["bash", "-c", body], capture_output=True, text=True,
+                               env={**os.environ, "PATH": f"{bin_dir}:/bin:/usr/bin"}, timeout=20)
+            self.assertNotEqual(0, r.returncode)
+            self.assertIn("JOINT_E2E=FAIL api-boot exited before ready", r.stdout)
+            self.assertNotIn("class=infrastructure", r.stdout)
+
+    def test_joint_boot_dead_process_with_stack_down_is_infrastructure(self):
+        script = (Path(__file__).resolve().parents[1] / "joint-api-mcp-e2e.sh").read_text(encoding="utf-8")
+        start = script.index("stack_down()")
+        end = script.index("json_field()")
+        boot = script[start:end]
+        with tempfile.TemporaryDirectory() as td:
+            bin_dir = Path(td) / "bin"
+            bin_dir.mkdir()
+            (bin_dir / "docker").write_text(
+                "#!/bin/bash\nprintf '%s\\n' postgres-db\n", encoding="utf-8")
+            (bin_dir / "docker").chmod(0o755)
+            (bin_dir / "curl").write_text("#!/bin/bash\nprintf 000\n", encoding="utf-8")
+            (bin_dir / "curl").chmod(0o755)
+            (bin_dir / "sleep").write_text("#!/bin/bash\ntrue\n", encoding="utf-8")
+            (bin_dir / "sleep").chmod(0o755)
+            out = Path(td) / "joint-api-mcp-e2e"
+            out.mkdir()
+            body = (
+                "set -euo pipefail\n"
+                f"OUT={out}\nURL=http://localhost:1\nSRV=99999999\n"
+                + boot
+            )
+            r = subprocess.run(["bash", "-c", body], capture_output=True, text=True,
+                               env={**os.environ, "PATH": f"{bin_dir}:/bin:/usr/bin"}, timeout=20)
+            self.assertNotEqual(0, r.returncode)
+            self.assertIn("class=infrastructure", r.stdout)
+            self.assertIn("api-boot exited before ready", r.stdout)
+
+    def test_joint_live_non_200_with_stack_up_is_product(self):
+        script = (Path(__file__).resolve().parents[1] / "joint-api-mcp-e2e.sh").read_text(encoding="utf-8")
+        start = script.index("stack_down()")
+        end = script.index("json_field()")
+        boot = script[start:end]
+        with tempfile.TemporaryDirectory() as td:
+            bin_dir = Path(td) / "bin"
+            bin_dir.mkdir()
+            (bin_dir / "docker").write_text(
+                "#!/bin/bash\nprintf '%s\\n' postgres-db dynamodb-local\n", encoding="utf-8")
+            (bin_dir / "docker").chmod(0o755)
+            (bin_dir / "curl").write_text("#!/bin/bash\nprintf 500\n", encoding="utf-8")
+            (bin_dir / "curl").chmod(0o755)
+            (bin_dir / "sleep").write_text("#!/bin/bash\ntrue\n", encoding="utf-8")
+            (bin_dir / "sleep").chmod(0o755)
+            out = Path(td) / "joint-api-mcp-e2e"
+            out.mkdir()
+            body = (
+                "set -euo pipefail\n"
+                f"OUT={out}\nURL=http://localhost:1\n"
+                "SRV=$(/bin/sleep 30 >/dev/null 2>&1 & echo $!)\n"
+                + boot
+            )
+            r = subprocess.run(["bash", "-c", body], capture_output=True, text=True,
+                               env={**os.environ, "PATH": f"{bin_dir}:/bin:/usr/bin"}, timeout=20)
+            self.assertNotEqual(0, r.returncode)
+            self.assertIn("JOINT_E2E=FAIL api boot code=500", r.stdout)
+            self.assertNotIn("class=infrastructure", r.stdout)
+
+    def test_second_identity_401_is_infrastructure_and_does_not_start_jest(self):
+        script = (Path(__file__).resolve().parents[1] / "joint-api-mcp-e2e.sh").read_text(encoding="utf-8")
+        block = script[script.index("SECOND_PROBE="):script.index("RC=0")]
+        with tempfile.TemporaryDirectory() as td:
+            bin_dir = Path(td) / "bin"
+            bin_dir.mkdir()
+            (bin_dir / "curl").write_text("#!/bin/bash\nprintf 401\n", encoding="utf-8")
+            (bin_dir / "curl").chmod(0o755)
+            (bin_dir / "pnpm").write_text("#!/bin/bash\necho JEST_STARTED >&2; exit 0\n", encoding="utf-8")
+            (bin_dir / "pnpm").chmod(0o755)
+            env = dict(os.environ, PATH=f"{bin_dir}:/bin:/usr/bin",
+                       OTP_EMAIL_SECOND="edy+archon2@goodword.com")
+            body = 'set -euo pipefail\nURL=http://localhost:1\nTOKEN_SECOND=tok\nOTP_EMAIL_SECOND=edy+archon2@goodword.com\n' + block
+            r = subprocess.run(["bash", "-c", body], capture_output=True, text=True, env=env, timeout=20)
+            self.assertNotEqual(0, r.returncode)
+            self.assertIn("class=infrastructure second-identity-unsubscribed code=401", r.stdout)
+            self.assertNotIn("JEST_STARTED", r.stdout + r.stderr)
 
     def test_runs_structured_command_in_repo_candidate_worktree_with_expanded_refs(self):
         self.write_plan({

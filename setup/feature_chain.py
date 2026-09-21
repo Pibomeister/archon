@@ -1116,6 +1116,7 @@ def parse_base_overrides(values: object, repos: list[str], host: Any) -> dict[st
         if not isinstance(raw, str) or "=" not in raw:
             raise FeatureChainError("--base requires repo=<40-hex-sha>")
         repo, sha = raw.split("=", 1)
+        repo = REPOSITORY_ALIASES.get(repo, repo)
         if repo not in repos:
             raise FeatureChainError(f"--base repository is outside selected scope: {repo}")
         if not COMMIT_RE.fullmatch(sha):
@@ -1955,6 +1956,7 @@ def params_payload(state: dict, phase: str, repo: str | None, row: dict) -> dict
         "worktrees_by_repo": {name: data["worktree"] for name, data in state["worktrees"].items()},
         "logical_chain_id": state["logical_chain_id"],
         "run_id": row["id"],
+        "feature_provider": state["provider"],
     }
     if "executable_plan_contract" in state:
         payload["executable_plan_contract"] = state["executable_plan_contract"]
@@ -2424,12 +2426,28 @@ def validate_scope_add_file(state: dict, repo: str, add_file: str) -> str:
     if normalized.startswith(".git/") or normalized == ".git":
         raise FeatureChainError("scope amendment path cannot target git metadata")
     worktree = Path(str(state["worktrees"][repo]["worktree"]))
+    cursor = worktree
+    for part in raw.parts:
+        cursor = cursor / part
+        if cursor.exists() and cursor.is_symlink():
+            raise FeatureChainError("scope amendment file must be an existing non-symlink file")
     candidate = worktree / raw
     if not candidate.is_file():
-        artifacts = Path(str((state.get("current_run") or {}).get("artifacts_dir") or ""))
-        stray = artifacts / "strays" / normalized
-        if not artifacts.is_dir() or not stray.is_file() or stray.is_symlink():
+        artifacts_raw = (state.get("current_run") or {}).get("artifacts_dir")
+        if not artifacts_raw:
             raise FeatureChainError(f"scope amendment file is unavailable: {add_file}")
+        artifacts = Path(str(artifacts_raw))
+        if not artifacts.is_dir():
+            raise FeatureChainError(f"scope amendment file is unavailable: {add_file}")
+        stray = artifacts / "strays" / normalized
+        if stray.is_symlink():
+            raise FeatureChainError("scope amendment file must be an existing non-symlink file")
+        try:
+            stray_resolved = stray.resolve(strict=True)
+            strays_root = (artifacts / "strays").resolve(strict=True)
+            stray_resolved.relative_to(strays_root)
+        except (OSError, ValueError) as exc:
+            raise FeatureChainError(f"scope amendment file is unavailable: {add_file}") from exc
         candidate.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(stray), str(candidate))
     try:
@@ -2441,12 +2459,7 @@ def validate_scope_add_file(state: dict, repo: str, add_file: str) -> str:
         resolved.relative_to(worktree_resolved)
     except ValueError as exc:
         raise FeatureChainError("scope amendment file must stay inside the selected repository worktree") from exc
-    cursor = worktree
-    for part in raw.parts:
-        cursor = cursor / part
-        if cursor.is_symlink():
-            raise FeatureChainError("scope amendment file must be an existing non-symlink file")
-    if not resolved.is_file():
+    if not resolved.is_file() or resolved.is_symlink():
         raise FeatureChainError("scope amendment file must be an existing non-symlink file")
     if hasattr(os, "getuid") and resolved.stat().st_uid != os.getuid():
         raise FeatureChainError("scope amendment file is not owned by the current operator")
@@ -4183,21 +4196,38 @@ def timing_field(value: object) -> str:
     return "null" if value is None else str(value)
 
 
+def print_budget_recovery(state: dict) -> None:
+    run_id = (
+        ((state.get("current_run") or {}).get("run_id"))
+        or ((state.get("dispatch_reservation") or {}).get("source_run_id"))
+        or "<run-id>"
+    )
+    chain = state.get("logical_chain_id") or "<chain-id>"
+    budget = state.get("budget") or {}
+    tokens = budget.get("max_total_tokens") or DEFAULT_MAX_TOTAL_TOKENS
+    minutes = budget.get("wall_minutes") or DEFAULT_WALL_MINUTES
+    auth = "--token <operator-token>" if state.get("provider") == "codex" else f"--chain {chain}"
+    print(
+        "RECOVERY=python3 .archon/setup/archon-run.py feature-budget-update "
+        f"{run_id} {auth} --total-tokens {tokens} --total-active-minutes {minutes} "
+        "--reason \"authorized budget raise (raise at least one ceiling)\""
+    )
+
+
 def require_active_budget(state: dict, timing: dict | None) -> None:
     """Stop the next dispatch when active time is already over the cap.
 
     Report-after-finish is the C3 bug: CHAIN_BUDGET=EXCEEDED printed once the
     chain was locally_verified. Wall-clock stays advisory (human gates, outages).
     """
-    if not timing or state.get("status") == "locally_verified":
+    if state.get("status") == "locally_verified":
         return
+    if not timing:
+        print_budget_recovery(state)
+        raise FeatureChainError("CHAIN_BUDGET=UNAVAILABLE timing missing")
     active, cap = active_seconds(timing), active_budget_seconds()
     if isinstance(active, int) and active > cap:
-        chain = state.get("logical_chain_id") or "<chain-id>"
-        print(
-            f"RECOVERY=python3 .archon/setup/archon-run.py feature-budget-update "
-            f"<run-id> --chain {chain} --reason \"authorized budget raise\""
-        )
+        print_budget_recovery(state)
         raise FeatureChainError(f"CHAIN_BUDGET=EXCEEDED active={active} cap={cap}")
 
 
@@ -4266,6 +4296,29 @@ def advance(host: Any, args: Any, row: dict, result: dict) -> dict:
                     dispatch_integration_after = True
                 else:
                     raise FeatureChainError("dispatch reservation has invalid phase")
+                try:
+                    require_active_budget(state, record_chain_timing(args, state))
+                except FeatureChainError:
+                    # A dead reservation blocks feature-budget-update. Drop it
+                    # and restore the completed source run so the printed
+                    # RECOVERY= line can authorize a raise.
+                    state["dispatch_reservation"] = None
+                    current_run = state.get("current_run")
+                    if not isinstance(current_run, dict) or current_run.get("run_id") != row.get("id"):
+                        restored = None
+                        for rec in reversed(state.get("phase_runs") or []):
+                            if isinstance(rec, dict) and rec.get("run_id") == row.get("id"):
+                                restored = dict(rec)
+                                break
+                        if restored is None:
+                            for rec in (state.get("child_runs") or {}).values():
+                                if isinstance(rec, dict) and rec.get("run_id") == row.get("id"):
+                                    restored = dict(rec)
+                                    break
+                        state["current_run"] = restored or {"run_id": row.get("id")}
+                    state["updated_at"] = now()
+                    write_state(control_dir, state)
+                    raise
                 reservation["status"] = "dispatching"
                 reservation["owner_pid"] = os.getpid()
                 reservation["owner_fingerprint"] = process_fingerprint()
@@ -4284,6 +4337,7 @@ def advance(host: Any, args: Any, row: dict, result: dict) -> dict:
             dispatch_repo = next_stage(state)
             if dispatch_repo is None:
                 raise FeatureChainError("approved plan has no repository stage to dispatch")
+            require_active_budget(state, record_chain_timing(args, state))
             state["current_run"] = None
             state["dispatch_reservation"] = {
                 "phase": "implement",
@@ -4340,10 +4394,11 @@ def advance(host: Any, args: Any, row: dict, result: dict) -> dict:
             state["candidate_handoffs"][repo] = candidate
             state["stages"][repo]["status"] = "verified"
             state["stages"][repo]["candidate"] = candidate
-            state["current_run"] = None
             state["updated_at"] = now()
             dispatch_repo = next_stage(state)
             dispatch_integration_after = dispatch_repo is None
+            require_active_budget(state, record_chain_timing(args, state))
+            state["current_run"] = None
             state["dispatch_reservation"] = {
                 "phase": "integration" if dispatch_integration_after else "implement",
                 "repo": None if dispatch_integration_after else dispatch_repo,
@@ -4354,7 +4409,6 @@ def advance(host: Any, args: Any, row: dict, result: dict) -> dict:
                 "reserved_at": now(),
             }
             state = write_state(control_dir, state)
-            require_active_budget(state, record_chain_timing(args, state))
     if dispatch_repo is not None:
         dispatched = dispatch_repository_stage(host, args, state, dispatch_repo)
         if dispatched.get("result") is not None:

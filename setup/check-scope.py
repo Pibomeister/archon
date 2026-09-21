@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Converge scope guard: every path changed since bootstrap (committed or not)
-must be in the plan's files-allowlist.json. A breach is a hard human stop —
-legitimate scope growth is a human editing the allowlist and resuming.
+must be in the plan's files-allowlist.json. A breach is a hard human stop.
+On a repository-list stage the signed joint-plan allowlist is the source of
+truth (`files-allowlist.json` is a projection; a hand edit is ALLOWLIST_DRIFT).
+Legitimate scope growth is `feature-scope-amend --add-file`, then resume.
 Usage: check-scope.py <files-allowlist.json> <worktree> <base-sha>
                       [--round N] [--exclude <path> ...] [--stage]
                       [--quarantine <dir>]
@@ -158,19 +160,36 @@ def adoptable(path):
     return any(os.path.dirname(a) == d and stem(a) == st for a in allowed)
 
 
+def remaining_strays(quarantine_dir):
+    root = os.path.join(quarantine_dir, "strays")
+    found = []
+    if not os.path.isdir(root):
+        return found
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in filenames:
+            full = os.path.join(dirpath, name)
+            found.append(os.path.relpath(full, root))
+    return sorted(found)
+
+
 def print_amend_recovery(path, dest=None):
     """Last line of a scope stop is the command that unblocks it."""
     artifacts = os.path.dirname(os.path.abspath(allowlist_path))
     run_id = feature_env("ARCHON_FEATURE_RUN_ID", artifacts=artifacts) or "<run-id>"
     chain_id = feature_env("ARCHON_FEATURE_CHAIN_ID", artifacts=artifacts) or "<chain-id>"
+    provider = (feature_env("ARCHON_FEATURE_PROVIDER", artifacts=artifacts) or "").lower()
+    auth = (
+        "--token <operator-token>" if provider == "codex"
+        else f"--chain {shlex.quote(chain_id)}"
+    )
     restore = (
         f"mv {shlex.quote(dest)} {shlex.quote(os.path.join(worktree, path))} && "
         if dest else ""
     )
     print(
         f"RECOVERY={restore}python3 .archon/setup/archon-run.py feature-scope-amend "
-        f"{shlex.quote(run_id)} --chain {shlex.quote(chain_id)} "
-        f"--add-file {shlex.quote(path)} --reason \"scope recovery\""
+        f"{shlex.quote(run_id)} {auth} --add-file {shlex.quote(path)} "
+        f"--reason \"scope recovery\""
     )
 
 
@@ -185,10 +204,12 @@ if repository_list_scope():
         plan_stage = stages.get(repo) if isinstance(stages, dict) and repo else None
         signed = plan_stage.get("files_allowlist") if isinstance(plan_stage, dict) else None
     except Exception as exc:
-        print(f"COMMIT_SCOPE=FAIL unreadable joint-plan.json [{plan_path}]: {exc}")
+        tag = "COMMIT_SCOPE" if stage else "SCOPE_GUARD"
+        print(f"{tag}=FAIL unreadable joint-plan.json [{plan_path}]: {exc}")
         sys.exit(1)
     if not isinstance(signed, list):
-        print("COMMIT_SCOPE=FAIL joint-plan.json has no files_allowlist for this stage")
+        tag = "COMMIT_SCOPE" if stage else "SCOPE_GUARD"
+        print(f"{tag}=FAIL joint-plan.json has no files_allowlist for this stage")
         sys.exit(1)
     if set(allowed) != set(signed):
         print("ALLOWLIST_DRIFT=FAIL files-allowlist.json does not match the signed joint-plan allowlist")
@@ -254,7 +275,8 @@ if breaches and stage and quarantine:
                   "(new file, unrelated to any allowlisted file: kept, not committed)")
         print("COMMIT_SCOPE=FAIL nothing staged (restore the quarantined file, "
               "then feature-scope-amend --add-file, then resume)")
-        print_amend_recovery(moved[0], dest=os.path.join(quarantine, "strays", moved[0]))
+        for b in moved:
+            print_amend_recovery(b, dest=os.path.join(quarantine, "strays", b))
         sys.exit(1)
     breaches = []
 
@@ -272,6 +294,14 @@ if breaches:
     sys.exit(1)
 
 if stage:
+    leftover = remaining_strays(quarantine) if quarantine else []
+    if leftover:
+        print("COMMIT_SCOPE=FAIL remaining quarantined files: " + ",".join(leftover))
+        print("COMMIT_SCOPE=FAIL nothing staged (feature-scope-amend --add-file "
+              "the stray, or delete it, then resume)")
+        print_amend_recovery(
+            leftover[0], dest=os.path.join(quarantine, "strays", leftover[0]))
+        sys.exit(1)
     # Only allowlisted paths, one at a time: `git add -- <path>` stages a
     # deletion as readily as an edit, and a path the round never touched is a
     # silent no-op. Excluded paths (.env) and a drift-declared install's

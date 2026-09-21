@@ -1117,9 +1117,32 @@ nodes:
       if [ "$WEBOK" = NO ]; then H=$(probe_host "$WEBPORT" /health) && { WEBOK=YES; WEBHOST="$H"; }; fi
       test "$APIOK" = YES && test "$WEBOK" = YES && break
     done
-    test "$APIOK" = YES || { echo "SMOKE=FAIL api not up"; exit 1; }
+    RUN_ID=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('run_id') or '')" "$ARTIFACTS_DIR/params.json" 2>/dev/null || true)
+    [ -n "$RUN_ID" ] || RUN_ID=$(basename "$ARTIFACTS_DIR")
+    stack_down() {
+      command -v docker >/dev/null 2>&1 || return 1
+      local names
+      names=$(docker ps --format '{{.Names}}' 2>/dev/null || true)
+      echo "$names" | grep -qx postgres-db || return 0
+      echo "$names" | grep -qx dynamodb-local || return 0
+      return 1
+    }
+    if [ "$APIOK" != YES ]; then
+      if stack_down; then
+        echo "SMOKE=FAIL api not up class=infrastructure reason=stack-down"
+        echo "RECOVERY=docker start postgres-db dynamodb-local, then bash .archon/setup/resume.sh $RUN_ID"
+      else
+        echo "SMOKE=FAIL api not up"
+      fi
+      exit 1
+    fi
     if [ "$WEBOK" != YES ]; then
-      echo "SMOKE=FAIL web /health not 200 on localhost or 127.0.0.1 (see smoke-web.log)"
+      if stack_down; then
+        echo "SMOKE=FAIL web /health not 200 class=infrastructure reason=stack-down (see smoke-web.log)"
+        echo "RECOVERY=docker start postgres-db dynamodb-local, then bash .archon/setup/resume.sh $RUN_ID"
+      else
+        echo "SMOKE=FAIL web /health not 200 on localhost or 127.0.0.1 (see smoke-web.log)"
+      fi
       # Name the cause instead of leaving a six-minute silent timeout behind.
       echo "HOST_RESOLUTION: $(getent hosts localhost 2>/dev/null || echo 'getent unavailable or localhost unresolved')"
       exit 1

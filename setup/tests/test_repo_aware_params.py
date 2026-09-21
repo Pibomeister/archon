@@ -486,7 +486,7 @@ class Acceptance(unittest.TestCase):
             bin_dir.mkdir()
             wt = Path(td) / "wt"
             wt.mkdir()
-            shim(bin_dir, "bun", f'echo "bun $*" >> {trace}\nsleep 30\n')
+            shim(bin_dir, "bun", f'echo "bun $*" >> {trace}\nexec /bin/sleep 30\n')
             # Every probe reports 200; the node distinguishes them by URL, and the
             # trace is what proves both were requested.
             # URL-aware on purpose: the node itself uses /info as an AUTH
@@ -503,7 +503,8 @@ class Acceptance(unittest.TestCase):
             shim(bin_dir, "lsof", "exit 1\n")   # no listener: nothing to sweep
             shim(bin_dir, "kill", "true\n")     # never signal a real process
             shim(bin_dir, "sleep", "true\n")    # collapse the node's 60x3s readiness loop
-            f.write_params(repo="api", api_port=4123, worktree=str(wt))
+            shim(bin_dir, "docker", "printf '%s\\n' postgres-db dynamodb-local\n")
+            f.write_params(repo="api", api_port=4123, worktree=str(wt), run_id="a" * 32)
             r = run_node(node_bash("smoke"), f,
                          env={"PATH": f"{bin_dir}:{os.environ['PATH']}"},
                          timeout=180)
@@ -531,13 +532,14 @@ class Acceptance(unittest.TestCase):
             bin_dir.mkdir()
             wt = Path(td) / "wt"
             wt.mkdir()
-            shim(bin_dir, "bun", "sleep 30\n")
+            shim(bin_dir, "bun", "exec /bin/sleep 30\n")
             # Readiness never comes up; the node must not report PASS.
             shim(bin_dir, "curl", "printf 500\n")
             shim(bin_dir, "lsof", "exit 1\n")
             shim(bin_dir, "kill", "true\n")
             shim(bin_dir, "sleep", "true\n")
-            f.write_params(repo="api", api_port=4123, worktree=str(wt))
+            shim(bin_dir, "docker", "printf '%s\\n' postgres-db dynamodb-local\n")
+            f.write_params(repo="api", api_port=4123, worktree=str(wt), run_id="a" * 32)
             r = run_node(node_bash("smoke"), f,
                          env={"PATH": f"{bin_dir}:{os.environ['PATH']}"},
                          timeout=180)
@@ -546,6 +548,96 @@ class Acceptance(unittest.TestCase):
                 result = (f.ad / "smoke-result.txt").read_text(encoding="utf-8")
             self.assertNotIn("SMOKE=PASS", result + r.stdout,
                              "the smoke gate reported PASS with failing probes")
+            self.assertNotIn("class=infrastructure", result + r.stdout)
+
+    def _run_dead_api_smoke(self, docker_body, run_id="a" * 32):
+        with tempfile.TemporaryDirectory() as td, FakeRoot() as f:
+            bin_dir = Path(td) / "bin"
+            bin_dir.mkdir()
+            wt = Path(td) / "wt"
+            wt.mkdir()
+            shim(bin_dir, "bun", "exit 7\n")
+            shim(bin_dir, "curl", "printf 000\n")
+            shim(bin_dir, "lsof", "exit 1\n")
+            shim(bin_dir, "kill", "true\n")
+            shim(bin_dir, "sleep", "true\n")
+            shim(bin_dir, "docker", docker_body)
+            f.write_params(repo="api", api_port=4123, worktree=str(wt), run_id=run_id)
+            r = run_node(node_bash("smoke"), f,
+                         env={"PATH": f"{bin_dir}:/bin:/usr/bin"},
+                         timeout=30)
+            return r, f
+
+    def test_p10c_dead_api_with_stack_up_is_product(self):
+        started = time.monotonic()
+        r, _ = self._run_dead_api_smoke("printf '%s\\n' postgres-db dynamodb-local\n")
+        out = r.stdout + r.stderr
+        self.assertNotEqual(0, r.returncode)
+        self.assertIn("SMOKE=FAIL api-boot exited before ready", out)
+        self.assertNotIn("class=infrastructure", out)
+        self.assertNotIn("api-docs-json code=000", out)
+        self.assertLess(time.monotonic() - started, 20, "took the timeout path, not the liveness path")
+
+    def test_p10d_dead_api_with_stack_down_is_infrastructure_and_interpolates_run_id(self):
+        run_id = "deadbeef" + "c" * 24
+        r, _ = self._run_dead_api_smoke("printf '%s\\n' postgres-db\n", run_id=run_id)
+        out = r.stdout + r.stderr
+        self.assertNotEqual(0, r.returncode)
+        self.assertIn("class=infrastructure", out)
+        self.assertIn("reason=stack-down", out)
+        self.assertIn(f"resume.sh {run_id}", out)
+        self.assertNotIn("$run-id", out)
+        self.assertNotIn("api-docs-json code=000", out)
+
+    def test_p10e_either_container_missing_is_stack_down(self):
+        r, _ = self._run_dead_api_smoke("printf '%s\\n' dynamodb-local\n")
+        out = r.stdout + r.stderr
+        self.assertIn("class=infrastructure", out)
+        self.assertIn("reason=stack-down", out)
+
+    def test_api_smoke_recovery_does_not_print_literal_dollar_run_id(self):
+        body = node_bash("smoke")
+        self.assertNotIn("resume.sh $run-id", body)
+        self.assertIn("resume.sh $RUN_ID", body)
+        self.assertIn("grep -qx postgres-db", body)
+        self.assertIn("grep -qx dynamodb-local", body)
+
+    def test_web_smoke_stack_down_is_infrastructure_and_interpolates_run_id(self):
+        body = node_bash("smoke", "full-sdlc-web.yaml")
+        start = body.index("RUN_ID=$(python3")
+        snippet = body[start:]
+        snippet = snippet.split('echo "SMOKE=PASS', 1)[0]
+        run_id = "webbeef" + "d" * 25
+        with tempfile.TemporaryDirectory() as td, FakeRoot() as f:
+            bin_dir = Path(td) / "bin"
+            bin_dir.mkdir()
+            shim(bin_dir, "docker", "printf '%s\\n' postgres-db\n")
+            shim(bin_dir, "curl", "printf 000\n")
+            f.write_params(repo="web-app", api_port=4123, web_port=3127, worktree=str(td), run_id=run_id)
+            script = 'set -euo pipefail\nAPIOK=NO\nWEBOK=NO\n' + snippet
+            r = run_node(script, f, env={"PATH": f"{bin_dir}:/bin:/usr/bin"}, timeout=30)
+            out = r.stdout + r.stderr
+            self.assertNotEqual(0, r.returncode)
+            self.assertIn("SMOKE=FAIL api not up class=infrastructure reason=stack-down", out)
+            self.assertIn(f"resume.sh {run_id}", out)
+            self.assertNotIn("$run-id", out)
+
+    def test_web_smoke_product_failure_has_no_class_when_stack_is_up(self):
+        body = node_bash("smoke", "full-sdlc-web.yaml")
+        start = body.index("RUN_ID=$(python3")
+        snippet = body[start:]
+        snippet = snippet.split('echo "SMOKE=PASS', 1)[0]
+        with tempfile.TemporaryDirectory() as td, FakeRoot() as f:
+            bin_dir = Path(td) / "bin"
+            bin_dir.mkdir()
+            shim(bin_dir, "docker", "printf '%s\\n' postgres-db dynamodb-local\n")
+            f.write_params(repo="web-app", api_port=4123, web_port=3127, worktree=str(td), run_id="a" * 32)
+            script = 'set -euo pipefail\nAPIOK=NO\nWEBOK=NO\n' + snippet
+            r = run_node(script, f, env={"PATH": f"{bin_dir}:/bin:/usr/bin"}, timeout=30)
+            out = r.stdout + r.stderr
+            self.assertNotEqual(0, r.returncode)
+            self.assertIn("SMOKE=FAIL api not up", out)
+            self.assertNotIn("class=infrastructure", out)
 
     def test_a12_result_artifacts_report_the_real_repo(self):
         lane = (WORKFLOWS / "full-sdlc-api.yaml").read_text(encoding="utf-8")

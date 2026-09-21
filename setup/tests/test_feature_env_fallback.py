@@ -47,6 +47,7 @@ REPOSITORY_PARAMS = {
     "repo": "api",
     "repositories": ["api", "goodword-mcp"],
     "slug": "feature-bbbbbbbb-implement-api",
+    "feature_provider": "codex",
 }
 
 
@@ -79,6 +80,7 @@ class FeatureEnvHelperTest(unittest.TestCase):
                 "ARCHON_FEATURE_PHASE": "implement",
                 "ARCHON_FEATURE_CHAIN_ID": CHAIN,
                 "ARCHON_FEATURE_RUN_ID": RUN_ID,
+                "ARCHON_FEATURE_PROVIDER": "codex",
             },
         )
 
@@ -167,6 +169,10 @@ class CheckScopeFallbackTest(unittest.TestCase):
         subprocess.run(["git", "-C", str(self.worktree), "commit", "-qm", "base"], env=self.env, check=True)
         (self.artifacts / "files-allowlist.json").write_text(
             json.dumps(["src/commit-import.service.ts"]))
+        (self.artifacts / "joint-plan.json").write_text(json.dumps({
+            "schema": "archon.joint-feature-plan.v1",
+            "stages": {"api": {"files_allowlist": ["src/commit-import.service.ts"]}},
+        }))
         # The stray a repo rule mandates: a new sibling sharing the stem.
         (self.worktree / "src" / "commit-import.util.ts").write_text("export const b = 2;\n")
 

@@ -2732,14 +2732,15 @@ def feature_advance_command(args: argparse.Namespace) -> None:
     if result["state"] != "terminal":
         print_feature_chain_pause(args, args.chain)
         return
-    if result["status"] != "completed":
-        fail(f"FEATURE_CHAIN={result['status'].upper()} run={row['id'][:8]}")
     result["artifacts"] = str(artifact_dir(row))
     result["feature_chain"] = {
         "logical_chain_id": args.chain,
-        "phase": current.get("phase"),
-        "repo": current.get("repo"),
+        "phase": (current or {}).get("phase"),
+        "repo": (current or {}).get("repo"),
     }
+    if result["status"] != "completed":
+        repository_feature_call("advance_unguarded", args, row, result)
+        fail(f"FEATURE_CHAIN={result['status'].upper()} run={row['id'][:8]}")
     advanced = repository_feature_call("advance_unguarded", args, row, result)
     if isinstance(advanced, dict) and advanced.get("receipt_path"):
         return
@@ -3475,7 +3476,7 @@ def parser() -> argparse.ArgumentParser:
     feature.add_argument("--provider", choices=("claude", "codex"), required=True)
     feature.add_argument("--scope", required=True, help="registered repository names separated by commas; web and fullstack aliases supported")
     feature.add_argument("--base", action="append", default=[], metavar="REPO=SHA",
-                         help="pin a selected repository worktree to a local 40-hex commit instead of current HEAD")
+                         help="pin a selected repository worktree to a local 40-hex commit instead of current HEAD; REPO is a registered name (web aliases web-app); repeatable")
     feature.add_argument("--no-watch", action="store_true")
     feature.add_argument("--watch-timeout-seconds", type=int, default=86400)
     feature.add_argument("spec")
@@ -3524,7 +3525,11 @@ def parser() -> argparse.ArgumentParser:
     advance = sub.add_parser("feature-advance", help="claude only: seal the approved joint plan and dispatch the next chain stage")
     advance.add_argument("--chain", required=True)
     advance.add_argument("--watch-timeout-seconds", type=int, default=86400)
-    reopen = sub.add_parser("feature-reopen", help="after a failed integration: reset a verified stage (and its consumers) and re-dispatch it")
+    reopen = sub.add_parser(
+        "feature-reopen",
+        help="re-dispatch a failed implement stage (including first-failure) or, after failed integration, reset a verified stage and its consumers",
+        description="re-dispatch a failed implement stage (including first-failure) or, after failed integration, reset a verified stage and its consumers",
+    )
     reopen.add_argument("--chain", required=True)
     reopen.add_argument("--repo", required=True)
     reopen.add_argument("--reason", required=True)

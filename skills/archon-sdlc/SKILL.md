@@ -218,7 +218,7 @@ For the guarded Codex path:
   a stopped Codex repository-list run, use:
 
   ```bash
-  python3 "$ROOT/.archon/setup/archon-run.py" feature-budget-update <run-id> --token <operator-token> --total-tokens 100000000 --enable-shepherd --reason "Authorized ENG-3866 retry"
+  python3 "$ROOT/.archon/setup/archon-run.py" feature-budget-update <run-id> --token <operator-token> --total-tokens 100000000 --total-active-minutes 480 --enable-shepherd --reason "Authorized ENG-3866 retry"
   ```
 
   The total includes prior usage; active time is not replenished. The controller

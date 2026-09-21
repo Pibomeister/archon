@@ -141,6 +141,18 @@ class QualificationTextContract(unittest.TestCase):
             self.assertIn("accept-residuals.txt", text, name)
             self.assertIn("never write", text.lower(), name)
 
+    def test_budget_recovery_names_both_ceilings(self):
+        for text, name in (
+            (self.skill_text, "archon-sdlc"),
+            (self.recovery_text, "operator-recovery"),
+        ):
+            self.assertIn("--total-active-minutes", text, name)
+            self.assertIn("--total-tokens", text, name)
+
+    def test_base_web_alias_is_documented(self):
+        self.assertIn("`web` aliases `web-app`", self.recovery_text)
+        self.assertIn("--base", self.recovery_text)
+
 
 if __name__ == "__main__":
     unittest.main()
