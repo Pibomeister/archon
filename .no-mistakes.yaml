@@ -1,0 +1,13 @@
+# no-mistakes gate configuration for Archon.
+#
+# This repo has no package.json/pyproject/Makefile — it is a bash + stdlib-Python
+# SDLC workflow toolkit. The only real, existing test entrypoint is
+# setup/run-tests.py, a fail-closed unittest discovery runner
+# (default start-directory setup/tests, pattern test*.py) with 171 discovered
+# test files as of this commit. No lint/format tool is configured anywhere in
+# the repo (no ruff/flake8/pylint/black config, no .github/workflows), so
+# commands.lint and commands.format are intentionally omitted rather than
+# invented.
+
+commands:
+  test: "python3 setup/run-tests.py"
