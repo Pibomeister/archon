@@ -302,7 +302,17 @@ def size_signals(ctx, paths, triage_name):
         signals.append({"id": "triage", "value": size, "points": pts["triage"][size], "floor": None,
                         "source": "mechanical", "evidence": f"{triage_name} size"})
     evidence = ctx["profile"].get("evidence") if isinstance(ctx["profile"].get("evidence"), dict) else None
-    probes = (evidence or {}).get("behavioral") or []
+    probes = (evidence or {}).get("behavioral")
+    if probes is not None:
+        if not isinstance(probes, list):
+            raise Fail("profile evidence.behavioral must be a list")
+        for i, pr in enumerate(probes):
+            if not isinstance(pr, dict):
+                raise Fail(f"profile evidence.behavioral[{i}] must be an object")
+            covers = pr.get("covers")
+            if covers is not None and (not isinstance(covers, list) or not all(isinstance(c, str) for c in covers)):
+                raise Fail(f"profile evidence.behavioral[{i}].covers must be a list of strings")
+    probes = probes or []
     if not probes:
         signals.append({"id": "coverage", "value": "no probes", "points": 0, "floor": None,
                         "source": "mechanical", "evidence": "profile has no evidence.behavioral probes (Slice 2)"})
@@ -435,7 +445,15 @@ def prior_tier(ad, stage, handoff):
     impl); anything else means the artifacts directory is in an inconsistent
     state and this FAILs rather than trusting a mismatched tier. handoffTier
     records the handoff's own toTier whenever a handoff is given, so the
-    merge is visible in the output even when it did not change the result."""
+    merge is visible in the output even when it did not change the result.
+
+    A missing previous-stage doc is read as "never ran" (prior stays null)
+    ONLY when risk-trajectory.jsonl also has no line for that stage. The
+    trajectory line is appended before risk-<stage>.json is written (see the
+    comment in main()), so a trajectory line with no matching doc means the
+    doc was lost or removed after a real run completed -- an inconsistent
+    artifacts directory, not "never ran" -- and this FAILs rather than
+    silently trusting a null prior."""
     entry = _PREVIOUS_STAGE.get(stage)
     doc_tier, doc_stage = None, None
     if entry:
@@ -447,6 +465,14 @@ def prior_tier(ad, stage, handoff):
             if doc.get("tier") not in rp.TIERS:
                 raise Fail(f"{name} tier out of enum")
             doc_tier, doc_stage = doc["tier"], doc["stage"]
+        else:
+            traj_path = os.path.join(ad, "risk-trajectory.jsonl")
+            try:
+                rows = sl.read_jsonl(traj_path)
+            except (OSError, ValueError, sl.LibraryError) as exc:
+                raise Fail(f"risk-trajectory.jsonl is not JSONL: {exc}")
+            if any(isinstance(r, dict) and r.get("stage") == expected_stage for r in rows):
+                raise Fail(f"{name} missing but risk-trajectory.jsonl has a {expected_stage} line")
     handoff_tier = handoff["toTier"] if handoff else None
     tier = rp.tier_max(doc_tier, handoff_tier)
     stage_out = doc_stage if doc_tier is not None else (handoff["stage"] if handoff else None)
@@ -454,11 +480,17 @@ def prior_tier(ad, stage, handoff):
 
 
 def lane_tier_of(handoff):
-    """The lower lane's tier from its name (sdlc-green -> green), else None."""
+    """The lower lane's tier from its name (sdlc-green -> green), else None.
+
+    Matches a whole -/_ delimited segment, not a bare substring: "sdlc-green"
+    matches "green", but "evergreen-lane" must not (a future lane or repo
+    name could otherwise contain a tier word by coincidence, e.g. "starred",
+    which contains "red")."""
     if not handoff:
         return None
+    segments = re.split(r"[-_]", handoff["fromLane"])
     for tier in rp.TIERS:
-        if tier in handoff["fromLane"]:
+        if tier in segments:
             return tier
     return None
 
@@ -627,6 +659,12 @@ def main(argv=None):
         ctx, doc = score(args)
         # Trajectory first: it is append-only and cheap to retry, so if it
         # fails nothing (not even a partial risk-<stage>.json) is left behind.
+        # This ordering is also why prior_tier() treats a trajectory line with
+        # no matching risk-<stage>.json as an inconsistent artifacts
+        # directory rather than "never ran": a crash or an external delete
+        # between these two writes is the only way to reach that state, and
+        # it means a later stage's prior would otherwise score as null
+        # instead of failing closed on a run that did, in fact, happen.
         sl.append_jsonl(os.path.join(ctx["ad"], "risk-trajectory.jsonl"), trajectory_line(doc))
         sl.write_json_atomic(os.path.join(ctx["ad"], f"risk-{args.stage}.json"), doc)
     except Fail as exc:

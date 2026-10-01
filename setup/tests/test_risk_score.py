@@ -334,6 +334,24 @@ class BriefPathsUnit(unittest.TestCase):
         self.assertEqual(rs.canonical_path("apps/../apps/integration/x.ts", "path"), "apps/integration/x.ts")
 
 
+class LaneTierOfUnit(unittest.TestCase):
+    """Direct checks of risk_score.lane_tier_of: the tier word must match a
+    whole -/_ delimited segment of fromLane, not an arbitrary substring."""
+
+    def test_returns_none_for_no_handoff(self):
+        self.assertIsNone(rs.lane_tier_of(None))
+        self.assertIsNone(rs.lane_tier_of({}))
+
+    def test_matches_a_whole_dash_or_underscore_delimited_segment(self):
+        self.assertEqual(rs.lane_tier_of({"fromLane": "sdlc-green"}), "green")
+        self.assertEqual(rs.lane_tier_of({"fromLane": "sdlc_yellow_v2"}), "yellow")
+        self.assertEqual(rs.lane_tier_of({"fromLane": "red"}), "red")
+
+    def test_does_not_match_a_bare_substring_of_a_longer_segment(self):
+        self.assertIsNone(rs.lane_tier_of({"fromLane": "evergreen-lane"}))
+        self.assertIsNone(rs.lane_tier_of({"fromLane": "sdlc-starred"}))
+
+
 def gathered(name, file, callers):
     return {"name": name, "file": file, "d1_callers": callers, "risk": "LOW",
             "query_status": "GATHERED", "query_repo": "api", "query_target": name}
@@ -474,6 +492,44 @@ class Plan(Base):
         handoff.write_text(json.dumps({"schema": "nope"}), encoding="utf-8")
         self.assert_fail(self.run_cli("plan", "--handoff", str(handoff)), "handoff", stage="plan")
 
+    def test_prior_doc_missing_but_trajectory_has_the_stage_fails_closed(self):
+        # risk-intake.json is gone but risk-trajectory.jsonl remembers intake
+        # ran: that is an inconsistent artifacts directory, not "never ran".
+        traj = self.ad / "risk-trajectory.jsonl"
+        traj.write_text(json.dumps({"stage": "intake", "tier": "green"}) + "\n", encoding="utf-8")
+        self.baseline()
+        self.assert_fail(self.run_cli("plan"), "risk-intake.json", stage="plan")
+
+    def test_prior_doc_genuinely_missing_with_no_trajectory_line_is_null(self):
+        self.baseline()
+        self.assert_tier(self.run_cli("plan"), "green", "plan")
+        self.assertEqual(self.doc("plan")["prior"], {"tier": None, "stage": None, "handoffTier": None})
+
+    def test_non_list_behavioral_probes_fail_closed(self):
+        for bad in ("oops", {"covers": ["x"]}, [1, 2]):
+            profile = dict(PROFILE)
+            profile["evidence"] = {"behavioral": bad}
+            self.profile.write_text(json.dumps(profile), encoding="utf-8")
+            self.baseline()
+            self.assert_fail(self.run_cli("plan"), "evidence.behavioral", stage="plan")
+
+    def test_non_string_covers_entries_fail_closed(self):
+        for bad in (5, [1, 2]):
+            profile = dict(PROFILE)
+            profile["evidence"] = {"behavioral": [{"covers": bad}]}
+            self.profile.write_text(json.dumps(profile), encoding="utf-8")
+            self.baseline()
+            self.assert_fail(self.run_cli("plan"), "evidence.behavioral", stage="plan")
+
+    def test_well_formed_probes_still_compute_coverage(self):
+        profile = dict(PROFILE)
+        profile["evidence"] = {"behavioral": [{"covers": ["apps/api/src/notes/notes.service.ts"]}]}
+        self.profile.write_text(json.dumps(profile), encoding="utf-8")
+        self.baseline()
+        self.assert_tier(self.run_cli("plan"), "green", "plan")
+        ids = {s["id"]: s for s in self.doc("plan")["mechanical"]["signals"]}
+        self.assertEqual(ids["coverage"]["value"], [])
+
     def test_web_allowlist_without_web_repo_fails_closed(self):
         profile = dict(PROFILE)
         profile["capabilities"] = {"defaultRepo": "api"}  # no webRepo
@@ -576,6 +632,12 @@ class Impl(Base):
 
     def test_prior_doc_with_wrong_stage_fails_closed(self):
         self.write(self.ad, "risk-plan.json", {"schema": rp.SCHEMA_SCORE, "stage": "intake", "tier": "yellow"})
+        self.commit_file("docs/a.md", "x")
+        self.assert_fail(self.run_cli("impl"), "risk-plan.json", stage="impl")
+
+    def test_prior_doc_missing_but_trajectory_has_the_stage_fails_closed(self):
+        traj = self.ad / "risk-trajectory.jsonl"
+        traj.write_text(json.dumps({"stage": "plan", "tier": "yellow"}) + "\n", encoding="utf-8")
         self.commit_file("docs/a.md", "x")
         self.assert_fail(self.run_cli("impl"), "risk-plan.json", stage="impl")
 
