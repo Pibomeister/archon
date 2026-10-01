@@ -117,6 +117,38 @@ class Merge(unittest.TestCase):
         with self.assertRaises(rp.RiskPolicyError):
             rp.load_policy(policy_path=str(tmp / "p.json"))
 
+    def test_unknown_layer_key_is_rejected(self):
+        with self.assertRaises(rp.RiskPolicyError):
+            rp.load_policy(profile={"risk": {"sensitiveDomain": {"floor": "red"}}})
+
+    def test_layer_floor_must_be_a_known_tier(self):
+        for key in ("sensitiveDomains", "factoryControl", "publicContract", "sideEffects"):
+            with self.assertRaises(rp.RiskPolicyError) as cm:
+                rp.load_policy(profile={"risk": {key: {"floor": "purple"}}})
+            self.assertIn(key, str(cm.exception))
+
+    def test_points_merge_is_scoped_and_additive(self):
+        merged = rp.load_policy(profile={"risk": {
+            "points": {"filesOverMax": 20, "taskClass": {"docs": 1}},
+        }})
+        self.assertEqual(merged["points"]["filesOverMax"], 20)
+        self.assertEqual(merged["points"]["taskClass"]["docs"], 1)
+        self.assertEqual(merged["points"]["taskClass"]["chore"], 5)  # untouched classes survive
+
+    def test_points_rejects_unknown_task_class(self):
+        with self.assertRaises(rp.RiskPolicyError):
+            rp.load_policy(profile={"risk": {"points": {"taskClass": {"sprint": 1}}}})
+
+    def test_points_rejects_non_integer_values(self):
+        with self.assertRaises(rp.RiskPolicyError):
+            rp.load_policy(profile={"risk": {"points": {"filesOverMax": True}}})
+
+    def test_check_layer_deep_copies_so_merged_never_aliases_the_profile(self):
+        profile = {"risk": {"protectedAreas": [{"paths": ["libs/"], "floor": "red", "reason": "x"}]}}
+        merged = rp.load_policy(profile=profile)
+        merged["protectedAreas"][0]["floor"] = "yellow"
+        self.assertEqual(profile["risk"]["protectedAreas"][0]["floor"], "red")
+
 
 class Invariants(unittest.TestCase):
     def test_cannot_lower_sensitive_domain_floor(self):
@@ -157,6 +189,16 @@ class Invariants(unittest.TestCase):
             rp.load_policy(profile={"risk": {"autoMerge": True}})
         self.assertIn("auto-merge", str(cm.exception))
 
+    def test_autoMerge_rejects_any_non_false_value(self):
+        for bad in (1, "true", "True"):
+            with self.assertRaises(rp.RiskPolicyError) as cm:
+                rp.load_policy(profile={"risk": {"autoMerge": bad}})
+            self.assertIn("auto-merge", str(cm.exception))
+
+    def test_autoMerge_false_is_accepted(self):
+        merged = rp.load_policy(profile={"risk": {"autoMerge": False}})
+        self.assertIn(merged.get("autoMerge"), (None, False))
+
     def test_assert_invariants_is_callable_on_a_merged_document(self):
         merged = rp.load_policy()
         rp.assert_invariants(merged, rp.load_defaults())  # no raise
@@ -164,6 +206,39 @@ class Invariants(unittest.TestCase):
         broken["factoryControl"]["floor"] = "yellow"
         with self.assertRaises(rp.RiskPolicyError):
             rp.assert_invariants(broken, rp.load_defaults())
+
+    def test_assert_invariants_rejects_malformed_merged_documents(self):
+        defaults = rp.load_defaults()
+        broken = json.loads(json.dumps(rp.load_policy()))
+        del broken["factoryControl"]
+        with self.assertRaises(rp.RiskPolicyError) as cm:
+            rp.assert_invariants(broken, defaults)
+        self.assertIn("factoryControl", str(cm.exception))
+        broken = json.loads(json.dumps(rp.load_policy()))
+        broken["sensitiveDomains"]["tokens"] = []
+        with self.assertRaises(rp.RiskPolicyError):
+            rp.assert_invariants(broken, defaults)
+
+
+class PolicyFileValidation(unittest.TestCase):
+    def _doctored(self, mutate):
+        doc = json.loads(json.dumps(POLICY))
+        mutate(doc)
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        path = tmp / "risk-policy.json"
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        return str(path)
+
+    def test_policy_file_requires_exact_task_classes(self):
+        path = self._doctored(lambda d: d["points"]["taskClass"].pop("docs"))
+        with self.assertRaises(rp.RiskPolicyError):
+            rp.load_defaults(policy_path=path)
+
+    def test_policy_file_requires_tier_valid_reversibility_floors(self):
+        path = self._doctored(lambda d: d["reversibility"]["lockfiles"].__setitem__("floor", "purple"))
+        with self.assertRaises(rp.RiskPolicyError):
+            rp.load_defaults(policy_path=path)
 
 
 if __name__ == "__main__":

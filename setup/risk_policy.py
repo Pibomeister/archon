@@ -14,6 +14,13 @@ sensitive token or factory path, or carries autoMerge: true. The same check
 runs at load, at proposal and at admit (Slice 5), so no layer can sneak a
 weaker floor in.
 
+Only the sensitiveDomains and factoryControl floors are invariant:
+publicContract, sideEffects, codeowners and protectedAreas floors may be set
+lower by a layer on purpose, since those sections encode judgment calls
+rather than hard floors. Overlay-version monotonicity (rejecting an overlay
+applied out of order) is enforced by the Slice 5 admit step, not here at
+load time.
+
 Path rules ("anchored-prefix globs", the lite-envelope.sh semantics plus globs):
   "dir/"        prefix: dir/ and everything beneath it
   "file.ext"    exact match
@@ -46,6 +53,8 @@ _REQUIRED_POINTS = ("taskClass", "triage", "filesOverMax", "perExtraFile", "test
                     "callersOverMax", "chainLinksOverMax", "impactUnavailable", "impactMissing",
                     "unknownCoverage")
 _REQUIRED_SIZES = ("max_files", "max_test_files", "max_d1_callers", "max_chain_links")
+LAYER_KEYS = ("thresholds", "points", "protectedAreas", "sensitiveDomains", "factoryControl",
+              "publicContract", "sideEffects", "codeowners", "autoMerge")
 
 
 class RiskPolicyError(ValueError):
@@ -123,6 +132,18 @@ def load_defaults(policy_path: Optional[str] = None) -> dict:
     points = doc.get("points")
     if not isinstance(points, dict) or any(k not in points for k in _REQUIRED_POINTS):
         raise RiskPolicyError("risk-policy.json points is incomplete")
+    tc = points.get("taskClass")
+    if not isinstance(tc, dict) or set(tc) != set(TASK_CLASSES) or any(not _is_nonneg_int(v) for v in tc.values()):
+        raise RiskPolicyError("risk-policy.json points.taskClass must map exactly the task classes "
+                              "to non-negative integers")
+    tr = points.get("triage")
+    if not isinstance(tr, dict) or set(tr) != {"S", "M", "L"} or any(not _is_nonneg_int(v) for v in tr.values()):
+        raise RiskPolicyError("risk-policy.json points.triage must map exactly S, M, L to non-negative integers")
+    for key in _REQUIRED_POINTS:
+        if key in ("taskClass", "triage"):
+            continue
+        if not _is_nonneg_int(points.get(key)):
+            raise RiskPolicyError(f"risk-policy.json points.{key} must be a non-negative integer")
     sizes = doc.get("sizeThresholds")
     if not isinstance(sizes, dict) or any(not _is_nonneg_int(sizes.get(k)) for k in _REQUIRED_SIZES):
         raise RiskPolicyError("risk-policy.json sizeThresholds is incomplete")
@@ -139,6 +160,11 @@ def load_defaults(policy_path: Optional[str] = None) -> dict:
         _check_str_list(words, f"sensitiveDomains.tokens.{name}")
     _check_areas(doc.get("protectedAreas", []), "risk-policy.json protectedAreas")
     _check_str_list(doc.get("repro_command_allow"), "repro_command_allow")
+    for name, section in doc["reversibility"].items():
+        if not isinstance(section, dict):
+            raise RiskPolicyError(f"risk-policy.json reversibility.{name} must be an object")
+        _check_tier(section.get("floor"), f"reversibility.{name}.floor")
+        _check_str_list(section.get("paths"), f"reversibility.{name}.paths")
     return doc
 
 
@@ -173,10 +199,43 @@ def _check_areas(areas: Any, label: str) -> list:
     return areas
 
 
+def _check_points(points: Any, label: str) -> dict:
+    """A layer's points block: a subset of _REQUIRED_POINTS, each value typed.
+
+    Unlike load_defaults (which requires every point key and an exact
+    taskClass/triage key set), a layer may touch only the keys it means to
+    change; taskClass and triage are merged key-by-key, so a layer may add or
+    override a single class without restating the rest."""
+    if not isinstance(points, dict) or any(k not in _REQUIRED_POINTS for k in points):
+        raise RiskPolicyError(f"{label} must map known point keys")
+    if "taskClass" in points:
+        tc = points["taskClass"]
+        if not isinstance(tc, dict) or any(k not in TASK_CLASSES for k in tc) or \
+                any(not _is_nonneg_int(v) for v in tc.values()):
+            raise RiskPolicyError(f"{label}.taskClass must map known task classes to non-negative integers")
+    if "triage" in points:
+        tr = points["triage"]
+        if not isinstance(tr, dict) or any(k not in ("S", "M", "L") for k in tr) or \
+                any(not _is_nonneg_int(v) for v in tr.values()):
+            raise RiskPolicyError(f"{label}.triage must map S, M, L to non-negative integers")
+    for key, value in points.items():
+        if key in ("taskClass", "triage"):
+            continue
+        if not _is_nonneg_int(value):
+            raise RiskPolicyError(f"{label}.{key} must be a non-negative integer")
+    return points
+
+
 def _check_layer(layer: Any, label: str) -> dict:
-    """A profile.risk block or an overlay: every key optional, each typed."""
+    """A profile.risk block or an overlay: every key optional, each typed.
+
+    Returns a deep copy so the merged document never aliases the caller's
+    profile or overlay dicts."""
     if not isinstance(layer, dict):
         raise RiskPolicyError(f"{label} must be an object")
+    for k in layer:
+        if k not in LAYER_KEYS:
+            raise RiskPolicyError(f"{label}: unknown key {k}")
     if "thresholds" in layer:
         th = layer["thresholds"]
         if not isinstance(th, dict):
@@ -184,11 +243,17 @@ def _check_layer(layer: Any, label: str) -> dict:
         for k, v in th.items():
             if k not in ("yellow", "red") or not _is_nonneg_int(v):
                 raise RiskPolicyError(f"{label}.thresholds.{k} must be a non-negative integer")
+    if "points" in layer:
+        _check_points(layer["points"], f"{label}.points")
     if "protectedAreas" in layer:
         _check_areas(layer["protectedAreas"], f"{label}.protectedAreas")
     for key in ("sensitiveDomains", "factoryControl", "publicContract", "sideEffects", "codeowners"):
         if key in layer and not isinstance(layer[key], dict):
             raise RiskPolicyError(f"{label}.{key} must be an object")
+    for key in ("sensitiveDomains", "factoryControl", "publicContract", "sideEffects"):
+        section = layer.get(key) or {}
+        if "floor" in section:
+            _check_tier(section["floor"], f"{label}.{key}.floor")
     sd = layer.get("sensitiveDomains") or {}
     if "extraPaths" in sd:
         _check_str_list(sd["extraPaths"], f"{label}.sensitiveDomains.extraPaths")
@@ -208,12 +273,23 @@ def _check_layer(layer: Any, label: str) -> dict:
             _check_tier(tier, f"{label}.codeowners.ownerFloors[{owner}]")
     if "defaultOwnedFloor" in co:
         _check_tier(co["defaultOwnedFloor"], f"{label}.codeowners.defaultOwnedFloor")
-    return layer
+    if "autoMerge" in layer and layer["autoMerge"] is not False:
+        raise RiskPolicyError(f"{label}.autoMerge: risk policy cannot enable auto-merge")
+    return json.loads(json.dumps(layer))
 
 
 def _merge_layer(merged: dict, layer: dict) -> None:
     if "thresholds" in layer:
         merged["thresholds"] = dict(merged["thresholds"], **layer["thresholds"])
+    if "points" in layer:
+        target = merged.setdefault("points", {})
+        for key, value in layer["points"].items():
+            if key in ("taskClass", "triage"):
+                sub = dict(target.get(key, {}))
+                sub.update(value)
+                target[key] = sub
+            else:
+                target[key] = value
     if "protectedAreas" in layer:
         merged["protectedAreas"] = list(merged.get("protectedAreas", [])) + list(layer["protectedAreas"])
     sd = layer.get("sensitiveDomains")
@@ -248,20 +324,55 @@ def _merge_layer(merged: dict, layer: dict) -> None:
         merged["autoMerge"] = layer["autoMerge"]
 
 
+def _require_floor_section(doc: dict, key: str, label: str) -> dict:
+    section = doc.get(key)
+    if not isinstance(section, dict):
+        raise RiskPolicyError(f"{label} {key} must be an object")
+    _check_tier(section.get("floor"), f"{label} {key}.floor")
+    return section
+
+
 def assert_invariants(merged: dict, defaults: dict) -> None:
-    """The floors that no layer may weaken. Raised at load, proposal and admit."""
-    for key in ("sensitiveDomains", "factoryControl"):
-        if tier_gt(defaults[key]["floor"], merged[key]["floor"]):
-            raise RiskPolicyError(f"{key} floor cannot be lowered below {defaults[key]['floor']}")
-    for name, words in defaults["sensitiveDomains"]["tokens"].items():
-        kept = set(merged["sensitiveDomains"]["tokens"].get(name, []))
+    """The floors that no layer may weaken. Raised at load, proposal and admit.
+
+    Shape-checks first so a malformed document (a hand-edited overlay, a
+    Slice 5 proposal, an entry that never went through load_policy) raises a
+    named RiskPolicyError instead of a KeyError or AttributeError."""
+    if not isinstance(merged, dict):
+        raise RiskPolicyError("merged policy document must be an object")
+    if not isinstance(defaults, dict):
+        raise RiskPolicyError("default policy document must be an object")
+    merged_sd = _require_floor_section(merged, "sensitiveDomains", "merged")
+    merged_fc = _require_floor_section(merged, "factoryControl", "merged")
+    defaults_sd = _require_floor_section(defaults, "sensitiveDomains", "defaults")
+    defaults_fc = _require_floor_section(defaults, "factoryControl", "defaults")
+    for key, merged_section, defaults_section in (
+        ("sensitiveDomains", merged_sd, defaults_sd),
+        ("factoryControl", merged_fc, defaults_fc),
+    ):
+        if tier_gt(defaults_section["floor"], merged_section["floor"]):
+            raise RiskPolicyError(f"{key} floor cannot be lowered below {defaults_section['floor']}")
+    tokens = merged_sd.get("tokens")
+    if not isinstance(tokens, dict) or any(not isinstance(v, list) for v in tokens.values()):
+        raise RiskPolicyError("sensitiveDomains.tokens must be an object of lists")
+    default_tokens = defaults_sd.get("tokens")
+    if not isinstance(default_tokens, dict):
+        raise RiskPolicyError("defaults sensitiveDomains.tokens must be an object")
+    for name, words in default_tokens.items():
+        kept = set(tokens.get(name, []))
         missing = sorted(set(words) - kept)
         if missing:
             raise RiskPolicyError(f"sensitiveDomains.tokens.{name} cannot drop {', '.join(missing)}")
-    missing = sorted(set(defaults["factoryControl"]["paths"]) - set(merged["factoryControl"]["paths"]))
+    merged_paths = merged_fc.get("paths")
+    if not isinstance(merged_paths, list):
+        raise RiskPolicyError("factoryControl.paths must be a list")
+    default_paths = defaults_fc.get("paths")
+    if not isinstance(default_paths, list):
+        raise RiskPolicyError("defaults factoryControl.paths must be a list")
+    missing = sorted(set(default_paths) - set(merged_paths))
     if missing:
         raise RiskPolicyError(f"factoryControl.paths cannot drop {', '.join(missing)}")
-    if merged.get("autoMerge") is True:
+    if merged.get("autoMerge") not in (None, False):
         raise RiskPolicyError("risk policy cannot enable auto-merge")
     _check_thresholds(merged.get("thresholds"), "merged thresholds")
 
