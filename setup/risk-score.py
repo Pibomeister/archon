@@ -30,9 +30,8 @@ Stage inputs:
           "Kind: <class>" line or a "## Kind" heading (missing -> feature,
           unknown -> FAIL), the repo-relative paths the brief names, and
           CODEOWNERS at --base (or the working tree when no --base)
-  plan    files-allowlist.json (required), web-files-allowlist.json (optional;
-          its paths are scored as paths in the capabilities.webRepo repo and
-          reported as "<webRepo>/<path>"), impact.json, triage.json,
+  plan    files-allowlist.json (required), web-files-allowlist.json (optional,
+          paths in the capabilities.webRepo repo), impact.json, triage.json,
           risk-judgment.json, causal-chain.json (optional)
   impl    git diff -z --name-status <base>..HEAD where base is --base or
           bootstrap-head.txt (base must be an ancestor of HEAD, the tracked
@@ -41,6 +40,14 @@ Stage inputs:
 
 The repo label for "<repo>/<path>" rule matching is params.json repo, else
 profile capabilities.defaultRepo, else the basename of --repo-root.
+
+Every path is scored as a bare repo-relative path under its own repo's label.
+A web allowlist path belongs to capabilities.webRepo. A brief path whose
+first segment is a known repo name (the repo label above, or the profile's
+defaultRepo, webRepo or allowedRepos) is scored as written and again with
+that segment stripped, as a path in the named repo. Paths in a sibling repo
+are reported as "<repo>/<path>" and get path floors only: just --repo-root
+is diffed and matched against CODEOWNERS.
 """
 import argparse
 import json
@@ -206,12 +213,31 @@ def task_class_signal(ctx):
             "source": "mechanical", "evidence": evidence}
 
 
+def brief_entries(ctx, paths):
+    """(shown, bare, repo) entries for the brief's paths. A path whose first
+    segment is a known repo name is scored twice, both times reported as
+    written: once as written, and once with that segment stripped as a path
+    in the named repo, so "api/.github/workflows/ci.yml" hits the same
+    root-anchored rules ".github/workflows/ci.yml" does. A path naming a
+    sibling repo is not a path in the primary repo, so its as-written entry
+    carries no repo label and is never matched against CODEOWNERS."""
+    entries = []
+    for p in paths:
+        head, _, rest = p.partition("/")
+        if head in ctx["repos"] and rest:
+            entries.append((p, p, ctx["repo"] if head == ctx["repo"] else None))
+            entries.append((p, rest, head))
+        else:
+            entries.append((p, p, ctx["repo"]))
+    return entries
+
+
 def signals_intake(ctx):
     signals = [task_class_signal(ctx)]
     paths = brief_paths(ctx["brief"], ctx["policy"])
     signals.append({"id": "brief-paths", "value": paths, "points": 0, "floor": None,
                     "source": "mechanical", "evidence": f"{len(paths)} path(s) named in the brief"})
-    return signals, paths
+    return signals, brief_entries(ctx, paths), {}
 
 
 # --- shared plan/impl signals ------------------------------------------------
@@ -276,14 +302,9 @@ def read_chain_links(ad):
     return len(links)
 
 
-def web_shown(ctx, path):
-    return f"{ctx['web_repo']}/{path}"
-
-
-def size_signals(ctx, paths, web, triage_name):
+def size_signals(ctx, entries, triage_name):
     pol = ctx["policy"]
     pts, sizes = pol["points"], pol["sizeThresholds"]
-    entries = [(p, p, ctx["repo"]) for p in paths] + [(web_shown(ctx, p), p, ctx["web_repo"]) for p in web]
     code = [e for e in entries if not TEST_RE.search(e[1])]
     tests = [e for e in entries if TEST_RE.search(e[1])]
     signals = [task_class_signal(ctx)]
@@ -337,8 +358,9 @@ def signals_plan(ctx):
     web = read_allowlist(ctx["ad"], "web-files-allowlist.json", required=False) or []
     if web and not ctx["web_repo"]:
         raise Fail("web-files-allowlist.json present but profile has no capabilities.webRepo")
-    signals = size_signals(ctx, allow, web, "triage.json")
-    return signals, allow, web, {"allowlistSha256": rp.sha256_bytes(rp.canonical_bytes(raw))}
+    entries = [(p, p, ctx["repo"]) for p in allow] + [(f"{ctx['web_repo']}/{p}", p, ctx["web_repo"]) for p in web]
+    signals = size_signals(ctx, entries, "triage.json")
+    return signals, entries, {"allowlistSha256": rp.sha256_bytes(rp.canonical_bytes(raw))}
 
 
 # --- stage: impl -------------------------------------------------------------
@@ -354,7 +376,10 @@ def signals_impl(ctx):
     non-empty) are a guard against an upstream node forgetting that commit,
     not the mechanism that makes it true: they catch a broken caller, they do
     not create the commit themselves. Untracked files are ignored -- they are
-    not part of the diff and are not this stage's business."""
+    not part of the diff and are not this stage's business.
+
+    Only --repo-root is diffed: a change in a sibling repo is not re-scored
+    here, and reaches this stage's tier only through the plan stage's prior."""
     if not ctx["base"]:
         raise Fail("impl needs a base commit: --base or bootstrap-head.txt")
     status = git(ctx["root"], "status", "--porcelain", "--untracked-files=no")
@@ -394,8 +419,9 @@ def signals_impl(ctx):
     head = git(ctx["root"], "rev-parse", "HEAD")
     if head.returncode != 0:
         raise Fail("git rev-parse HEAD failed")
-    signals = size_signals(ctx, paths, [], "triage-post.json")
-    return signals, paths, [], {"diffSha256": rp.sha256_text(diff_text), "head": head.stdout.strip()}
+    entries = [(p, p, ctx["repo"]) for p in paths]
+    signals = size_signals(ctx, entries, "triage-post.json")
+    return signals, entries, {"diffSha256": rp.sha256_text(diff_text), "head": head.stdout.strip()}
 
 
 # --- assembly ----------------------------------------------------------------
@@ -498,29 +524,42 @@ def lane_tier_of(handoff):
     return None
 
 
-def stage_floors(ctx, paths, web):
-    """Path floors for the primary repo's paths plus the web repo's paths,
-    one entry per floor id. Each group is evaluated as bare repo-relative
-    paths under its own repo label, so a root-anchored rule
-    (".github/workflows/", "uv.lock") applies to the web repo exactly as it
-    does to the primary one; web paths are reported as "<webRepo>/<path>"."""
+def shown_floors(floors, group):
+    """floors with each bare path replaced by the spelling(s) it is reported as."""
+    shown = {}
+    for spelling, bare, _ in group:
+        shown.setdefault(bare, set()).add(spelling)
+    return [dict(f, paths=sorted({spelling for p in f["paths"] for spelling in shown[p]})) for f in floors]
+
+
+def stage_floors(ctx, entries):
+    """Path floors over (shown, bare, repo) entries, one per floor id. Each
+    repo's paths are evaluated as bare repo-relative paths under that repo's
+    label, so a root-anchored rule (".github/workflows/", "uv.lock") applies
+    to a sibling repo exactly as it does to the primary one."""
+    groups = {}
+    for e in entries:
+        groups.setdefault(e[2], []).append(e)
     merged = {}
-    for repo, group, shown in ((ctx["repo"], paths, lambda p: p),
-                               (ctx["web_repo"], web, lambda p: web_shown(ctx, p))):
-        for f in rp.path_floors(ctx["policy"], group, repo):
+    for repo, group in groups.items():
+        for f in shown_floors(rp.path_floors(ctx["policy"], [e[1] for e in group], repo), group):
             entry = merged.setdefault(f["id"], {"id": f["id"], "floor": f["floor"], "reason": f["reason"], "paths": []})
             entry["floor"] = rp.tier_max(entry["floor"], f["floor"])
-            entry["paths"] = sorted(set(entry["paths"]) | {shown(p) for p in f["paths"]})
+            entry["paths"] = sorted(set(entry["paths"]) | set(f["paths"]))
     return list(merged.values())
 
 
-def build(ctx, signals, paths, web, extra_inputs):
+def build(ctx, signals, entries, extra_inputs):
+    """Assemble the score document. CODEOWNERS is the primary repo's
+    (--repo-root), so only entries in that repo are owner-scored;
+    sibling-repo paths get path floors only."""
     policy = ctx["policy"]
-    floors = stage_floors(ctx, paths, web)
+    floors = stage_floors(ctx, entries)
     owners, co_floors = [], []
     if ctx["codeowners_rules"] is not None:
-        owners, co_floors = rp.codeowner_floors(policy, ctx["codeowners_rules"],
-                                                paths + [web_shown(ctx, p) for p in web])
+        primary = [e for e in entries if e[2] == ctx["repo"]]
+        owners, co_floors = rp.codeowner_floors(policy, ctx["codeowners_rules"], [e[1] for e in primary])
+        co_floors = shown_floors(co_floors, primary)
     floors = sorted(floors + co_floors, key=lambda f: f["id"])
     score = sum(s["points"] for s in signals)
     mech_tier = rp.tier_max(rp.tier_from_score(score, policy["thresholds"]), *[f["floor"] for f in floors])
@@ -623,10 +662,12 @@ def context(args):
     caps = profile.get("capabilities") if isinstance(profile.get("capabilities"), dict) else {}
     repo = params.get("repo") if isinstance(params.get("repo"), str) and params.get("repo") else None
     repo = repo or caps.get("defaultRepo") or os.path.basename(root.rstrip(os.sep))
+    allowed = caps.get("allowedRepos") if isinstance(caps.get("allowedRepos"), list) else []
+    repos = {n for n in [repo, caps.get("defaultRepo"), caps.get("webRepo"), *allowed] if isinstance(n, str) and n}
     return {
         "ad": ad, "stage": args.stage, "params": params, "profile": profile, "policy": policy,
         "brief": brief, "brief_sha": rp.sha256_text(brief), "root": root, "base": base, "repo": repo,
-        "web_repo": caps.get("webRepo"),
+        "web_repo": caps.get("webRepo"), "repos": repos,
         "profile_sha": rp.sha256_file(args.profile), "policy_sha": rp.sha256_file(args.policy or rp.DEFAULT_POLICY_PATH),
         "overlay_sha": rp.sha256_file(args.overlay) if args.overlay else None,
         "codeowners_rules": rules, "codeowners_sha": co_sha,
@@ -636,7 +677,7 @@ def context(args):
     }
 
 
-STAGE_FUNCS = {"intake": lambda ctx: signals_intake(ctx) + ([], {}), "plan": signals_plan, "impl": signals_impl}
+STAGE_FUNCS = {"intake": signals_intake, "plan": signals_plan, "impl": signals_impl}
 
 
 def score(args):
@@ -647,8 +688,8 @@ def score(args):
     if os.path.isfile(stale):
         os.remove(stale)
     ctx = context(args)
-    signals, paths, web, extra_inputs = STAGE_FUNCS[args.stage](ctx)
-    return ctx, build(ctx, signals, paths, web, extra_inputs)
+    signals, entries, extra_inputs = STAGE_FUNCS[args.stage](ctx)
+    return ctx, build(ctx, signals, entries, extra_inputs)
 
 
 class RiskArgumentParser(argparse.ArgumentParser):

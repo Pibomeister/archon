@@ -26,7 +26,7 @@ _spec.loader.exec_module(rs)
 POLICY = rp.load_defaults()
 PROFILE = {
     "profileVersion": "archon.project-profile.v2", "projectId": "project:test",
-    "capabilities": {"defaultRepo": "api", "webRepo": "web-app"},
+    "capabilities": {"defaultRepo": "api", "webRepo": "web-app", "allowedRepos": ["api", "goodword-mcp", "web-app"]},
     "risk": {"protectedAreas": [{"paths": ["api/apps/integration-service/"], "floor": "red", "reason": "integration"}],
              "codeowners": {"ownerFloors": {"@org/security": "red"}, "defaultOwnedFloor": "yellow"}},
 }
@@ -173,6 +173,34 @@ class Intake(Base):
         self.assertEqual(d["inputs"]["baseCommit"], base)
         ids = [f["id"] for f in d["floors"]]
         self.assertEqual(ids, ["codeowners:@org/security", "codeowners:owned", "sensitive-domain:auth"])
+
+    def test_repo_prefixed_brief_paths_hit_root_anchored_floors(self):
+        for named, tier, fid in (("api/.github/workflows/ci.yml", "red", "factory-control"),
+                                 ("web-app/.github/workflows/deploy.yml", "red", "factory-control"),
+                                 ("api/uv.lock", "yellow", "lockfile"),
+                                 ("web-app/uv.lock", "yellow", "lockfile"),
+                                 ("goodword-mcp/uv.lock", "yellow", "lockfile"),
+                                 ("api/apps/integration-service/handler.ts", "red", "protected:integration")):
+            self.write_spec(f"# T\n\nKind: docs\n\nTouch {named} only.\n")
+            self.assert_tier(self.run_cli("intake"), tier, "intake")
+            floors = {f["id"]: f["paths"] for f in self.doc("intake")["floors"]}
+            self.assertEqual(floors, {fid: [named]})
+
+    def test_brief_path_naming_a_sibling_repo_is_not_matched_against_primary_codeowners(self):
+        self.commit_file("CODEOWNERS", "*.md  @org/docs\n")
+        self.write_spec("# T\n\nKind: docs\n\nTouch web-app/docs/readme.md only.\n")
+        self.assert_tier(self.run_cli("intake"), "green", "intake")
+        d = self.doc("intake")
+        self.assertEqual(d["codeowners"], {"present": True, "ownersTouched": [], "floorsApplied": []})
+        self.assertEqual(d["floors"], [])
+
+    def test_brief_path_naming_the_primary_repo_is_matched_against_its_codeowners(self):
+        self.commit_file("CODEOWNERS", "/docs/  @org/docs\n")
+        self.write_spec("# T\n\nKind: docs\n\nTouch api/docs/readme.md only.\n")
+        self.assert_tier(self.run_cli("intake"), "yellow", "intake")
+        d = self.doc("intake")
+        self.assertEqual(d["codeowners"]["ownersTouched"], ["@org/docs"])
+        self.assertEqual({f["id"]: f["paths"] for f in d["floors"]}, {"codeowners:owned": ["api/docs/readme.md"]})
 
     def test_codeowners_is_read_at_base_not_working_tree(self):
         self.commit_file("CODEOWNERS", "*  @org/default\n")
@@ -440,6 +468,15 @@ class Plan(Base):
         self.assert_tier(self.run_cli("plan"), "red", "plan")
         floors = {f["id"]: f["paths"] for f in self.doc("plan")["floors"]}
         self.assertEqual(floors, {"protected:editor": ["web-app/app/routes/editor/index.tsx"]})
+
+    def test_web_allowlist_paths_are_not_matched_against_primary_codeowners(self):
+        self.commit_file("CODEOWNERS", "*.md  @org/docs\n")
+        self.baseline()
+        self.write(self.ad, "web-files-allowlist.json", ["docs/readme.md"])
+        self.assert_tier(self.run_cli("plan"), "green", "plan")
+        d = self.doc("plan")
+        self.assertEqual(d["codeowners"], {"present": True, "ownersTouched": [], "floorsApplied": []})
+        self.assertEqual(d["floors"], [])
 
     def test_missing_allowlist_fails_closed(self):
         self.assert_fail(self.run_cli("plan"), "files-allowlist.json", stage="plan")
