@@ -82,21 +82,34 @@ def read_json_optional(ad, name):
 
 
 def canonical_path(entry, label, soft=False):
-    """Repo-relative, normalised: backslashes -> '/', one leading '/'
-    stripped (a '/' that survives that strip means the entry is still
-    absolute and is rejected), interior runs of 2+ slashes collapsed to one,
-    repeated leading './' segments dropped. Escaping ('..' segment), empty,
-    or still-absolute entries FAIL by default; with soft=True they are
-    dropped instead (return None) so one bad token in a free-form brief does
-    not sink the whole score."""
+    """Repo-relative, normalised: interior runs of 2+ slashes collapsed to
+    one, repeated leading './' segments dropped, interior '..' segments
+    resolved (apps/../apps/x -> apps/x) via posixpath.normpath with a
+    trailing slash carried across that resolution. An unresolved '..'
+    segment, an empty result, or a still-absolute entry FAILs.
+
+    soft=True is for free-form prose (a brief): a backslash is converted to
+    '/' and one leading '/' is stripped before those checks, and any
+    resulting problem is dropped instead of raised (return None), so one odd
+    token does not sink the whole score. soft=False (the default) is for
+    machine-produced, already-structured input (files-allowlist.json, a git
+    diff path): a backslash or any leading '/' there means an upstream node
+    is broken, so both FAIL immediately rather than being silently
+    repaired."""
     def bad(msg):
         if soft:
             return None
         raise Fail(f"{label} {msg}: {entry}")
     if not isinstance(entry, str) or not entry.strip():
         return bad("entry is not a non-empty string")
-    raw = entry.strip().replace("\\", "/")
+    raw = entry.strip()
+    if "\\" in raw:
+        if not soft:
+            return bad("entry must use forward slashes")
+        raw = raw.replace("\\", "/")
     if raw.startswith("/"):
+        if not soft:
+            return bad("entry must be repo-relative")
         raw = raw[1:]
         if raw.startswith("/"):
             return bad("entry must be repo-relative")

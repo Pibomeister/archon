@@ -407,7 +407,7 @@ class Plan(Base):
         self.assert_fail(self.run_cli("plan"), "files-allowlist.json")
 
     def test_bad_allowlist_entries_fail_closed(self):
-        for bad in ([], ["//abs/path.ts"], ["../escape.ts"], [""], "not a list"):
+        for bad in ([], ["/abs/path.ts"], ["//abs/path.ts"], ["apps\\api\\x.ts"], ["../escape.ts"], [""], "not a list"):
             self.write(self.ad, "files-allowlist.json", bad)
             self.assert_fail(self.run_cli("plan"), "files-allowlist.json")
 
