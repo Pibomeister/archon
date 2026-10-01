@@ -404,12 +404,12 @@ class Plan(Base):
         self.assertEqual(d["floors"][0]["paths"], ["web-app/app/services/api-client.d.ts"])
 
     def test_missing_allowlist_fails_closed(self):
-        self.assert_fail(self.run_cli("plan"), "files-allowlist.json")
+        self.assert_fail(self.run_cli("plan"), "files-allowlist.json", stage="plan")
 
     def test_bad_allowlist_entries_fail_closed(self):
         for bad in ([], ["/abs/path.ts"], ["//abs/path.ts"], ["apps\\api\\x.ts"], ["../escape.ts"], [""], "not a list"):
             self.write(self.ad, "files-allowlist.json", bad)
-            self.assert_fail(self.run_cli("plan"), "files-allowlist.json")
+            self.assert_fail(self.run_cli("plan"), "files-allowlist.json", stage="plan")
 
     def test_impact_missing_or_unavailable_adds_unknown_points(self):
         self.baseline(impact=False)
@@ -421,7 +421,7 @@ class Plan(Base):
         ids = {s["id"]: s for s in self.doc("plan")["mechanical"]["signals"]}
         self.assertEqual(ids["impact"]["points"], POLICY["points"]["impactUnavailable"])
         self.write(self.ad, "impact.json", {"status": "NOPE"})
-        self.assert_fail(self.run_cli("plan"), "impact.json")
+        self.assert_fail(self.run_cli("plan"), "impact.json", stage="plan")
 
     def test_callers_and_chain_links_over_max_add_points(self):
         self.baseline()
@@ -438,7 +438,7 @@ class Plan(Base):
         self.write(self.ad, "triage.json", {"size": "L"})
         self.assert_tier(self.run_cli("plan"), "yellow", "plan")
         self.write(self.ad, "triage.json", {"size": "XL"})
-        self.assert_fail(self.run_cli("plan"), "triage.json")
+        self.assert_fail(self.run_cli("plan"), "triage.json", stage="plan")
 
     def test_agent_judgment_joins_the_max_and_malformed_fails(self):
         self.baseline()
@@ -449,7 +449,7 @@ class Plan(Base):
         self.assertEqual(d["agent"]["tier"], "red")
         self.assertEqual(d["mechanical"]["tier"], "green")  # disagreement recorded, not resolved
         self.write(self.ad, "risk-judgment.json", {"schema": rp.SCHEMA_JUDGMENT, "tier": "red"})
-        self.assert_fail(self.run_cli("plan"), "risk-judgment.json")
+        self.assert_fail(self.run_cli("plan"), "risk-judgment.json", stage="plan")
 
     def test_prior_stage_tier_never_lowers(self):
         self.write_spec("# T\n\nKind: docs\n\nEdit apps/api/src/auth/a.md.\n")
@@ -458,7 +458,7 @@ class Plan(Base):
         self.baseline(files=["docs/a.md"])
         self.assert_tier(self.run_cli("plan"), "red", "plan")
         d = self.doc("plan")
-        self.assertEqual(d["prior"], {"tier": "red", "stage": "intake"})
+        self.assertEqual(d["prior"], {"tier": "red", "stage": "intake", "handoffTier": None})
         self.assertEqual(d["mechanical"]["tier"], "green")
 
     def test_handoff_sets_prior_and_escalated_from(self):
@@ -468,11 +468,41 @@ class Plan(Base):
                                        "stage": "plan", "runId": "run-123"}), encoding="utf-8")
         self.assert_tier(self.run_cli("plan", "--handoff", str(handoff)), "yellow", "plan")
         d = self.doc("plan")
-        self.assertEqual(d["prior"], {"tier": "yellow", "stage": "plan"})
+        self.assertEqual(d["prior"], {"tier": "yellow", "stage": "plan", "handoffTier": "yellow"})
         self.assertEqual((d["escalated"], d["escalatedFrom"], d["handoffRunId"]), (True, "green", "run-123"))
         self.assertEqual(self.trajectory()[-1]["handoffRunId"], "run-123")
         handoff.write_text(json.dumps({"schema": "nope"}), encoding="utf-8")
-        self.assert_fail(self.run_cli("plan", "--handoff", str(handoff)), "handoff")
+        self.assert_fail(self.run_cli("plan", "--handoff", str(handoff)), "handoff", stage="plan")
+
+    def test_web_allowlist_without_web_repo_fails_closed(self):
+        profile = dict(PROFILE)
+        profile["capabilities"] = {"defaultRepo": "api"}  # no webRepo
+        self.profile.write_text(json.dumps(profile), encoding="utf-8")
+        self.baseline()
+        self.write(self.ad, "web-files-allowlist.json", ["app/services/api-client.d.ts"])
+        self.assert_fail(self.run_cli("plan"),
+                         "web-files-allowlist.json present but profile has no capabilities.webRepo", stage="plan")
+
+    def test_duplicate_allowlist_entries_count_once(self):
+        self.baseline(files=["apps/api/src/notes/notes.service.ts"] * 5)
+        self.assert_tier(self.run_cli("plan"), "green", "plan")
+        ids = {s["id"]: s for s in self.doc("plan")["mechanical"]["signals"]}
+        self.assertEqual(ids["files"]["value"], 1)
+
+    def test_differently_spelled_duplicate_allowlist_entries_count_once(self):
+        self.baseline(files=["apps/../apps/x.ts", "apps/x.ts"])
+        self.assert_tier(self.run_cli("plan"), "green", "plan")
+        ids = {s["id"]: s for s in self.doc("plan")["mechanical"]["signals"]}
+        self.assertEqual(ids["files"]["value"], 1)
+
+    def test_callers_value_is_the_max_across_symbols_not_the_sum(self):
+        self.baseline()
+        self.write(self.ad, "impact.json", {"status": "GATHERED", "symbols": [
+            gathered("A", "apps/api/src/notes/a.ts", ["c1", "c2", "c3"]),
+            gathered("B", "apps/api/src/notes/b.ts", ["c4"])]})
+        self.assert_tier(self.run_cli("plan"), "green", "plan")
+        ids = {s["id"]: s for s in self.doc("plan")["mechanical"]["signals"]}
+        self.assertEqual(ids["d1-callers"]["value"], 3)
 
 
 class Impl(Base):
@@ -490,8 +520,8 @@ class Impl(Base):
         ids = {s["id"]: s for s in d["mechanical"]["signals"]}
         self.assertEqual(ids["files"]["value"], 1)
         self.assertEqual(ids["test-files"]["value"], 1)
-        diff = git(self.root, "diff", "--name-status", f"{self.base}..HEAD")
-        self.assertEqual(d["inputs"]["diffSha256"], rp.sha256_text(diff + "\n"))
+        diff = git(self.root, "diff", "-z", "--name-status", f"{self.base}..HEAD")
+        self.assertEqual(d["inputs"]["diffSha256"], rp.sha256_text(diff))
         self.assertEqual(d["inputs"]["head"], git(self.root, "rev-parse", "HEAD"))
         self.assertEqual(d["inputs"]["baseCommit"], self.base)
         self.assertIsNone(d["inputs"]["allowlistSha256"])
@@ -518,11 +548,11 @@ class Impl(Base):
 
     def test_missing_base_fails_closed(self):
         os.remove(self.ad / "bootstrap-head.txt")
-        self.assert_fail(self.run_cli("impl"), "base")
+        self.assert_fail(self.run_cli("impl"), "base", stage="impl")
 
     def test_unreadable_diff_fails_closed(self):
-        self.assert_fail(self.run_cli("impl", "--base", "0" * 40), "base commit")
-        self.assert_fail(self.run_cli("impl", "--repo-root", str(self.tmp / "not-a-repo")), "repo root")
+        self.assert_fail(self.run_cli("impl", "--base", "0" * 40), "base commit", stage="impl")
+        self.assert_fail(self.run_cli("impl", "--repo-root", str(self.tmp / "not-a-repo")), "repo root", stage="impl")
 
     def test_prior_from_plan_and_triage_post(self):
         self.write(self.ad, "risk-plan.json", {"schema": rp.SCHEMA_SCORE, "stage": "plan", "tier": "yellow"})
@@ -530,9 +560,52 @@ class Impl(Base):
         self.commit_file("docs/a.md", "x")
         self.assert_tier(self.run_cli("impl"), "yellow", "impl")
         d = self.doc("impl")
-        self.assertEqual(d["prior"], {"tier": "yellow", "stage": "plan"})
+        self.assertEqual(d["prior"], {"tier": "yellow", "stage": "plan", "handoffTier": None})
         ids = {s["id"]: s for s in d["mechanical"]["signals"]}
         self.assertEqual((ids["triage"]["value"], ids["triage"]["points"]), ("M", POLICY["points"]["triage"]["M"]))
+
+    def test_handoff_raises_prior_above_the_previous_stage_doc(self):
+        self.write(self.ad, "risk-plan.json", {"schema": rp.SCHEMA_SCORE, "stage": "plan", "tier": "green"})
+        handoff = self.tmp / "escalation.json"
+        handoff.write_text(json.dumps({"schema": rp.SCHEMA_ESCALATION, "fromLane": "sdlc-yellow", "toTier": "red",
+                                       "stage": "impl", "runId": "run-9"}), encoding="utf-8")
+        self.commit_file("docs/a.md", "x")
+        self.assert_tier(self.run_cli("impl", "--handoff", str(handoff)), "red", "impl")
+        d = self.doc("impl")
+        self.assertEqual(d["prior"], {"tier": "red", "stage": "plan", "handoffTier": "red"})
+
+    def test_prior_doc_with_wrong_stage_fails_closed(self):
+        self.write(self.ad, "risk-plan.json", {"schema": rp.SCHEMA_SCORE, "stage": "intake", "tier": "yellow"})
+        self.commit_file("docs/a.md", "x")
+        self.assert_fail(self.run_cli("impl"), "risk-plan.json", stage="impl")
+
+    def test_empty_diff_fails_closed(self):
+        self.assert_fail(self.run_cli("impl"), "impl diff is empty", stage="impl")
+
+    def test_dirty_tracked_worktree_fails_closed(self):
+        self.commit_file("apps/api/src/notes/notes.service.ts", "x")
+        (self.root / "apps/api/src/notes/notes.service.ts").write_text("dirty", encoding="utf-8")
+        self.assert_fail(self.run_cli("impl"), "uncommitted tracked changes", stage="impl")
+
+    def test_untracked_files_do_not_block_scoring(self):
+        self.commit_file("apps/api/src/notes/notes.service.ts", "x")
+        (self.root / "scratch.txt").write_text("untracked", encoding="utf-8")
+        self.assert_tier(self.run_cli("impl"), "green", "impl")
+
+    def test_base_not_an_ancestor_fails_closed(self):
+        git(self.root, "checkout", "-q", "-b", "side")
+        self.commit_file("side.txt", "x")
+        side = git(self.root, "rev-parse", "HEAD")
+        git(self.root, "checkout", "-q", "main")
+        self.commit_file("main.txt", "y")
+        (self.ad / "bootstrap-head.txt").write_text(side + "\n", encoding="utf-8")
+        self.assert_fail(self.run_cli("impl"), "base is not an ancestor of HEAD", stage="impl")
+
+    def test_non_ascii_path_in_diff_is_not_quoted(self):
+        self.commit_file("apps/api/src/auth/café.ts", "x")
+        self.assert_tier(self.run_cli("impl"), "red", "impl")
+        d = self.doc("impl")
+        self.assertEqual(d["floors"][0]["paths"], ["apps/api/src/auth/café.ts"])
 
 
 if __name__ == "__main__":

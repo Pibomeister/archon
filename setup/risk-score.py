@@ -20,7 +20,9 @@ tier_from_score(points)): floors dominate, points only decide where no floor
 fires. agent is risk-judgment.json (archon.risk-judgment.v1, written by
 ralplan from Slice 3 on; absent is null, malformed is FAIL). prior is the
 previous stage's tier in this run (risk-intake.json at plan, risk-plan.json at
-impl) or the handoff's toTier when --handoff names an escalation.json.
+impl, each checked for schema and the expected stage name), raised by the
+handoff's toTier when --handoff names an escalation.json; prior.handoffTier
+records that contribution even when it did not change the result.
 override is --override-tier; it can only raise because it joins the max.
 
 Stage inputs:
@@ -31,8 +33,10 @@ Stage inputs:
   plan    files-allowlist.json (required), web-files-allowlist.json (optional,
           tagged with capabilities.webRepo), impact.json, triage.json,
           risk-judgment.json, causal-chain.json (optional)
-  impl    git diff --name-status <base>..HEAD where base is --base or
-          bootstrap-head.txt; impact.json, triage-post.json, risk-judgment.json
+  impl    git diff -z --name-status <base>..HEAD where base is --base or
+          bootstrap-head.txt (base must be an ancestor of HEAD, the tracked
+          worktree must be clean, and the diff must be non-empty); impact.json,
+          triage-post.json, risk-judgment.json
 
 The repo label for "<repo>/<path>" rule matching is params.json repo, else
 profile capabilities.defaultRepo, else the basename of --repo-root.
@@ -192,11 +196,17 @@ def codeowners_text(root, base):
 
 
 # --- stage: intake -----------------------------------------------------------
-def signals_intake(ctx):
+def task_class_signal(ctx):
+    """The "task-class" signal shared by the intake stage (signals_intake) and
+    the plan/impl stage (size_signals), so the two never drift apart."""
     kind, evidence = brief_kind(ctx["brief"])
     pts = ctx["policy"]["points"]
-    signals = [{"id": "task-class", "value": kind, "points": pts["taskClass"][kind], "floor": None,
-                "source": "mechanical", "evidence": evidence}]
+    return {"id": "task-class", "value": kind, "points": pts["taskClass"][kind], "floor": None,
+            "source": "mechanical", "evidence": evidence}
+
+
+def signals_intake(ctx):
+    signals = [task_class_signal(ctx)]
     paths = brief_paths(ctx["brief"], ctx["policy"])
     signals.append({"id": "brief-paths", "value": paths, "points": 0, "floor": None,
                     "source": "mechanical", "evidence": f"{len(paths)} path(s) named in the brief"})
@@ -205,6 +215,10 @@ def signals_intake(ctx):
 
 # --- shared plan/impl signals ------------------------------------------------
 def read_allowlist(ad, name, required):
+    """[canonical paths], deduplicated and sorted: a path repeated verbatim or
+    reachable only after normalisation (apps/../apps/x.ts == apps/x.ts) counts
+    once, so a machine-produced allowlist with accidental repeats does not
+    inflate the files/test-files signals."""
     doc = read_json_optional(ad, name)
     if doc is None:
         if required:
@@ -213,7 +227,7 @@ def read_allowlist(ad, name, required):
     if not isinstance(doc, list) or (required and not doc):
         raise Fail(f"{name} is not a non-empty list")
     try:
-        return [canonical_path(e, name) for e in doc]
+        return sorted({canonical_path(e, name) for e in doc})
     except Fail as exc:
         raise Fail(f"{name}: {exc}")
 
@@ -229,7 +243,11 @@ def read_triage(ad, name):
 
 
 def read_impact(ad):
-    """(status, d1_callers). Absent -> ("missing", 0). Malformed -> FAIL."""
+    """(status, max_d1_callers). Absent -> ("missing", 0). Malformed -> FAIL.
+    The value is the MAX d1_callers count across symbols, not the sum: one
+    heavily-called symbol should not be diluted by a dozen lightly-called
+    ones, and touching many lightly-called symbols should not be inflated
+    into looking like one heavily-called one."""
     doc = read_json_optional(ad, "impact.json")
     if doc is None:
         return "missing", 0
@@ -243,7 +261,7 @@ def read_impact(ad):
     for i, s in enumerate(syms):
         if not isinstance(s, dict) or not isinstance(s.get("d1_callers"), list):
             raise Fail(f"impact.json symbols[{i}] needs a d1_callers list")
-        callers += len(s["d1_callers"])
+        callers = max(callers, len(s["d1_callers"]))
     return status, callers
 
 
@@ -262,9 +280,7 @@ def size_signals(ctx, paths, triage_name):
     pts, sizes = pol["points"], pol["sizeThresholds"]
     code = [p for p in paths if not TEST_RE.search(p)]
     tests = [p for p in paths if TEST_RE.search(p)]
-    kind, evidence = brief_kind(ctx["brief"])
-    signals = [{"id": "task-class", "value": kind, "points": pts["taskClass"][kind], "floor": None,
-                "source": "mechanical", "evidence": evidence}]
+    signals = [task_class_signal(ctx)]
     over = len(code) - sizes["max_files"]
     signals.append({"id": "files", "value": len(code), "points": pts["filesOverMax"] + pts["perExtraFile"] * over if over > 0 else 0,
                     "floor": None, "source": "mechanical", "evidence": f"{len(code)}/{sizes['max_files']} non-test files"})
@@ -275,7 +291,8 @@ def size_signals(ctx, paths, triage_name):
     signals.append({"id": "impact", "value": status, "points": impact_points, "floor": None,
                     "source": "mechanical", "evidence": "impact.json status"})
     signals.append({"id": "d1-callers", "value": callers, "points": pts["callersOverMax"] if callers > sizes["max_d1_callers"] else 0,
-                    "floor": None, "source": "mechanical", "evidence": f"{callers}/{sizes['max_d1_callers']} first-degree callers"})
+                    "floor": None, "source": "mechanical",
+                    "evidence": f"{callers}/{sizes['max_d1_callers']} first-degree callers (max across symbols)"})
     links = read_chain_links(ctx["ad"])
     if links is not None:
         signals.append({"id": "chain-links", "value": links, "points": pts["chainLinksOverMax"] if links > sizes["max_chain_links"] else 0,
@@ -303,7 +320,9 @@ def signals_plan(ctx):
     raw = sl.read_json(os.path.join(ctx["ad"], "files-allowlist.json"))
     paths = list(allow)
     web = read_allowlist(ctx["ad"], "web-files-allowlist.json", required=False)
-    if web and ctx["web_repo"]:
+    if web:
+        if not ctx["web_repo"]:
+            raise Fail("web-files-allowlist.json present but profile has no capabilities.webRepo")
         paths += [f"{ctx['web_repo']}/{p}" for p in web]
     signals = size_signals(ctx, paths, "triage.json")
     return signals, paths, {"allowlistSha256": rp.sha256_bytes(rp.canonical_bytes(raw))}
@@ -311,20 +330,53 @@ def signals_plan(ctx):
 
 # --- stage: impl -------------------------------------------------------------
 def signals_impl(ctx):
+    """Impl stage footprint: git diff -z --name-status <base>..HEAD, where
+    base is --base or bootstrap-head.txt. -z NUL-separates every token
+    (status, then path) instead of git's default quoting/octal-escaping of
+    non-ASCII paths, so a path like "café.ts" round-trips exactly.
+
+    The lane commits the implementation before invoking this stage, so HEAD
+    is expected to already hold the finished change. The checks below (base
+    is an ancestor of HEAD, the tracked worktree is clean, the diff is
+    non-empty) are a guard against an upstream node forgetting that commit,
+    not the mechanism that makes it true: they catch a broken caller, they do
+    not create the commit themselves. Untracked files are ignored -- they are
+    not part of the diff and are not this stage's business."""
     if not ctx["base"]:
         raise Fail("impl needs a base commit: --base or bootstrap-head.txt")
-    r = git(ctx["root"], "diff", "--name-status", f"{ctx['base']}..HEAD")
+    status = git(ctx["root"], "status", "--porcelain", "--untracked-files=no")
+    if status.returncode != 0:
+        raise Fail(f"git status failed: {status.stderr.strip()}")
+    if status.stdout.strip():
+        raise Fail("worktree has uncommitted tracked changes")
+    ancestor = git(ctx["root"], "merge-base", "--is-ancestor", ctx["base"], "HEAD")
+    if ancestor.returncode != 0:
+        raise Fail("base is not an ancestor of HEAD")
+    r = git(ctx["root"], "diff", "-z", "--name-status", f"{ctx['base']}..HEAD")
     if r.returncode != 0:
         raise Fail(f"git diff failed: {r.stderr.strip()}")
-    diff_text = r.stdout if r.stdout.endswith("\n") else r.stdout + "\n"
+    if not r.stdout:
+        raise Fail("impl diff is empty")
+    diff_text = r.stdout
+    tokens = diff_text.split("\x00")
+    if tokens and tokens[-1] == "":
+        tokens.pop()
     paths = []
-    for line in r.stdout.splitlines():
-        parts = line.split("\t")
-        if len(parts) < 2:
-            continue
-        # R100\told\tnew and C\told\tnew list both sides; every other status lists one path
-        for p in parts[1:]:
-            paths.append(canonical_path(p, "diff"))
+    i = 0
+    while i < len(tokens):
+        tstat = tokens[i]
+        i += 1
+        if i >= len(tokens):
+            raise Fail("git diff -z output truncated")
+        # R100\x00old\x00new\x00 and C100\x00old\x00new\x00 list both sides;
+        # every other status lists one path.
+        paths.append(canonical_path(tokens[i], "diff"))
+        i += 1
+        if tstat[:1] in ("R", "C"):
+            if i >= len(tokens):
+                raise Fail("git diff -z output truncated")
+            paths.append(canonical_path(tokens[i], "diff"))
+            i += 1
     paths = sorted(set(paths))
     head = git(ctx["root"], "rev-parse", "HEAD")
     if head.returncode != 0:
@@ -372,18 +424,33 @@ def read_handoff(path):
     return doc
 
 
+_PREVIOUS_STAGE = {"plan": ("risk-intake.json", "intake"), "impl": ("risk-plan.json", "plan")}
+
+
 def prior_tier(ad, stage, handoff):
-    """The previous stage's tier in this run, else the handoff's target tier."""
-    previous = {"plan": "risk-intake.json", "impl": "risk-plan.json"}.get(stage)
-    if previous:
-        doc = read_json_optional(ad, previous)
+    """The previous stage's tier in this run, raised (never lowered) by the
+    handoff's target tier when a handoff is also given. The previous stage's
+    risk-<stage>.json, when present, must carry schema archon.risk-score.v1
+    and the expected previous stage name (intake before plan, plan before
+    impl); anything else means the artifacts directory is in an inconsistent
+    state and this FAILs rather than trusting a mismatched tier. handoffTier
+    records the handoff's own toTier whenever a handoff is given, so the
+    merge is visible in the output even when it did not change the result."""
+    entry = _PREVIOUS_STAGE.get(stage)
+    doc_tier, doc_stage = None, None
+    if entry:
+        name, expected_stage = entry
+        doc = read_json_optional(ad, name)
         if doc is not None:
-            if not isinstance(doc, dict) or doc.get("tier") not in rp.TIERS:
-                raise Fail(f"{previous} tier out of enum")
-            return {"tier": doc["tier"], "stage": doc.get("stage")}
-    if handoff:
-        return {"tier": handoff["toTier"], "stage": handoff["stage"]}
-    return {"tier": None, "stage": None}
+            if not isinstance(doc, dict) or doc.get("schema") != rp.SCHEMA_SCORE or doc.get("stage") != expected_stage:
+                raise Fail(f"{name} must be schema {rp.SCHEMA_SCORE} stage {expected_stage}")
+            if doc.get("tier") not in rp.TIERS:
+                raise Fail(f"{name} tier out of enum")
+            doc_tier, doc_stage = doc["tier"], doc["stage"]
+    handoff_tier = handoff["toTier"] if handoff else None
+    tier = rp.tier_max(doc_tier, handoff_tier)
+    stage_out = doc_stage if doc_tier is not None else (handoff["stage"] if handoff else None)
+    return {"tier": tier, "stage": stage_out, "handoffTier": handoff_tier}
 
 
 def lane_tier_of(handoff):
@@ -521,6 +588,12 @@ STAGE_FUNCS = {"intake": lambda ctx: signals_intake(ctx) + ({},), "plan": signal
 
 
 def score(args):
+    # Unlink any stale risk-<stage>.json before any reads: a FAIL partway
+    # through must never leave a previous successful run's document in place
+    # looking current.
+    stale = os.path.join(os.path.abspath(args.artifacts), f"risk-{args.stage}.json")
+    if os.path.isfile(stale):
+        os.remove(stale)
     ctx = context(args)
     signals, paths, extra_inputs = STAGE_FUNCS[args.stage](ctx)
     return ctx, build(ctx, signals, paths, extra_inputs)
