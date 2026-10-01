@@ -191,9 +191,11 @@ def validate_profile(profile: dict) -> None:
         expected_fields += ("risk",)
     object_fields(profile, expected_fields, "project profile")
     if "risk" in profile:
-        # RiskPolicyError is a ValueError subclass, so it is caught the same
-        # way as every other profile validation failure here.
-        risk_policy._check_layer(profile["risk"], "profile.risk")
+        # load_policy runs _check_layer (shape/type) and assert_invariants
+        # (the floor invariants no layer may weaken) together; RiskPolicyError
+        # is a ValueError subclass, so it is caught the same way as every
+        # other profile validation failure here.
+        risk_policy.load_policy(profile=profile)
     object_fields(profile["repository"], ("remote", "defaultBranch", "stack") + (() if v2 else ("packageManager",)), "repository")
     if v2 and profile["sourceRecipe"] not in source_recipes.RECIPES:
         raise ValueError("Unknown source recipe")

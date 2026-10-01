@@ -124,6 +124,13 @@ class SetupScriptsArePackagedTest(unittest.TestCase):
             self.assertIn(name, entries, name)
         self.assertIn("  setup/risk-policy.json\n", MANIFEST.read_text(encoding="utf-8"))
 
+    def test_portable_scripts_ship_risk_policy_json(self):
+        # risk_policy.py's DEFAULT_POLICY_PATH resolves next to __file__, so
+        # the portable copy (symlinked scripts dir) needs its own sibling
+        # risk-policy.json shipped alongside it, not just setup/risk-policy.json.
+        package = MANIFEST.read_text(encoding="utf-8")
+        self.assertIn("  workflows/portable/single-repo-feature/scripts/risk-policy.json\n", package)
+
     def test_package_reference_scanner_ignores_trailing_prose_punctuation(self):
         package = MANIFEST.read_text(encoding="utf-8")
         match = re.search(r"GREP\" -ohE '([^']+)'", package)

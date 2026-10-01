@@ -77,6 +77,7 @@ MANIFEST=(
   workflows/portable/single-repo-feature/scripts/repo_policy.py
   workflows/portable/single-repo-feature/scripts/review_envelope.py
   workflows/portable/single-repo-feature/scripts/risk_policy.py
+  workflows/portable/single-repo-feature/scripts/risk-policy.json
   config.yaml
   .env
   RUNBOOK.md
