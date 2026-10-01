@@ -98,9 +98,10 @@ also stops for inspection instead of guessing ownership.
 
 The pack lives at `workflows/portable/single-repo-feature/` in this repository.
 Stage it under the engine source root at
-`.archon/workflows/portable/single-repo-feature/`; preserve the two helper symlinks
-or copy their target contents. The engine's source capture dereferences them, so
-repository policy and review vocabulary are pinned with the workflow. Python
+`.archon/workflows/portable/single-repo-feature/`; preserve the helper symlinks
+under `scripts/` or copy their target contents. The engine's source capture
+dereferences them, so repository policy, review vocabulary and the risk policy
+are pinned with the workflow. Python
 bytecode writes are disabled inside the helper to preserve that captured source.
 The team package manifest includes all resources.
 

@@ -4,7 +4,6 @@
 Each rule the scorer relies on gets one named test here so a regression in a
 single guard shows up as one named failure."""
 import json
-import os
 import shutil
 import subprocess
 import sys

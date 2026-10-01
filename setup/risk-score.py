@@ -50,7 +50,6 @@ are reported as "<repo>/<path>" and get path floors only: just --repo-root
 is diffed and matched against CODEOWNERS.
 """
 import argparse
-import json
 import os
 import posixpath
 import re
