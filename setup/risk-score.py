@@ -472,7 +472,7 @@ def prior_tier(ad, stage, handoff):
             except (OSError, ValueError, sl.LibraryError) as exc:
                 raise Fail(f"risk-trajectory.jsonl is not JSONL: {exc}")
             if any(isinstance(r, dict) and r.get("stage") == expected_stage for r in rows):
-                raise Fail(f"{name} missing but risk-trajectory.jsonl has a {expected_stage} line")
+                raise Fail(f"{name} missing but risk-trajectory.jsonl has a line for stage {expected_stage}")
     handoff_tier = handoff["toTier"] if handoff else None
     tier = rp.tier_max(doc_tier, handoff_tier)
     stage_out = doc_stage if doc_tier is not None else (handoff["stage"] if handoff else None)
