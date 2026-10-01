@@ -359,6 +359,7 @@ def assert_invariants(merged: dict, defaults: dict) -> None:
     if not isinstance(default_tokens, dict):
         raise RiskPolicyError("defaults sensitiveDomains.tokens must be an object")
     for name, words in default_tokens.items():
+        _check_str_list(tokens.get(name, []), f"sensitiveDomains.tokens.{name}")
         kept = set(tokens.get(name, []))
         missing = sorted(set(words) - kept)
         if missing:
@@ -369,6 +370,7 @@ def assert_invariants(merged: dict, defaults: dict) -> None:
     default_paths = defaults_fc.get("paths")
     if not isinstance(default_paths, list):
         raise RiskPolicyError("defaults factoryControl.paths must be a list")
+    _check_str_list(merged_paths, "factoryControl.paths")
     missing = sorted(set(default_paths) - set(merged_paths))
     if missing:
         raise RiskPolicyError(f"factoryControl.paths cannot drop {', '.join(missing)}")
@@ -402,3 +404,114 @@ def load_policy(policy_path: Optional[str] = None, profile: Optional[dict] = Non
         merged["overlayVersion"] = overlay["overlayVersion"]
     assert_invariants(merged, defaults)
     return merged
+
+
+# --- path rules --------------------------------------------------------------
+def _glob_regex(pattern: str) -> "re.Pattern[str]":
+    """** spans segments, * stays inside one segment, ? is one char.
+    A pattern starting with **/ floats; everything else is anchored."""
+    out = []
+    i = 0
+    while i < len(pattern):
+        c = pattern[i]
+        if pattern.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+            continue
+        if pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+            continue
+        if c == "*":
+            out.append("[^/]*")
+        elif c == "?":
+            out.append("[^/]")
+        else:
+            out.append(re.escape(c))
+        i += 1
+    return re.compile("^" + "".join(out) + "$")
+
+
+_GLOB_CACHE: dict = {}
+
+
+def match_rule(rule: str, path: str) -> bool:
+    if "*" in rule or "?" in rule:
+        rx = _GLOB_CACHE.get(rule)
+        if rx is None:
+            rx = _GLOB_CACHE[rule] = _glob_regex(rule)
+        return rx.match(path) is not None
+    if rule.endswith("/"):
+        return path.startswith(rule)
+    return path == rule
+
+
+def match_any(rules: list, path: str, repo: Optional[str] = None) -> Optional[str]:
+    """The first rule matching the bare path or "<repo>/<path>", else None."""
+    candidates = [path] + ([f"{repo}/{path}"] if repo else [])
+    for rule in rules:
+        for cand in candidates:
+            if match_rule(rule, cand):
+                return rule
+    return None
+
+
+_TOKEN_RX_CACHE: dict = {}
+
+
+def sensitive_domain(tokens: dict, path: str) -> Optional[str]:
+    """The first domain whose token appears as a whole path segment or as a
+    dot/dash/underscore separated part of a segment, case-insensitively."""
+    for domain, words in tokens.items():
+        for word in words:
+            rx = _TOKEN_RX_CACHE.get(word)
+            if rx is None:
+                rx = _TOKEN_RX_CACHE[word] = re.compile(r"(?:^|[/._-])" + re.escape(word) + r"(?:$|[/._-])", re.I)
+            if rx.search(path):
+                return domain
+    return None
+
+
+# --- floors ------------------------------------------------------------------
+def path_floors(policy: dict, paths: list, repo: Optional[str]) -> list:
+    """[{id, floor, reason, paths:[...]}] sorted by id, one entry per floor id,
+    paths sorted and de-duplicated. Points never appear here: a floor is a
+    minimum tier with a named reason, and the scorer takes the max."""
+    hits: dict = {}
+
+    def hit(fid: str, floor: str, reason: str, path: str) -> None:
+        entry = hits.setdefault(fid, {"id": fid, "floor": floor, "reason": reason, "paths": set()})
+        entry["paths"].add(path)
+
+    sd = policy["sensitiveDomains"]
+    fc = policy["factoryControl"]
+    rev = policy["reversibility"]
+    for path in paths:
+        domain = sensitive_domain(sd["tokens"], path)
+        if domain:
+            hit(f"sensitive-domain:{domain}", sd["floor"], f"sensitive domain {domain}", path)
+        if match_any(sd.get("extraPaths", []), path, repo):
+            hit("sensitive-domain:profile", sd["floor"], "profile sensitive path", path)
+        if match_any(fc["paths"], path, repo):
+            hit("factory-control", fc["floor"], "factory control path", path)
+        for fid, key, reason in (("migration", "migrations", "schema migration"),
+                                 ("data-mutation", "dataMutation", "data mutation script"),
+                                 ("lockfile", "lockfiles", "dependency lockfile"),
+                                 ("manifest", "manifests", "package manifest")):
+            rule = rev.get(key) or {}
+            if match_any(rule.get("paths", []), path, repo):
+                hit(fid, rule["floor"], reason, path)
+        pc = policy["publicContract"]
+        if match_any(pc.get("paths", []), path, repo):
+            hit("public-contract", pc["floor"], "public contract surface", path)
+        se = policy["sideEffects"]
+        if match_any(se.get("paths", []), path, repo):
+            hit("side-effects", se["floor"], "external side effect", path)
+        for area in policy.get("protectedAreas", []):
+            if match_any(area["paths"], path, repo):
+                hit(f"protected:{area['reason']}", area["floor"], f"protected area: {area['reason']}", path)
+    out = []
+    for fid in sorted(hits):
+        entry = hits[fid]
+        out.append({"id": fid, "floor": entry["floor"], "reason": entry["reason"], "paths": sorted(entry["paths"])})
+    return out

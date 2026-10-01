@@ -219,6 +219,15 @@ class Invariants(unittest.TestCase):
         with self.assertRaises(rp.RiskPolicyError):
             rp.assert_invariants(broken, defaults)
 
+    def test_assert_invariants_rejects_unhashable_factory_control_paths(self):
+        # a hand-built document with a dict in factoryControl.paths must raise
+        # RiskPolicyError, not TypeError, from the set() comparison
+        defaults = rp.load_defaults()
+        broken = json.loads(json.dumps(rp.load_policy()))
+        broken["factoryControl"]["paths"].append({"not": "a string"})
+        with self.assertRaises(rp.RiskPolicyError):
+            rp.assert_invariants(broken, defaults)
+
 
 class PolicyFileValidation(unittest.TestCase):
     def _doctored(self, mutate):
@@ -239,6 +248,72 @@ class PolicyFileValidation(unittest.TestCase):
         path = self._doctored(lambda d: d["reversibility"]["lockfiles"].__setitem__("floor", "purple"))
         with self.assertRaises(rp.RiskPolicyError):
             rp.load_defaults(policy_path=path)
+
+
+class PathRules(unittest.TestCase):
+    def test_prefix_exact_and_glob(self):
+        self.assertTrue(rp.match_rule("apps/api/src/auth/", "apps/api/src/auth/guard.ts"))
+        self.assertFalse(rp.match_rule("apps/api/src/auth/", "apps/api/src/author/x.ts"))
+        self.assertTrue(rp.match_rule("package.json", "package.json"))
+        self.assertFalse(rp.match_rule("package.json", "apps/package.json"))
+        self.assertTrue(rp.match_rule("**/package.json", "apps/package.json"))
+        self.assertTrue(rp.match_rule("**/migrations/**", "libs/db/migrations/0001.ts"))
+        self.assertFalse(rp.match_rule("**/migrations/**", "libs/db/migrations"))
+        self.assertTrue(rp.match_rule("**/*.d.ts", "app/services/api-client.d.ts"))
+        self.assertFalse(rp.match_rule("*.d.ts", "app/services/api-client.d.ts"))
+        self.assertTrue(rp.match_rule("libs/*/src/**", "libs/db/src/a/b.ts"))
+        self.assertFalse(rp.match_rule("libs/*/src/**", "libs/db/deep/src/a.ts"))
+
+    def test_repo_prefix_is_tried_too(self):
+        self.assertEqual(rp.match_any(["api/apps/api/src/auth/"], "apps/api/src/auth/x.ts", repo="api"),
+                         "api/apps/api/src/auth/")
+        self.assertIsNone(rp.match_any(["api/apps/api/src/auth/"], "apps/api/src/auth/x.ts", repo="web-app"))
+        self.assertIsNone(rp.match_any(["api/apps/api/src/auth/"], "apps/api/src/auth/x.ts", repo=None))
+
+    def test_sensitive_tokens_match_segments_and_name_parts_only(self):
+        tokens = {"auth": ["auth", "token"]}
+        self.assertEqual(rp.sensitive_domain(tokens, "apps/api/src/auth/guard.ts"), "auth")
+        self.assertEqual(rp.sensitive_domain(tokens, "src/auth.service.ts"), "auth")
+        self.assertEqual(rp.sensitive_domain(tokens, "src/AUTH-flow/x.ts"), "auth")
+        self.assertEqual(rp.sensitive_domain(tokens, "docs/auth/README.md"), "auth")
+        self.assertIsNone(rp.sensitive_domain(tokens, "src/author.ts"))
+        self.assertIsNone(rp.sensitive_domain(tokens, "src/tokenizer.ts"))
+        self.assertIsNone(rp.sensitive_domain(tokens, "src/notes/notes.service.ts"))
+
+
+class Floors(unittest.TestCase):
+    def setUp(self):
+        self.policy = rp.load_policy(profile={"risk": {
+            "protectedAreas": [{"paths": ["api/apps/integration-service/"], "floor": "red", "reason": "integration"}],
+        }})
+
+    def ids(self, paths, repo="api"):
+        return sorted((f["id"], f["floor"]) for f in rp.path_floors(self.policy, paths, repo))
+
+    def test_sensitive_domain_is_red_even_for_docs(self):
+        floors = rp.path_floors(self.policy, ["apps/api/src/auth/README.md"], "api")
+        self.assertEqual([(f["id"], f["floor"], f["paths"]) for f in floors],
+                         [("sensitive-domain:auth", "red", ["apps/api/src/auth/README.md"])])
+        self.assertIn("auth", floors[0]["reason"])
+
+    def test_factory_control_migration_lockfile_public_contract(self):
+        self.assertEqual(self.ids(["workflows/sdlc-red.yaml"]), [("factory-control", "red")])
+        self.assertEqual(self.ids(["libs/data-access/src/lib/rds/migrations/0007.ts"]), [("migration", "red")])
+        self.assertEqual(self.ids(["bun.lock"]), [("lockfile", "yellow")])
+        self.assertEqual(self.ids(["apps/web/package.json"]), [("manifest", "yellow")])
+        self.assertEqual(self.ids(["app/services/api-client.d.ts"]), [("public-contract", "yellow")])
+
+    def test_protected_area_from_profile_with_repo_prefix(self):
+        self.assertEqual(self.ids(["apps/integration-service/handler.ts"]), [("protected:integration", "red")])
+        self.assertEqual(self.ids(["apps/integration-service/handler.ts"], repo="web-app"), [])
+
+    def test_floors_group_paths_and_are_sorted_by_id(self):
+        floors = rp.path_floors(self.policy, ["bun.lock", "pnpm-lock.yaml", "apps/api/src/billing/x.ts"], "api")
+        self.assertEqual([f["id"] for f in floors], ["lockfile", "sensitive-domain:payments"])
+        self.assertEqual(floors[0]["paths"], ["bun.lock", "pnpm-lock.yaml"])
+
+    def test_plain_source_file_has_no_floor(self):
+        self.assertEqual(self.ids(["apps/api/src/notes/notes.service.ts"]), [])
 
 
 if __name__ == "__main__":
