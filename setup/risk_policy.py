@@ -63,6 +63,13 @@ _REQUIRED_POINTS = ("taskClass", "triage", "filesOverMax", "perExtraFile", "test
 _REQUIRED_SIZES = ("max_files", "max_test_files", "max_d1_callers", "max_chain_links")
 LAYER_KEYS = ("thresholds", "points", "protectedAreas", "sensitiveDomains", "factoryControl",
               "publicContract", "sideEffects", "codeowners", "autoMerge")
+_SECTION_KEYS = {
+    "sensitiveDomains": ("floor", "extraPaths", "tokens"),
+    "factoryControl": ("floor", "paths"),
+    "publicContract": ("floor", "paths"),
+    "sideEffects": ("floor", "paths"),
+    "codeowners": ("ownerFloors", "defaultOwnedFloor"),
+}
 
 
 class RiskPolicyError(ValueError):
@@ -173,6 +180,18 @@ def load_defaults(policy_path: Optional[str] = None) -> dict:
             raise RiskPolicyError(f"risk-policy.json reversibility.{name} must be an object")
         _check_tier(section.get("floor"), f"reversibility.{name}.floor")
         _check_str_list(section.get("paths"), f"reversibility.{name}.paths")
+    _check_tier(doc["publicContract"].get("floor"), "publicContract.floor")
+    _check_str_list(doc["publicContract"].get("paths"), "publicContract.paths")
+    _check_tier(doc["sideEffects"].get("floor"), "sideEffects.floor")
+    _check_str_list(doc["sideEffects"].get("paths"), "sideEffects.paths")
+    _check_tier(doc["codeowners"].get("defaultOwnedFloor"), "codeowners.defaultOwnedFloor")
+    owner_floors = doc["codeowners"].get("ownerFloors")
+    if not isinstance(owner_floors, dict):
+        raise RiskPolicyError("risk-policy.json codeowners.ownerFloors must be an object")
+    for owner, tier in owner_floors.items():
+        if not isinstance(owner, str) or not _OWNER_RE.match(owner):
+            raise RiskPolicyError(f"risk-policy.json codeowners.ownerFloors: bad owner token: {owner}")
+        _check_tier(tier, f"risk-policy.json codeowners.ownerFloors[{owner}]")
     return doc
 
 
@@ -200,7 +219,12 @@ def _check_areas(areas: Any, label: str) -> list:
     for i, area in enumerate(areas):
         if not isinstance(area, dict):
             raise RiskPolicyError(f"{label}[{i}] must be an object")
-        _check_str_list(area.get("paths"), f"{label}[{i}].paths")
+        for k in area:
+            if k not in ("paths", "floor", "reason"):
+                raise RiskPolicyError(f"{label}[{i}]: unknown key {k}")
+        paths = _check_str_list(area.get("paths"), f"{label}[{i}].paths")
+        if not paths:
+            raise RiskPolicyError(f"{label}[{i}].paths must not be empty")
         _check_tier(area.get("floor"), f"{label}[{i}].floor")
         if not isinstance(area.get("reason"), str) or not area["reason"].strip():
             raise RiskPolicyError(f"{label}[{i}].reason is required")
@@ -256,8 +280,13 @@ def _check_layer(layer: Any, label: str) -> dict:
     if "protectedAreas" in layer:
         _check_areas(layer["protectedAreas"], f"{label}.protectedAreas")
     for key in ("sensitiveDomains", "factoryControl", "publicContract", "sideEffects", "codeowners"):
-        if key in layer and not isinstance(layer[key], dict):
+        if key not in layer:
+            continue
+        if not isinstance(layer[key], dict):
             raise RiskPolicyError(f"{label}.{key} must be an object")
+        for k in layer[key]:
+            if k not in _SECTION_KEYS[key]:
+                raise RiskPolicyError(f"{label}.{key}: unknown key {k}")
     for key in ("sensitiveDomains", "factoryControl", "publicContract", "sideEffects"):
         section = layer.get(key) or {}
         if "floor" in section:

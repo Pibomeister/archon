@@ -132,6 +132,33 @@ class Merge(unittest.TestCase):
                 rp.load_policy(profile={"risk": {key: {"floor": "purple"}}})
             self.assertIn(key, str(cm.exception))
 
+    def test_unknown_nested_key_in_section_is_rejected(self):
+        cases = [
+            ({"sensitiveDomains": {"floor": "red", "bogus": 1}}, "sensitiveDomains"),
+            ({"factoryControl": {"floor": "red", "bogus": 1}}, "factoryControl"),
+            ({"publicContract": {"floor": "yellow", "bogus": 1}}, "publicContract"),
+            ({"sideEffects": {"floor": "yellow", "bogus": 1}}, "sideEffects"),
+            ({"codeowners": {"defaultOwnedFloor": "yellow", "bogus": 1}}, "codeowners"),
+        ]
+        for risk, section in cases:
+            with self.assertRaises(rp.RiskPolicyError) as cm:
+                rp.load_policy(profile={"risk": risk})
+            self.assertIn(section, str(cm.exception))
+            self.assertIn("bogus", str(cm.exception))
+
+    def test_unknown_key_in_protected_area_is_rejected(self):
+        with self.assertRaises(rp.RiskPolicyError) as cm:
+            rp.load_policy(profile={"risk": {"protectedAreas": [
+                {"paths": ["libs/"], "floor": "red", "reason": "x", "owner": "@org/platform"},
+            ]}})
+        self.assertIn("owner", str(cm.exception))
+
+    def test_empty_protected_area_paths_is_rejected(self):
+        with self.assertRaises(rp.RiskPolicyError):
+            rp.load_policy(profile={"risk": {"protectedAreas": [
+                {"paths": [], "floor": "red", "reason": "x"},
+            ]}})
+
     def test_points_merge_is_scoped_and_additive(self):
         merged = rp.load_policy(profile={"risk": {
             "points": {"filesOverMax": 20, "taskClass": {"docs": 1}},
@@ -251,6 +278,46 @@ class PolicyFileValidation(unittest.TestCase):
 
     def test_policy_file_requires_tier_valid_reversibility_floors(self):
         path = self._doctored(lambda d: d["reversibility"]["lockfiles"].__setitem__("floor", "purple"))
+        with self.assertRaises(rp.RiskPolicyError):
+            rp.load_defaults(policy_path=path)
+
+    def test_policy_file_requires_tier_valid_public_contract_floor(self):
+        path = self._doctored(lambda d: d["publicContract"].__setitem__("floor", "purple"))
+        with self.assertRaises(rp.RiskPolicyError):
+            rp.load_defaults(policy_path=path)
+
+    def test_policy_file_requires_public_contract_paths_be_a_string_list(self):
+        path = self._doctored(lambda d: d["publicContract"].__setitem__("paths", "not-a-list"))
+        with self.assertRaises(rp.RiskPolicyError):
+            rp.load_defaults(policy_path=path)
+
+    def test_policy_file_requires_tier_valid_side_effects_floor(self):
+        path = self._doctored(lambda d: d["sideEffects"].__setitem__("floor", "purple"))
+        with self.assertRaises(rp.RiskPolicyError):
+            rp.load_defaults(policy_path=path)
+
+    def test_policy_file_requires_side_effects_paths_be_a_string_list(self):
+        path = self._doctored(lambda d: d["sideEffects"].__setitem__("paths", [1]))
+        with self.assertRaises(rp.RiskPolicyError):
+            rp.load_defaults(policy_path=path)
+
+    def test_policy_file_requires_tier_valid_codeowners_default_floor(self):
+        path = self._doctored(lambda d: d["codeowners"].__setitem__("defaultOwnedFloor", "purple"))
+        with self.assertRaises(rp.RiskPolicyError):
+            rp.load_defaults(policy_path=path)
+
+    def test_policy_file_requires_codeowners_owner_floors_be_an_object(self):
+        path = self._doctored(lambda d: d["codeowners"].__setitem__("ownerFloors", []))
+        with self.assertRaises(rp.RiskPolicyError):
+            rp.load_defaults(policy_path=path)
+
+    def test_policy_file_requires_codeowners_owner_tokens_be_valid(self):
+        path = self._doctored(lambda d: d["codeowners"]["ownerFloors"].__setitem__("not an owner", "red"))
+        with self.assertRaises(rp.RiskPolicyError):
+            rp.load_defaults(policy_path=path)
+
+    def test_policy_file_requires_codeowners_owner_floor_be_a_known_tier(self):
+        path = self._doctored(lambda d: d["codeowners"]["ownerFloors"].__setitem__("@org/platform", "purple"))
         with self.assertRaises(rp.RiskPolicyError):
             rp.load_defaults(policy_path=path)
 
