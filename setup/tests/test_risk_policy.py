@@ -302,6 +302,12 @@ class PathRules(unittest.TestCase):
         self.assertIsNone(rp.sensitive_domain(tokens, "src/Authority.ts"))
         self.assertIsNone(rp.sensitive_domain(tokens, "apps/api/x.ts"))
 
+    def test_sensitive_tokens_match_acronym_runs(self):
+        tokens = rp.load_defaults()["sensitiveDomains"]["tokens"]
+        self.assertEqual(rp.sensitive_domain(tokens, "src/PIIRedactor.ts"), "pii")
+        self.assertEqual(rp.sensitive_domain(tokens, "src/JWTAuthGuard.ts"), "auth")
+        self.assertIsNone(rp.sensitive_domain(tokens, "src/HTMLParser.ts"))
+
 
 class Floors(unittest.TestCase):
     def setUp(self):
@@ -356,6 +362,71 @@ class Floors(unittest.TestCase):
     def test_directory_forms_of_backfill_and_openapi_paths(self):
         self.assertEqual(self.ids(["scripts/backfill/x.ts"]), [("data-mutation", "red")])
         self.assertEqual(self.ids(["openapi/spec.yaml"]), [("public-contract", "yellow")])
+
+
+CODEOWNERS = """# comment line
+*                 @org/default
+/apps/api/src/auth/   @org/security @alice
+*.md              docs@example.com
+/libs/data-access/  @org/platform
+apps/api/src/notes/notes.service.ts  @bob
+/scratch/
+"""
+
+
+class CodeownersParsing(unittest.TestCase):
+    def test_rules_in_order_with_owners(self):
+        rules = rp.parse_codeowners(CODEOWNERS)
+        self.assertEqual([r[0] for r in rules],
+                         ["*", "/apps/api/src/auth/", "*.md", "/libs/data-access/",
+                          "apps/api/src/notes/notes.service.ts", "/scratch/"])
+        self.assertEqual(rules[1][1], ["@org/security", "@alice"])
+        self.assertEqual(rules[2][1], ["docs@example.com"])
+        self.assertEqual(rules[5][1], [])  # pattern with no owners clears ownership
+
+    def test_last_matching_rule_wins(self):
+        rules = rp.parse_codeowners(CODEOWNERS)
+        self.assertEqual(rp.codeowners_owners(rules, "apps/api/src/auth/guard.ts"), ["@org/security", "@alice"])
+        self.assertEqual(rp.codeowners_owners(rules, "apps/api/src/auth/README.md"), ["docs@example.com"])
+        self.assertEqual(rp.codeowners_owners(rules, "libs/data-access/src/x.ts"), ["@org/platform"])
+        self.assertEqual(rp.codeowners_owners(rules, "apps/api/src/notes/notes.service.ts"), ["@bob"])
+        self.assertEqual(rp.codeowners_owners(rules, "apps/api/src/notes/other.ts"), ["@org/default"])
+        self.assertEqual(rp.codeowners_owners(rules, "scratch/tmp.txt"), [])
+
+    def test_unanchored_pattern_floats_and_anchored_does_not(self):
+        rules = rp.parse_codeowners("docs/  @a\n/src/  @b\n")
+        self.assertEqual(rp.codeowners_owners(rules, "apps/web/docs/x.md"), ["@a"])
+        self.assertEqual(rp.codeowners_owners(rules, "src/x.ts"), ["@b"])
+        self.assertEqual(rp.codeowners_owners(rules, "apps/src/x.ts"), [])
+
+    def test_malformed_lines_raise(self):
+        with self.assertRaises(rp.RiskPolicyError):
+            rp.parse_codeowners("@org/team apps/\n")  # owner where the pattern should be
+        with self.assertRaises(rp.RiskPolicyError):
+            rp.parse_codeowners("apps/ org-team\n")  # owner token is neither @handle nor email
+        with self.assertRaises(rp.RiskPolicyError):
+            rp.parse_codeowners("apps/ @org/team\n\x00")  # binary junk
+
+
+class OwnerFloors(unittest.TestCase):
+    def test_owner_floors_and_default_owned_floor(self):
+        policy = rp.load_policy(profile={"risk": {"codeowners": {
+            "ownerFloors": {"@org/security": "red"}, "defaultOwnedFloor": "yellow"}}})
+        rules = rp.parse_codeowners(CODEOWNERS)
+        touched, floors = rp.codeowner_floors(policy, rules,
+                                              ["apps/api/src/auth/guard.ts", "apps/api/src/notes/other.ts"])
+        self.assertEqual(touched, ["@alice", "@org/default", "@org/security"])
+        self.assertEqual([(f["id"], f["floor"]) for f in floors],
+                         [("codeowners:@org/security", "red"), ("codeowners:owned", "yellow")])
+        self.assertEqual(floors[0]["paths"], ["apps/api/src/auth/guard.ts"])
+        self.assertEqual(floors[1]["paths"], ["apps/api/src/auth/guard.ts", "apps/api/src/notes/other.ts"])
+        self.assertEqual(floors[0]["rules"], ["/apps/api/src/auth/"])
+
+    def test_unowned_paths_contribute_nothing(self):
+        policy = rp.load_policy()
+        rules = rp.parse_codeowners("/apps/  @org/a\n")
+        touched, floors = rp.codeowner_floors(policy, rules, ["libs/x.ts"])
+        self.assertEqual((touched, floors), ([], []))
 
 
 if __name__ == "__main__":

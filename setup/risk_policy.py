@@ -471,7 +471,7 @@ def match_any(rules: list, path: str, repo: Optional[str] = None) -> Optional[st
 
 
 _TOKEN_RX_CACHE: dict = {}
-_HUMP_RX = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_HUMP_RX = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
 
 def _sensitive_match(tokens: dict, path: str) -> Optional[tuple]:
@@ -562,3 +562,120 @@ def path_floors(policy: dict, paths: list, repo: Optional[str]) -> list:
         out.append({"id": fid, "floor": entry["floor"], "reason": entry["reason"],
                     "paths": sorted(entry["paths"]), "rules": sorted(entry["rules"])})
     return out
+
+
+# --- CODEOWNERS --------------------------------------------------------------
+_OWNER_RE = re.compile(r"^(@[A-Za-z0-9][A-Za-z0-9_.-]*(?:/[A-Za-z0-9][A-Za-z0-9_.-]*)?|[^@\s]+@[^@\s]+\.[^@\s]+)$")
+
+
+def parse_codeowners(text: str) -> list:
+    """[(pattern, [owners])] in file order. GitHub semantics: '#' comments,
+    gitignore-style patterns, a pattern with no owners clears ownership.
+    Malformed (owner in the pattern slot, an owner token that is neither an
+    @handle nor an email, control characters) raises: the scorer fails closed."""
+    if any(ord(c) < 32 and c not in "\t\n\r" for c in text):
+        raise RiskPolicyError("CODEOWNERS contains control characters")
+    rules = []
+    for n, raw in enumerate(text.splitlines(), 1):
+        line = raw.split("#", 1)[0].strip() if not raw.lstrip().startswith("#") else ""
+        if not line:
+            continue
+        parts = line.split()
+        pattern, owners = parts[0], parts[1:]
+        if pattern.startswith("@") or "@" in pattern:
+            raise RiskPolicyError(f"CODEOWNERS line {n}: pattern slot holds an owner: {pattern}")
+        for owner in owners:
+            if not _OWNER_RE.match(owner):
+                raise RiskPolicyError(f"CODEOWNERS line {n}: bad owner token: {owner}")
+        rules.append((pattern, owners))
+    return rules
+
+
+_CO_RX_CACHE: dict = {}
+
+
+def _codeowners_regex(pattern: str) -> "re.Pattern[str]":
+    """Compile a CODEOWNERS pattern to an anchored regex over the whole path.
+
+    gitignore-style semantics: a pattern starting with "/", or carrying a "/"
+    anywhere but the end, is anchored to the repo root; any other pattern
+    floats and may match starting at any path segment. A trailing "/", or a
+    plain name with no glob in its last segment, also matches everything
+    beneath it. A bare "*" is GitHub's catch-all and must span segments, not
+    stop at the first one the way a glob "*" normally would."""
+    rx = _CO_RX_CACHE.get(pattern)
+    if rx is not None:
+        return rx
+    anchored = pattern.startswith("/")
+    body = pattern.lstrip("/")
+    dir_only = body.endswith("/")
+    body = body.rstrip("/")
+    if body == "*":
+        rx = _CO_RX_CACHE[pattern] = re.compile("^.*$")
+        return rx
+    if "/" not in body and not anchored:
+        # "docs/" or "*.md": matches at any depth
+        prefix = "(?:.*/)?"
+    else:
+        # leading slash, or an inner slash without one: GitHub anchors both
+        prefix = ""
+    core = _glob_regex(body).pattern[1:-1]  # strip ^ and $
+    if dir_only or "*" not in body.split("/")[-1]:
+        # a directory pattern or a plain name matches itself and everything under it
+        suffix = "(?:/.*)?"
+    else:
+        suffix = ""
+    rx = _CO_RX_CACHE[pattern] = re.compile("^" + prefix + core + suffix + "$")
+    return rx
+
+
+def _codeowners_match(rules: list, path: str) -> tuple:
+    """(pattern, owners) for the last rule matching path; (None, []) when unowned."""
+    pattern, owners = None, []
+    for rule_pattern, rule_owners in rules:
+        if _codeowners_regex(rule_pattern).match(path):
+            pattern, owners = rule_pattern, rule_owners
+    return pattern, list(owners)
+
+
+def codeowners_owners(rules: list, path: str) -> list:
+    """Owners of path under last-match-wins; [] when unowned."""
+    return _codeowners_match(rules, path)[1]
+
+
+def codeowner_floors(policy: dict, rules: list, paths: list) -> tuple:
+    """(ownersTouched sorted, floors) from the merged policy's codeowners block:
+    an ownerFloors entry names its floor; any owned path gets defaultOwnedFloor.
+    Floor entries share path_floors' shape: {id, floor, reason, paths, rules},
+    where rules holds the CODEOWNERS pattern that assigned the owner."""
+    co = policy.get("codeowners") or {}
+    owner_floors = co.get("ownerFloors") or {}
+    default_floor = co.get("defaultOwnedFloor")
+    touched: set = set()
+    hits: dict = {}
+
+    def hit(fid: str, floor: str, reason: str, path: str, rule: str) -> None:
+        _check_tier(floor, f"codeowners floor for {fid}")
+        entry = hits.setdefault(fid, {"id": fid, "floor": floor, "reason": reason, "paths": set(), "rules": set()})
+        if tier_gt(floor, entry["floor"]):
+            entry["floor"] = floor
+        entry["paths"].add(path)
+        entry["rules"].add(rule)
+
+    for path in paths:
+        pattern, owners = _codeowners_match(rules, path)
+        if not owners:
+            continue
+        touched.update(owners)
+        for owner in owners:
+            if owner in owner_floors:
+                hit(f"codeowners:{owner}", owner_floors[owner], f"owned by {owner}", path, pattern)
+        if default_floor:
+            hit("codeowners:owned", default_floor, "path has a code owner", path, pattern)
+
+    out = []
+    for fid in sorted(hits):
+        entry = hits[fid]
+        out.append({"id": fid, "floor": entry["floor"], "reason": entry["reason"],
+                    "paths": sorted(entry["paths"]), "rules": sorted(entry["rules"])})
+    return sorted(touched), out
