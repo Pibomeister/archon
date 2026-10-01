@@ -61,7 +61,9 @@ risk:  null unless risk-trajectory.jsonl exists (setup/risk-score.py). Per
        keep the key name); exitGate / mergeGate are the pass flags of
        node-exit-gate.out / node-merge-gate.out (null when the node never
        ran); delivery is delivery.json {mode, autoMerge, prUrl} when present
-       (the ship node writes it from Slice 3 on), else nulls.
+       (the ship node writes it from Slice 3 on), else nulls. prUrl may be
+       null (a draft or refused ship has no PR yet); mode and autoMerge must
+       be present with the right type when delivery.json exists.
 """
 import argparse
 import json
@@ -286,8 +288,9 @@ def _risk(ad, review, typed):
     for row in rows:
         if not isinstance(row, dict) or row.get("stage") not in RISK_STAGES or row.get("tier") not in ("green", "yellow", "red"):
             raise Fail("risk-trajectory.jsonl line without a valid stage and tier")
-        floors = row.get("floors", [])
-        escalate = row.get("escalate", False)
+        if "floors" not in row or "escalate" not in row:
+            raise Fail("risk-trajectory.jsonl line without floors or escalate")
+        floors, escalate = row["floors"], row["escalate"]
         if not isinstance(floors, list) or not all(isinstance(f, str) for f in floors) or not isinstance(escalate, bool):
             raise Fail("risk-trajectory.jsonl line with malformed floors or escalate")
         row["floors"], row["escalate"] = floors, escalate
@@ -304,10 +307,13 @@ def _risk(ad, review, typed):
     delivery = _read_json(os.path.join(ad, "delivery.json"), "delivery.json")
     if delivery is not None and not isinstance(delivery, dict):
         raise Fail("delivery.json is not an object")
+    if delivery is not None:
+        for key, types in (("mode", (str,)), ("autoMerge", (bool,))):
+            if key not in delivery or not isinstance(delivery[key], types):
+                raise Fail(f"delivery.json {key} has the wrong type")
+        if "prUrl" in delivery and not isinstance(delivery["prUrl"], (str, type(None))):
+            raise Fail("delivery.json prUrl has the wrong type")
     delivery = delivery or {}
-    for key, types in (("mode", (str,)), ("autoMerge", (bool,)), ("prUrl", (str, type(None)))):
-        if key in delivery and not isinstance(delivery[key], types):
-            raise Fail(f"delivery.json {key} has the wrong type")
     nodes = typed["nodes"]
     return {
         "intake": (by_stage.get("intake") or {}).get("tier"),

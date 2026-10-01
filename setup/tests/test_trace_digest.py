@@ -497,6 +497,14 @@ class Risk(Base):
             with self.assertRaises(td.Fail):
                 self.digest()
 
+    def test_missing_floors_or_escalate_is_fail(self):
+        for missing in ("floors", "escalate"):
+            bad = json.loads(self.row("intake", "green"))
+            del bad[missing]
+            write(self.ad, "risk-trajectory.jsonl", json.dumps(bad) + "\n")
+            with self.assertRaises(td.Fail):
+                self.digest()
+
     def test_delivery_wrong_type_is_fail(self):
         write(self.ad, "risk-trajectory.jsonl", self.row("intake", "green") + "\n")
         write(self.ad, "delivery.json", {"mode": 5})
@@ -505,9 +513,12 @@ class Risk(Base):
 
     def test_delivery_partial_fields_default_null(self):
         write(self.ad, "risk-trajectory.jsonl", self.row("intake", "green") + "\n")
-        write(self.ad, "delivery.json", {"mode": "pr"})
+        write(self.ad, "delivery.json", {"mode": "pr", "autoMerge": False})
         r = self.digest()["risk"]
-        self.assertEqual(r["delivery"], {"mode": "pr", "autoMerge": None, "prUrl": None})
+        self.assertEqual(r["delivery"], {"mode": "pr", "autoMerge": False, "prUrl": None})
+        write(self.ad, "delivery.json", {"mode": "pr"})
+        with self.assertRaises(td.Fail):
+            self.digest()
 
     def test_risk_block_has_no_absolute_paths_and_typed_line_unchanged(self):
         write(self.ad, "risk-trajectory.jsonl", self.row("intake", "green") + "\n")
