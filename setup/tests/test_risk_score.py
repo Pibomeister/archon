@@ -421,6 +421,26 @@ class Plan(Base):
         d = self.doc("plan")
         self.assertEqual(d["floors"][0]["paths"], ["web-app/app/services/api-client.d.ts"])
 
+    def test_web_allowlist_paths_hit_root_anchored_floors_in_the_web_repo(self):
+        for web, tier, fid in (([".github/workflows/deploy.yml"], "red", "factory-control"),
+                               (["uv.lock"], "yellow", "lockfile")):
+            self.baseline()
+            self.write(self.ad, "web-files-allowlist.json", web)
+            self.assert_tier(self.run_cli("plan"), tier, "plan")
+            floors = {f["id"]: f["paths"] for f in self.doc("plan")["floors"]}
+            self.assertEqual(floors, {fid: [f"web-app/{web[0]}"]})
+
+    def test_web_allowlist_path_matches_a_web_repo_prefixed_protected_area(self):
+        profile = json.loads(json.dumps(PROFILE))
+        profile["risk"]["protectedAreas"].append(
+            {"paths": ["web-app/app/routes/editor/"], "floor": "red", "reason": "editor"})
+        self.profile.write_text(json.dumps(profile), encoding="utf-8")
+        self.baseline()
+        self.write(self.ad, "web-files-allowlist.json", ["app/routes/editor/index.tsx"])
+        self.assert_tier(self.run_cli("plan"), "red", "plan")
+        floors = {f["id"]: f["paths"] for f in self.doc("plan")["floors"]}
+        self.assertEqual(floors, {"protected:editor": ["web-app/app/routes/editor/index.tsx"]})
+
     def test_missing_allowlist_fails_closed(self):
         self.assert_fail(self.run_cli("plan"), "files-allowlist.json", stage="plan")
 

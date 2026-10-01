@@ -30,8 +30,9 @@ Stage inputs:
           "Kind: <class>" line or a "## Kind" heading (missing -> feature,
           unknown -> FAIL), the repo-relative paths the brief names, and
           CODEOWNERS at --base (or the working tree when no --base)
-  plan    files-allowlist.json (required), web-files-allowlist.json (optional,
-          tagged with capabilities.webRepo), impact.json, triage.json,
+  plan    files-allowlist.json (required), web-files-allowlist.json (optional;
+          its paths are scored as paths in the capabilities.webRepo repo and
+          reported as "<webRepo>/<path>"), impact.json, triage.json,
           risk-judgment.json, causal-chain.json (optional)
   impl    git diff -z --name-status <base>..HEAD where base is --base or
           bootstrap-head.txt (base must be an ancestor of HEAD, the tracked
@@ -275,11 +276,16 @@ def read_chain_links(ad):
     return len(links)
 
 
-def size_signals(ctx, paths, triage_name):
+def web_shown(ctx, path):
+    return f"{ctx['web_repo']}/{path}"
+
+
+def size_signals(ctx, paths, web, triage_name):
     pol = ctx["policy"]
     pts, sizes = pol["points"], pol["sizeThresholds"]
-    code = [p for p in paths if not TEST_RE.search(p)]
-    tests = [p for p in paths if TEST_RE.search(p)]
+    entries = [(p, p, ctx["repo"]) for p in paths] + [(web_shown(ctx, p), p, ctx["web_repo"]) for p in web]
+    code = [e for e in entries if not TEST_RE.search(e[1])]
+    tests = [e for e in entries if TEST_RE.search(e[1])]
     signals = [task_class_signal(ctx)]
     over = len(code) - sizes["max_files"]
     signals.append({"id": "files", "value": len(code), "points": pts["filesOverMax"] + pts["perExtraFile"] * over if over > 0 else 0,
@@ -317,8 +323,8 @@ def size_signals(ctx, paths, triage_name):
         signals.append({"id": "coverage", "value": "no probes", "points": 0, "floor": None,
                         "source": "mechanical", "evidence": "profile has no evidence.behavioral probes (Slice 2)"})
     else:
-        covered = [p for p in code if any(rp.match_any(pr.get("covers") or [], p, ctx["repo"]) for pr in probes)]
-        uncovered = sorted(set(code) - set(covered))
+        uncovered = sorted({shown for shown, bare, repo in code
+                            if not any(rp.match_any(pr.get("covers") or [], bare, repo) for pr in probes)})
         signals.append({"id": "coverage", "value": uncovered, "points": pts["unknownCoverage"] if uncovered else 0,
                         "floor": None, "source": "mechanical", "evidence": f"{len(uncovered)} path(s) no probe covers"})
     return signals
@@ -328,14 +334,11 @@ def size_signals(ctx, paths, triage_name):
 def signals_plan(ctx):
     allow = read_allowlist(ctx["ad"], "files-allowlist.json", required=True)
     raw = sl.read_json(os.path.join(ctx["ad"], "files-allowlist.json"))
-    paths = list(allow)
-    web = read_allowlist(ctx["ad"], "web-files-allowlist.json", required=False)
-    if web:
-        if not ctx["web_repo"]:
-            raise Fail("web-files-allowlist.json present but profile has no capabilities.webRepo")
-        paths += [f"{ctx['web_repo']}/{p}" for p in web]
-    signals = size_signals(ctx, paths, "triage.json")
-    return signals, paths, {"allowlistSha256": rp.sha256_bytes(rp.canonical_bytes(raw))}
+    web = read_allowlist(ctx["ad"], "web-files-allowlist.json", required=False) or []
+    if web and not ctx["web_repo"]:
+        raise Fail("web-files-allowlist.json present but profile has no capabilities.webRepo")
+    signals = size_signals(ctx, allow, web, "triage.json")
+    return signals, allow, web, {"allowlistSha256": rp.sha256_bytes(rp.canonical_bytes(raw))}
 
 
 # --- stage: impl -------------------------------------------------------------
@@ -391,8 +394,8 @@ def signals_impl(ctx):
     head = git(ctx["root"], "rev-parse", "HEAD")
     if head.returncode != 0:
         raise Fail("git rev-parse HEAD failed")
-    signals = size_signals(ctx, paths, "triage-post.json")
-    return signals, paths, {"diffSha256": rp.sha256_text(diff_text), "head": head.stdout.strip()}
+    signals = size_signals(ctx, paths, [], "triage-post.json")
+    return signals, paths, [], {"diffSha256": rp.sha256_text(diff_text), "head": head.stdout.strip()}
 
 
 # --- assembly ----------------------------------------------------------------
@@ -495,12 +498,29 @@ def lane_tier_of(handoff):
     return None
 
 
-def build(ctx, signals, paths, extra_inputs):
+def stage_floors(ctx, paths, web):
+    """Path floors for the primary repo's paths plus the web repo's paths,
+    one entry per floor id. Each group is evaluated as bare repo-relative
+    paths under its own repo label, so a root-anchored rule
+    (".github/workflows/", "uv.lock") applies to the web repo exactly as it
+    does to the primary one; web paths are reported as "<webRepo>/<path>"."""
+    merged = {}
+    for repo, group, shown in ((ctx["repo"], paths, lambda p: p),
+                               (ctx["web_repo"], web, lambda p: web_shown(ctx, p))):
+        for f in rp.path_floors(ctx["policy"], group, repo):
+            entry = merged.setdefault(f["id"], {"id": f["id"], "floor": f["floor"], "reason": f["reason"], "paths": []})
+            entry["floor"] = rp.tier_max(entry["floor"], f["floor"])
+            entry["paths"] = sorted(set(entry["paths"]) | {shown(p) for p in f["paths"]})
+    return list(merged.values())
+
+
+def build(ctx, signals, paths, web, extra_inputs):
     policy = ctx["policy"]
-    floors = rp.path_floors(policy, paths, ctx["repo"])
+    floors = stage_floors(ctx, paths, web)
     owners, co_floors = [], []
     if ctx["codeowners_rules"] is not None:
-        owners, co_floors = rp.codeowner_floors(policy, ctx["codeowners_rules"], paths)
+        owners, co_floors = rp.codeowner_floors(policy, ctx["codeowners_rules"],
+                                                paths + [web_shown(ctx, p) for p in web])
     floors = sorted(floors + co_floors, key=lambda f: f["id"])
     score = sum(s["points"] for s in signals)
     mech_tier = rp.tier_max(rp.tier_from_score(score, policy["thresholds"]), *[f["floor"] for f in floors])
@@ -616,7 +636,7 @@ def context(args):
     }
 
 
-STAGE_FUNCS = {"intake": lambda ctx: signals_intake(ctx) + ({},), "plan": signals_plan, "impl": signals_impl}
+STAGE_FUNCS = {"intake": lambda ctx: signals_intake(ctx) + ([], {}), "plan": signals_plan, "impl": signals_impl}
 
 
 def score(args):
@@ -627,8 +647,8 @@ def score(args):
     if os.path.isfile(stale):
         os.remove(stale)
     ctx = context(args)
-    signals, paths, extra_inputs = STAGE_FUNCS[args.stage](ctx)
-    return ctx, build(ctx, signals, paths, extra_inputs)
+    signals, paths, web, extra_inputs = STAGE_FUNCS[args.stage](ctx)
+    return ctx, build(ctx, signals, paths, web, extra_inputs)
 
 
 class RiskArgumentParser(argparse.ArgumentParser):

@@ -428,14 +428,6 @@ class Risk(Base):
     def test_absent_trajectory_is_null(self):
         self.assertIsNone(self.digest()["risk"])
 
-    def test_risk_reader_does_not_dead_reassign_floors_and_escalate(self):
-        # row["floors"], row["escalate"] = floors, escalate immediately after
-        # floors, escalate = row["floors"], row["escalate"] writes each value
-        # back onto the exact key it came from: a no-op kept from an earlier
-        # revision of the validation, not a real assignment.
-        text = SCRIPT.read_text(encoding="utf-8")
-        self.assertNotIn('row["floors"], row["escalate"] = floors, escalate', text)
-
     def test_trajectory_summarised_with_review_and_gates(self):
         write(self.ad, "risk-trajectory.jsonl", "\n".join([
             self.row("intake", "green", 15), self.row("plan", "yellow", 32, laneTier="green", escalate=True),

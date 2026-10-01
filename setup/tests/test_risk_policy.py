@@ -6,6 +6,7 @@ single guard shows up as one named failure."""
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -59,15 +60,28 @@ class ShippedPolicy(unittest.TestCase):
         self.assertEqual(merged["repro_command_allow"],
                          json.loads((SETUP / "lite-envelope.json").read_text())["repro_command_allow"])
 
-    def test_shipped_policy_file_carries_no_machine_paths(self):
-        text = (SETUP / "risk-policy.json").read_text(encoding="utf-8")
-        self.assertNotIn("/Use" + "rs/", text)
+    def test_shipped_policy_carries_no_absolute_paths(self):
+        def strings(value):
+            if isinstance(value, str):
+                yield value
+            elif isinstance(value, dict):
+                for k, v in value.items():
+                    yield k
+                    yield from strings(v)
+            elif isinstance(value, list):
+                for v in value:
+                    yield from strings(v)
+        absolute = [s for s in strings(POLICY) if s.startswith(("/", "~")) or "/Users/" in s or "/home/" in s]
+        self.assertEqual(absolute, [])
 
-    def test_module_is_stdlib_only(self):
-        import re
-        text = (SETUP / "risk_policy.py").read_text(encoding="utf-8")
-        imports = set(re.findall(r"^(?:import|from) (\w+)", text, re.M))
-        self.assertTrue(imports <= {"__future__", "hashlib", "json", "os", "re", "typing"}, imports)
+    def test_module_loads_the_policy_without_site_packages(self):
+        # -I -S: no user site, no site-packages, no PYTHON* environment, so
+        # only the standard library is importable.
+        code = ("import sys; sys.path.insert(0, sys.argv[1]); import risk_policy; "
+                "print(risk_policy.load_policy()['schema'])")
+        r = subprocess.run([sys.executable, "-I", "-S", "-c", code, str(SETUP)],
+                           capture_output=True, encoding="utf-8")
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, rp.SCHEMA_POLICY), r.stderr)
 
 
 class Merge(unittest.TestCase):

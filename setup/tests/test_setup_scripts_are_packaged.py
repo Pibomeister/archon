@@ -23,6 +23,12 @@ def manifest_entries():
                           MANIFEST.read_text()))
 
 
+def manifest_paths():
+    """Every payload path in package.sh's MANIFEST=( ... ) array."""
+    body = re.search(r"^MANIFEST=\(\n(.*?)^\)", MANIFEST.read_text(encoding="utf-8"), re.M | re.S).group(1)
+    return {line.split("#")[0].strip() for line in body.splitlines()} - {""}
+
+
 def referenced():
     out = {}
     for p in sorted((ARCHON / "workflows").glob("*.yaml")):
@@ -122,14 +128,13 @@ class SetupScriptsArePackagedTest(unittest.TestCase):
         entries = manifest_entries()
         for name in ("risk-score.py", "risk_policy.py"):
             self.assertIn(name, entries, name)
-        self.assertIn("  setup/risk-policy.json\n", MANIFEST.read_text(encoding="utf-8"))
+        self.assertIn("setup/risk-policy.json", manifest_paths())
 
     def test_portable_scripts_ship_risk_policy_json(self):
         # risk_policy.py's DEFAULT_POLICY_PATH resolves next to __file__, so
         # the portable copy (symlinked scripts dir) needs its own sibling
         # risk-policy.json shipped alongside it, not just setup/risk-policy.json.
-        package = MANIFEST.read_text(encoding="utf-8")
-        self.assertIn("  workflows/portable/single-repo-feature/scripts/risk-policy.json\n", package)
+        self.assertIn("workflows/portable/single-repo-feature/scripts/risk-policy.json", manifest_paths())
 
     def test_package_reference_scanner_ignores_trailing_prose_punctuation(self):
         package = MANIFEST.read_text(encoding="utf-8")
