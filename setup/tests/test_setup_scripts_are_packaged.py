@@ -116,6 +116,14 @@ class SetupScriptsArePackagedTest(unittest.TestCase):
         self.assertIn("port-alloc.sh", referenced())
         self.assertIn("resolve-params.sh", referenced()["port-alloc.sh"])
 
+    def test_risk_scorer_is_shipped(self):
+        # risk_policy.py is imported, not called, so the reference regex cannot
+        # see it; pin it with the scorer and the policy file it reads.
+        entries = manifest_entries()
+        for name in ("risk-score.py", "risk_policy.py"):
+            self.assertIn(name, entries, name)
+        self.assertIn("  setup/risk-policy.json\n", MANIFEST.read_text(encoding="utf-8"))
+
     def test_package_reference_scanner_ignores_trailing_prose_punctuation(self):
         package = MANIFEST.read_text(encoding="utf-8")
         match = re.search(r"GREP\" -ohE '([^']+)'", package)
