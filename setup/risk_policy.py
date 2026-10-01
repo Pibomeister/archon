@@ -22,13 +22,21 @@ applied out of order) is enforced by the Slice 5 admit step, not here at
 load time.
 
 Path rules ("anchored-prefix globs", the lite-envelope.sh semantics plus globs):
-  "dir/"        prefix: dir/ and everything beneath it
+  "dir/"        prefix: dir/ and everything beneath it, and dir/ itself
   "file.ext"    exact match
   "**/x/**"     glob: ** spans segments, * stays inside one segment; a pattern
                 starting with **/ floats, any other glob is anchored at the root
-Every rule is tried against the bare repo-relative path AND "<repo>/<path>",
-so a profile pack that lists paths with a repository prefix (the Goodword
-hot_paths convention, "api/apps/api/src/auth/") keeps working unchanged.
+Prefix and glob rules are matched case-sensitively; sensitive-domain tokens
+are matched case-insensitively instead (see sensitive_domain). Every rule is
+tried against the bare repo-relative path AND "<repo>/<path>", so a profile
+pack that lists paths with a repository prefix (the Goodword hot_paths
+convention, "api/apps/api/src/auth/") keeps working unchanged -- except a
+rule equal to "<repo>/" itself, which is never retried against the
+repo-prefixed candidate (that degenerate case would otherwise match every
+path in a repo named after the rule). The repo-prefixed retry only ever adds
+matches, never removes any: a repo-prefixed rule can still match a
+same-named path that happens to live in a different repo, which is the safe
+direction for a floor check to err in.
 """
 from __future__ import annotations
 
@@ -442,76 +450,115 @@ def match_rule(rule: str, path: str) -> bool:
             rx = _GLOB_CACHE[rule] = _glob_regex(rule)
         return rx.match(path) is not None
     if rule.endswith("/"):
-        return path.startswith(rule)
+        return path.startswith(rule) or path == rule[:-1]
     return path == rule
 
 
 def match_any(rules: list, path: str, repo: Optional[str] = None) -> Optional[str]:
-    """The first rule matching the bare path or "<repo>/<path>", else None."""
-    candidates = [path] + ([f"{repo}/{path}"] if repo else [])
+    """The first rule matching the bare path or "<repo>/<path>", else None.
+
+    A rule equal to "<repo>/" is never retried against the repo-prefixed
+    candidate: that degenerate case would otherwise match every path in a
+    repo whose name happens to equal the rule's directory name."""
+    prefixed = f"{repo}/{path}" if repo else None
+    bare_repo_rule = f"{repo}/" if repo else None
     for rule in rules:
-        for cand in candidates:
-            if match_rule(rule, cand):
-                return rule
+        if match_rule(rule, path):
+            return rule
+        if prefixed is not None and rule != bare_repo_rule and match_rule(rule, prefixed):
+            return rule
     return None
 
 
 _TOKEN_RX_CACHE: dict = {}
+_HUMP_RX = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 
 
-def sensitive_domain(tokens: dict, path: str) -> Optional[str]:
-    """The first domain whose token appears as a whole path segment or as a
-    dot/dash/underscore separated part of a segment, case-insensitively."""
+def _sensitive_match(tokens: dict, path: str) -> Optional[tuple]:
+    """(domain, word) for the first domain/word pair that matches, else None.
+
+    Checked against both the raw path and a "humped" copy where a
+    lowercase-or-digit to uppercase transition becomes an underscore, so
+    camelCase and PascalCase names (AuthGuard.ts, authService.ts) match the
+    same as an explicit separator would."""
+    humped = _HUMP_RX.sub("_", path)
     for domain, words in tokens.items():
         for word in words:
             rx = _TOKEN_RX_CACHE.get(word)
             if rx is None:
-                rx = _TOKEN_RX_CACHE[word] = re.compile(r"(?:^|[/._-])" + re.escape(word) + r"(?:$|[/._-])", re.I)
-            if rx.search(path):
-                return domain
+                rx = _TOKEN_RX_CACHE[word] = re.compile(r"(?:^|[/._@-])" + re.escape(word) + r"(?:$|[/._@-])", re.I)
+            if rx.search(path) or rx.search(humped):
+                return domain, word
     return None
+
+
+def sensitive_domain(tokens: dict, path: str) -> Optional[str]:
+    """The first domain whose token appears as a whole path segment or as a
+    dot/dash/underscore/@-separated part of a segment, case-insensitively;
+    a camelCase or PascalCase hump counts as a separator too."""
+    match = _sensitive_match(tokens, path)
+    return match[0] if match else None
 
 
 # --- floors ------------------------------------------------------------------
 def path_floors(policy: dict, paths: list, repo: Optional[str]) -> list:
-    """[{id, floor, reason, paths:[...]}] sorted by id, one entry per floor id,
-    paths sorted and de-duplicated. Points never appear here: a floor is a
-    minimum tier with a named reason, and the scorer takes the max."""
+    """[{id, floor, reason, paths:[...], rules:[...]}] sorted by id, one entry
+    per floor id; paths and rules sorted and de-duplicated, and floor the
+    highest tier among the rules that hit that id (two rules can share an id
+    with different floors, e.g. two protectedAreas with the same reason).
+    Points never appear here: a floor is a minimum tier with a named reason,
+    and the scorer takes the max.
+
+    paths must already be canonical repo-relative paths: no "./", no
+    backslashes, no repo-name prefix. setup/risk-score.py (Task 4) owns that
+    canonicalisation before calling in here."""
     hits: dict = {}
 
-    def hit(fid: str, floor: str, reason: str, path: str) -> None:
-        entry = hits.setdefault(fid, {"id": fid, "floor": floor, "reason": reason, "paths": set()})
+    def hit(fid: str, floor: str, reason: str, path: str, rule: str) -> None:
+        entry = hits.setdefault(fid, {"id": fid, "floor": floor, "reason": reason, "paths": set(), "rules": set()})
+        if tier_gt(floor, entry["floor"]):
+            entry["floor"] = floor
         entry["paths"].add(path)
+        entry["rules"].add(rule)
 
     sd = policy["sensitiveDomains"]
     fc = policy["factoryControl"]
     rev = policy["reversibility"]
     for path in paths:
-        domain = sensitive_domain(sd["tokens"], path)
-        if domain:
-            hit(f"sensitive-domain:{domain}", sd["floor"], f"sensitive domain {domain}", path)
-        if match_any(sd.get("extraPaths", []), path, repo):
-            hit("sensitive-domain:profile", sd["floor"], "profile sensitive path", path)
-        if match_any(fc["paths"], path, repo):
-            hit("factory-control", fc["floor"], "factory control path", path)
+        sd_match = _sensitive_match(sd["tokens"], path)
+        if sd_match:
+            domain, word = sd_match
+            hit(f"sensitive-domain:{domain}", sd["floor"], f"sensitive domain {domain}", path, word)
+        extra_rule = match_any(sd.get("extraPaths", []), path, repo)
+        if extra_rule:
+            hit("sensitive-domain:profile", sd["floor"], "profile sensitive path", path, extra_rule)
+        fc_rule = match_any(fc["paths"], path, repo)
+        if fc_rule:
+            hit("factory-control", fc["floor"], "factory control path", path, fc_rule)
         for fid, key, reason in (("migration", "migrations", "schema migration"),
                                  ("data-mutation", "dataMutation", "data mutation script"),
                                  ("lockfile", "lockfiles", "dependency lockfile"),
                                  ("manifest", "manifests", "package manifest")):
             rule = rev.get(key) or {}
-            if match_any(rule.get("paths", []), path, repo):
-                hit(fid, rule["floor"], reason, path)
+            rule_hit = match_any(rule.get("paths", []), path, repo)
+            if rule_hit:
+                hit(fid, rule["floor"], reason, path, rule_hit)
         pc = policy["publicContract"]
-        if match_any(pc.get("paths", []), path, repo):
-            hit("public-contract", pc["floor"], "public contract surface", path)
+        pc_rule = match_any(pc.get("paths", []), path, repo)
+        if pc_rule:
+            hit("public-contract", pc["floor"], "public contract surface", path, pc_rule)
         se = policy["sideEffects"]
-        if match_any(se.get("paths", []), path, repo):
-            hit("side-effects", se["floor"], "external side effect", path)
+        se_rule = match_any(se.get("paths", []), path, repo)
+        if se_rule:
+            hit("side-effects", se["floor"], "external side effect", path, se_rule)
         for area in policy.get("protectedAreas", []):
-            if match_any(area["paths"], path, repo):
-                hit(f"protected:{area['reason']}", area["floor"], f"protected area: {area['reason']}", path)
+            area_rule = match_any(area["paths"], path, repo)
+            if area_rule:
+                hit(f"protected:{area['reason']}", area["floor"], f"protected area: {area['reason']}",
+                    path, area_rule)
     out = []
     for fid in sorted(hits):
         entry = hits[fid]
-        out.append({"id": fid, "floor": entry["floor"], "reason": entry["reason"], "paths": sorted(entry["paths"])})
+        out.append({"id": fid, "floor": entry["floor"], "reason": entry["reason"],
+                    "paths": sorted(entry["paths"]), "rules": sorted(entry["rules"])})
     return out

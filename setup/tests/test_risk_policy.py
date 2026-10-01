@@ -264,11 +264,23 @@ class PathRules(unittest.TestCase):
         self.assertTrue(rp.match_rule("libs/*/src/**", "libs/db/src/a/b.ts"))
         self.assertFalse(rp.match_rule("libs/*/src/**", "libs/db/deep/src/a.ts"))
 
+    def test_prefix_rule_matches_the_directory_itself(self):
+        self.assertTrue(rp.match_rule("apps/api/src/auth/", "apps/api/src/auth"))
+        self.assertFalse(rp.match_rule("apps/api/src/auth/", "apps/api/src/author"))
+
     def test_repo_prefix_is_tried_too(self):
         self.assertEqual(rp.match_any(["api/apps/api/src/auth/"], "apps/api/src/auth/x.ts", repo="api"),
                          "api/apps/api/src/auth/")
         self.assertIsNone(rp.match_any(["api/apps/api/src/auth/"], "apps/api/src/auth/x.ts", repo="web-app"))
         self.assertIsNone(rp.match_any(["api/apps/api/src/auth/"], "apps/api/src/auth/x.ts", repo=None))
+
+    def test_repo_prefix_rule_equal_to_repo_itself_is_not_retried(self):
+        # a rule that is exactly "<repo>/" must not be retried against the
+        # repo-prefixed candidate: that would match every path in a repo
+        # that happens to share the rule's directory name
+        self.assertIsNone(rp.match_any(["setup/"], "README.md", repo="setup"))
+        self.assertEqual(rp.match_any(["setup/"], "setup/x.py", repo="setup"), "setup/")
+        self.assertEqual(rp.match_any(["api/apps/"], "apps/x.ts", repo="api"), "api/apps/")
 
     def test_sensitive_tokens_match_segments_and_name_parts_only(self):
         tokens = {"auth": ["auth", "token"]}
@@ -279,6 +291,16 @@ class PathRules(unittest.TestCase):
         self.assertIsNone(rp.sensitive_domain(tokens, "src/author.ts"))
         self.assertIsNone(rp.sensitive_domain(tokens, "src/tokenizer.ts"))
         self.assertIsNone(rp.sensitive_domain(tokens, "src/notes/notes.service.ts"))
+
+    def test_sensitive_tokens_match_camel_case_pascal_case_and_scoped_packages(self):
+        tokens = POLICY["sensitiveDomains"]["tokens"]
+        self.assertEqual(rp.sensitive_domain(tokens, "src/AuthGuard.ts"), "auth")
+        self.assertEqual(rp.sensitive_domain(tokens, "src/authService.ts"), "auth")
+        self.assertEqual(rp.sensitive_domain(tokens, "web-app/app/components/LoginForm.tsx"), "auth")
+        self.assertEqual(rp.sensitive_domain(tokens, "node_modules/@auth/core/x.ts"), "auth")
+        self.assertIsNone(rp.sensitive_domain(tokens, "src/author.ts"))
+        self.assertIsNone(rp.sensitive_domain(tokens, "src/Authority.ts"))
+        self.assertIsNone(rp.sensitive_domain(tokens, "apps/api/x.ts"))
 
 
 class Floors(unittest.TestCase):
@@ -295,6 +317,7 @@ class Floors(unittest.TestCase):
         self.assertEqual([(f["id"], f["floor"], f["paths"]) for f in floors],
                          [("sensitive-domain:auth", "red", ["apps/api/src/auth/README.md"])])
         self.assertIn("auth", floors[0]["reason"])
+        self.assertEqual(floors[0]["rules"], ["auth"])
 
     def test_factory_control_migration_lockfile_public_contract(self):
         self.assertEqual(self.ids(["workflows/sdlc-red.yaml"]), [("factory-control", "red")])
@@ -314,6 +337,25 @@ class Floors(unittest.TestCase):
 
     def test_plain_source_file_has_no_floor(self):
         self.assertEqual(self.ids(["apps/api/src/notes/notes.service.ts"]), [])
+
+    def test_shared_floor_id_takes_the_max_tier_regardless_of_order(self):
+        # two protectedAreas sharing a reason ("core") but different floors:
+        # the aggregated floor must be the max, no matter which path is
+        # scored first
+        policy = rp.load_policy(profile={"risk": {"protectedAreas": [
+            {"paths": ["x/"], "floor": "red", "reason": "core"},
+            {"paths": ["y/"], "floor": "yellow", "reason": "core"},
+        ]}})
+        forward = rp.path_floors(policy, ["x/1.ts", "y/2.ts"], None)
+        backward = rp.path_floors(policy, ["y/2.ts", "x/1.ts"], None)
+        for floors in (forward, backward):
+            self.assertEqual([f["id"] for f in floors], ["protected:core"])
+            self.assertEqual(floors[0]["floor"], "red")
+            self.assertEqual(floors[0]["paths"], ["x/1.ts", "y/2.ts"])
+
+    def test_directory_forms_of_backfill_and_openapi_paths(self):
+        self.assertEqual(self.ids(["scripts/backfill/x.ts"]), [("data-mutation", "red")])
+        self.assertEqual(self.ids(["openapi/spec.yaml"]), [("public-contract", "yellow")])
 
 
 if __name__ == "__main__":

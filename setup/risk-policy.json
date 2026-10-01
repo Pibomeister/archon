@@ -38,9 +38,9 @@
                                                 "**/package-lock.json", "**/pnpm-lock.yaml", "**/bun.lock", "**/yarn.lock"]},
     "manifests": {"floor": "yellow", "paths": ["package.json", "pyproject.toml", "Cargo.toml", "go.mod", "**/package.json"]},
     "migrations": {"floor": "red", "paths": ["migrations/", "**/migrations/**", "**/migrate/**"]},
-    "dataMutation": {"floor": "red", "paths": ["**/backfill*", "**/scripts/data/**", "**/seeds/**"]}
+    "dataMutation": {"floor": "red", "paths": ["**/backfill*", "**/backfill*/**", "**/scripts/data/**", "**/seeds/**"]}
   },
-  "publicContract": {"floor": "yellow", "paths": ["**/generated/**", "**/*.d.ts", "**/dto/**", "**/openapi*", "**/*.proto", "**/*.graphql"]},
+  "publicContract": {"floor": "yellow", "paths": ["**/generated/**", "**/*.d.ts", "**/dto/**", "**/openapi*", "**/openapi/**", "**/*.proto", "**/*.graphql"]},
   "sideEffects": {"floor": "yellow", "paths": []},
   "protectedAreas": [],
   "codeowners": {"defaultOwnedFloor": "yellow", "ownerFloors": {}},
