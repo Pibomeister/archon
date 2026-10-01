@@ -403,6 +403,15 @@ class PortableProjectTest(unittest.TestCase):
         self.assertFalse(any("codex-home" in name for name in manifest["files"]))
         self.assertFalse((self.artifacts / "approval-evidence/codex-home").exists())
 
+    def test_profile_with_risk_block_validates(self):
+        self.profile["risk"] = {"protectedAreas": [{"paths": ["x/"], "floor": "red", "reason": "test"}]}
+        portable.validate_profile(self.profile)
+
+    def test_profile_with_non_object_risk_is_rejected(self):
+        self.profile["risk"] = "nope"
+        with self.assertRaises(ValueError):
+            portable.validate_profile(self.profile)
+
     def test_planner_cannot_select_extra_evidence_by_rewriting_local_context_and_seal(self):
         self.capture()
         context = json.loads((self.artifacts / "run-context.json").read_text())

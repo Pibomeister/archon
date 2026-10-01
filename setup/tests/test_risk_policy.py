@@ -17,6 +17,11 @@ import risk_policy as rp  # noqa: E402
 
 POLICY = json.loads((SETUP / "risk-policy.json").read_text(encoding="utf-8"))
 
+try:
+    import jsonschema
+except ImportError:
+    jsonschema = None
+
 
 class TierMath(unittest.TestCase):
     def test_tier_max_ignores_none_and_orders_tiers(self):
@@ -508,6 +513,54 @@ class GoodwordSeed(unittest.TestCase):
             self.assertIn("protectedAreas", risk["properties"])
             self.assertIn("codeowners", risk["properties"])
             self.assertNotIn("risk", schema["required"])
+
+
+class OwnerFloorsValidation(unittest.TestCase):
+    def test_owner_floors_rejects_non_handle_keys(self):
+        with self.assertRaises(rp.RiskPolicyError):
+            rp.load_policy(profile={"risk": {"codeowners": {"ownerFloors": {"team-x": "red"}}}})
+
+
+class PointsSchemaKeys(unittest.TestCase):
+    ARCHON = SETUP.parent
+
+    def test_points_schema_matches_module_constants(self):
+        expected_points = set(rp._REQUIRED_POINTS) | {"taskClass", "triage"}
+        for name in ("project-profile.v1.schema.json", "project-profile.v2.schema.json"):
+            schema = json.loads((self.ARCHON / "profiles" / name).read_text(encoding="utf-8"))
+            points = schema["properties"]["risk"]["properties"]["points"]
+            self.assertEqual(set(points["properties"]), expected_points)
+            self.assertEqual(set(points["properties"]["taskClass"]["properties"]), set(rp.TASK_CLASSES))
+            self.assertEqual(set(points["properties"]["triage"]["properties"]), {"S", "M", "L"})
+
+
+class SchemaValidation(unittest.TestCase):
+    ARCHON = SETUP.parent
+    MINIMAL_PROFILE = {
+        "profileVersion": "archon.project-profile.v1",
+        "projectId": "project:fixture",
+        "repository": {"remote": "https://github.com/example/fixture.git", "defaultBranch": "main",
+                        "stack": "nextjs-workspace", "packageManager": "pnpm@10.21.0"},
+        "verification": [{"id": "test", "argv": ["true"], "timeoutSeconds": 30}],
+        "scope": {"allowedPaths": ["x"], "forbiddenPaths": []},
+        "knowledge": {"paths": ["README.md"], "maxBytes": 4096},
+        "recovery": {"maxRounds": 1},
+        "delivery": {"draftOnly": True, "autoMerge": False, "autoDeploy": False},
+    }
+
+    @unittest.skipUnless(jsonschema is not None, "jsonschema not installed")
+    def test_goodword_profile_validates_against_v1_schema(self):
+        schema = json.loads((self.ARCHON / "profiles/project-profile.v1.schema.json").read_text(encoding="utf-8"))
+        profile = json.loads((self.ARCHON / "profiles/goodword/project.v1.json").read_text(encoding="utf-8"))
+        jsonschema.validate(profile, schema)
+
+    @unittest.skipUnless(jsonschema is not None, "jsonschema not installed")
+    def test_blank_reason_is_rejected_by_schema(self):
+        schema = json.loads((self.ARCHON / "profiles/project-profile.v1.schema.json").read_text(encoding="utf-8"))
+        profile = dict(self.MINIMAL_PROFILE)
+        profile["risk"] = {"protectedAreas": [{"paths": ["x/"], "floor": "red", "reason": " "}]}
+        with self.assertRaises(jsonschema.ValidationError):
+            jsonschema.validate(profile, schema)
 
 
 if __name__ == "__main__":

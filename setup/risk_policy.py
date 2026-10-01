@@ -278,6 +278,8 @@ def _check_layer(layer: Any, label: str) -> dict:
         if not isinstance(co["ownerFloors"], dict):
             raise RiskPolicyError(f"{label}.codeowners.ownerFloors must be an object")
         for owner, tier in co["ownerFloors"].items():
+            if not isinstance(owner, str) or not _OWNER_RE.match(owner):
+                raise RiskPolicyError(f"{label}.codeowners.ownerFloors: bad owner token: {owner}")
             _check_tier(tier, f"{label}.codeowners.ownerFloors[{owner}]")
     if "defaultOwnedFloor" in co:
         _check_tier(co["defaultOwnedFloor"], f"{label}.codeowners.defaultOwnedFloor")

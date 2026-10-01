@@ -241,7 +241,7 @@
     },
     "risk": {
       "type": "object",
-      "description": "Risk-tier inputs merged over setup/risk-policy.json. Floors here can only add; setup/risk_policy.py refuses anything that weakens a default floor.",
+      "description": "Risk-tier inputs merged over setup/risk-policy.json. Floors here can only add; setup/risk_policy.py refuses anything that weakens a default floor. Profiles may only add protected-area/public-contract/side-effect paths and owner floors: sensitiveDomains.tokens, factoryControl, floor changes on publicContract/sideEffects, and autoMerge are reserved for the default policy and calibration overlays. thresholds are checked after the merge (red must stay above yellow), which this schema cannot express.",
       "properties": {
         "protectedAreas": {
           "type": "array",
@@ -250,7 +250,7 @@
             "properties": {
               "paths": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
               "floor": {"enum": ["green", "yellow", "red"]},
-              "reason": {"type": "string", "minLength": 1}
+              "reason": {"type": "string", "minLength": 1, "pattern": "\\S"}
             },
             "required": ["paths", "floor", "reason"],
             "additionalProperties": false
@@ -259,7 +259,11 @@
         "codeowners": {
           "type": "object",
           "properties": {
-            "ownerFloors": {"type": "object", "additionalProperties": {"enum": ["green", "yellow", "red"]}},
+            "ownerFloors": {
+              "type": "object",
+              "propertyNames": {"pattern": "^(@[A-Za-z0-9][A-Za-z0-9_.-]*(/[A-Za-z0-9][A-Za-z0-9_.-]*)?|[^@\\s]+@[^@\\s]+\\.[^@\\s]+)$"},
+              "additionalProperties": {"enum": ["green", "yellow", "red"]}
+            },
             "defaultOwnedFloor": {"enum": ["green", "yellow", "red"]}
           },
           "additionalProperties": false

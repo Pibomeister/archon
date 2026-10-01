@@ -25,6 +25,7 @@ sys.dont_write_bytecode = True
 import source_recipes
 import repo_policy
 import repair_publication
+import risk_policy
 from review_envelope import ENUM as REVIEW_VERDICTS
 
 PROFILE_VERSION = "archon.project-profile.v1"
@@ -186,7 +187,13 @@ def validate_profile(profile: dict) -> None:
         expected_fields += ("guidance",)
     if "capabilities" in profile:
         expected_fields += ("capabilities",)
+    if "risk" in profile:
+        expected_fields += ("risk",)
     object_fields(profile, expected_fields, "project profile")
+    if "risk" in profile:
+        # RiskPolicyError is a ValueError subclass, so it is caught the same
+        # way as every other profile validation failure here.
+        risk_policy._check_layer(profile["risk"], "profile.risk")
     object_fields(profile["repository"], ("remote", "defaultBranch", "stack") + (() if v2 else ("packageManager",)), "repository")
     if v2 and profile["sourceRecipe"] not in source_recipes.RECIPES:
         raise ValueError("Unknown source recipe")
