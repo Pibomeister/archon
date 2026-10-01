@@ -608,5 +608,31 @@ class Impl(Base):
         self.assertEqual(d["floors"][0]["paths"], ["apps/api/src/auth/café.ts"])
 
 
+class SpecFixtures(Base):
+    """Verification step 3 of the design spec, as executable fixtures."""
+
+    def test_docs_only_spec_is_green(self):
+        self.write_spec("# Clarify the README\n\nKind: docs\n\nUpdate README.md and docs/setup.md.\n")
+        self.assert_tier(self.run_cli("intake"), "green", "intake")
+
+    def test_spec_touching_auth_is_red_with_the_named_floor(self):
+        self.write_spec("# Session refresh\n\nKind: feature\n\nChange apps/api/src/auth/session.service.ts.\n")
+        last = self.assert_tier(self.run_cli("intake"), "red", "intake")
+        self.assertTrue(last.endswith("floors=sensitive-domain:auth"), last)
+
+    def test_same_with_codeowners_mapping_security_populates_owners_touched(self):
+        self.commit_file("CODEOWNERS", "/apps/api/src/auth/  @org/security\n")
+        self.write_spec("# Session refresh\n\nKind: feature\n\nChange apps/api/src/auth/session.service.ts.\n")
+        self.assert_tier(self.run_cli("intake", "--base", git(self.root, "rev-parse", "HEAD")), "red", "intake")
+        d = self.doc("intake")
+        self.assertEqual(d["codeowners"]["ownersTouched"], ["@org/security"])
+        self.assertIn("codeowners:@org/security", [f["id"] for f in d["floors"]])
+
+    def test_lockfile_bump_is_yellow(self):
+        self.write_spec("# Bump deps\n\nKind: chore\n\nRegenerate bun.lock.\n")
+        last = self.assert_tier(self.run_cli("intake"), "yellow", "intake")
+        self.assertTrue(last.endswith("floors=lockfile"), last)
+
+
 if __name__ == "__main__":
     unittest.main()
