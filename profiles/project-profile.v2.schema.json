@@ -266,6 +266,92 @@
         }
       },
       "additionalProperties": false
+    },
+    "risk": {
+      "type": "object",
+      "description": "Risk-tier inputs merged over setup/risk-policy.json. Floors here can only add; setup/risk_policy.py refuses anything that weakens a default floor.",
+      "properties": {
+        "protectedAreas": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "paths": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+              "floor": {"enum": ["green", "yellow", "red"]},
+              "reason": {"type": "string", "minLength": 1}
+            },
+            "required": ["paths", "floor", "reason"],
+            "additionalProperties": false
+          }
+        },
+        "codeowners": {
+          "type": "object",
+          "properties": {
+            "ownerFloors": {"type": "object", "additionalProperties": {"enum": ["green", "yellow", "red"]}},
+            "defaultOwnedFloor": {"enum": ["green", "yellow", "red"]}
+          },
+          "additionalProperties": false
+        },
+        "sensitiveDomains": {
+          "type": "object",
+          "properties": {
+            "extraPaths": {"type": "array", "items": {"type": "string", "minLength": 1}}
+          },
+          "additionalProperties": false
+        },
+        "publicContract": {
+          "type": "object",
+          "properties": {"paths": {"type": "array", "items": {"type": "string", "minLength": 1}}},
+          "additionalProperties": false
+        },
+        "sideEffects": {
+          "type": "object",
+          "properties": {"paths": {"type": "array", "items": {"type": "string", "minLength": 1}}},
+          "additionalProperties": false
+        },
+        "thresholds": {
+          "type": "object",
+          "properties": {"yellow": {"type": "integer", "minimum": 0}, "red": {"type": "integer", "minimum": 0}},
+          "additionalProperties": false
+        },
+        "points": {
+          "type": "object",
+          "description": "Per-signal scoring deltas merged over setup/risk-policy.json points; only the keys setup/risk_policy.py's _REQUIRED_POINTS recognizes are accepted.",
+          "properties": {
+            "taskClass": {
+              "type": "object",
+              "properties": {
+                "docs": {"type": "integer", "minimum": 0},
+                "chore": {"type": "integer", "minimum": 0},
+                "bugfix": {"type": "integer", "minimum": 0},
+                "feature": {"type": "integer", "minimum": 0},
+                "refactor": {"type": "integer", "minimum": 0},
+                "migration": {"type": "integer", "minimum": 0}
+              },
+              "additionalProperties": false
+            },
+            "triage": {
+              "type": "object",
+              "properties": {
+                "S": {"type": "integer", "minimum": 0},
+                "M": {"type": "integer", "minimum": 0},
+                "L": {"type": "integer", "minimum": 0}
+              },
+              "additionalProperties": false
+            },
+            "filesOverMax": {"type": "integer", "minimum": 0},
+            "perExtraFile": {"type": "integer", "minimum": 0},
+            "testFilesOverMax": {"type": "integer", "minimum": 0},
+            "callersOverMax": {"type": "integer", "minimum": 0},
+            "chainLinksOverMax": {"type": "integer", "minimum": 0},
+            "impactUnavailable": {"type": "integer", "minimum": 0},
+            "impactMissing": {"type": "integer", "minimum": 0},
+            "unknownCoverage": {"type": "integer", "minimum": 0}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     }
   },
   "required": [

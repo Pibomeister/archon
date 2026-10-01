@@ -485,5 +485,30 @@ class CodeownersHardening(unittest.TestCase):
             rp.parse_codeowners("a\\ #b @x\n")
 
 
+class GoodwordSeed(unittest.TestCase):
+    ARCHON = SETUP.parent
+
+    def test_goodword_profile_seeds_protected_areas_from_hot_paths(self):
+        profile = json.loads((self.ARCHON / "profiles/goodword/project.v1.json").read_text(encoding="utf-8"))
+        hot = json.loads((self.ARCHON / "profiles/goodword/envelope.json").read_text(encoding="utf-8"))["hot_paths"]
+        seeded = [p for area in profile["risk"]["protectedAreas"] for p in area["paths"]]
+        self.assertEqual(sorted(seeded), sorted(hot))
+        merged = rp.load_policy(profile=profile)
+        floors = rp.path_floors(merged, ["apps/api/src/global-search/x.ts"], "api")
+        self.assertEqual([f["floor"] for f in floors], ["red"])
+        floors = rp.path_floors(merged, ["app/services/api-client.d.ts"], "web-app")
+        self.assertEqual(sorted(f["id"] for f in floors), ["protected:generated-api-client", "public-contract"])
+
+    def test_both_schemas_accept_the_risk_block(self):
+        for name in ("project-profile.v1.schema.json", "project-profile.v2.schema.json"):
+            schema = json.loads((self.ARCHON / "profiles" / name).read_text(encoding="utf-8"))
+            risk = schema["properties"]["risk"]
+            self.assertEqual(risk["type"], "object")
+            self.assertFalse(risk.get("additionalProperties", True))
+            self.assertIn("protectedAreas", risk["properties"])
+            self.assertIn("codeowners", risk["properties"])
+            self.assertNotIn("risk", schema["required"])
+
+
 if __name__ == "__main__":
     unittest.main()
