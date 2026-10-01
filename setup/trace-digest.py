@@ -293,7 +293,6 @@ def _risk(ad, review, typed):
         floors, escalate = row["floors"], row["escalate"]
         if not isinstance(floors, list) or not all(isinstance(f, str) for f in floors) or not isinstance(escalate, bool):
             raise Fail("risk-trajectory.jsonl line with malformed floors or escalate")
-        row["floors"], row["escalate"] = floors, escalate
         by_stage[row["stage"]] = row
         last = row
         if escalated_at is None and escalate:
