@@ -474,6 +474,16 @@ class CodeownersHardening(unittest.TestCase):
         with self.assertRaises(rp.RiskPolicyError):
             rp.parse_codeowners(None)
 
+    def test_owner_floors_casefold_collision_keeps_the_higher_tier(self):
+        policy = rp.load_policy(profile={"risk": {"codeowners": {"ownerFloors": {"@A": "red", "@a": "green"}}}})
+        rules = rp.parse_codeowners("* @a\n")
+        touched, floors = rp.codeowner_floors(policy, rules, ["x.ts"])
+        self.assertIn(("codeowners:@a", "red"), [(f["id"], f["floor"]) for f in floors])
+
+    def test_pattern_ending_in_bare_backslash_is_malformed(self):
+        with self.assertRaises(rp.RiskPolicyError):
+            rp.parse_codeowners("a\\ #b @x\n")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -612,6 +612,8 @@ def parse_codeowners(text: str) -> list:
             continue
         parts = line.split()
         pattern, owners = parts[0], parts[1:]
+        if pattern.endswith("\\"):
+            raise RiskPolicyError(f"CODEOWNERS line {n}: pattern ends with a bare backslash: {pattern}")
         if pattern.startswith("!") or "[" in pattern or "]" in pattern:
             raise RiskPolicyError(f"CODEOWNERS line {n}: unsupported pattern syntax: {pattern}")
         if pattern.startswith("@") or _OWNER_RE.match(pattern):
@@ -694,7 +696,10 @@ def codeowner_floors(policy: dict, rules: list, paths: list) -> tuple:
     defaultOwnedFloor still shows up as its own entry for evidence, but it
     never pulls the merged result below defaultOwnedFloor."""
     co = policy.get("codeowners") or {}
-    owner_floors = {owner.casefold(): floor for owner, floor in (co.get("ownerFloors") or {}).items()}
+    owner_floors: dict = {}
+    for owner, floor in (co.get("ownerFloors") or {}).items():
+        key = owner.casefold()
+        owner_floors[key] = tier_max(owner_floors.get(key), floor)
     default_floor = co.get("defaultOwnedFloor")
     touched: set = set()
     hits: dict = {}
