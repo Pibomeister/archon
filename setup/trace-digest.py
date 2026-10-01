@@ -53,12 +53,15 @@ deslop: rounds = deslop-round.txt else count of deslop-round-N dirs;
 risk:  null unless risk-trajectory.jsonl exists (setup/risk-score.py). Per
        stage the LAST line's tier; final = the last line overall; escalatedAt =
        the first stage whose line carries escalate: true; escalationRunId =
-       the handoffRunId of any line (the lower run of an escalation pair);
-       floors = the last line's floor ids; reviewSeverities sums the fixer's
-       applied findings by severity across rounds; exitGate / mergeGate are
-       the pass flags of node-exit-gate.out / node-merge-gate.out (null when
-       the node never ran); delivery is delivery.json {mode, autoMerge, prUrl}
-       when present (the ship node writes it from Slice 3 on), else nulls.
+       the handoffRunId carried by the upper run's lines (the id of the lower
+       run that escalated); null in the lower run itself. floors = the last
+       line's floor ids; reviewSeverities sums the fixer's applied findings
+       by severity across rounds; fixerRounds is the review-loop round
+       counter from round.txt (the name is fixed by the ledger contract;
+       keep the key name); exitGate / mergeGate are the pass flags of
+       node-exit-gate.out / node-merge-gate.out (null when the node never
+       ran); delivery is delivery.json {mode, autoMerge, prUrl} when present
+       (the ship node writes it from Slice 3 on), else nulls.
 """
 import argparse
 import json
@@ -275,15 +278,22 @@ def _risk(ad, review, typed):
         return None
     try:
         rows = sl.read_jsonl(path)
-    except (OSError, sl.LibraryError) as exc:
+    except (OSError, ValueError, sl.LibraryError) as exc:
         raise Fail(f"risk-trajectory.jsonl is not JSONL: {exc}")
+    if not rows:
+        raise Fail("risk-trajectory.jsonl is empty")
     by_stage, last, escalated_at, run_id = {}, None, None, None
     for row in rows:
         if not isinstance(row, dict) or row.get("stage") not in RISK_STAGES or row.get("tier") not in ("green", "yellow", "red"):
             raise Fail("risk-trajectory.jsonl line without a valid stage and tier")
+        floors = row.get("floors", [])
+        escalate = row.get("escalate", False)
+        if not isinstance(floors, list) or not all(isinstance(f, str) for f in floors) or not isinstance(escalate, bool):
+            raise Fail("risk-trajectory.jsonl line with malformed floors or escalate")
+        row["floors"], row["escalate"] = floors, escalate
         by_stage[row["stage"]] = row
         last = row
-        if escalated_at is None and row.get("escalate") is True:
+        if escalated_at is None and escalate:
             escalated_at = row["stage"]
         if run_id is None and isinstance(row.get("handoffRunId"), str) and row["handoffRunId"]:
             run_id = row["handoffRunId"]
@@ -295,6 +305,9 @@ def _risk(ad, review, typed):
     if delivery is not None and not isinstance(delivery, dict):
         raise Fail("delivery.json is not an object")
     delivery = delivery or {}
+    for key, types in (("mode", (str,)), ("autoMerge", (bool,)), ("prUrl", (str, type(None)))):
+        if key in delivery and not isinstance(delivery[key], types):
+            raise Fail(f"delivery.json {key} has the wrong type")
     nodes = typed["nodes"]
     return {
         "intake": (by_stage.get("intake") or {}).get("tier"),
@@ -303,14 +316,12 @@ def _risk(ad, review, typed):
         "final": last["tier"] if last else None,
         "escalatedAt": escalated_at,
         "escalationRunId": run_id,
-        "floors": [f for f in (last.get("floors") or []) if isinstance(f, str)] if last else [],
+        "floors": list(last["floors"]) if last else [],
         "reviewSeverities": severities,
         "fixerRounds": review["rounds"],
         "exitGate": (nodes.get("exit-gate") or {}).get("pass"),
         "mergeGate": (nodes.get("merge-gate") or {}).get("pass"),
-        "delivery": {"mode": delivery.get("mode") if isinstance(delivery.get("mode"), str) else None,
-                     "autoMerge": delivery.get("autoMerge") if isinstance(delivery.get("autoMerge"), bool) else None,
-                     "prUrl": delivery.get("prUrl") if isinstance(delivery.get("prUrl"), str) else None},
+        "delivery": {"mode": delivery.get("mode"), "autoMerge": delivery.get("autoMerge"), "prUrl": delivery.get("prUrl")},
     }
 
 

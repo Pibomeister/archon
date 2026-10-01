@@ -431,7 +431,7 @@ class Risk(Base):
     def test_trajectory_summarised_with_review_and_gates(self):
         write(self.ad, "risk-trajectory.jsonl", "\n".join([
             self.row("intake", "green", 15), self.row("plan", "yellow", 32, laneTier="green", escalate=True),
-            self.row("plan", "yellow", 32, handoffRunId="run-1"), self.row("impl", "red", 40, ["sensitive-domain:auth"])]) + "\n")
+            self.row("impl", "red", 40, ["sensitive-domain:auth"])]) + "\n")
         write(self.ad, "round.txt", "2\n")
         write(self.ad, "round-1/fixer-result.json", self.fixer(applied=(("a", "P1"), ("b", "P2"))))
         write(self.ad, "round-2/fixer-result.json", self.fixer(applied=(("c", "P2"),)))
@@ -442,12 +442,19 @@ class Risk(Base):
         r = self.digest()["risk"]
         self.assertEqual(r, {
             "intake": "green", "plan": "yellow", "impl": "red", "final": "red",
-            "escalatedAt": "plan", "escalationRunId": "run-1",
+            "escalatedAt": "plan", "escalationRunId": None,
             "floors": ["sensitive-domain:auth"],
             "reviewSeverities": {"P0": 0, "P1": 1, "P2": 2, "P3": 0},
             "fixerRounds": 2, "exitGate": True, "mergeGate": True,
             "delivery": {"mode": "draft", "autoMerge": False, "prUrl": "https://example.invalid/pr/9"},
         })
+
+    def test_upper_run_links_lower_run(self):
+        write(self.ad, "risk-trajectory.jsonl",
+              self.row("intake", "green", escalatedFrom="yellow", handoffRunId="run-1") + "\n")
+        r = self.digest()["risk"]
+        self.assertIsNone(r["escalatedAt"])
+        self.assertEqual(r["escalationRunId"], "run-1")
 
     def test_partial_trajectory_leaves_nulls(self):
         write(self.ad, "risk-trajectory.jsonl", self.row("intake", "yellow") + "\n")
@@ -466,10 +473,47 @@ class Risk(Base):
         with self.assertRaises(td.Fail):
             self.digest()
 
+    def test_bad_utf8_trajectory_fails_closed(self):
+        (self.ad / "risk-trajectory.jsonl").write_bytes(b"\xff{}\n")
+        with self.assertRaises(td.Fail):
+            self.digest()
+        r = run([str(self.ad)])
+        self.assertEqual(r.returncode, 1)
+        self.assertTrue(r.stdout.startswith("TRACE_DIGEST=FAIL risk-trajectory.jsonl is not JSONL"), r.stdout)
+
+    def test_empty_or_blank_trajectory_is_fail(self):
+        write(self.ad, "risk-trajectory.jsonl", "")
+        with self.assertRaises(td.Fail):
+            self.digest()
+        write(self.ad, "risk-trajectory.jsonl", "\n\n")
+        with self.assertRaises(td.Fail):
+            self.digest()
+
+    def test_malformed_floors_or_escalate_is_fail(self):
+        for override in ({"floors": "oops"}, {"floors": {"a": 1}}, {"floors": [{"id": "x"}]}, {"escalate": "true"}):
+            bad = json.loads(self.row("intake", "green"))
+            bad.update(override)
+            write(self.ad, "risk-trajectory.jsonl", json.dumps(bad) + "\n")
+            with self.assertRaises(td.Fail):
+                self.digest()
+
+    def test_delivery_wrong_type_is_fail(self):
+        write(self.ad, "risk-trajectory.jsonl", self.row("intake", "green") + "\n")
+        write(self.ad, "delivery.json", {"mode": 5})
+        with self.assertRaises(td.Fail):
+            self.digest()
+
+    def test_delivery_partial_fields_default_null(self):
+        write(self.ad, "risk-trajectory.jsonl", self.row("intake", "green") + "\n")
+        write(self.ad, "delivery.json", {"mode": "pr"})
+        r = self.digest()["risk"]
+        self.assertEqual(r["delivery"], {"mode": "pr", "autoMerge": None, "prUrl": None})
+
     def test_risk_block_has_no_absolute_paths_and_typed_line_unchanged(self):
         write(self.ad, "risk-trajectory.jsonl", self.row("intake", "green") + "\n")
         r = run([str(self.ad)])
         self.assertEqual(r.stdout.strip(), "TRACE_DIGEST=OK run=run-abc lane=unknown terminal=incomplete rounds=0 score_inputs=0")
+        self.assertNotIn(str(self.ad), json.dumps(self.digest()["risk"]))
 
 
 if __name__ == "__main__":
