@@ -330,6 +330,210 @@ class BriefPathsUnit(unittest.TestCase):
     def test_bare_manifest_and_lockfile_names_still_count_on_their_own(self):
         self.assertEqual(rs.brief_paths("Bump package.json and bun.lock.", POLICY), ["bun.lock", "package.json"])
 
+    def test_mid_path_dotdot_segments_resolve_instead_of_escaping(self):
+        self.assertEqual(rs.canonical_path("apps/../apps/integration/x.ts", "path"), "apps/integration/x.ts")
+
+
+def gathered(name, file, callers):
+    return {"name": name, "file": file, "d1_callers": callers, "risk": "LOW",
+            "query_status": "GATHERED", "query_repo": "api", "query_target": name}
+
+
+class Plan(Base):
+    def baseline(self, files=None, impact=True):
+        self.write(self.ad, "files-allowlist.json", files or ["apps/api/src/notes/notes.service.ts",
+                                                              "apps/api/src/notes/notes.service.spec.ts"])
+        if impact:
+            self.write(self.ad, "impact.json", {"status": "GATHERED", "symbols": [
+                gathered("NotesService.list", "apps/api/src/notes/notes.service.ts", ["a", "b"])]})
+        self.write(self.ad, "triage.json", {"size": "S", "reasons": [], "hot_path_hits": [], "unknowns": []})
+
+    def test_small_feature_is_green_and_records_allowlist_digest(self):
+        self.baseline()
+        last = self.assert_tier(self.run_cli("plan"), "green", "plan")
+        d = self.doc("plan")
+        self.assertEqual(d["inputs"]["allowlistSha256"],
+                         rp.sha256_bytes(rp.canonical_bytes(json.loads((self.ad / "files-allowlist.json").read_text()))))
+        ids = {s["id"]: s for s in d["mechanical"]["signals"]}
+        self.assertEqual((ids["files"]["value"], ids["files"]["points"]), (1, 0))
+        self.assertEqual((ids["test-files"]["value"], ids["test-files"]["points"]), (1, 0))
+        self.assertEqual((ids["d1-callers"]["value"], ids["d1-callers"]["points"]), (2, 0))
+        self.assertEqual((ids["impact"]["value"], ids["impact"]["points"]), ("GATHERED", 0))
+        self.assertEqual((ids["triage"]["value"], ids["triage"]["points"]), ("S", 0))
+        self.assertEqual(ids["coverage"]["value"], "no probes")
+        self.assertTrue(last.endswith("floors=none"))
+
+    def test_points_push_a_big_plan_to_yellow(self):
+        files = [f"apps/api/src/notes/f{i}.ts" for i in range(7)]
+        self.baseline(files=files)
+        self.assert_tier(self.run_cli("plan"), "yellow", "plan")
+        d = self.doc("plan")
+        pts = POLICY["points"]
+        expected = pts["taskClass"]["feature"] + pts["filesOverMax"] + pts["perExtraFile"] * (7 - POLICY["sizeThresholds"]["max_files"])
+        self.assertEqual(d["mechanical"]["score"], expected)
+        self.assertEqual(d["floors"], [])
+
+    def test_floors_dominate_points(self):
+        self.baseline(files=["docs/auth/README.md"])
+        self.write_spec("# T\n\nKind: docs\n")
+        self.assert_tier(self.run_cli("plan"), "red", "plan")
+        d = self.doc("plan")
+        self.assertEqual(d["mechanical"]["score"], 0)
+        self.assertEqual([f["id"] for f in d["floors"]], ["sensitive-domain:auth"])
+
+    def test_lockfile_is_yellow_migration_red_public_contract_yellow_factory_red(self):
+        for files, tier, fid in ((["bun.lock"], "yellow", "lockfile"),
+                                 (["libs/data-access/src/lib/rds/migrations/0007.ts"], "red", "migration"),
+                                 (["app/services/api-client.d.ts"], "yellow", "public-contract"),
+                                 ([".github/workflows/ci.yml"], "red", "factory-control")):
+            self.baseline(files=files)
+            self.write_spec("# T\n\nKind: chore\n")
+            self.assert_tier(self.run_cli("plan"), tier, "plan")
+            self.assertIn(fid, [f["id"] for f in self.doc("plan")["floors"]])
+
+    def test_profile_protected_area_with_repo_prefix(self):
+        self.baseline(files=["apps/integration-service/handler.ts"])
+        self.assert_tier(self.run_cli("plan"), "red", "plan")
+        self.assertEqual([f["id"] for f in self.doc("plan")["floors"]], ["protected:integration"])
+
+    def test_web_allowlist_is_tagged_with_the_web_repo(self):
+        self.baseline()
+        self.write(self.ad, "web-files-allowlist.json", ["app/services/api-client.d.ts"])
+        self.assert_tier(self.run_cli("plan"), "yellow", "plan")
+        d = self.doc("plan")
+        self.assertEqual(d["floors"][0]["paths"], ["web-app/app/services/api-client.d.ts"])
+
+    def test_missing_allowlist_fails_closed(self):
+        self.assert_fail(self.run_cli("plan"), "files-allowlist.json")
+
+    def test_bad_allowlist_entries_fail_closed(self):
+        for bad in ([], ["//abs/path.ts"], ["../escape.ts"], [""], "not a list"):
+            self.write(self.ad, "files-allowlist.json", bad)
+            self.assert_fail(self.run_cli("plan"), "files-allowlist.json")
+
+    def test_impact_missing_or_unavailable_adds_unknown_points(self):
+        self.baseline(impact=False)
+        self.assert_tier(self.run_cli("plan"), "yellow", "plan")
+        ids = {s["id"]: s for s in self.doc("plan")["mechanical"]["signals"]}
+        self.assertEqual((ids["impact"]["value"], ids["impact"]["points"]), ("missing", POLICY["points"]["impactMissing"]))
+        self.write(self.ad, "impact.json", {"status": "UNAVAILABLE", "symbols": []})
+        self.assert_tier(self.run_cli("plan"), "yellow", "plan")
+        ids = {s["id"]: s for s in self.doc("plan")["mechanical"]["signals"]}
+        self.assertEqual(ids["impact"]["points"], POLICY["points"]["impactUnavailable"])
+        self.write(self.ad, "impact.json", {"status": "NOPE"})
+        self.assert_fail(self.run_cli("plan"), "impact.json")
+
+    def test_callers_and_chain_links_over_max_add_points(self):
+        self.baseline()
+        many = [f"c{i}" for i in range(POLICY["sizeThresholds"]["max_d1_callers"] + 1)]
+        self.write(self.ad, "impact.json", {"status": "GATHERED", "symbols": [gathered("X", "apps/api/src/notes/x.ts", many)]})
+        self.write(self.ad, "causal-chain.json", {"links": [{"n": i} for i in range(POLICY["sizeThresholds"]["max_chain_links"] + 1)]})
+        self.assert_tier(self.run_cli("plan"), "yellow", "plan")
+        ids = {s["id"]: s for s in self.doc("plan")["mechanical"]["signals"]}
+        self.assertEqual(ids["d1-callers"]["points"], POLICY["points"]["callersOverMax"])
+        self.assertEqual(ids["chain-links"]["points"], POLICY["points"]["chainLinksOverMax"])
+
+    def test_triage_L_adds_points_and_bad_triage_fails(self):
+        self.baseline()
+        self.write(self.ad, "triage.json", {"size": "L"})
+        self.assert_tier(self.run_cli("plan"), "yellow", "plan")
+        self.write(self.ad, "triage.json", {"size": "XL"})
+        self.assert_fail(self.run_cli("plan"), "triage.json")
+
+    def test_agent_judgment_joins_the_max_and_malformed_fails(self):
+        self.baseline()
+        self.write(self.ad, "risk-judgment.json", {"schema": rp.SCHEMA_JUDGMENT, "tier": "red",
+                                                   "rationale": "touches the billing webhook path indirectly", "unknowns": ["retry semantics"]})
+        self.assert_tier(self.run_cli("plan"), "red", "plan")
+        d = self.doc("plan")
+        self.assertEqual(d["agent"]["tier"], "red")
+        self.assertEqual(d["mechanical"]["tier"], "green")  # disagreement recorded, not resolved
+        self.write(self.ad, "risk-judgment.json", {"schema": rp.SCHEMA_JUDGMENT, "tier": "red"})
+        self.assert_fail(self.run_cli("plan"), "risk-judgment.json")
+
+    def test_prior_stage_tier_never_lowers(self):
+        self.write_spec("# T\n\nKind: docs\n\nEdit apps/api/src/auth/a.md.\n")
+        self.assert_tier(self.run_cli("intake"), "red", "intake")
+        self.write_spec("# T\n\nKind: docs\n")
+        self.baseline(files=["docs/a.md"])
+        self.assert_tier(self.run_cli("plan"), "red", "plan")
+        d = self.doc("plan")
+        self.assertEqual(d["prior"], {"tier": "red", "stage": "intake"})
+        self.assertEqual(d["mechanical"]["tier"], "green")
+
+    def test_handoff_sets_prior_and_escalated_from(self):
+        self.baseline()
+        handoff = self.tmp / "escalation.json"
+        handoff.write_text(json.dumps({"schema": rp.SCHEMA_ESCALATION, "fromLane": "sdlc-green", "toTier": "yellow",
+                                       "stage": "plan", "runId": "run-123"}), encoding="utf-8")
+        self.assert_tier(self.run_cli("plan", "--handoff", str(handoff)), "yellow", "plan")
+        d = self.doc("plan")
+        self.assertEqual(d["prior"], {"tier": "yellow", "stage": "plan"})
+        self.assertEqual((d["escalated"], d["escalatedFrom"], d["handoffRunId"]), (True, "green", "run-123"))
+        self.assertEqual(self.trajectory()[-1]["handoffRunId"], "run-123")
+        handoff.write_text(json.dumps({"schema": "nope"}), encoding="utf-8")
+        self.assert_fail(self.run_cli("plan", "--handoff", str(handoff)), "handoff")
+
+
+class Impl(Base):
+    def setUp(self):
+        super().setUp()
+        (self.ad / "bootstrap-head.txt").write_text(self.base + "\n", encoding="utf-8")
+        self.write(self.ad, "impact.json", {"status": "GATHERED", "symbols": [
+            gathered("NotesService.list", "apps/api/src/notes/notes.service.ts", ["a"])]})
+
+    def test_diff_since_bootstrap_head_is_the_footprint(self):
+        self.commit_file("apps/api/src/notes/notes.service.ts", "x")
+        self.commit_file("apps/api/src/notes/notes.service.spec.ts", "t")
+        self.assert_tier(self.run_cli("impl"), "green", "impl")
+        d = self.doc("impl")
+        ids = {s["id"]: s for s in d["mechanical"]["signals"]}
+        self.assertEqual(ids["files"]["value"], 1)
+        self.assertEqual(ids["test-files"]["value"], 1)
+        diff = git(self.root, "diff", "--name-status", f"{self.base}..HEAD")
+        self.assertEqual(d["inputs"]["diffSha256"], rp.sha256_text(diff + "\n"))
+        self.assertEqual(d["inputs"]["head"], git(self.root, "rev-parse", "HEAD"))
+        self.assertEqual(d["inputs"]["baseCommit"], self.base)
+        self.assertIsNone(d["inputs"]["allowlistSha256"])
+
+    def test_changed_diff_changes_the_digest_and_can_raise_the_tier(self):
+        self.commit_file("docs/a.md", "x")
+        self.assert_tier(self.run_cli("impl"), "green", "impl")
+        first = self.doc("impl")["inputs"]["diffSha256"]
+        self.commit_file("apps/api/src/auth/guard.ts", "y")
+        self.assert_tier(self.run_cli("impl"), "red", "impl")
+        d = self.doc("impl")
+        self.assertNotEqual(first, d["inputs"]["diffSha256"])
+        self.assertEqual([f["id"] for f in d["floors"]], ["sensitive-domain:auth"])
+
+    def test_deleted_and_renamed_paths_count(self):
+        self.commit_file("apps/api/src/billing/old.ts", "x")
+        base = git(self.root, "rev-parse", "HEAD")
+        (self.ad / "bootstrap-head.txt").write_text(base + "\n", encoding="utf-8")
+        os.remove(self.root / "apps/api/src/billing/old.ts")
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-q", "-m", "rm")
+        self.assert_tier(self.run_cli("impl"), "red", "impl")
+        self.assertEqual(self.doc("impl")["floors"][0]["paths"], ["apps/api/src/billing/old.ts"])
+
+    def test_missing_base_fails_closed(self):
+        os.remove(self.ad / "bootstrap-head.txt")
+        self.assert_fail(self.run_cli("impl"), "base")
+
+    def test_unreadable_diff_fails_closed(self):
+        self.assert_fail(self.run_cli("impl", "--base", "0" * 40), "base commit")
+        self.assert_fail(self.run_cli("impl", "--repo-root", str(self.tmp / "not-a-repo")), "repo root")
+
+    def test_prior_from_plan_and_triage_post(self):
+        self.write(self.ad, "risk-plan.json", {"schema": rp.SCHEMA_SCORE, "stage": "plan", "tier": "yellow"})
+        self.write(self.ad, "triage-post.json", {"size": "M"})
+        self.commit_file("docs/a.md", "x")
+        self.assert_tier(self.run_cli("impl"), "yellow", "impl")
+        d = self.doc("impl")
+        self.assertEqual(d["prior"], {"tier": "yellow", "stage": "plan"})
+        ids = {s["id"]: s for s in d["mechanical"]["signals"]}
+        self.assertEqual((ids["triage"]["value"], ids["triage"]["points"]), ("M", POLICY["points"]["triage"]["M"]))
+
 
 if __name__ == "__main__":
     unittest.main()

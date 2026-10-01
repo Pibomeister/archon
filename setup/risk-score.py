@@ -40,6 +40,7 @@ profile capabilities.defaultRepo, else the basename of --repo-root.
 import argparse
 import json
 import os
+import posixpath
 import re
 import subprocess
 import sys
@@ -102,7 +103,13 @@ def canonical_path(entry, label, soft=False):
     e = re.sub(r"/{2,}", "/", raw)
     while e.startswith("./"):
         e = re.sub(r"/{2,}", "/", e[2:])
-    if ".." in e.split("/"):
+    # posixpath.normpath resolves interior ".." segments (apps/../apps/x ->
+    # apps/x) instead of letting one sink the whole entry; it also strips a
+    # trailing slash, so that is carried over separately when present.
+    had_slash = e.endswith("/") and e != "/"
+    normed = posixpath.normpath(e)
+    e = "" if normed == "." else (normed + "/" if had_slash else normed)
+    if e.startswith("/") or ".." in e.split("/"):
         return bad("entry escapes the repo")
     if e in ("", "."):
         return bad("entry is empty after normalisation")
@@ -181,6 +188,136 @@ def signals_intake(ctx):
     signals.append({"id": "brief-paths", "value": paths, "points": 0, "floor": None,
                     "source": "mechanical", "evidence": f"{len(paths)} path(s) named in the brief"})
     return signals, paths
+
+
+# --- shared plan/impl signals ------------------------------------------------
+def read_allowlist(ad, name, required):
+    doc = read_json_optional(ad, name)
+    if doc is None:
+        if required:
+            raise Fail(f"{name} missing")
+        return None
+    if not isinstance(doc, list) or (required and not doc):
+        raise Fail(f"{name} is not a non-empty list")
+    try:
+        return [canonical_path(e, name) for e in doc]
+    except Fail as exc:
+        raise Fail(f"{name}: {exc}")
+
+
+def read_triage(ad, name):
+    doc = read_json_optional(ad, name)
+    if doc is None:
+        return None
+    size = doc.get("size") if isinstance(doc, dict) else None
+    if size not in ("S", "M", "L"):
+        raise Fail(f"{name} size not in S|M|L")
+    return size
+
+
+def read_impact(ad):
+    """(status, d1_callers). Absent -> ("missing", 0). Malformed -> FAIL."""
+    doc = read_json_optional(ad, "impact.json")
+    if doc is None:
+        return "missing", 0
+    status = doc.get("status") if isinstance(doc, dict) else None
+    if status not in ("GATHERED", "UNAVAILABLE", "SKIPPED"):
+        raise Fail("impact.json status not in GATHERED|UNAVAILABLE|SKIPPED")
+    syms = doc.get("symbols")
+    if not isinstance(syms, list):
+        raise Fail("impact.json symbols is not a list")
+    callers = 0
+    for i, s in enumerate(syms):
+        if not isinstance(s, dict) or not isinstance(s.get("d1_callers"), list):
+            raise Fail(f"impact.json symbols[{i}] needs a d1_callers list")
+        callers += len(s["d1_callers"])
+    return status, callers
+
+
+def read_chain_links(ad):
+    doc = read_json_optional(ad, "causal-chain.json")
+    if doc is None:
+        return None
+    links = doc.get("links") if isinstance(doc, dict) else None
+    if not isinstance(links, list):
+        raise Fail("causal-chain.json links is not a list")
+    return len(links)
+
+
+def size_signals(ctx, paths, triage_name):
+    pol = ctx["policy"]
+    pts, sizes = pol["points"], pol["sizeThresholds"]
+    code = [p for p in paths if not TEST_RE.search(p)]
+    tests = [p for p in paths if TEST_RE.search(p)]
+    kind, evidence = brief_kind(ctx["brief"])
+    signals = [{"id": "task-class", "value": kind, "points": pts["taskClass"][kind], "floor": None,
+                "source": "mechanical", "evidence": evidence}]
+    over = len(code) - sizes["max_files"]
+    signals.append({"id": "files", "value": len(code), "points": pts["filesOverMax"] + pts["perExtraFile"] * over if over > 0 else 0,
+                    "floor": None, "source": "mechanical", "evidence": f"{len(code)}/{sizes['max_files']} non-test files"})
+    signals.append({"id": "test-files", "value": len(tests), "points": pts["testFilesOverMax"] if len(tests) > sizes["max_test_files"] else 0,
+                    "floor": None, "source": "mechanical", "evidence": f"{len(tests)}/{sizes['max_test_files']} test files"})
+    status, callers = read_impact(ctx["ad"])
+    impact_points = {"missing": pts["impactMissing"], "UNAVAILABLE": pts["impactUnavailable"]}.get(status, 0)
+    signals.append({"id": "impact", "value": status, "points": impact_points, "floor": None,
+                    "source": "mechanical", "evidence": "impact.json status"})
+    signals.append({"id": "d1-callers", "value": callers, "points": pts["callersOverMax"] if callers > sizes["max_d1_callers"] else 0,
+                    "floor": None, "source": "mechanical", "evidence": f"{callers}/{sizes['max_d1_callers']} first-degree callers"})
+    links = read_chain_links(ctx["ad"])
+    if links is not None:
+        signals.append({"id": "chain-links", "value": links, "points": pts["chainLinksOverMax"] if links > sizes["max_chain_links"] else 0,
+                        "floor": None, "source": "mechanical", "evidence": f"{links}/{sizes['max_chain_links']} causal links"})
+    size = read_triage(ctx["ad"], triage_name)
+    if size is not None:
+        signals.append({"id": "triage", "value": size, "points": pts["triage"][size], "floor": None,
+                        "source": "mechanical", "evidence": f"{triage_name} size"})
+    evidence = ctx["profile"].get("evidence") if isinstance(ctx["profile"].get("evidence"), dict) else None
+    probes = (evidence or {}).get("behavioral") or []
+    if not probes:
+        signals.append({"id": "coverage", "value": "no probes", "points": 0, "floor": None,
+                        "source": "mechanical", "evidence": "profile has no evidence.behavioral probes (Slice 2)"})
+    else:
+        covered = [p for p in code if any(rp.match_any(pr.get("covers") or [], p, ctx["repo"]) for pr in probes)]
+        uncovered = sorted(set(code) - set(covered))
+        signals.append({"id": "coverage", "value": uncovered, "points": pts["unknownCoverage"] if uncovered else 0,
+                        "floor": None, "source": "mechanical", "evidence": f"{len(uncovered)} path(s) no probe covers"})
+    return signals
+
+
+# --- stage: plan -------------------------------------------------------------
+def signals_plan(ctx):
+    allow = read_allowlist(ctx["ad"], "files-allowlist.json", required=True)
+    raw = sl.read_json(os.path.join(ctx["ad"], "files-allowlist.json"))
+    paths = list(allow)
+    web = read_allowlist(ctx["ad"], "web-files-allowlist.json", required=False)
+    if web and ctx["web_repo"]:
+        paths += [f"{ctx['web_repo']}/{p}" for p in web]
+    signals = size_signals(ctx, paths, "triage.json")
+    return signals, paths, {"allowlistSha256": rp.sha256_bytes(rp.canonical_bytes(raw))}
+
+
+# --- stage: impl -------------------------------------------------------------
+def signals_impl(ctx):
+    if not ctx["base"]:
+        raise Fail("impl needs a base commit: --base or bootstrap-head.txt")
+    r = git(ctx["root"], "diff", "--name-status", f"{ctx['base']}..HEAD")
+    if r.returncode != 0:
+        raise Fail(f"git diff failed: {r.stderr.strip()}")
+    diff_text = r.stdout if r.stdout.endswith("\n") else r.stdout + "\n"
+    paths = []
+    for line in r.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        # R100\told\tnew and C\told\tnew list both sides; every other status lists one path
+        for p in parts[1:]:
+            paths.append(canonical_path(p, "diff"))
+    paths = sorted(set(paths))
+    head = git(ctx["root"], "rev-parse", "HEAD")
+    if head.returncode != 0:
+        raise Fail("git rev-parse HEAD failed")
+    signals = size_signals(ctx, paths, "triage-post.json")
+    return signals, paths, {"diffSha256": rp.sha256_text(diff_text), "head": head.stdout.strip()}
 
 
 # --- assembly ----------------------------------------------------------------
@@ -367,7 +504,7 @@ def context(args):
     }
 
 
-STAGE_FUNCS = {"intake": lambda ctx: signals_intake(ctx) + ({},)}
+STAGE_FUNCS = {"intake": lambda ctx: signals_intake(ctx) + ({},), "plan": signals_plan, "impl": signals_impl}
 
 
 def score(args):
