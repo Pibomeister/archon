@@ -50,7 +50,8 @@ import skill_library as sl  # noqa: E402
 
 SCORING_VERSION = 1
 TEST_RE = re.compile(r"(/__tests__/|(^|/)tests?/|(^|/)test_[^/]+\.py$|_test\.(go|py)$|\.(spec|test|int\.spec|e2e\.spec)\.[cm]?[jt]sx?$)")
-PATH_TOKEN_RE = re.compile(r"(?<![\w/:.])(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]*")
+PATH_TOKEN_RE = re.compile(r"(?<![\w/\\:.])[/\\]?[A-Za-z0-9_.@-]+(?:[/\\][A-Za-z0-9_.@-]+)+[/\\]?")
+BARE_NAME_RE = re.compile(r"(?<![\w/\\])[A-Za-z0-9_.-]+")
 KIND_LINE_RE = re.compile(r"^\s*Kind:\s*([A-Za-z][\w-]*)\s*$", re.M)
 KIND_HEADING_RE = re.compile(r"^## Kind\s*$\n+\s*([A-Za-z][\w-]*)", re.M)
 
@@ -64,7 +65,7 @@ def read_text(path, label):
     try:
         with open(path, encoding="utf-8") as fh:
             return fh.read()
-    except OSError as exc:
+    except (OSError, ValueError) as exc:  # a non-UTF-8 file raises UnicodeDecodeError (a ValueError)
         raise Fail(f"{label} unreadable: {exc}")
 
 
@@ -79,28 +80,40 @@ def read_json_optional(ad, name):
         raise Fail(f"{name} is not JSON: {exc}")
 
 
-def canonical_path(entry, label):
-    """Repo-relative, normalised. Absolute, escaping or empty entries FAIL."""
+def canonical_path(entry, label, soft=False):
+    """Repo-relative, normalised: backslashes -> '/', one leading '/'
+    stripped (a '/' that survives that strip means the entry is still
+    absolute and is rejected), interior runs of 2+ slashes collapsed to one,
+    repeated leading './' segments dropped. Escaping ('..' segment), empty,
+    or still-absolute entries FAIL by default; with soft=True they are
+    dropped instead (return None) so one bad token in a free-form brief does
+    not sink the whole score."""
+    def bad(msg):
+        if soft:
+            return None
+        raise Fail(f"{label} {msg}: {entry}")
     if not isinstance(entry, str) or not entry.strip():
-        raise Fail(f"{label} entry is not a non-empty string")
+        return bad("entry is not a non-empty string")
     raw = entry.strip().replace("\\", "/")
     if raw.startswith("/"):
-        raise Fail(f"{label} entry must be repo-relative: {entry}")
+        raw = raw[1:]
+        if raw.startswith("/"):
+            return bad("entry must be repo-relative")
     e = re.sub(r"/{2,}", "/", raw)
     while e.startswith("./"):
         e = re.sub(r"/{2,}", "/", e[2:])
     if ".." in e.split("/"):
-        raise Fail(f"{label} entry escapes the repo: {entry}")
+        return bad("entry escapes the repo")
     if e in ("", "."):
-        raise Fail(f"{label} entry is empty after normalisation: {entry}")
+        return bad("entry is empty after normalisation")
     return e
 
 
 def git(root, *args):
     try:
         r = subprocess.run(["git", "-C", root, *args], capture_output=True, encoding="utf-8")
-    except OSError as exc:
-        raise Fail(f"git unavailable: {exc}")
+    except (OSError, ValueError) as exc:  # non-UTF-8 git output raises UnicodeDecodeError (a ValueError)
+        raise Fail(f"git {' '.join(args)} failed: {exc}")
     return r
 
 
@@ -116,21 +129,28 @@ def brief_kind(text):
 
 
 def brief_paths(text, policy):
-    """Repo-relative paths the brief names: tokens with a slash (no URL
-    scheme, trailing sentence punctuation stripped) plus bare lockfile and
-    manifest names from the policy ("bump bun.lock"), de-duplicated, sorted."""
+    """Repo-relative paths the brief names: multi-segment tokens containing
+    '/' or '\\' (URL schemes stripped first, trailing sentence punctuation
+    stripped per token), each canonicalised via canonical_path(soft=True) --
+    a leading './' or one leading '/' is normalised away, and a token that
+    still escapes the repo or is still absolute after that is dropped rather
+    than failing the whole brief -- plus bare lockfile and manifest names
+    from the policy ("bump bun.lock") that are not already part of a longer
+    path token (so "apps/web/package.json" does not also add a bare
+    "package.json" hit), de-duplicated, sorted."""
     text = re.sub(r"\w+://\S+", " ", text)
     out = set()
     for tok in PATH_TOKEN_RE.findall(text):
         tok = tok.rstrip(".,;:)")
-        if tok.endswith("/") or "." in tok.rsplit("/", 1)[-1] or tok.count("/") >= 2:
-            if "/" in tok and not tok.startswith("/"):
-                out.add(tok)
+        canon = canonical_path(tok, "brief-path", soft=True)
+        if canon is not None:
+            out.add(canon)
     rev = policy["reversibility"]
     names = {n for key in ("lockfiles", "manifests") for n in rev[key]["paths"] if "/" not in n and "*" not in n}
-    for tok in re.findall(r"[A-Za-z0-9_.-]+", text):
-        if tok.rstrip(".,;:)") in names:
-            out.add(tok.rstrip(".,;:)"))
+    for tok in BARE_NAME_RE.findall(text):
+        clean = tok.rstrip(".,;:)")
+        if clean in names:
+            out.add(clean)
     return sorted(out)
 
 
@@ -278,6 +298,13 @@ def trajectory_line(doc):
 
 
 def context(args):
+    """Assemble every input build() needs for one stage.
+
+    A relative params.json "spec" path resolves against --repo-root, not the
+    process's current working directory, since the node that writes
+    params.json rarely runs with the worktree as its cwd. An explicit
+    --brief is used exactly as given (left relative to the cwd), since that
+    is a direct CLI override."""
     ad = os.path.abspath(args.artifacts)
     if not os.path.isdir(ad):
         raise Fail(f"artifacts dir missing: {args.artifacts}")
@@ -296,13 +323,19 @@ def context(args):
         policy = rp.load_policy(args.policy, profile, args.overlay)
     except rp.RiskPolicyError as exc:
         raise Fail(f"policy: {exc}")
-    brief_path = args.brief or params.get("spec")
-    if not isinstance(brief_path, str) or not os.path.isfile(brief_path):
-        raise Fail("brief missing: params.json has no readable spec path and no --brief given")
-    brief = read_text(brief_path, "brief")
     root = os.path.abspath(args.repo_root)
     if not os.path.isdir(root):
         raise Fail(f"repo root missing: {args.repo_root}")
+    brief_path = args.brief or params.get("spec")
+    if not isinstance(brief_path, str) or not brief_path.strip():
+        raise Fail("brief missing: params.json has no readable spec path and no --brief given")
+    if not args.brief and not os.path.isabs(brief_path):
+        brief_path = os.path.join(root, brief_path)
+    if not os.path.isfile(brief_path):
+        raise Fail("brief missing: params.json has no readable spec path and no --brief given")
+    brief = read_text(brief_path, "brief")
+    if not brief.strip():
+        raise Fail("brief is empty")
     base = args.base
     if base is None and args.stage == "impl":
         head_file = os.path.join(ad, "bootstrap-head.txt")
@@ -343,9 +376,18 @@ def score(args):
     return ctx, build(ctx, signals, paths, extra_inputs)
 
 
+class RiskArgumentParser(argparse.ArgumentParser):
+    """A usage error (missing or invalid argument) must end with the same
+    typed last line as every other failure mode, not argparse's default
+    usage dump on stderr and exit code 2."""
+    def error(self, message):
+        print(f"RISK=FAIL usage: {message}")
+        raise SystemExit(1)
+
+
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], epilog=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = RiskArgumentParser(description=__doc__.split("\n")[0], epilog=__doc__,
+                            formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("stage", choices=rp.STAGES)
     ap.add_argument("--artifacts", required=True)
     ap.add_argument("--profile", required=True)
@@ -360,13 +402,18 @@ def main(argv=None):
     args = ap.parse_args(argv)
     try:
         ctx, doc = score(args)
-        sl.write_json_atomic(os.path.join(ctx["ad"], f"risk-{args.stage}.json"), doc)
+        # Trajectory first: it is append-only and cheap to retry, so if it
+        # fails nothing (not even a partial risk-<stage>.json) is left behind.
         sl.append_jsonl(os.path.join(ctx["ad"], "risk-trajectory.jsonl"), trajectory_line(doc))
+        sl.write_json_atomic(os.path.join(ctx["ad"], f"risk-{args.stage}.json"), doc)
     except Fail as exc:
         print(f"RISK=FAIL {exc}")
         return 1
     except OSError as exc:
         print(f"RISK=FAIL {exc}")
+        return 1
+    except Exception as exc:  # last-resort fail-closed guard: never let a raw traceback be the last line
+        print(f"RISK=FAIL internal: {type(exc).__name__}: {exc}")
         return 1
     floors = ",".join(f["id"] for f in doc["floors"]) or "none"
     print(f"RISK_TIER={doc['tier']} stage={doc['stage']} score={doc['mechanical']['score']} floors={floors}")
