@@ -568,21 +568,53 @@ def path_floors(policy: dict, paths: list, repo: Optional[str]) -> list:
 _OWNER_RE = re.compile(r"^(@[A-Za-z0-9][A-Za-z0-9_.-]*(?:/[A-Za-z0-9][A-Za-z0-9_.-]*)?|[^@\s]+@[^@\s]+\.[^@\s]+)$")
 
 
+def _strip_codeowners_comment(raw: str) -> str:
+    """Drop a '#' comment (at line start, or after whitespace) and unescape
+    '\\#' to a literal '#'. An escaped '#' never starts a comment, even when
+    it follows whitespace."""
+    out = []
+    i, n = 0, len(raw)
+    while i < n:
+        c = raw[i]
+        if c == "\\" and i + 1 < n and raw[i + 1] == "#":
+            out.append("#")
+            i += 2
+            continue
+        if c == "#" and (i == 0 or raw[i - 1].isspace()):
+            break
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def parse_codeowners(text: str) -> list:
-    """[(pattern, [owners])] in file order. GitHub semantics: '#' comments,
+    """[(pattern, [owners])] in file order. GitHub semantics: '#' comments
+    (only at line start or after whitespace; '\\#' is a literal '#'),
     gitignore-style patterns, a pattern with no owners clears ownership.
-    Malformed (owner in the pattern slot, an owner token that is neither an
-    @handle nor an email, control characters) raises: the scorer fails closed."""
+    A leading UTF-8 BOM is stripped. Lines are split on bare '\\n' (not
+    str.splitlines(), which would also break on '\\x85' and other Unicode
+    line separators that can legitimately appear inside a CODEOWNERS line).
+    Malformed input (non-string text, control characters, an owner where the
+    pattern should be, an owner token that is neither an @handle nor an
+    email, unsupported gitignore syntax such as '!' negation or '[...]'
+    character classes) raises: the scorer fails closed."""
+    if not isinstance(text, str):
+        raise RiskPolicyError("CODEOWNERS text must be a string")
+    if text.startswith("﻿"):
+        text = text[1:]
     if any(ord(c) < 32 and c not in "\t\n\r" for c in text):
         raise RiskPolicyError("CODEOWNERS contains control characters")
     rules = []
-    for n, raw in enumerate(text.splitlines(), 1):
-        line = raw.split("#", 1)[0].strip() if not raw.lstrip().startswith("#") else ""
+    for n, raw in enumerate(text.split("\n"), 1):
+        raw = raw.rstrip("\r")
+        line = _strip_codeowners_comment(raw).strip()
         if not line:
             continue
         parts = line.split()
         pattern, owners = parts[0], parts[1:]
-        if pattern.startswith("@") or "@" in pattern:
+        if pattern.startswith("!") or "[" in pattern or "]" in pattern:
+            raise RiskPolicyError(f"CODEOWNERS line {n}: unsupported pattern syntax: {pattern}")
+        if pattern.startswith("@") or _OWNER_RE.match(pattern):
             raise RiskPolicyError(f"CODEOWNERS line {n}: pattern slot holds an owner: {pattern}")
         for owner in owners:
             if not _OWNER_RE.match(owner):
@@ -620,8 +652,13 @@ def _codeowners_regex(pattern: str) -> "re.Pattern[str]":
         # leading slash, or an inner slash without one: GitHub anchors both
         prefix = ""
     core = _glob_regex(body).pattern[1:-1]  # strip ^ and $
-    if dir_only or "*" not in body.split("/")[-1]:
-        # a directory pattern or a plain name matches itself and everything under it
+    if dir_only:
+        # an explicit trailing slash is directory-only: it owns everything
+        # beneath the directory but not a sibling file of the same name
+        suffix = "/.*"
+    elif "*" not in body.split("/")[-1]:
+        # a plain name with no trailing slash matches itself, or (if it
+        # turns out to be a directory) everything beneath it
         suffix = "(?:/.*)?"
     else:
         suffix = ""
@@ -647,9 +684,17 @@ def codeowner_floors(policy: dict, rules: list, paths: list) -> tuple:
     """(ownersTouched sorted, floors) from the merged policy's codeowners block:
     an ownerFloors entry names its floor; any owned path gets defaultOwnedFloor.
     Floor entries share path_floors' shape: {id, floor, reason, paths, rules},
-    where rules holds the CODEOWNERS pattern that assigned the owner."""
+    where rules holds the CODEOWNERS pattern that assigned the owner.
+
+    Owner comparisons (the ownerFloors lookup, the touched set, and the
+    codeowners:<owner> floor id) are casefolded, since GitHub handles and
+    emails are case-insensitive; only the casefolded spelling is ever
+    returned. Floors only ever raise the tier: path_floors and the scorer
+    both take the max across every floor id, so an ownerFloors entry below
+    defaultOwnedFloor still shows up as its own entry for evidence, but it
+    never pulls the merged result below defaultOwnedFloor."""
     co = policy.get("codeowners") or {}
-    owner_floors = co.get("ownerFloors") or {}
+    owner_floors = {owner.casefold(): floor for owner, floor in (co.get("ownerFloors") or {}).items()}
     default_floor = co.get("defaultOwnedFloor")
     touched: set = set()
     hits: dict = {}
@@ -666,8 +711,9 @@ def codeowner_floors(policy: dict, rules: list, paths: list) -> tuple:
         pattern, owners = _codeowners_match(rules, path)
         if not owners:
             continue
-        touched.update(owners)
-        for owner in owners:
+        folded_owners = [owner.casefold() for owner in owners]
+        touched.update(folded_owners)
+        for owner in folded_owners:
             if owner in owner_floors:
                 hit(f"codeowners:{owner}", owner_floors[owner], f"owned by {owner}", path, pattern)
         if default_floor:

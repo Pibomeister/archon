@@ -429,5 +429,51 @@ class OwnerFloors(unittest.TestCase):
         self.assertEqual((touched, floors), ([], []))
 
 
+class CodeownersHardening(unittest.TestCase):
+    def test_inline_hash_is_literal_unless_comment_start(self):
+        self.assertEqual(rp.parse_codeowners("foo#bar @a\n"), [("foo#bar", ["@a"])])
+        self.assertEqual(rp.parse_codeowners("\\#file @a\n"), [("#file", ["@a"])])
+        self.assertEqual(rp.parse_codeowners("docs/ @a # trailing comment\n"), [("docs/", ["@a"])])
+
+    def test_leading_bom_is_stripped(self):
+        self.assertEqual(rp.parse_codeowners("﻿* @sec\n"), [("*", ["@sec"])])
+
+    def test_at_sign_inside_a_path_is_not_an_owner(self):
+        rules = rp.parse_codeowners("/packages/@scope/ui/ @team\n")
+        self.assertEqual(rules, [("/packages/@scope/ui/", ["@team"])])
+        self.assertEqual(rp.codeowners_owners(rules, "packages/@scope/ui/x.ts"), ["@team"])
+
+    def test_owner_floors_are_case_insensitive(self):
+        policy = rp.load_policy(profile={"risk": {"codeowners": {"ownerFloors": {"@Org/Security": "red"}}}})
+        rules = rp.parse_codeowners("* @org/SECURITY\n")
+        touched, floors = rp.codeowner_floors(policy, rules, ["x.ts"])
+        self.assertEqual(touched, ["@org/security"])
+        self.assertIn(("codeowners:@org/security", "red"), [(f["id"], f["floor"]) for f in floors])
+
+    def test_unsupported_syntax_is_rejected(self):
+        with self.assertRaises(rp.RiskPolicyError):
+            rp.parse_codeowners("!x @a\n")
+        with self.assertRaises(rp.RiskPolicyError):
+            rp.parse_codeowners("[ab].js @a\n")
+
+    def test_unicode_line_separators_do_not_split_a_line(self):
+        with self.assertRaises(rp.RiskPolicyError):
+            rp.parse_codeowners("* @a\x85x @b\n")
+
+    def test_trailing_slash_pattern_is_directory_only(self):
+        rules = rp.parse_codeowners("build/ @a\n")
+        self.assertEqual(rp.codeowners_owners(rules, "build"), [])
+        self.assertEqual(rp.codeowners_owners(rules, "build/x"), ["@a"])
+
+    def test_no_slash_pattern_matches_bare_name_and_contents(self):
+        rules = rp.parse_codeowners("/docs @a\n")
+        self.assertEqual(rp.codeowners_owners(rules, "docs/readme.md"), ["@a"])
+        self.assertEqual(rp.codeowners_owners(rules, "docs"), ["@a"])
+
+    def test_parse_codeowners_rejects_non_string_input(self):
+        with self.assertRaises(rp.RiskPolicyError):
+            rp.parse_codeowners(None)
+
+
 if __name__ == "__main__":
     unittest.main()
