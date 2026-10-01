@@ -161,6 +161,30 @@ class Intake(Base):
         self.assertTrue(last.endswith("floors=lockfile"), last)
         self.assertEqual(self.doc("intake")["floors"][0]["paths"], ["bun.lock"])
 
+    def test_bare_factory_control_name_is_red_by_floor(self):
+        for brief, name in (("Update the Jenkinsfile", "Jenkinsfile"), ("Edit CODEOWNERS", "CODEOWNERS"),
+                            ("Change .gitlab-ci.yml", ".gitlab-ci.yml")):
+            self.write_spec(f"# T\n\nKind: docs\n\n{brief}.\n")
+            last = self.assert_tier(self.run_cli("intake"), "red", "intake")
+            self.assertTrue(last.endswith("floors=factory-control"), last)
+            self.assertEqual({f["id"]: f["paths"] for f in self.doc("intake")["floors"]}, {"factory-control": [name]})
+
+    def test_ordinary_bare_word_is_not_a_brief_path(self):
+        self.write_spec("# T\n\nKind: docs\n\nTidy the readme and the setup notes.\n")
+        last = self.assert_tier(self.run_cli("intake"), "green", "intake")
+        self.assertTrue(last.endswith("floors=none"), last)
+        paths = [s for s in self.doc("intake")["mechanical"]["signals"] if s["id"] == "brief-paths"][0]["value"]
+        self.assertEqual(paths, [])
+
+    def test_bare_name_from_a_profile_protected_area_counts_as_a_brief_path(self):
+        profile = json.loads(json.dumps(PROFILE))
+        profile["risk"]["protectedAreas"].append({"paths": ["Makefile", "*.tf"], "floor": "red", "reason": "infra"})
+        self.profile.write_text(json.dumps(profile), encoding="utf-8")
+        self.write_spec("# T\n\nKind: docs\n\nEdit the Makefile, then main.tf.\n")
+        self.assert_tier(self.run_cli("intake"), "red", "intake")
+        self.assertEqual({f["id"]: f["paths"] for f in self.doc("intake")["floors"]},
+                         {"protected:infra": ["Makefile", "main.tf"]})
+
     def test_codeowners_at_base_commit_populates_owners_and_floors(self):
         self.commit_file("CODEOWNERS", "*  @org/default\n/apps/api/src/auth/  @org/security\n")
         base = git(self.root, "rev-parse", "HEAD")

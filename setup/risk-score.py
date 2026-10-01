@@ -160,16 +160,29 @@ def brief_kind(text):
     return kind, m.group(0).strip().splitlines()[0]
 
 
+def bare_name_rules(policy):
+    """Slash-free path rules of the merged policy, sorted: the rules a bare
+    file name in prose (no directory) can match. Covers every section
+    rp.path_floors reads, so an overlay or profile addition is honoured."""
+    rev = policy["reversibility"]
+    sections = [policy["sensitiveDomains"].get("extraPaths", []), policy["factoryControl"]["paths"],
+                policy["publicContract"].get("paths", []), policy["sideEffects"].get("paths", [])]
+    sections += [(rev.get(key) or {}).get("paths", []) for key in ("migrations", "dataMutation", "lockfiles", "manifests")]
+    sections += [area["paths"] for area in policy.get("protectedAreas", [])]
+    return sorted({rule for paths in sections for rule in paths if "/" not in rule})
+
+
 def brief_paths(text, policy):
     """Repo-relative paths the brief names: multi-segment tokens containing
     '/' or '\\' (URL schemes stripped first, trailing sentence punctuation
     stripped per token), each canonicalised via canonical_path(soft=True) --
     a leading './' or one leading '/' is normalised away, and a token that
     still escapes the repo or is still absolute after that is dropped rather
-    than failing the whole brief -- plus bare lockfile and manifest names
-    from the policy ("bump bun.lock") that are not already part of a longer
-    path token (so "apps/web/package.json" does not also add a bare
-    "package.json" hit), de-duplicated, sorted."""
+    than failing the whole brief -- plus bare names matching a slash-free
+    rule of the merged policy ("bump bun.lock", "update the Jenkinsfile")
+    that are not already part of a longer path token (so
+    "apps/web/package.json" does not also add a bare "package.json" hit),
+    de-duplicated, sorted."""
     text = re.sub(r"\w+://\S+", " ", text)
     out = set()
     for tok in PATH_TOKEN_RE.findall(text):
@@ -177,11 +190,10 @@ def brief_paths(text, policy):
         canon = canonical_path(tok, "brief-path", soft=True)
         if canon is not None:
             out.add(canon)
-    rev = policy["reversibility"]
-    names = {n for key in ("lockfiles", "manifests") for n in rev[key]["paths"] if "/" not in n and "*" not in n}
+    rules = bare_name_rules(policy)
     for tok in BARE_NAME_RE.findall(text):
         clean = tok.rstrip(".,;:)")
-        if clean in names:
+        if clean and rp.match_any(rules, clean):
             out.add(clean)
     return sorted(out)
 
