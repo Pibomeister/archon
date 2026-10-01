@@ -50,6 +50,15 @@ reraised: applied findings of round N whose normalised key (setup/review-yield.p
 deslop: rounds = deslop-round.txt else count of deslop-round-N dirs;
        dirty_rounds = deslop-dirty.txt else count of DESLOP=DIRTY lines;
        slop_fail = any "DESLOP_GATE=FAIL slop" line.
+risk:  null unless risk-trajectory.jsonl exists (setup/risk-score.py). Per
+       stage the LAST line's tier; final = the last line overall; escalatedAt =
+       the first stage whose line carries escalate: true; escalationRunId =
+       the handoffRunId of any line (the lower run of an escalation pair);
+       floors = the last line's floor ids; reviewSeverities sums the fixer's
+       applied findings by severity across rounds; exitGate / mergeGate are
+       the pass flags of node-exit-gate.out / node-merge-gate.out (null when
+       the node never ran); delivery is delivery.json {mode, autoMerge, prUrl}
+       when present (the ship node writes it from Slice 3 on), else nulls.
 """
 import argparse
 import json
@@ -257,6 +266,54 @@ def _waivers(ad):
     return {"count": len(entries), "findings": findings}
 
 
+RISK_STAGES = ("intake", "plan", "impl")
+
+
+def _risk(ad, review, typed):
+    path = os.path.join(ad, "risk-trajectory.jsonl")
+    if not os.path.isfile(path):
+        return None
+    try:
+        rows = sl.read_jsonl(path)
+    except (OSError, sl.LibraryError) as exc:
+        raise Fail(f"risk-trajectory.jsonl is not JSONL: {exc}")
+    by_stage, last, escalated_at, run_id = {}, None, None, None
+    for row in rows:
+        if not isinstance(row, dict) or row.get("stage") not in RISK_STAGES or row.get("tier") not in ("green", "yellow", "red"):
+            raise Fail("risk-trajectory.jsonl line without a valid stage and tier")
+        by_stage[row["stage"]] = row
+        last = row
+        if escalated_at is None and row.get("escalate") is True:
+            escalated_at = row["stage"]
+        if run_id is None and isinstance(row.get("handoffRunId"), str) and row["handoffRunId"]:
+            run_id = row["handoffRunId"]
+    severities = {s: 0 for s in SEVERITIES}
+    for r in review["per_round"]:
+        for s in SEVERITIES:
+            severities[s] += r["applied_by_severity"][s]
+    delivery = _read_json(os.path.join(ad, "delivery.json"), "delivery.json")
+    if delivery is not None and not isinstance(delivery, dict):
+        raise Fail("delivery.json is not an object")
+    delivery = delivery or {}
+    nodes = typed["nodes"]
+    return {
+        "intake": (by_stage.get("intake") or {}).get("tier"),
+        "plan": (by_stage.get("plan") or {}).get("tier"),
+        "impl": (by_stage.get("impl") or {}).get("tier"),
+        "final": last["tier"] if last else None,
+        "escalatedAt": escalated_at,
+        "escalationRunId": run_id,
+        "floors": [f for f in (last.get("floors") or []) if isinstance(f, str)] if last else [],
+        "reviewSeverities": severities,
+        "fixerRounds": review["rounds"],
+        "exitGate": (nodes.get("exit-gate") or {}).get("pass"),
+        "mergeGate": (nodes.get("merge-gate") or {}).get("pass"),
+        "delivery": {"mode": delivery.get("mode") if isinstance(delivery.get("mode"), str) else None,
+                     "autoMerge": delivery.get("autoMerge") if isinstance(delivery.get("autoMerge"), bool) else None,
+                     "prUrl": delivery.get("prUrl") if isinstance(delivery.get("prUrl"), str) else None},
+    }
+
+
 def _files_present(ad):
     out = []
     for name in sorted(os.listdir(ad)):
@@ -362,6 +419,7 @@ def digest(artifacts_dir):
         "waivers": _waivers(ad),
         "typed": typed,
         "rca": rca,
+        "risk": _risk(ad, review, typed),
         "skills_staged": _read_json(os.path.join(ad, "skills-staged.json"), "skills-staged.json"),
         "files_present": _files_present(ad),
     }

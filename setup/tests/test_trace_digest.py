@@ -417,5 +417,60 @@ class Fixtures(unittest.TestCase):
                 self.assertIsNone(bad.search(p.read_text(errors="replace")), str(p))
 
 
+class Risk(Base):
+    def row(self, stage, tier, score=0, floors=(), **extra):
+        base = {"at": "2026-10-01T00:00:00Z", "stage": stage, "tier": tier, "score": score, "floors": list(floors),
+                "mechanical": tier, "agent": None, "prior": None, "override": None, "laneTier": None,
+                "escalate": False, "escalatedFrom": None, "handoffRunId": None}
+        base.update(extra)
+        return json.dumps(base)
+
+    def test_absent_trajectory_is_null(self):
+        self.assertIsNone(self.digest()["risk"])
+
+    def test_trajectory_summarised_with_review_and_gates(self):
+        write(self.ad, "risk-trajectory.jsonl", "\n".join([
+            self.row("intake", "green", 15), self.row("plan", "yellow", 32, laneTier="green", escalate=True),
+            self.row("plan", "yellow", 32, handoffRunId="run-1"), self.row("impl", "red", 40, ["sensitive-domain:auth"])]) + "\n")
+        write(self.ad, "round.txt", "2\n")
+        write(self.ad, "round-1/fixer-result.json", self.fixer(applied=(("a", "P1"), ("b", "P2"))))
+        write(self.ad, "round-2/fixer-result.json", self.fixer(applied=(("c", "P2"),)))
+        write(self.ad, "node-exit-gate.out", "EXIT_GATE=PASS\n")
+        write(self.ad, "node-merge-gate.out", "MERGE_GATE=PASS\n")
+        write(self.ad, "pr-url.txt", "https://example.invalid/pr/9\n")
+        write(self.ad, "delivery.json", {"mode": "draft", "autoMerge": False, "prUrl": "https://example.invalid/pr/9"})
+        r = self.digest()["risk"]
+        self.assertEqual(r, {
+            "intake": "green", "plan": "yellow", "impl": "red", "final": "red",
+            "escalatedAt": "plan", "escalationRunId": "run-1",
+            "floors": ["sensitive-domain:auth"],
+            "reviewSeverities": {"P0": 0, "P1": 1, "P2": 2, "P3": 0},
+            "fixerRounds": 2, "exitGate": True, "mergeGate": True,
+            "delivery": {"mode": "draft", "autoMerge": False, "prUrl": "https://example.invalid/pr/9"},
+        })
+
+    def test_partial_trajectory_leaves_nulls(self):
+        write(self.ad, "risk-trajectory.jsonl", self.row("intake", "yellow") + "\n")
+        r = self.digest()["risk"]
+        self.assertEqual((r["intake"], r["plan"], r["impl"], r["final"]), ("yellow", None, None, "yellow"))
+        self.assertEqual((r["escalatedAt"], r["escalationRunId"], r["mergeGate"], r["exitGate"]), (None, None, None, None))
+        self.assertEqual(r["delivery"], {"mode": None, "autoMerge": None, "prUrl": None})
+
+    def test_corrupt_trajectory_or_delivery_is_fail(self):
+        write(self.ad, "risk-trajectory.jsonl", "{not json\n")
+        with self.assertRaises(td.Fail) as cm:
+            self.digest()
+        self.assertIn("risk-trajectory.jsonl", str(cm.exception))
+        write(self.ad, "risk-trajectory.jsonl", self.row("intake", "green") + "\n")
+        write(self.ad, "delivery.json", "{oops")
+        with self.assertRaises(td.Fail):
+            self.digest()
+
+    def test_risk_block_has_no_absolute_paths_and_typed_line_unchanged(self):
+        write(self.ad, "risk-trajectory.jsonl", self.row("intake", "green") + "\n")
+        r = run([str(self.ad)])
+        self.assertEqual(r.stdout.strip(), "TRACE_DIGEST=OK run=run-abc lane=unknown terminal=incomplete rounds=0 score_inputs=0")
+
+
 if __name__ == "__main__":
     unittest.main()
