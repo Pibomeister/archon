@@ -58,7 +58,7 @@ TIERS = ("green", "yellow", "red")
 TIER_RANK = {t: i for i, t in enumerate(TIERS)}
 TASK_CLASSES = ("docs", "chore", "bugfix", "feature", "refactor", "migration")
 STAGES = ("intake", "plan", "impl")
-CODEOWNERS_CANDIDATES = ("CODEOWNERS", ".github/CODEOWNERS", "docs/CODEOWNERS")
+CODEOWNERS_CANDIDATES = (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
 DEFAULT_POLICY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "risk-policy.json")
 _REQUIRED_POINTS = ("taskClass", "triage", "filesOverMax", "perExtraFile", "testFilesOverMax",
                     "callersOverMax", "chainLinksOverMax", "impactUnavailable", "impactMissing",
@@ -736,7 +736,8 @@ def _codeowners_regex(pattern: str) -> "re.Pattern[str]":
     floats and may match starting at any path segment. A trailing "/", or a
     plain name with no glob in its last segment, also matches everything
     beneath it. A bare "*" is GitHub's catch-all and must span segments, not
-    stop at the first one the way a glob "*" normally would."""
+    stop at the first one the way a glob "*" normally would; an anchored
+    "/*" is not the catch-all and owns only the files at the repo root."""
     rx = _CO_RX_CACHE.get(pattern)
     if rx is not None:
         return rx
@@ -744,7 +745,7 @@ def _codeowners_regex(pattern: str) -> "re.Pattern[str]":
     body = pattern.lstrip("/")
     dir_only = body.endswith("/")
     body = body.rstrip("/")
-    if body == "*":
+    if pattern == "*":
         rx = _CO_RX_CACHE[pattern] = re.compile("^.*$")
         return rx
     if "/" not in body and not anchored:

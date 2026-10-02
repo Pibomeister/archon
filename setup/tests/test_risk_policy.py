@@ -569,6 +569,23 @@ class CodeownersParsing(unittest.TestCase):
         self.assertEqual(rp.codeowners_owners(rules, "src/x.ts"), ["@b"])
         self.assertEqual(rp.codeowners_owners(rules, "apps/src/x.ts"), [])
 
+    def test_only_a_bare_star_is_the_catch_all(self):
+        rules = rp.parse_codeowners("src/  @specific\n/*  @root\n")
+        self.assertEqual(rp.codeowners_owners(rules, "README.md"), ["@root"])
+        self.assertEqual(rp.codeowners_owners(rules, "src/x.md"), ["@specific"])
+        self.assertEqual(rp.codeowners_owners(rules, "libs/deep/x.ts"), [])
+        rules = rp.parse_codeowners("*  @all\n")
+        self.assertEqual(rp.codeowners_owners(rules, "README.md"), ["@all"])
+        self.assertEqual(rp.codeowners_owners(rules, "libs/deep/x.ts"), ["@all"])
+
+    def test_codeowners_file_anywhere_is_factory_control(self):
+        policy = rp.load_policy()
+        for path in ("CODEOWNERS", ".github/CODEOWNERS", "docs/CODEOWNERS", ".gitlab/CODEOWNERS",
+                     "packages/x/CODEOWNERS"):
+            self.assertEqual([(f["id"], f["floor"]) for f in rp.path_floors(policy, [path], None)],
+                             [("factory-control", "red")], path)
+        self.assertEqual(rp.path_floors(policy, ["docs/CODEOWNERS.md"], None), [])
+
     def test_malformed_lines_raise(self):
         with self.assertRaises(rp.RiskPolicyError):
             rp.parse_codeowners("@org/team apps/\n")  # owner where the pattern should be

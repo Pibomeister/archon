@@ -65,7 +65,7 @@ import skill_library as sl  # noqa: E402
 SCORING_VERSION = 1
 TEST_RE = re.compile(r"(/__tests__/|(^|/)tests?/|(^|/)test_[^/]+\.py$|_test\.(go|py)$|\.(spec|test|int\.spec|e2e\.spec)\.[cm]?[jt]sx?$)")
 PATH_TOKEN_RE = re.compile(r"(?<![\w/\\:.])[/\\]?[A-Za-z0-9_.@-]+(?:(?:[/\\][A-Za-z0-9_.@-]+)+[/\\]?|[/\\])")
-BARE_NAME_RE = re.compile(r"(?<![\w/\\])[A-Za-z0-9_.-]+")
+BARE_NAME_RE = re.compile(r"(?<![\w/\\])/?[A-Za-z0-9_.-]+")
 KIND_LINE_RE = re.compile(r"^(?P<lead>(?:[>\-*+|#_`\s]|\d+[.)]|</?b>)*)Kind(?P<close>(?:[*_`]|</?b>)*)"
                           r"(?:\s*(?P<sep>[:=|]))?(?P<value>.*)$")
 KIND_BOLD_CLOSE = ("**", "__", "</b>")
@@ -257,8 +257,8 @@ def brief_paths(text, policy):
     a leading './' or one leading '/' is normalised away, and a token that
     still escapes the repo or is still absolute after that is dropped rather
     than failing the whole brief -- plus bare names matching a slash-free
-    rule of the merged policy ("bump bun.lock", "update the Jenkinsfile")
-    that are not already part of a longer path token (so
+    rule of the merged policy ("bump bun.lock", "update the Jenkinsfile"),
+    with one root-anchoring leading '/' dropped ("/Jenkinsfile"), that are not already part of a longer path token (so
     "apps/web/package.json" does not also add a bare "package.json" hit),
     de-duplicated, sorted."""
     text = re.sub(r"\w+://\S+", " ", text)
@@ -270,7 +270,7 @@ def brief_paths(text, policy):
             out.add(canon)
     rules = bare_name_rules(policy)
     for tok in BARE_NAME_RE.findall(text):
-        clean = tok.rstrip(".,;:)")
+        clean = tok.lstrip("/").rstrip(".,;:)")
         if clean and rp.match_any(rules, clean):
             out.add(clean)
     return sorted(out)

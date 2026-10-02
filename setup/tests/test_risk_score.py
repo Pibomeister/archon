@@ -295,6 +295,24 @@ class Intake(Base):
             self.assertTrue(last.endswith("floors=factory-control"), last)
             self.assertEqual({f["id"]: f["paths"] for f in self.doc("intake")["floors"]}, {"factory-control": [name]})
 
+    def test_root_anchored_bare_name_is_a_brief_path(self):
+        for brief, tier, floors in (("Update /Jenkinsfile", "red", {"factory-control": ["Jenkinsfile"]}),
+                                    ("Edit /CODEOWNERS now", "red", {"factory-control": ["CODEOWNERS"]}),
+                                    ("bump /package.json", "yellow", {"manifest": ["package.json"]}),
+                                    ("Touch /setup/ only", "red", {"factory-control": ["setup/"]}),
+                                    ("bump apps/web/package.json", "yellow", {"manifest": ["apps/web/package.json"]})):
+            self.write_spec(f"# T\n\nKind: docs\n\n{brief}.\n")
+            self.assert_tier(self.run_cli("intake"), tier, "intake")
+            self.assertEqual({f["id"]: f["paths"] for f in self.doc("intake")["floors"]}, floors, brief)
+        self.write_spec("# T\n\nKind: docs\n\nTouch /apps/api/src/auth/guard.ts only.\n")
+        self.assert_tier(self.run_cli("intake"), "red", "intake")
+        self.assertEqual(self.brief_path_values(), ["apps/api/src/auth/guard.ts"])
+
+    def test_lone_slash_and_slashed_prose_are_not_brief_paths(self):
+        self.write_spec("# T\n\nKind: docs\n\nUse a / here, and/or tidy the /readme notes.\n")
+        last = self.assert_tier(self.run_cli("intake"), "green", "intake")
+        self.assertTrue(last.endswith("floors=none"), last)
+
     def test_ordinary_bare_word_is_not_a_brief_path(self):
         self.write_spec("# T\n\nKind: docs\n\nTidy the readme and the setup notes.\n")
         last = self.assert_tier(self.run_cli("intake"), "green", "intake")
@@ -372,6 +390,18 @@ class Intake(Base):
         d = self.doc("intake")
         self.assertEqual(d["codeowners"]["ownersTouched"], ["@org/docs"])
         self.assertEqual({f["id"]: f["paths"] for f in d["floors"]}, {"codeowners:owned": ["api/docs/readme.md"]})
+
+    def test_codeowners_lookup_follows_github_order(self):
+        self.commit_file("docs/CODEOWNERS", "*  @org/docs-dir\n")
+        self.write_spec("# T\n\nKind: feature\n\nTouch libs/x.ts.\n")
+        self.assert_tier(self.run_cli("intake", "--base", git(self.root, "rev-parse", "HEAD")), "yellow", "intake")
+        self.assertEqual(self.doc("intake")["codeowners"]["ownersTouched"], ["@org/docs-dir"])
+        self.commit_file("CODEOWNERS", "*  @org/root\n")
+        self.assert_tier(self.run_cli("intake", "--base", git(self.root, "rev-parse", "HEAD")), "yellow", "intake")
+        self.assertEqual(self.doc("intake")["codeowners"]["ownersTouched"], ["@org/root"])
+        self.commit_file(".github/CODEOWNERS", "*  @org/github-dir\n")
+        self.assert_tier(self.run_cli("intake", "--base", git(self.root, "rev-parse", "HEAD")), "yellow", "intake")
+        self.assertEqual(self.doc("intake")["codeowners"]["ownersTouched"], ["@org/github-dir"])
 
     def test_codeowners_is_read_at_base_not_working_tree(self):
         self.commit_file("CODEOWNERS", "*  @org/default\n")
