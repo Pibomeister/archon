@@ -150,6 +150,25 @@ class Intake(Base):
     def task_class(self):
         return [s for s in self.doc("intake")["mechanical"]["signals"] if s["id"] == "task-class"][0]
 
+    def test_quoted_kind_heading_reads_its_quoted_value(self):
+        for brief in ("# T\n\n> ## Kind\n> migration\n", "# T\n\n> ## Kind\n>\n> migration\n",
+                      "# T\n\n> > ## Kind\n> > migration\n"):
+            self.write_spec(brief)
+            out = self.run_cli("intake")
+            self.assertEqual(out.returncode, 0, (brief, out.stdout, out.stderr))
+            self.assertEqual(self.task_class()["value"], "migration", brief)
+
+    def test_quoted_tables_follow_the_table_rule(self):
+        for brief in ("# T\n\n> | Kind | Value |\n> | :--- | ---: |\n> | a | b |\n",
+                      "# T\n\n> | Kind | File | Notes |\n> |---|---|---|\n"):
+            self.assert_feature_default(brief)
+        for brief in ("# T\n\n> | Kind | migration |\n",
+                      "# T\n\n> | Field | Value |\n> |---|---|\n> | Kind | migration |\n> | Owner | me |\n"):
+            self.write_spec(brief)
+            out = self.run_cli("intake")
+            self.assertEqual(out.returncode, 0, (brief, out.stdout, out.stderr))
+            self.assertEqual(self.task_class()["value"], "migration", brief)
+
     def test_kind_line_forms_resolve_to_their_class(self):
         cases = [("Kind: migration.", "migration"), ("**Kind:** migration", "migration"),
                  ("- Kind: refactor", "refactor"), ("* Kind: refactor", "refactor"),
@@ -282,6 +301,27 @@ class Intake(Base):
         self.assertTrue(last.endswith("floors=none"), last)
         paths = [s for s in self.doc("intake")["mechanical"]["signals"] if s["id"] == "brief-paths"][0]["value"]
         self.assertEqual(paths, [])
+
+    def brief_path_values(self):
+        return [s for s in self.doc("intake")["mechanical"]["signals"] if s["id"] == "brief-paths"][0]["value"]
+
+    def test_single_segment_directory_token_is_a_brief_path(self):
+        for prose, paths, floor in (
+                ("Change the scripts under setup/ to log more", ["setup/"], "factory-control"),
+                ("add a file in migrations/", ["migrations/"], "migration"),
+                ("tidy .circleci/ config", [".circleci/"], "factory-control"),
+                ("Edit workflows/ and profiles/.", ["profiles/", "workflows/"], "factory-control"),
+                ("Touch `setup/`, then '.github/'; (profiles/)", [".github/", "profiles/", "setup/"],
+                 "factory-control")):
+            self.write_spec(f"# T\n\nKind: docs\n\n{prose}\n")
+            last = self.assert_tier(self.run_cli("intake"), "red", "intake")
+            self.assertEqual(self.brief_path_values(), paths, prose)
+            self.assertIn(floor, last.rsplit("floors=", 1)[1], prose)
+
+    def test_slashed_prose_words_hit_no_floor(self):
+        self.write_spec("# T\n\nKind: docs\n\nValidate input/output and/or the setup notes.\n")
+        last = self.assert_tier(self.run_cli("intake"), "green", "intake")
+        self.assertTrue(last.endswith("floors=none"), last)
 
     def test_bare_name_from_a_profile_protected_area_counts_as_a_brief_path(self):
         profile = json.loads(json.dumps(PROFILE))

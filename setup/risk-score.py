@@ -64,7 +64,7 @@ import skill_library as sl  # noqa: E402
 
 SCORING_VERSION = 1
 TEST_RE = re.compile(r"(/__tests__/|(^|/)tests?/|(^|/)test_[^/]+\.py$|_test\.(go|py)$|\.(spec|test|int\.spec|e2e\.spec)\.[cm]?[jt]sx?$)")
-PATH_TOKEN_RE = re.compile(r"(?<![\w/\\:.])[/\\]?[A-Za-z0-9_.@-]+(?:[/\\][A-Za-z0-9_.@-]+)+[/\\]?")
+PATH_TOKEN_RE = re.compile(r"(?<![\w/\\:.])[/\\]?[A-Za-z0-9_.@-]+(?:(?:[/\\][A-Za-z0-9_.@-]+)+[/\\]?|[/\\])")
 BARE_NAME_RE = re.compile(r"(?<![\w/\\])[A-Za-z0-9_.-]+")
 KIND_LINE_RE = re.compile(r"^(?P<lead>(?:[>\-*+|#_`\s]|\d+[.)]|</?b>)*)Kind(?P<close>(?:[*_`]|</?b>)*)"
                           r"(?:\s*(?P<sep>[:=|]))?(?P<value>.*)$")
@@ -186,7 +186,7 @@ def brief_kind(text):
       non-blank line is not a delimiter row ("|---|---|").
     The value is the rest of the line, normalised by kind_value. A "## Kind"
     heading with nothing after the key takes its value from the next
-    non-blank line.
+    non-blank line; blockquote ">" markers are not part of that line.
 
     The first Kind line wins. A Kind line whose value is not a known task
     class fails, naming the line, and so does a later Kind line that yields a
@@ -215,9 +215,9 @@ def brief_kind(text):
         if not m:
             continue
         value = m.group("value")
-        following = next((nxt for nxt in lines[i + 1:] if nxt.strip()), "")
+        following = next((nxt for nxt in (QUOTE_RE.sub("", ln, 1) for ln in lines[i + 1:]) if nxt.strip()), "")
         if m.group("sep") == "|":
-            header = "|" in following and TABLE_DELIMITER_RE.match(QUOTE_RE.sub("", following, 1))
+            header = "|" in following and TABLE_DELIMITER_RE.match(following)
             if header or "|" in value.strip().rstrip("|"):
                 continue
             kind = kind_value(value)
@@ -250,8 +250,10 @@ def bare_name_rules(policy):
 
 def brief_paths(text, policy):
     """Repo-relative paths the brief names: multi-segment tokens containing
-    '/' or '\\' (URL schemes stripped first, trailing sentence punctuation
-    stripped per token), each canonicalised via canonical_path(soft=True) --
+    '/' or '\\' and single-segment directory tokens written with a trailing
+    slash ("setup/", ".circleci/"), with URL schemes stripped first and
+    surrounding punctuation (quotes, backticks, brackets, a trailing
+    sentence mark) left out of the token, each canonicalised via canonical_path(soft=True) --
     a leading './' or one leading '/' is normalised away, and a token that
     still escapes the repo or is still absolute after that is dropped rather
     than failing the whole brief -- plus bare names matching a slash-free
