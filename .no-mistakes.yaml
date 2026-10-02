@@ -11,3 +11,10 @@
 
 commands:
   test: "python3 setup/run-tests.py"
+
+# This repository has no GitHub checks (no .github/workflows). Declare that
+# positively so the no-mistakes CI monitor treats an empty check list as
+# checks-passed instead of parking at "no CI checks reported yet" until its
+# idle timeout. Read only from the trusted default-branch copy, so it takes
+# effect once merged to main.
+no_ci: true
