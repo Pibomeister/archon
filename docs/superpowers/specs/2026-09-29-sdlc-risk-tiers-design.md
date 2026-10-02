@@ -100,7 +100,7 @@ root):
 
 | Stage | Reads | Diff footprint |
 |---|---|---|
-| intake | brief (run message path), profile, CODEOWNERS at base commit, task class from brief header (`Kind:` line or `## Kind`, read leniently; missing → `feature`, a Kind key with an unknown class → FAIL) | none; path signals come only from explicit paths in the brief |
+| intake | brief (run message path), profile, CODEOWNERS at base commit, task class from brief header (`Kind:` line or `## Kind`; missing → `feature`, a Kind line with an unknown class or two Kind lines that disagree → FAIL) | none; path signals come only from explicit paths in the brief |
 | plan | `files-allowlist.json`, `impact.json` (callers, chain links), `triage.json`, `risk-judgment.json` | allowlist |
 | impl | `git diff --name-status <bootstrap-head>..HEAD`, test-file count, `impact.json` | actual diff |
 

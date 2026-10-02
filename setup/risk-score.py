@@ -27,9 +27,10 @@ override is --override-tier; it can only raise because it joins the max.
 
 Stage inputs:
   intake  the brief (params.json spec, or --brief), task class from a
-          "Kind: <class>" line or a "## Kind" heading, read leniently (any
-          case, list bullet, bold, backticks, trailing punctuation; no Kind
-          key at all -> feature, a Kind key with an unknown class -> FAIL), the repo-relative paths the brief names, and
+          "Kind: <class>" line or a "## Kind" heading (see brief_kind for
+          the exact rule; no Kind line -> feature, a Kind line with an unknown
+          class or two Kind lines that disagree -> FAIL),
+          the repo-relative paths the brief names, and
           CODEOWNERS at --base (or the working tree when no --base)
   plan    files-allowlist.json (required), web-files-allowlist.json (optional,
           paths in the capabilities.webRepo repo), impact.json, triage.json,
@@ -65,7 +66,9 @@ SCORING_VERSION = 1
 TEST_RE = re.compile(r"(/__tests__/|(^|/)tests?/|(^|/)test_[^/]+\.py$|_test\.(go|py)$|\.(spec|test|int\.spec|e2e\.spec)\.[cm]?[jt]sx?$)")
 PATH_TOKEN_RE = re.compile(r"(?<![\w/\\:.])[/\\]?[A-Za-z0-9_.@-]+(?:[/\\][A-Za-z0-9_.@-]+)+[/\\]?")
 BARE_NAME_RE = re.compile(r"(?<![\w/\\])[A-Za-z0-9_.-]+")
-KIND_KEY_RE = re.compile(r"^\s*(?:[-*]\s+)?(?P<heading>#+\s*)?[*_]*kind[*_]*(?P<colon>\s*:)?(?P<value>.*)$", re.I)
+KIND_LINE_RE = re.compile(r"^(?P<lead>(?:[>\-*+|#_`\s]|\d+[.)]|</?b>)*)Kind(?P<close>(?:[*_`]|</?b>)*)"
+                          r"(?:\s*(?P<sep>[:=|]))?(?P<value>.*)$")
+KIND_BOLD_CLOSE = ("**", "__", "</b>")
 
 
 class Fail(Exception):
@@ -150,32 +153,64 @@ def git(root, *args):
 
 # --- brief -------------------------------------------------------------------
 def kind_value(raw):
-    """A Kind value normalised: markdown emphasis, backticks and trailing
-    punctuation stripped, lower-cased, inner whitespace collapsed to "-"."""
-    return re.sub(r"\s+", "-", raw.strip("*_` \t.:;,").lower())
+    """A Kind value normalised: <b> tags dropped, surrounding bold, backticks,
+    "|", ".", ":" and whitespace stripped, lower-cased, inner runs of spaces
+    or underscores collapsed to "-"."""
+    return re.sub(r"[\s_]+", "-", re.sub(r"</?b>", "", raw).strip("*_`|.: \t").lower())
 
 
 def brief_kind(text):
-    """(task class, evidence line) from the first line that names the Kind
-    key: "Kind: <class>" in any case, optionally behind a "- " or "* " bullet
-    or wrapped in bold, or a "# Kind" heading with the value on the same
-    line or the next non-blank one. A Kind key whose value is not a known
-    class fails; only a brief with no Kind key at all defaults to feature."""
+    """(task class, evidence line) from the brief's Kind line.
+
+    A line is a Kind line only when all of these hold:
+    - it is outside any fenced code block (``` or ~~~) and is not indented
+      code (fewer than 4 leading spaces, no leading tab);
+    - after its leading markdown markers (blockquote ">", bullets "-", "*",
+      "+", a numbered "1.", a table "|", heading "#"s, bold or italic "**",
+      "__", "*", "_", "<b>", backticks) the first word is exactly "Kind",
+      capitalised, and it is the only word before the separator, so
+      "Task Kind:", "Kind (class):" and a YAML or TypeScript "kind:" are not
+      Kind lines;
+    - the key is followed by ":", "=" or "|", or closes a bold key
+      ("**Kind** migration"); "Kind - migration" is not a Kind line.
+    The value is the rest of the line, normalised by kind_value. A "## Kind"
+    heading with nothing after the key takes its value from the next
+    non-blank line.
+
+    The first Kind line wins. A Kind line whose value is not a known task
+    class fails, naming the line, and so does a later Kind line that yields a
+    different class, naming both. A brief with no Kind line is a feature."""
     lines = text.splitlines()
+    found = None
+    fence = None
     for i, line in enumerate(lines):
-        m = KIND_KEY_RE.match(line)
+        stripped = line.strip()
+        if fence:
+            if stripped.startswith(fence):
+                fence = None
+            continue
+        if stripped.startswith(("```", "~~~")):
+            fence = stripped[:3]
+            continue
+        if line.startswith(("\t", "    ")):
+            continue
+        m = KIND_LINE_RE.match(line)
         if not m:
             continue
         value = m.group("value")
-        if not m.group("colon") and not (m.group("heading") and (not value or value[0].isspace())):
-            continue
-        kind = kind_value(value)
-        if not kind and m.group("heading"):
+        if m.group("sep") or (m.group("close").endswith(KIND_BOLD_CLOSE) and value[:1].isspace() and value.strip()):
+            kind = kind_value(value)
+        elif "#" in m.group("lead") and not value.strip():
             kind = kind_value(next((nxt for nxt in lines[i + 1:] if nxt.strip()), ""))
+        else:
+            continue
         if kind not in rp.TASK_CLASSES:
-            raise Fail(f"task class {kind!r} not in {','.join(rp.TASK_CLASSES)}: {line.strip()!r}")
-        return kind, line.strip()
-    return "feature", "no Kind line; default feature"
+            raise Fail(f"task class {kind!r} not in {','.join(rp.TASK_CLASSES)}: {stripped!r}")
+        if found is None:
+            found = kind, stripped
+        elif kind != found[0]:
+            raise Fail(f"task class given twice: {found[1]!r} and {stripped!r}")
+    return found or ("feature", "no Kind line; default feature")
 
 
 def bare_name_rules(policy):
