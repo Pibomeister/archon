@@ -76,24 +76,29 @@ root):
 - `setup/risk-score.py` (stdlib only; workflow nodes have no PyYAML). CLI:
   `risk-score.py <intake|plan|impl> --artifacts <dir> --profile <profile.json> --repo-root <wt>
   [--base <sha>] [--policy <risk-policy.json>] [--overlay <policy-overlay.json>]
-  [--handoff <escalation.json>] [--override-tier <red|yellow>]`.
-  Typed last line: `RISK_TIER=<red|yellow|green> stage=<stage> score=<n> floors=<a,b>` exit 0;
-  `RISK=FAIL <reason>` exit 1. Writes `risk-<stage>.json` (schema `archon.risk-score.v1`)
-  atomically and appends one line to `risk-trajectory.jsonl`.
+  [--handoff <escalation.json>] [--override-tier <red|yellow>] [--lane-tier <tier>]
+  [--brief <path>]`.
+  Typed last line: `RISK_TIER=<red|yellow|green> stage=<stage> score=<n> floors=<a,b|none>`
+  exit 0; `RISK=FAIL <reason>` exit 1. Writes `risk-<stage>.json` (schema
+  `archon.risk-score.v1`) atomically and appends one line to `risk-trajectory.jsonl`. The
+  module docstring of `setup/risk-score.py` owns the exact CLI and per-stage inputs.
 - `setup/risk-policy.json` (successor of `setup/lite-envelope.json`): `version`,
-  `scoringVersion`, `thresholds {yellow, red}`, `taskClassPoints`, `sizeThresholds`
+  `scoringVersion`, `thresholds {yellow, red}`, `points` (task class, triage and the
+  size/impact signals), `sizeThresholds`
   (`max_files`, `max_test_files`, `max_d1_callers`, `max_chain_links`, carried over),
-  `sensitiveDomains` (built-in red floors: path/name regexes for auth, oauth, session, token,
-  crypto, kms, secret, payment, billing, stripe, pii, gdpr, consent, plus profile globs),
+  `sensitiveDomains` (built-in red floors: name tokens per domain for auth, oauth, session,
+  token, crypto, kms, secret, payment, billing, stripe, pii, gdpr, consent, matched as whole
+  name parts, plus profile globs in `extraPaths`),
   `factoryControl` (red floor: `workflows/**`, `setup/**`, `profiles/**`, `**/CODEOWNERS`,
   `.github/workflows/**`, CI config), `reversibility` (lockfiles/manifests yellow,
   migrations red, data-mutation script globs red), `publicContract` (yellow: generated
-  clients, exported DTO globs), `repro_command_allow` (moved from lite-envelope for bugfix
-  compatibility).
+  clients, exported DTO globs), `sideEffects` (yellow, empty by default), `protectedAreas`
+  and `codeowners` (`defaultOwnedFloor`, `ownerFloors`; both filled by profiles),
+  `repro_command_allow` (moved from lite-envelope for bugfix compatibility).
 - `setup/risk_policy.py`: importable helpers shared by scorer, calibrator, gates: load and
   merge (defaults ← profile.risk ← repo overlay), floor-invariant check, glob matching with
   the anchored-prefix semantics `lite-envelope.sh` already uses, CODEOWNERS parser (last
-  matching rule wins, gitignore-style globs, absent file → `codeowners: null`).
+  matching rule wins, gitignore-style globs, absent file → `codeowners.present: false`).
 - `setup/tests/test_risk_score.py`, `setup/tests/test_risk_policy.py`.
 
 ### Inputs per stage
@@ -107,15 +112,17 @@ root):
 ### Output contract (`archon.risk-score.v1`)
 
 ```
-{ schema, scoringVersion, policyVersion, overlayVersion|null, stage,
+{ schema, scoringVersion, policyVersion, overlayVersion|null, stage, laneTier|null,
   mechanical: {tier, score, signals:[{id, value, points, floor|null, source:"mechanical", evidence}]},
   agent: {tier|null, rationale|null, unknowns:[]},
-  prior: {tier|null, stage|null},
+  prior: {tier|null, stage|null, handoffTier|null},
+  override: tier|null,
   tier, floors:[{id, reason, paths:[]}],
   codeowners: {present, ownersTouched:[], floorsApplied:[]} ,
   inputs: {briefSha256, allowlistSha256|null, diffSha256|null, codeownersSha256|null,
            profileSha256, policySha256, overlaySha256|null, baseCommit, head|null},
-  escalated: bool, escalatedFrom: tier|null }
+  escalation: {required: bool, toTier: tier|null},
+  escalated: bool, escalatedFrom: tier|null, handoffRunId|null }
 ```
 
 Rules: `tier = max(mechanical, agent, prior, override)`; any missing or unparsable required
@@ -141,8 +148,9 @@ Seed the Goodword protected areas from today's `hot_paths` list.
 ### Ledger pointer
 
 Extend `setup/trace-digest.py` to include a `risk` block when `risk-trajectory.jsonl` exists:
-`{intake, plan, impl, final, escalatedAt|null, escalationRunId|null, reviewSeverities{P0..P3},
-fixerRounds, exitGate, mergeGate|null, delivery{mode, autoMerge, prUrl|null}}`. Absent → null,
+`{intake, plan, impl, final, escalatedAt|null, escalationRunId|null, floors[],
+reviewSeverities{P0..P3}, fixerRounds, exitGate|null, mergeGate|null,
+delivery{mode, autoMerge, prUrl|null}}`. Absent → null,
 never inferred. `setup/skill-score.py ingest` already writes the digest pointer into
 `library/<repo>/raw/index.jsonl`; no new writer. Bump `SCHEMA_DIGEST` consumers' tests
 (`setup/tests/test_trace_digest.py` if present, else add).
