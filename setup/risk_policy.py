@@ -508,17 +508,33 @@ _HUMP_RX = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 _NAME_SEP_RX = re.compile(r"[/._@-]")
 
 
-def _hump_runs(path: str) -> set:
-    """Lower-cased joins of every contiguous run of two or more hump parts
-    inside one separator-delimited name. OAuth2Client splits into O, Auth2,
-    Client, giving "oauth2", "oauth2client" and "auth2client". Runs never
-    cross a "/", ".", "_", "@" or "-"; a name with no hump yields nothing."""
+def _joinable(part: str) -> bool:
+    """A hump part that may glue to its neighbour: one letter, all caps, or
+    ending in a digit (the O, JWT and Auth2 of OAuth2Client, JWTAuth)."""
+    return len(part) == 1 or part.isupper() or part[-1].isdigit()
+
+
+def _hump_runs(path: str, max_len: int) -> set:
+    """Lower-cased joins of contiguous runs of two or more hump parts inside
+    one separator-delimited name. OAuth2Client splits into O, Auth2, Client,
+    giving "oauth2" and "oauth2client". Two adjacent parts join only when at
+    least one of them is a single letter, an all-caps acronym or ends in a
+    digit, so two full words (Check+Out, In+Voice, Log+In) never join. Runs
+    never cross a "/", ".", "_", "@" or "-", a name with no hump yields
+    nothing, and a run stops growing past max_len (the longest token), which
+    keeps a long camelCase name linear."""
     runs = set()
     for name in _NAME_SEP_RX.split(path):
         parts = [p for p in _HUMP_RX.split(name) if p]
-        for i in range(len(parts)):
-            for j in range(i + 2, len(parts) + 1):
-                runs.add("".join(parts[i:j]).lower())
+        for i in range(len(parts) - 1):
+            acc = parts[i]
+            for j in range(i + 1, len(parts)):
+                if not (_joinable(parts[j - 1]) or _joinable(parts[j])):
+                    break
+                acc += parts[j]
+                if len(acc) > max_len:
+                    break
+                runs.add(acc.lower())
     return runs
 
 
@@ -531,13 +547,15 @@ def _sensitive_match(tokens: dict, path: str) -> Optional[tuple]:
     - the same against a "humped" copy where each camelCase or PascalCase
       hump becomes an underscore, so AuthGuard.ts and authService.ts match;
     - as the joined run of adjacent hump parts inside one name, so
-      OAuth2Client.ts (humped to O_Auth2_Client) still matches "oauth2".
+      OAuth2Client.ts (humped to O_Auth2_Client) still matches "oauth2";
+      only a single-letter, all-caps or digit-ending part glues to its
+      neighbour, so isCheckOutOfStock.ts does not match "checkout".
     A name with no hump is one opaque part: authservice.ts and
     oauth2client.ts do not match, by design, so author/ and Authorization.ts
     stay clear. Policy order decides: the first domain, then its first
     word, that matches wins."""
     humped = _HUMP_RX.sub("_", path)
-    runs = _hump_runs(path)
+    runs = _hump_runs(path, max((len(w) for ws in tokens.values() for w in ws), default=0))
     for domain, words in tokens.items():
         for word in words:
             rx = _TOKEN_RX_CACHE.get(word)
@@ -552,8 +570,10 @@ def sensitive_domain(tokens: dict, path: str) -> Optional[str]:
     """The first domain whose token appears as a whole path segment or as a
     dot/dash/underscore/@-separated part of a segment, case-insensitively.
     A camelCase or PascalCase hump counts as a separator too, and adjacent
-    hump parts of one name may join to form the token (OAuth2Client.ts
-    matches "oauth2"); an all-lower-case run like authservice.ts does not."""
+    hump parts of one name may join across a single-letter, acronym or
+    digit-ending part to form the token (OAuth2Client.ts matches "oauth2");
+    two full words (BuiltInVoice.ts) and an all-lower-case name like
+    authservice.ts do not."""
     match = _sensitive_match(tokens, path)
     return match[0] if match else None
 

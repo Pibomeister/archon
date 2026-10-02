@@ -402,6 +402,22 @@ class PathRules(unittest.TestCase):
         for path in ("src/author/x.ts", "src/authservice.ts", "src/oauth2client.ts", "src/Authorization.ts"):
             self.assertIsNone(rp.sensitive_domain(tokens, path), path)
 
+    def test_hump_runs_join_only_across_a_letter_acronym_or_digit_part(self):
+        tokens = rp.load_defaults()["sensitiveDomains"]["tokens"]
+        self.assertEqual(rp.sensitive_domain(tokens, "src/OAuth2Client.ts"), "auth")
+        self.assertEqual(rp.sensitive_domain(tokens, "src/OAuthClient.ts"), "auth")
+        # two full words never join: Check+Out, In+Voice, Log+In stay apart
+        for path in ("src/isCheckOutOfStock.ts", "src/BuiltInVoice.ts", "src/BackLogIn.ts"):
+            self.assertIsNone(rp.sensitive_domain(tokens, path), path)
+
+    def test_long_camel_case_name_matches_in_linear_time(self):
+        import time
+        tokens = rp.load_defaults()["sensitiveDomains"]["tokens"]
+        name = "Ab" * 1500  # 3000 chars, 1500 hump parts
+        started = time.perf_counter()
+        self.assertIsNone(rp.sensitive_domain(tokens, f"src/{name}.ts"))
+        self.assertLess(time.perf_counter() - started, 0.5)
+
 
 class Floors(unittest.TestCase):
     def setUp(self):
