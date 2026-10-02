@@ -69,6 +69,9 @@ BARE_NAME_RE = re.compile(r"(?<![\w/\\])[A-Za-z0-9_.-]+")
 KIND_LINE_RE = re.compile(r"^(?P<lead>(?:[>\-*+|#_`\s]|\d+[.)]|</?b>)*)Kind(?P<close>(?:[*_`]|</?b>)*)"
                           r"(?:\s*(?P<sep>[:=|]))?(?P<value>.*)$")
 KIND_BOLD_CLOSE = ("**", "__", "</b>")
+QUOTE_RE = re.compile(r"^(?: {0,3}>)*")
+FENCE_RE = re.compile(r"^ {0,3}(?P<run>`{3,}|~{3,})(?P<info>.*)$")
+TABLE_DELIMITER_RE = re.compile(r"^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$")
 
 
 class Fail(Exception):
@@ -163,8 +166,13 @@ def brief_kind(text):
     """(task class, evidence line) from the brief's Kind line.
 
     A line is a Kind line only when all of these hold:
-    - it is outside any fenced code block (``` or ~~~) and is not indented
-      code (fewer than 4 leading spaces, no leading tab);
+    - it is outside any fenced code block and is not indented code (fewer
+      than 4 leading spaces, no leading tab). Fences follow CommonMark: a
+      run of three or more backticks or tildes, indented at most 3 spaces
+      behind any blockquote ">" markers, opens a block that closes only on
+      a line at the same blockquote depth made of the same character, at
+      least as many of them, and nothing else, or where its blockquote
+      ends; a shorter or different fence inside is content;
     - after its leading markdown markers (blockquote ">", bullets "-", "*",
       "+", a numbered "1.", a table "|", heading "#"s, bold or italic "**",
       "__", "*", "_", "<b>", backticks) the first word is exactly "Kind",
@@ -172,7 +180,10 @@ def brief_kind(text):
       "Task Kind:", "Kind (class):" and a YAML or TypeScript "kind:" are not
       Kind lines;
     - the key is followed by ":", "=" or "|", or closes a bold key
-      ("**Kind** migration"); "Kind - migration" is not a Kind line.
+      ("**Kind** migration"); "Kind - migration" is not a Kind line;
+    - when the separator is a table "|", the row has exactly two cells
+      ("| Kind | migration |") and is not a table header, that is, the next
+      non-blank line is not a delimiter row ("|---|---|").
     The value is the rest of the line, normalised by kind_value. A "## Kind"
     heading with nothing after the key takes its value from the next
     non-blank line.
@@ -185,12 +196,18 @@ def brief_kind(text):
     fence = None
     for i, line in enumerate(lines):
         stripped = line.strip()
+        quote = QUOTE_RE.match(line)
+        depth = quote.group().count(">")
+        fm = FENCE_RE.match(line[quote.end():])
+        if fence and depth < fence[2]:
+            fence = None
         if fence:
-            if stripped.startswith(fence):
+            run = fm.group("run") if fm and not fm.group("info").strip() else ""
+            if depth == fence[2] and run[:1] == fence[0] and len(run) >= fence[1]:
                 fence = None
             continue
-        if stripped.startswith(("```", "~~~")):
-            fence = stripped[:3]
+        if fm and not (fm.group("run")[0] == "`" and "`" in fm.group("info")):
+            fence = fm.group("run")[0], len(fm.group("run")), depth
             continue
         if line.startswith(("\t", "    ")):
             continue
@@ -198,10 +215,16 @@ def brief_kind(text):
         if not m:
             continue
         value = m.group("value")
-        if m.group("sep") or (m.group("close").endswith(KIND_BOLD_CLOSE) and value[:1].isspace() and value.strip()):
+        following = next((nxt for nxt in lines[i + 1:] if nxt.strip()), "")
+        if m.group("sep") == "|":
+            header = "|" in following and TABLE_DELIMITER_RE.match(QUOTE_RE.sub("", following, 1))
+            if header or "|" in value.strip().rstrip("|"):
+                continue
+            kind = kind_value(value)
+        elif m.group("sep") or (m.group("close").endswith(KIND_BOLD_CLOSE) and value[:1].isspace() and value.strip()):
             kind = kind_value(value)
         elif "#" in m.group("lead") and not value.strip():
-            kind = kind_value(next((nxt for nxt in lines[i + 1:] if nxt.strip()), ""))
+            kind = kind_value(following)
         else:
             continue
         if kind not in rp.TASK_CLASSES:

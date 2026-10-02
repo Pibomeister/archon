@@ -190,13 +190,56 @@ class Intake(Base):
 
     def test_kind_line_with_an_unknown_value_fails_instead_of_defaulting(self):
         for line in ("Kind: bug fix", "Kind: nonsense", "**Kind:** new feature", "- Kind: sprint", "Kind:",
-                     "| Kind | Value |", "## Kind\n\nmostly a refactor", "## Kind"):
+                     "Kind | nonsense", "## Kind\n\nmostly a refactor", "## Kind"):
             self.write_spec(f"# T\n\n{line}\n")
             if (self.ad / "risk-intake.json").exists():
                 os.remove(self.ad / "risk-intake.json")
             out = self.run_cli("intake")
             self.assert_fail(out, "task class")
             self.assertIn(line.splitlines()[0], out.stdout, line)
+
+    def assert_feature_default(self, brief):
+        self.write_spec(brief)
+        out = self.run_cli("intake")
+        self.assertEqual(out.returncode, 0, (brief, out.stdout, out.stderr))
+        sig = self.task_class()
+        self.assertEqual((sig["value"], sig["evidence"]), ("feature", "no Kind line; default feature"), brief)
+
+    def test_nested_and_quoted_fences_hide_their_kind_lines(self):
+        for brief in ("# T\n\n````md\n```\nKind: docs\n```\n````\n",
+                      "# T\n\n> ````md\n> ```\n> Kind: docs\n> ```\n> ````\n",
+                      "# T\n\n> ```yaml\n> Kind: docs\n> ```\n",
+                      "# T\n\n```\n```js\nKind: docs\n```\n",
+                      "# T\n\n~~~~\n~~~\nKind: docs\n```\nKind: docs\n~~~~\n",
+                      "# T\n\n   ```\nKind: docs\n   ```\n"):
+            self.assert_feature_default(brief)
+
+    def test_kind_line_after_a_closed_fence_is_read(self):
+        for brief in ("# T\n\n````md\n```\nKind: docs\n```\n````\n\nKind: migration\n",
+                      "# T\n\n> ```\n> Kind: docs\n\nKind: migration\n",
+                      "# T\n\n~~~~\nKind: docs\n~~~~~\n\n> Kind: migration\n"):
+            self.write_spec(brief)
+            out = self.run_cli("intake")
+            self.assertEqual(out.returncode, 0, (brief, out.stdout, out.stderr))
+            self.assertEqual(self.task_class()["value"], "migration", brief)
+
+    def test_table_header_rows_are_not_kind_lines(self):
+        for brief in ("# T\n\n| Kind | Value |\n|---|---|\n| a | b |\n",
+                      "# T\n\n| Kind | Value |\n\n| :--- | ---: |\n",
+                      "# T\n\n> | Kind | Value |\n> |---|---|\n",
+                      "# T\n\nKind | Value\n---|---\n",
+                      "# T\n\n| Kind | File | Notes |\n|---|---|---|\n| docs | a.md | x |\n",
+                      "# T\n\n| Kind | File | Notes |\n"):
+            self.assert_feature_default(brief)
+
+    def test_two_cell_table_row_is_a_kind_line(self):
+        for brief in ("# T\n\n| Kind | migration |\n",
+                      "# T\n\n| Field | Value |\n|---|---|\n| Kind | migration |\n| Owner | me |\n",
+                      "# T\n\nKind | migration\n\n---\n"):
+            self.write_spec(brief)
+            out = self.run_cli("intake")
+            self.assertEqual(out.returncode, 0, (brief, out.stdout, out.stderr))
+            self.assertEqual(self.task_class()["value"], "migration", brief)
 
     def test_conflicting_kind_lines_fail_and_agreeing_ones_do_not(self):
         self.write_spec("# T\n\nKind: docs\n\nSome prose.\n\n- Kind: migration\n")
