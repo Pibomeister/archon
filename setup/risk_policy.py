@@ -8,15 +8,18 @@ Python 3.9 compatible: workflow nodes run the system python3.
 
 Precedence: setup/risk-policy.json defaults <- profile["risk"] <- overlay file.
 Later layers ADD protected areas, extra sensitive paths, owner floors and may
-move thresholds. assert_invariants rejects any merged document that lowers a
+move thresholds. A profile may set only what the profile schemas allow
+(PROFILE_LAYER_KEYS): sensitiveDomains.tokens, factoryControl, a floor on
+publicContract or sideEffects, and autoMerge are reserved for the defaults
+and overlays. assert_invariants rejects any merged document that lowers a
 sensitiveDomains or factoryControl floor below the defaults, drops a default
 sensitive token or factory path, or carries autoMerge: true. The same check
 runs at load, at proposal and at admit (Slice 5), so no layer can sneak a
 weaker floor in.
 
 Only the sensitiveDomains and factoryControl floors are invariant:
-publicContract, sideEffects, codeowners and protectedAreas floors may be set
-lower by a layer on purpose, since those sections encode judgment calls
+publicContract and sideEffects floors may be set lower by an overlay, and
+codeowners and protectedAreas floors by any layer, on purpose, since those sections encode judgment calls
 rather than hard floors. Overlay-version monotonicity (rejecting an overlay
 applied out of order) is enforced by the Slice 5 admit step, not here at
 load time.
@@ -70,6 +73,15 @@ _SECTION_KEYS = {
     "sideEffects": ("floor", "paths"),
     "codeowners": ("ownerFloors", "defaultOwnedFloor"),
 }
+PROFILE_LAYER_KEYS = ("thresholds", "points", "protectedAreas", "sensitiveDomains", "publicContract",
+                      "sideEffects", "codeowners")
+_PROFILE_SECTION_KEYS = {
+    "sensitiveDomains": ("extraPaths",),
+    "publicContract": ("paths",),
+    "sideEffects": ("paths",),
+    "codeowners": ("ownerFloors", "defaultOwnedFloor"),
+}
+_RESERVED = "is reserved for the default policy and calibration overlays"
 
 
 class RiskPolicyError(ValueError):
@@ -258,16 +270,22 @@ def _check_points(points: Any, label: str) -> dict:
     return points
 
 
-def _check_layer(layer: Any, label: str) -> dict:
+def _check_layer(layer: Any, label: str, layer_keys: tuple = LAYER_KEYS,
+                 section_keys: dict = _SECTION_KEYS) -> dict:
     """A profile.risk block or an overlay: every key optional, each typed.
 
-    Returns a deep copy so the merged document never aliases the caller's
-    profile or overlay dicts."""
+    layer_keys and section_keys name what this layer may set: an overlay
+    takes the full LAYER_KEYS, a profile only PROFILE_LAYER_KEYS (the key set
+    the profile schemas allow). A key that exists but is outside the layer's
+    set is refused as reserved. Returns a deep copy so the merged document
+    never aliases the caller's profile or overlay dicts."""
     if not isinstance(layer, dict):
         raise RiskPolicyError(f"{label} must be an object")
     for k in layer:
         if k not in LAYER_KEYS:
             raise RiskPolicyError(f"{label}: unknown key {k}")
+        if k not in layer_keys:
+            raise RiskPolicyError(f"{label}.{k} {_RESERVED}")
     if "thresholds" in layer:
         th = layer["thresholds"]
         if not isinstance(th, dict):
@@ -287,6 +305,9 @@ def _check_layer(layer: Any, label: str) -> dict:
         for k in layer[key]:
             if k not in _SECTION_KEYS[key]:
                 raise RiskPolicyError(f"{label}.{key}: unknown key {k}")
+        for k in layer[key]:
+            if k not in section_keys[key]:
+                raise RiskPolicyError(f"{label}.{key}.{k} {_RESERVED}")
     for key in ("sensitiveDomains", "factoryControl", "publicContract", "sideEffects"):
         section = layer.get(key) or {}
         if "floor" in section:
@@ -431,7 +452,8 @@ def load_policy(policy_path: Optional[str] = None, profile: Optional[dict] = Non
         if not isinstance(profile, dict):
             raise RiskPolicyError("profile must be an object")
         if "risk" in profile:
-            _merge_layer(merged, _check_layer(profile["risk"], "profile.risk"))
+            _merge_layer(merged, _check_layer(profile["risk"], "profile.risk",
+                                              PROFILE_LAYER_KEYS, _PROFILE_SECTION_KEYS))
     if overlay_path:
         overlay = load_json(overlay_path, "policy overlay")
         if not isinstance(overlay, dict) or overlay.get("schema") != SCHEMA_OVERLAY:

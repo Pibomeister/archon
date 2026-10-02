@@ -35,8 +35,10 @@
   "reversibility": {
     "lockfiles": {"floor": "yellow", "paths": ["package-lock.json", "pnpm-lock.yaml", "bun.lock", "bun.lockb",
                                                 "yarn.lock", "uv.lock", "poetry.lock", "Cargo.lock", "go.sum",
-                                                "**/package-lock.json", "**/pnpm-lock.yaml", "**/bun.lock", "**/yarn.lock"]},
-    "manifests": {"floor": "yellow", "paths": ["package.json", "pyproject.toml", "Cargo.toml", "go.mod", "**/package.json"]},
+                                                "**/package-lock.json", "**/pnpm-lock.yaml", "**/bun.lock", "**/bun.lockb",
+                                                "**/yarn.lock", "**/uv.lock", "**/poetry.lock", "**/Cargo.lock", "**/go.sum"]},
+    "manifests": {"floor": "yellow", "paths": ["package.json", "pyproject.toml", "Cargo.toml", "go.mod", "**/package.json",
+                                                "**/pyproject.toml", "**/Cargo.toml", "**/go.mod"]},
     "migrations": {"floor": "red", "paths": ["migrations/", "**/migrations/**", "**/migrate/**"]},
     "dataMutation": {"floor": "red", "paths": ["**/backfill*", "**/backfill*/**", "**/scripts/data/**", "**/seeds/**"]}
   },

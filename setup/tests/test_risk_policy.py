@@ -23,6 +23,15 @@ except ImportError:
     jsonschema = None
 
 
+def load_with_overlay(case, body, profile=None):
+    tmp = Path(tempfile.mkdtemp())
+    case.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+    overlay = tmp / "overlay.json"
+    overlay.write_text(json.dumps(dict(body, schema="archon.risk-policy-overlay.v1", overlayVersion=1)),
+                       encoding="utf-8")
+    return rp.load_policy(profile=profile, overlay_path=str(overlay))
+
+
 class TierMath(unittest.TestCase):
     def test_tier_max_ignores_none_and_orders_tiers(self):
         self.assertEqual(rp.tier_max("green", None, "yellow"), "yellow")
@@ -142,8 +151,9 @@ class Merge(unittest.TestCase):
     def test_layer_floor_must_be_a_known_tier(self):
         for key in ("sensitiveDomains", "factoryControl", "publicContract", "sideEffects"):
             with self.assertRaises(rp.RiskPolicyError) as cm:
-                rp.load_policy(profile={"risk": {key: {"floor": "purple"}}})
+                load_with_overlay(self, {key: {"floor": "purple"}})
             self.assertIn(key, str(cm.exception))
+            self.assertIn("purple", str(cm.exception))
 
     def test_unknown_nested_key_in_section_is_rejected(self):
         cases = [
@@ -155,9 +165,53 @@ class Merge(unittest.TestCase):
         ]
         for risk, section in cases:
             with self.assertRaises(rp.RiskPolicyError) as cm:
-                rp.load_policy(profile={"risk": risk})
+                load_with_overlay(self, risk)
             self.assertIn(section, str(cm.exception))
             self.assertIn("bogus", str(cm.exception))
+            if section != "factoryControl":
+                risk[section].pop("floor", None)
+                with self.assertRaises(rp.RiskPolicyError) as cm:
+                    rp.load_policy(profile={"risk": risk})
+                self.assertIn("bogus", str(cm.exception))
+
+    def test_profile_cannot_set_keys_reserved_for_defaults_and_overlays(self):
+        cases = [
+            ({"publicContract": {"floor": "green"}}, "publicContract.floor"),
+            ({"sideEffects": {"floor": "green"}}, "sideEffects.floor"),
+            ({"sensitiveDomains": {"floor": "red"}}, "sensitiveDomains.floor"),
+            ({"sensitiveDomains": {"tokens": {"auth": ["authx"]}}}, "sensitiveDomains.tokens"),
+            ({"factoryControl": {"paths": ["ops/"]}}, "factoryControl"),
+            ({"factoryControl": {"floor": "red"}}, "factoryControl"),
+            ({"autoMerge": False}, "autoMerge"),
+            ({"autoMerge": True}, "autoMerge"),
+        ]
+        for risk, named in cases:
+            with self.assertRaises(rp.RiskPolicyError) as cm:
+                rp.load_policy(profile={"risk": risk})
+            self.assertIn(f"profile.risk.{named} is reserved", str(cm.exception))
+
+    def test_profile_may_set_every_key_the_profile_schema_allows(self):
+        merged = rp.load_policy(profile={"risk": {
+            "protectedAreas": [{"paths": ["libs/rds/"], "floor": "red", "reason": "schema"}],
+            "codeowners": {"ownerFloors": {"@org/platform": "red"}, "defaultOwnedFloor": "yellow"},
+            "sensitiveDomains": {"extraPaths": ["apps/api/src/consent/"]},
+            "publicContract": {"paths": ["api/schema.json"]},
+            "sideEffects": {"paths": ["apps/mailer/"]},
+            "thresholds": {"yellow": 25, "red": 55},
+            "points": {"filesOverMax": 20},
+        }})
+        self.assertEqual(sorted((f["id"], f["floor"]) for f in rp.path_floors(
+            merged, ["libs/rds/x.ts", "apps/api/src/consent/a.ts", "api/schema.json", "apps/mailer/send.ts"], None)),
+            [("protected:schema", "red"), ("public-contract", "yellow"), ("sensitive-domain:pii", "red"),
+             ("sensitive-domain:profile", "red"), ("side-effects", "yellow")])
+        self.assertEqual(merged["thresholds"], {"yellow": 25, "red": 55})
+        self.assertEqual(merged["points"]["filesOverMax"], 20)
+
+    def test_overlay_keeps_the_full_layer_key_set(self):
+        merged = load_with_overlay(self, {"publicContract": {"floor": "red"}, "sideEffects": {"floor": "red"},
+                                          "sensitiveDomains": {"floor": "red"}, "factoryControl": {"floor": "red"}})
+        self.assertEqual(merged["publicContract"]["floor"], "red")
+        self.assertEqual(merged["sideEffects"]["floor"], "red")
 
     def test_unknown_key_in_protected_area_is_rejected(self):
         with self.assertRaises(rp.RiskPolicyError) as cm:
@@ -198,15 +252,15 @@ class Merge(unittest.TestCase):
 class Invariants(unittest.TestCase):
     def test_cannot_lower_sensitive_domain_floor(self):
         with self.assertRaises(rp.RiskPolicyError) as cm:
-            rp.load_policy(profile={"risk": {"sensitiveDomains": {"floor": "yellow"}}})
-        self.assertIn("sensitiveDomains", str(cm.exception))
+            load_with_overlay(self, {"sensitiveDomains": {"floor": "yellow"}})
+        self.assertIn("sensitiveDomains floor cannot be lowered", str(cm.exception))
 
     def test_layers_can_only_add_tokens_and_factory_paths(self):
-        # merge is additive: a profile cannot replace the auth token list, only extend it
-        merged = rp.load_policy(profile={"risk": {"sensitiveDomains": {"tokens": {"auth": ["authz"]}},
-                                                  "factoryControl": {"paths": ["ops/"]}}})
+        # merge is additive: an overlay cannot replace the auth token list, only extend it
+        merged = load_with_overlay(self, {"sensitiveDomains": {"tokens": {"auth": ["authx"]}},
+                                          "factoryControl": {"paths": ["ops/"]}})
         self.assertIn("auth", merged["sensitiveDomains"]["tokens"]["auth"])
-        self.assertIn("authz", merged["sensitiveDomains"]["tokens"]["auth"])
+        self.assertIn("authx", merged["sensitiveDomains"]["tokens"]["auth"])
         self.assertIn("workflows/", merged["factoryControl"]["paths"])
         self.assertIn("ops/", merged["factoryControl"]["paths"])
 
@@ -226,22 +280,23 @@ class Invariants(unittest.TestCase):
         self.assertIn("factoryControl.paths", str(cm.exception))
 
     def test_cannot_lower_factory_control_floor(self):
-        with self.assertRaises(rp.RiskPolicyError):
-            rp.load_policy(profile={"risk": {"factoryControl": {"floor": "green"}}})
+        with self.assertRaises(rp.RiskPolicyError) as cm:
+            load_with_overlay(self, {"factoryControl": {"floor": "green"}})
+        self.assertIn("factoryControl floor cannot be lowered", str(cm.exception))
 
     def test_cannot_enable_auto_merge_from_policy(self):
         with self.assertRaises(rp.RiskPolicyError) as cm:
-            rp.load_policy(profile={"risk": {"autoMerge": True}})
+            load_with_overlay(self, {"autoMerge": True})
         self.assertIn("auto-merge", str(cm.exception))
 
     def test_autoMerge_rejects_any_non_false_value(self):
         for bad in (1, "true", "True"):
             with self.assertRaises(rp.RiskPolicyError) as cm:
-                rp.load_policy(profile={"risk": {"autoMerge": bad}})
+                load_with_overlay(self, {"autoMerge": bad})
             self.assertIn("auto-merge", str(cm.exception))
 
     def test_autoMerge_false_is_accepted(self):
-        merged = rp.load_policy(profile={"risk": {"autoMerge": False}})
+        merged = load_with_overlay(self, {"autoMerge": False})
         self.assertIn(merged.get("autoMerge"), (None, False))
 
     def test_assert_invariants_is_callable_on_a_merged_document(self):
@@ -440,6 +495,11 @@ class Floors(unittest.TestCase):
         self.assertEqual(self.ids(["libs/data-access/src/lib/rds/migrations/0007.ts"]), [("migration", "red")])
         self.assertEqual(self.ids(["bun.lock"]), [("lockfile", "yellow")])
         self.assertEqual(self.ids(["apps/web/package.json"]), [("manifest", "yellow")])
+        for nested in ("crates/y/Cargo.lock", "services/x/uv.lock", "services/x/poetry.lock",
+                       "tools/gen/go.sum", "apps/web/bun.lockb"):
+            self.assertEqual(self.ids([nested]), [("lockfile", "yellow")], nested)
+        for nested in ("services/x/pyproject.toml", "crates/y/Cargo.toml", "tools/gen/go.mod"):
+            self.assertEqual(self.ids([nested]), [("manifest", "yellow")], nested)
         self.assertEqual(self.ids(["app/services/api-client.d.ts"]), [("public-contract", "yellow")])
 
     def test_protected_area_from_profile_with_repo_prefix(self):

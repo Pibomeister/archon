@@ -408,6 +408,15 @@ class PortableProjectTest(unittest.TestCase):
         self.profile["risk"] = {"protectedAreas": [{"paths": ["x/"], "floor": "red", "reason": "test"}]}
         portable.validate_profile(self.profile)
 
+    def test_profile_risk_key_the_schema_reserves_is_rejected(self):
+        for risk in ({"publicContract": {"floor": "green"}}, {"factoryControl": {"paths": ["ops/"]}},
+                     {"sensitiveDomains": {"tokens": {"auth": ["authx"]}}}, {"autoMerge": False}):
+            self.profile["risk"] = risk
+            with self.assertRaisesRegex(ValueError, "reserved"):
+                portable.validate_profile(self.profile)
+        self.profile["risk"] = {"publicContract": {"paths": ["api/schema.json"]}}
+        portable.validate_profile(self.profile)
+
     def test_profile_with_non_object_risk_is_rejected(self):
         self.profile["risk"] = "nope"
         with self.assertRaises(ValueError):

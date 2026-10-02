@@ -147,6 +147,39 @@ class Intake(Base):
         sig = [s for s in self.doc("intake")["mechanical"]["signals"] if s["id"] == "task-class"][0]
         self.assertEqual(sig["value"], "refactor")
 
+    def task_class(self):
+        return [s for s in self.doc("intake")["mechanical"]["signals"] if s["id"] == "task-class"][0]
+
+    def test_kind_line_is_read_leniently(self):
+        cases = [("Kind: migration.", "migration"), ("**Kind:** migration", "migration"),
+                 ("- Kind: refactor", "refactor"), ("* Kind: refactor", "refactor"),
+                 ("kind: migration", "migration"), ("Kind: `migration`", "migration"),
+                 ("__Kind__: Migration", "migration"), ("**Kind**: migration:", "migration"),
+                 ("Kind:migration", "migration"), ("## Kind: refactor", "refactor"),
+                 ("## Kind refactor", "refactor"), ("## Kind\n\n`refactor`.", "refactor")]
+        for line, kind in cases:
+            self.write_spec(f"# T\n\n{line}\n\nJust prose.\n")
+            out = self.run_cli("intake")
+            self.assertEqual(out.returncode, 0, (line, out.stdout, out.stderr))
+            sig = self.task_class()
+            self.assertEqual((sig["value"], sig["points"]), (kind, POLICY["points"]["taskClass"][kind]), line)
+            self.assertEqual(sig["evidence"], line.splitlines()[0])
+
+    def test_kind_key_with_an_unknown_value_fails_instead_of_defaulting(self):
+        for line in ("Kind: bug fix", "Kind: nonsense", "**Kind:** new feature", "- kind: sprint", "Kind:",
+                     "## Kind\n\nmostly a refactor", "## Kind"):
+            self.write_spec(f"# T\n\n{line}\n")
+            if (self.ad / "risk-intake.json").exists():
+                os.remove(self.ad / "risk-intake.json")
+            out = self.run_cli("intake")
+            self.assert_fail(out, "task class")
+            self.assertIn(line.splitlines()[0], out.stdout + out.stderr, line)
+
+    def test_prose_mentioning_kind_is_not_a_kind_key(self):
+        self.write_spec("# T\n\nThis is a kind of cleanup.\nKind regards, the team.\n\n## Kinds of users\n\nadmins\n")
+        self.assert_tier(self.run_cli("intake"), "green", "intake")
+        self.assertEqual(self.task_class()["value"], "feature")
+
     def test_brief_paths_ignore_urls_and_trailing_punctuation(self):
         self.write_spec("# T\n\nKind: chore\n\nSee https://example.com/auth/docs. Edit libs/util/str.ts, then apps/api/src/billing/ (all of it).\n")
         self.assert_tier(self.run_cli("intake"), "red", "intake")
