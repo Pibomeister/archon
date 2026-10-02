@@ -393,6 +393,15 @@ class PathRules(unittest.TestCase):
         self.assertEqual(rp.sensitive_domain(tokens, "src/JWTAuthGuard.ts"), "auth")
         self.assertIsNone(rp.sensitive_domain(tokens, "src/HTMLParser.ts"))
 
+    def test_sensitive_tokens_match_oauth2_authz_authn_and_joined_hump_runs(self):
+        tokens = rp.load_defaults()["sensitiveDomains"]["tokens"]
+        for path in ("src/OAuth2Client.ts", "src/OAuthClient.ts", "src/oauth2/callback.ts",
+                     "src/authz/x.ts", "src/authn/x.ts", "src/AuthZ.ts"):
+            self.assertEqual(rp.sensitive_domain(tokens, path), "auth", path)
+        # lower-case concatenations carry no hump, so they stay one opaque name
+        for path in ("src/author/x.ts", "src/authservice.ts", "src/oauth2client.ts", "src/Authorization.ts"):
+            self.assertIsNone(rp.sensitive_domain(tokens, path), path)
+
 
 class Floors(unittest.TestCase):
     def setUp(self):

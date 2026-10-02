@@ -19,7 +19,7 @@
   "sensitiveDomains": {
     "floor": "red",
     "tokens": {
-      "auth": ["auth", "oauth", "session", "sessions", "token", "tokens", "jwt", "sso", "login", "password", "passwords"],
+      "auth": ["auth", "oauth", "oauth2", "authz", "authn", "session", "sessions", "token", "tokens", "jwt", "sso", "login", "password", "passwords"],
       "crypto": ["crypto", "kms", "cipher", "encrypt", "encryption", "signing"],
       "secrets": ["secret", "secrets", "credential", "credentials", "vault"],
       "payments": ["payment", "payments", "billing", "stripe", "invoice", "invoices", "checkout"],

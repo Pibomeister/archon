@@ -763,6 +763,11 @@ class SpecFixtures(Base):
         last = self.assert_tier(self.run_cli("intake"), "red", "intake")
         self.assertTrue(last.endswith("floors=sensitive-domain:auth"), last)
 
+    def test_spec_touching_an_oauth2_client_is_red_with_the_named_floor(self):
+        self.write_spec("# OAuth2 client\n\nKind: feature\n\nChange src/OAuth2Client.ts.\n")
+        last = self.assert_tier(self.run_cli("intake"), "red", "intake")
+        self.assertTrue(last.endswith("floors=sensitive-domain:auth"), last)
+
     def test_same_with_codeowners_mapping_security_populates_owners_touched(self):
         self.commit_file("CODEOWNERS", "/apps/api/src/auth/  @org/security\n")
         self.write_spec("# Session refresh\n\nKind: feature\n\nChange apps/api/src/auth/session.service.ts.\n")

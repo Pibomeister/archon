@@ -505,28 +505,55 @@ _TOKEN_RX_CACHE: dict = {}
 _HUMP_RX = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
 
+_NAME_SEP_RX = re.compile(r"[/._@-]")
+
+
+def _hump_runs(path: str) -> set:
+    """Lower-cased joins of every contiguous run of two or more hump parts
+    inside one separator-delimited name. OAuth2Client splits into O, Auth2,
+    Client, giving "oauth2", "oauth2client" and "auth2client". Runs never
+    cross a "/", ".", "_", "@" or "-"; a name with no hump yields nothing."""
+    runs = set()
+    for name in _NAME_SEP_RX.split(path):
+        parts = [p for p in _HUMP_RX.split(name) if p]
+        for i in range(len(parts)):
+            for j in range(i + 2, len(parts) + 1):
+                runs.add("".join(parts[i:j]).lower())
+    return runs
+
+
 def _sensitive_match(tokens: dict, path: str) -> Optional[tuple]:
     """(domain, word) for the first domain/word pair that matches, else None.
 
-    Checked against both the raw path and a "humped" copy where a
-    lowercase-or-digit to uppercase transition becomes an underscore, so
-    camelCase and PascalCase names (AuthGuard.ts, authService.ts) match the
-    same as an explicit separator would."""
+    A word matches in three ways, all case-insensitive:
+    - as a whole part of the raw path, bounded by "/", ".", "_", "@", "-" or
+      the ends;
+    - the same against a "humped" copy where each camelCase or PascalCase
+      hump becomes an underscore, so AuthGuard.ts and authService.ts match;
+    - as the joined run of adjacent hump parts inside one name, so
+      OAuth2Client.ts (humped to O_Auth2_Client) still matches "oauth2".
+    A name with no hump is one opaque part: authservice.ts and
+    oauth2client.ts do not match, by design, so author/ and Authorization.ts
+    stay clear. Policy order decides: the first domain, then its first
+    word, that matches wins."""
     humped = _HUMP_RX.sub("_", path)
+    runs = _hump_runs(path)
     for domain, words in tokens.items():
         for word in words:
             rx = _TOKEN_RX_CACHE.get(word)
             if rx is None:
                 rx = _TOKEN_RX_CACHE[word] = re.compile(r"(?:^|[/._@-])" + re.escape(word) + r"(?:$|[/._@-])", re.I)
-            if rx.search(path) or rx.search(humped):
+            if rx.search(path) or rx.search(humped) or word.lower() in runs:
                 return domain, word
     return None
 
 
 def sensitive_domain(tokens: dict, path: str) -> Optional[str]:
     """The first domain whose token appears as a whole path segment or as a
-    dot/dash/underscore/@-separated part of a segment, case-insensitively;
-    a camelCase or PascalCase hump counts as a separator too."""
+    dot/dash/underscore/@-separated part of a segment, case-insensitively.
+    A camelCase or PascalCase hump counts as a separator too, and adjacent
+    hump parts of one name may join to form the token (OAuth2Client.ts
+    matches "oauth2"); an all-lower-case run like authservice.ts does not."""
     match = _sensitive_match(tokens, path)
     return match[0] if match else None
 
