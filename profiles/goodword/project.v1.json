@@ -70,5 +70,18 @@
       {"id": "aws", "fail": false},
       {"id": "agent-browser", "fail": true}
     ]
+  },
+  "risk": {
+    "protectedAreas": [
+      {"paths": ["api/libs/data-access/src/lib/rds/migrations/", "api/libs/data-access/src/lib/rds/entities/",
+                 "api/libs/data-access/src/lib/rds/baseline/"], "floor": "red", "reason": "schema"},
+      {"paths": ["api/apps/api/src/auth/", "api/apps/api/src/oauth/"], "floor": "red", "reason": "auth"},
+      {"paths": ["api/apps/api/src/billing/"], "floor": "red", "reason": "billing"},
+      {"paths": ["api/apps/api/src/global-search/"], "floor": "red", "reason": "global-search"},
+      {"paths": ["api/infra/"], "floor": "red", "reason": "infra"},
+      {"paths": ["api/apps/integration-service/", "api/apps/bridge-service/"], "floor": "red", "reason": "integration"},
+      {"paths": ["web-app/app/services/api-client.d.ts"], "floor": "yellow", "reason": "generated-api-client"}
+    ],
+    "codeowners": {"defaultOwnedFloor": "yellow", "ownerFloors": {}}
   }
 }

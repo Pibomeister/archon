@@ -2,6 +2,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -402,6 +403,54 @@ class PortableProjectTest(unittest.TestCase):
         self.assertIn("knowledge/README.md", manifest["files"])
         self.assertFalse(any("codex-home" in name for name in manifest["files"]))
         self.assertFalse((self.artifacts / "approval-evidence/codex-home").exists())
+
+    def test_profile_with_risk_block_validates(self):
+        self.profile["risk"] = {"protectedAreas": [{"paths": ["x/"], "floor": "red", "reason": "test"}]}
+        portable.validate_profile(self.profile)
+
+    def test_profile_risk_key_the_schema_reserves_is_rejected(self):
+        for risk in ({"publicContract": {"floor": "green"}}, {"factoryControl": {"paths": ["ops/"]}},
+                     {"sensitiveDomains": {"tokens": {"auth": ["authx"]}}}, {"autoMerge": False}):
+            self.profile["risk"] = risk
+            with self.assertRaisesRegex(ValueError, "reserved"):
+                portable.validate_profile(self.profile)
+        self.profile["risk"] = {"publicContract": {"paths": ["api/schema.json"]}}
+        portable.validate_profile(self.profile)
+
+    def test_profile_with_non_object_risk_is_rejected(self):
+        self.profile["risk"] = "nope"
+        with self.assertRaises(ValueError):
+            portable.validate_profile(self.profile)
+
+    def test_profile_risk_block_passing_shape_check_alone_is_still_rejected_by_invariants(self):
+        # A profile layer that bumps only the yellow threshold passes
+        # risk_policy._check_layer in isolation (each key is independently
+        # well-typed), but merging it onto the shipped red=60 default yields
+        # yellow > red, which only risk_policy.assert_invariants catches.
+        # validate_profile must run the full load_policy(), not _check_layer
+        # alone, so this must be rejected here too, not only inside
+        # risk-score.py at run time.
+        layer = {"thresholds": {"yellow": 90}}
+        portable.risk_policy._check_layer(layer, "profile.risk")  # shape check alone accepts it
+        self.profile["risk"] = layer
+        with self.assertRaisesRegex(ValueError, "yellow threshold above red"):
+            portable.validate_profile(self.profile)
+
+    def test_portable_risk_policy_loads_from_a_packaged_copy(self):
+        # The installed layout ships real file copies (package.sh's template()
+        # reads and rewrites file content; it never ships a symlink). Import
+        # risk_policy from a temp copy of both files under a distinct module
+        # name so this does not reuse whatever "risk_policy" module another
+        # test module already cached in sys.modules.
+        packaged = Path(self.temp.name) / "packaged-scripts"
+        packaged.mkdir()
+        shutil.copy(SCRIPT.parent / "risk_policy.py", packaged / "risk_policy.py")
+        shutil.copy(SCRIPT.parent / "risk-policy.json", packaged / "risk-policy.json")
+        spec = importlib.util.spec_from_file_location("packaged_risk_policy", packaged / "risk_policy.py")
+        packaged_rp = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(packaged_rp)
+        merged = packaged_rp.load_policy()
+        self.assertEqual(merged["schema"], packaged_rp.SCHEMA_POLICY)
 
     def test_planner_cannot_select_extra_evidence_by_rewriting_local_context_and_seal(self):
         self.capture()

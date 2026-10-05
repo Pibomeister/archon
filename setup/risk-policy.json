@@ -1,0 +1,50 @@
+{
+  "schema": "archon.risk-policy.v1",
+  "version": 1,
+  "scoringVersion": 1,
+  "thresholds": {"yellow": 30, "red": 60},
+  "points": {
+    "taskClass": {"docs": 0, "chore": 5, "bugfix": 10, "feature": 15, "refactor": 20, "migration": 30},
+    "triage": {"S": 0, "M": 10, "L": 25},
+    "filesOverMax": 15,
+    "perExtraFile": 2,
+    "testFilesOverMax": 5,
+    "callersOverMax": 15,
+    "chainLinksOverMax": 10,
+    "impactUnavailable": 20,
+    "impactMissing": 20,
+    "unknownCoverage": 10
+  },
+  "sizeThresholds": {"max_files": 4, "max_test_files": 3, "max_d1_callers": 10, "max_chain_links": 7},
+  "sensitiveDomains": {
+    "floor": "red",
+    "tokens": {
+      "auth": ["auth", "oauth", "oauth2", "authz", "authn", "session", "sessions", "token", "tokens", "jwt", "sso", "login", "password", "passwords"],
+      "crypto": ["crypto", "kms", "cipher", "encrypt", "encryption", "signing"],
+      "secrets": ["secret", "secrets", "credential", "credentials", "vault"],
+      "payments": ["payment", "payments", "billing", "stripe", "invoice", "invoices", "checkout"],
+      "pii": ["pii", "gdpr", "consent", "personal-data"]
+    },
+    "extraPaths": []
+  },
+  "factoryControl": {
+    "floor": "red",
+    "paths": ["workflows/", "setup/", "profiles/", "CODEOWNERS", "**/CODEOWNERS",
+              ".github/workflows/", ".gitlab-ci.yml", ".circleci/", "Jenkinsfile", ".buildkite/"]
+  },
+  "reversibility": {
+    "lockfiles": {"floor": "yellow", "paths": ["package-lock.json", "pnpm-lock.yaml", "bun.lock", "bun.lockb",
+                                                "yarn.lock", "uv.lock", "poetry.lock", "Cargo.lock", "go.sum",
+                                                "**/package-lock.json", "**/pnpm-lock.yaml", "**/bun.lock", "**/bun.lockb",
+                                                "**/yarn.lock", "**/uv.lock", "**/poetry.lock", "**/Cargo.lock", "**/go.sum"]},
+    "manifests": {"floor": "yellow", "paths": ["package.json", "pyproject.toml", "Cargo.toml", "go.mod", "**/package.json",
+                                                "**/pyproject.toml", "**/Cargo.toml", "**/go.mod"]},
+    "migrations": {"floor": "red", "paths": ["migrations/", "**/migrations/**", "**/migrate/**"]},
+    "dataMutation": {"floor": "red", "paths": ["**/backfill*", "**/backfill*/**", "**/scripts/data/**", "**/seeds/**"]}
+  },
+  "publicContract": {"floor": "yellow", "paths": ["**/generated/**", "**/*.d.ts", "**/dto/**", "**/openapi*", "**/openapi/**", "**/*.proto", "**/*.graphql"]},
+  "sideEffects": {"floor": "yellow", "paths": []},
+  "protectedAreas": [],
+  "codeowners": {"defaultOwnedFloor": "yellow", "ownerFloors": {}},
+  "repro_command_allow": ["bun run test ", "bun run test:integration ", "pnpm test --run "]
+}

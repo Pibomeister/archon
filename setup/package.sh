@@ -76,6 +76,8 @@ MANIFEST=(
   workflows/portable/single-repo-feature/scripts/source_recipes.py
   workflows/portable/single-repo-feature/scripts/repo_policy.py
   workflows/portable/single-repo-feature/scripts/review_envelope.py
+  workflows/portable/single-repo-feature/scripts/risk_policy.py
+  workflows/portable/single-repo-feature/scripts/risk-policy.json
   config.yaml
   .env
   RUNBOOK.md
@@ -178,6 +180,11 @@ MANIFEST=(
   setup/finding_key.py
   setup/cross-repo-keys.py
   setup/write-review-summary.py
+  # Risk-tiered lanes (Slice 1): the scorer, its pure helpers, and the default
+  # policy. risk-policy.json is the successor of lite-envelope.json.
+  setup/risk-score.py
+  setup/risk_policy.py
+  setup/risk-policy.json
   # Lite lanes: the two YAMLs above are GENERATED from these by derive-lite.py.
   # package.sh regenerates and diffs them (LITE_DRIFT) before the secret gate.
   setup/lite-envelope.json
